@@ -386,7 +386,7 @@ Result<DFlash2SpecWorkspace> create_spec_workspace_impl(
             if (config.tree) {
                 const size_t rows = history_rows;
                 auto metadata = rank_arena.allocate_aligned(
-                    (3u * rows + 1u + rows * (rows + 1u) / 2u) * sizeof(uint32_t), 256u);
+                    (4u * rows + 1u + rows * (rows + 1u) / 2u) * sizeof(uint32_t), 256u);
                 if (!metadata.ok()) {
                     (void)shutdown_dflash2_spec_workspace(workspace);
                     return metadata.status();
@@ -396,6 +396,7 @@ Result<DFlash2SpecWorkspace> create_spec_workspace_impl(
                 g.tree_offsets = base + rows;
                 g.tree_rope = base + 2u * rows + 1u;
                 g.tree_ancestors = base + 3u * rows + 1u;
+                g.tree_committed_end = g.tree_ancestors + rows * (rows + 1u) / 2u;
                 auto selector = rank_arena.allocate_aligned((2u * rows + 16u * rows) * sizeof(uint32_t), 256u);
                 if (!selector.ok()) {
                     (void)shutdown_dflash2_spec_workspace(workspace);
@@ -1237,6 +1238,7 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
             for (auto& option : options) option.gdn_compact.defer_state_store = 1u;
         }
         if (decoder.config.tree) {
+            const std::vector<uint32_t> committed_end(verify_rows, position);
             for (std::size_t r = 0; r < options.size(); ++r) {
                 auto& g = decoder.gdn_ranks[r];
                 auto scope = shelf::gpu::ScopedDevice::create(g.device);
@@ -1247,7 +1249,8 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
                 if (copy(g.tree_parent, tree.parent.data(), tree.parent.size() * sizeof(int32_t)) != hipSuccess ||
                     copy(g.tree_offsets, tree.ancestor_offsets.data(), tree.ancestor_offsets.size() * sizeof(uint32_t)) != hipSuccess ||
                     copy(g.tree_ancestors, tree.ancestor_positions.data(), tree.ancestor_positions.size() * sizeof(uint32_t)) != hipSuccess ||
-                    copy(g.tree_rope, tree.rope_positions.data(), tree.rope_positions.size() * sizeof(uint32_t)) != hipSuccess) {
+                    copy(g.tree_rope, tree.rope_positions.data(), tree.rope_positions.size() * sizeof(uint32_t)) != hipSuccess ||
+                    copy(g.tree_committed_end, committed_end.data(), committed_end.size() * sizeof(uint32_t)) != hipSuccess) {
                     return Status::hip_error("dflash2 tree metadata upload", hipGetErrorString(hipGetLastError()), __FILE__, __LINE__);
                 }
                 options[r].tree_row_parent = g.tree_parent;
@@ -1255,6 +1258,7 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
                 options[r].tree_anc_positions = g.tree_ancestors;
                 options[r].rope_positions = g.tree_rope;
                 options[r].tree_committed_end = position;
+                options[r].tree_committed_end_rows = g.tree_committed_end;
                 if (tree_chunk) {
                     options[r].gdn_spec_history.recurrent_history = nullptr;
                     options[r].gdn_compact.defer_state_store = 1u;

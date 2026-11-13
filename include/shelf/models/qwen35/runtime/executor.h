@@ -132,10 +132,16 @@ struct GraphCacheSlot {
     uint32_t capture_rows = 0;
     const void* gdn_conv_history = nullptr;
     const void* gdn_recurrent_history = nullptr;
+    const void* gdn_recurrent_capture_mask = nullptr;
     uint64_t gdn_conv_row_stride = 0;
     uint64_t gdn_recurrent_row_stride = 0;
     ::shelf::execution::GdnCompactLogDeviceView gdn_compact{};
     const void* token_device_src = nullptr;
+    const void* tree_anc_offsets = nullptr;
+    const void* tree_anc_positions = nullptr;
+    const void* tree_committed_end_rows = nullptr;
+    const void* tree_row_parent = nullptr;
+    const void* rope_positions = nullptr;
     bool valid = false;
 };
 

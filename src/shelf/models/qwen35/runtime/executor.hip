@@ -1005,8 +1005,13 @@ Result<PendingBatch> submit_co_batch(
         exec_role == ::shelf::runtime::ExecutionRole::Verify &&
         options.gdn_spec_history.recurrent_history == nullptr && !compact_history;
     const char* verify_graph_env = std::getenv("SHELF_GRAPH_VERIFY");
-    const bool verify_graph = verify_graph_env != nullptr && verify_graph_env[0] != '\0' &&
-        verify_graph_env[0] != '0' && exec_role == ::shelf::runtime::ExecutionRole::Verify && R == 1u &&
+    const bool dflash_target = executor.model.config->declared_model_type == "qwen3_5" &&
+        executor.config.target_hidden_tap_count != 0u;
+    const bool verify_graph_enabled = verify_graph_env == nullptr
+        ? dflash_target
+        : verify_graph_env[0] != '\0' && verify_graph_env[0] != '0';
+    const bool verify_graph = verify_graph_enabled &&
+        exec_role == ::shelf::runtime::ExecutionRole::Verify && R == 1u &&
         prep.num_stochastic_outputs == 0u &&
         options.qsa_spec_history.partial == nullptr && options.qsa_spec_history.counts == nullptr &&
         options.ple_conv_history.store == nullptr;
@@ -1014,6 +1019,11 @@ Result<PendingBatch> submit_co_batch(
         options.tree_anc_offsets != nullptr || options.tree_anc_positions != nullptr ||
         options.tree_committed_end != 0u || options.rope_positions != nullptr ||
         options.tree_row_parent != nullptr || options.tree_committed_end_rows != nullptr;
+    const bool graph_tree_supported = !tree_batch ||
+        (dflash_target && exec_role == ::shelf::runtime::ExecutionRole::Verify && R == 1u &&
+         options.tree_anc_offsets != nullptr && options.tree_anc_positions != nullptr &&
+         options.tree_committed_end_rows != nullptr &&
+         options.tree_row_parent != nullptr && options.rope_positions != nullptr);
     const bool plamo = executor.model.config->declared_model_type == "plamo3";
     const char* plamo_graph_env = std::getenv("SHELF_PLAMO_HIP_GRAPH");
     const bool plamo_graph_enabled = plamo_graph_env == nullptr ||
@@ -1029,7 +1039,7 @@ Result<PendingBatch> submit_co_batch(
         executor.value_trace == nullptr &&
         !executor.external_input_preparer &&
         !spec_verify_without_history &&
-        !tree_batch &&
+        graph_tree_supported &&
         (exec_role == ::shelf::runtime::ExecutionRole::Decode || verify_graph);
     auto stage_graph_inputs = [&]() {
         if (!token_ids_on_device) {
@@ -1136,6 +1146,7 @@ Result<PendingBatch> submit_co_batch(
                 gslot->capture_rows == graph_capture_rows &&
                 gslot->gdn_conv_history == graph_gdn_conv_history &&
                 gslot->gdn_recurrent_history == graph_gdn_recurrent_history &&
+                gslot->gdn_recurrent_capture_mask == options.gdn_spec_history.recurrent_capture_mask &&
                 gslot->gdn_conv_row_stride == options.gdn_spec_history.conv_row_stride &&
                 gslot->gdn_recurrent_row_stride == options.gdn_spec_history.recurrent_row_stride &&
                 gslot->gdn_compact.delta == options.gdn_compact.delta &&
@@ -1146,6 +1157,11 @@ Result<PendingBatch> submit_co_batch(
                 gslot->gdn_compact.a_layer_stride == options.gdn_compact.a_layer_stride &&
                 gslot->gdn_compact.defer_state_store == options.gdn_compact.defer_state_store &&
                 gslot->gdn_compact.force_tree_chunk == options.gdn_compact.force_tree_chunk &&
+                gslot->tree_anc_offsets == options.tree_anc_offsets &&
+                gslot->tree_anc_positions == options.tree_anc_positions &&
+                gslot->tree_committed_end_rows == options.tree_committed_end_rows &&
+                gslot->tree_row_parent == options.tree_row_parent &&
+                gslot->rope_positions == options.rope_positions &&
                 gslot->token_device_src ==
                     (token_ids_on_device ? batch.token_ids : nullptr)) {
                 stage_graph_inputs();
@@ -1198,9 +1214,15 @@ Result<PendingBatch> submit_co_batch(
                             gslot->capture_rows = graph_capture_rows;
                             gslot->gdn_conv_history = graph_gdn_conv_history;
                             gslot->gdn_recurrent_history = graph_gdn_recurrent_history;
+                            gslot->gdn_recurrent_capture_mask = options.gdn_spec_history.recurrent_capture_mask;
                             gslot->gdn_conv_row_stride = options.gdn_spec_history.conv_row_stride;
                             gslot->gdn_recurrent_row_stride = options.gdn_spec_history.recurrent_row_stride;
                             gslot->gdn_compact = options.gdn_compact;
+                            gslot->tree_anc_offsets = options.tree_anc_offsets;
+                            gslot->tree_anc_positions = options.tree_anc_positions;
+                            gslot->tree_committed_end_rows = options.tree_committed_end_rows;
+                            gslot->tree_row_parent = options.tree_row_parent;
+                            gslot->rope_positions = options.rope_positions;
                             gslot->token_device_src =
                                 token_ids_on_device ? batch.token_ids : nullptr;
                             gslot->valid = true;

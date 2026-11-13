@@ -68,6 +68,7 @@ struct DFlash2GdnRankState {
     uint32_t* tree_offsets = nullptr;
     uint32_t* tree_ancestors = nullptr;
     uint32_t* tree_rope = nullptr;
+    uint32_t* tree_committed_end = nullptr;
     int32_t* tree_predecessors = nullptr;
     int32_t* tree_selected = nullptr;
     float* tree_scores = nullptr;
