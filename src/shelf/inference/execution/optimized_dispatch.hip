@@ -1158,6 +1158,9 @@ Result<KernelMode> read_kernel_mode() {
 Result<OptimizedLaunchResult> try_fixedcost_lucebox(
     const ::shelf::runtime::Program&, size_t, size_t, HostExecutionContext&, hipStream_t);
 
+Result<OptimizedLaunchResult> try_fixedcost_lucebox_qk(
+    const ::shelf::runtime::Program&, size_t, size_t, HostExecutionContext&, hipStream_t);
+
 Result<OptimizedLaunchResult> try_launch_optimized(
     const ::shelf::runtime::Program& program,
     size_t dispatch_index,
@@ -1213,8 +1216,11 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             return try_launch_rope(program, dispatch_index, ctx, stream);
         case KernelId::OUTPUT_GATHER:
             return try_launch_output_gather(program, b, ctx, stream);
-        case KernelId::L2_NORMALIZE:
+        case KernelId::L2_NORMALIZE: {
+            auto fused = try_fixedcost_lucebox_qk(program, dispatch_index, dispatch_end, ctx, stream);
+            if (!fused.ok() || fused.value().kind == OptimizedLaunchKind::Launched) return fused;
             return try_launch_l2_normalize(program, dispatch_index, ctx, stream);
+        }
         case KernelId::SPLIT:
         case KernelId::SWIGLU:
         case KernelId::SIGMOID:

@@ -29,6 +29,25 @@ __global__ void gdn_norm_gate(const float* input, const bf16* weight, const bf16
         output[base + i] = __float2bfloat16(norm * (z / (1.f + expf(-z))));
     }
 }
+__global__ void gdn_qk_norm(const bf16* q, const bf16* k, float* qout, float* kout,
+                            uint32_t features, float eps, float scale) {
+    const uint32_t head = blockIdx.x;
+    const uint32_t lane = threadIdx.x;
+    const bool is_key = head >= features / 128;
+    const uint32_t base = (is_key ? head - features / 128 : head) * 128;
+    const bf16* input = (is_key ? k : q) + base;
+    float sum = 0.f;
+    float x[4];
+    for (uint32_t j = 0; j < 4; ++j) {
+        x[j] = __bfloat162float(input[lane * 4 + j]);
+        sum += x[j] * x[j];
+    }
+    for (int offset = 16; offset; offset >>= 1) sum += __shfl_xor(sum, offset, 32);
+    const float factor = rsqrtf(sum + eps) * (is_key ? 1.f : scale);
+    float* out = (is_key ? kout : qout) + base;
+    for (uint32_t j = 0; j < 4; ++j) out[lane * 4 + j] = x[j] * factor;
+}
+
 }
 
 Result<OptimizedLaunchResult> try_fixedcost_lucebox(
@@ -84,4 +103,62 @@ Result<OptimizedLaunchResult> try_fixedcost_lucebox(
     record_optimized_op();
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 3};
 }
+Result<OptimizedLaunchResult> try_fixedcost_lucebox_qk(
+    const Program& p, size_t i, size_t end, HostExecutionContext& ctx, hipStream_t stream) {
+    const OptimizedLaunchResult none{OptimizedLaunchKind::NotApplicable};
+    static const bool enabled = std::getenv("SHELF_DISABLE_LUCEBOX_FUSION") == nullptr;
+    if (!enabled || ctx.actual_rows != 1 || ctx.value_trace != nullptr ||
+        ctx.layer_override_count != 0 || i == 0 || i + 5 >= end) return none;
+    const auto& q = p.dispatches[i];
+    const auto& k = p.dispatches[i + 1];
+    const auto& scale = p.dispatches[i + 2];
+    const auto& rec = p.dispatches[i + 3];
+    if (p.dispatches[i - 1].kernel_id != KernelId::SILU ||
+        q.kernel_id != KernelId::L2_NORMALIZE || k.kernel_id != KernelId::L2_NORMALIZE ||
+        scale.kernel_id != KernelId::SCALE || rec.kernel_id != KernelId::GDN_RECURRENCE ||
+        p.dispatches[i + 4].kernel_id != KernelId::RMS_NORM ||
+        p.dispatches[i + 5].kernel_id != KernelId::SILU ||
+        q.input_count != 1 || q.output_count != 1 || k.input_count != 1 ||
+        k.output_count != 1 || scale.input_count != 1 || scale.output_count != 1 ||
+        scale.input_slots[0] != q.output_slots[0] || rec.input_count < 2 ||
+        rec.input_slots[0] != scale.output_slots[0] || rec.input_slots[1] != k.output_slots[0]) return none;
+    bool exl3 = false;
+    for (size_t j = i + 6; j < end && j < i + 10; ++j)
+        exl3 |= p.dispatches[j].kernel_id == KernelId::LINEAR_EXL3_INT8;
+    if (!exl3) return none;
+    for (size_t j = i + 3; j < p.dispatches.size(); ++j)
+        for (uint32_t n = 0; n < p.dispatches[j].input_count; ++n)
+            if (p.dispatches[j].input_slots[n] == q.output_slots[0]) return none;
+    PhysicalL2NormalizeLaunch lq{}, lk{};
+    auto rq = resolve_l2_normalize_physical(p, q, ctx, lq);
+    auto rk = resolve_l2_normalize_physical(p, k, ctx, lk);
+    if (!rq.ok()) return rq.status();
+    if (!rk.ok()) return rk.status();
+    if (rq.value() != PhysicalResolveStatus::Applicable || rk.value() != PhysicalResolveStatus::Applicable ||
+        lq.rows != 1 || lk.rows != 1 || lq.features != 2048 || lk.features != lq.features ||
+        lq.group_size != 128 || lk.group_size != 128 || lq.eps != lk.eps) return none;
+    auto qo = resolve_host_value(p, ValueId{scale.output_slots[0]}, ctx);
+    if (!qo.ok() || qo.value().dtype != ValueDType::F32 ||
+        qo.value().feature_count != lq.features || qo.value().ptr == nullptr) return none;
+    const auto overlaps = [](uintptr_t x, size_t n, uintptr_t y, size_t m) {
+        return x < y + m && y < x + n;
+    };
+    const uintptr_t out = reinterpret_cast<uintptr_t>(qo.value().ptr);
+    const size_t input_bytes = lq.features * 2u, output_bytes = lq.features * 4u;
+    if (overlaps(out, output_bytes, lk.output, output_bytes) ||
+        overlaps(out, output_bytes, lq.input, input_bytes) ||
+        overlaps(out, output_bytes, lk.input, input_bytes) ||
+        overlaps(lk.output, output_bytes, lq.input, input_bytes) ||
+        overlaps(lk.output, output_bytes, lk.input, input_bytes)) return none;
+    gdn_qk_norm<<<2 * lq.features / 128, 32, 0, stream>>>(
+        reinterpret_cast<const bf16*>(lq.input), reinterpret_cast<const bf16*>(lk.input),
+        static_cast<float*>(qo.value().ptr), reinterpret_cast<float*>(lk.output),
+        lq.features, lq.eps, scale.scalar_a);
+    const auto err = hipGetLastError();
+    if (err != hipSuccess) return Status::hip_error("gdn qk norm", hipGetErrorString(err), __FILE__, __LINE__);
+    record_physical_launch(1);
+    record_optimized_op();
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 3};
+}
+
 }
