@@ -186,17 +186,6 @@
     }
   },
   "note": "HIP event 区間は重複し、launch/event overhead を含む。",
-  "interim": {
-    "baseline_tok_s": [
-      155.27777777777777
-    ],
-    "candidate_tok_s": [
-      159.07777777777778
-    ],
-    "quality_cases_completed": 36,
-    "final_quality": "pass",
-    "note": "ABAB 各3回と品質全例は GPU ロック待ち。暫定値。"
-  },
   "quality": {
     "ja-en": {
       "cases": 18,
@@ -212,5 +201,62 @@
       "top1_agreement": 0.9360000000525714,
       "max_logit_diff": 6.06640625
     }
+  },
+  "closed_loop": {
+    "baseline": {
+      "runs": [
+        {
+          "completion_tokens_per_s": 155.27777777777777,
+          "completion_tokens": 13975,
+          "completed_requests": 178,
+          "measurement_s": 90.0,
+          "warmup_after_first_completion_s": 20.0
+        },
+        {
+          "completion_tokens_per_s": 155.27777777777777,
+          "completion_tokens": 13975,
+          "completed_requests": 178,
+          "measurement_s": 90.0,
+          "warmup_after_first_completion_s": 20.0
+        },
+        {
+          "completion_tokens_per_s": 155.27777777777777,
+          "completion_tokens": 13975,
+          "completed_requests": 178,
+          "measurement_s": 90.0,
+          "warmup_after_first_completion_s": 20.0
+        }
+      ],
+      "mean": 155.27777777777777,
+      "sample_sd": 0.0
+    },
+    "candidate": {
+      "runs": [
+        {
+          "completion_tokens_per_s": 159.07777777777778,
+          "completion_tokens": 14317,
+          "completed_requests": 181,
+          "measurement_s": 90.0,
+          "warmup_after_first_completion_s": 20.0
+        },
+        {
+          "completion_tokens_per_s": 158.03333333333333,
+          "completion_tokens": 14223,
+          "completed_requests": 180,
+          "measurement_s": 90.0,
+          "warmup_after_first_completion_s": 20.0
+        },
+        {
+          "completion_tokens_per_s": 156.95555555555555,
+          "completion_tokens": 14126,
+          "completed_requests": 179,
+          "measurement_s": 90.0,
+          "warmup_after_first_completion_s": 20.0
+        }
+      ],
+      "mean": 158.0222222222222,
+      "sample_sd": 1.061154740231632
+    },
+    "change_percent": 1.7674418604651132
   }
 }
