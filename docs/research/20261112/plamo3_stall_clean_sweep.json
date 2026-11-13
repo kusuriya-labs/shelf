@@ -1,0 +1,112 @@
+{
+  "measurement_s": 90,
+  "warmup_after_first_completion_s": 20,
+  "notes": "clean restored build, no fix adopted; historical comparison is cumulative build",
+  "concurrency": {
+    "1": {
+      "previous_tokens_per_s": [
+        128.21,
+        127.68
+      ],
+      "current_tokens_per_s": [
+        127.67777777777778,
+        127.1
+      ],
+      "mean_change_percent": -0.43464856861239465,
+      "current_samples": [
+        {
+          "completed_requests": 147,
+          "completion_tokens": 11491
+        },
+        {
+          "completed_requests": 146,
+          "completion_tokens": 11439
+        }
+      ]
+    },
+    "4": {
+      "previous_tokens_per_s": [
+        460.61,
+        459.13
+      ],
+      "current_tokens_per_s": [
+        459.1333333333333,
+        459.1333333333333
+      ],
+      "mean_change_percent": -0.16019019867934414,
+      "current_samples": [
+        {
+          "completed_requests": 528,
+          "completion_tokens": 41322
+        },
+        {
+          "completed_requests": 528,
+          "completion_tokens": 41322
+        }
+      ]
+    },
+    "16": {
+      "previous_tokens_per_s": [
+        1339.46,
+        1341.31
+      ],
+      "current_tokens_per_s": [
+        1341.4666666666667,
+        1341.9777777777779
+      ],
+      "mean_change_percent": 0.09976403960221258,
+      "current_samples": [
+        {
+          "completed_requests": 1540,
+          "completion_tokens": 120732
+        },
+        {
+          "completed_requests": 1542,
+          "completion_tokens": 120778
+        }
+      ]
+    },
+    "64": {
+      "previous_tokens_per_s": [
+        2517.09,
+        2516.47
+      ],
+      "current_tokens_per_s": [
+        2521.711111111111,
+        2517.733333333333
+      ],
+      "mean_change_percent": 0.11690422771248876,
+      "current_samples": [
+        {
+          "completed_requests": 2897,
+          "completion_tokens": 226954
+        },
+        {
+          "completed_requests": 2890,
+          "completion_tokens": 226596
+        }
+      ]
+    },
+    "128": {
+      "previous_tokens_per_s": [
+        3020.71,
+        3020.71
+      ],
+      "current_tokens_per_s": [
+        3015.4,
+        3025.3333333333335
+      ],
+      "mean_change_percent": -0.011365981286959315,
+      "current_samples": [
+        {
+          "completed_requests": 3463,
+          "completion_tokens": 271386
+        },
+        {
+          "completed_requests": 3473,
+          "completion_tokens": 272280
+        }
+      ]
+    }
+  }
+}

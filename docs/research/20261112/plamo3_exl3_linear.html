@@ -1,0 +1,35 @@
+<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{margin:0;color:var(--foreground);font:14px/1.6 var(--font-sans,system-ui)}
+.controls{display:flex;gap:8px;align-items:center;margin:4px 0 12px;flex-wrap:wrap}
+button{font:inherit;color:var(--foreground);background:var(--secondary);border:1px solid var(--border);border-radius:var(--radius,8px);padding:5px 16px;cursor:pointer}
+button[aria-pressed=true]{background:var(--primary);color:var(--primary-foreground);border-color:var(--primary)}
+.hint{color:var(--muted-foreground);font-size:12px}.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
+th,td{padding:9px 6px;border-bottom:1px solid var(--border);text-align:right;white-space:nowrap}
+th:first-child,td:first-child{text-align:left;padding-left:0}th{font-weight:500;font-size:12px;color:var(--muted-foreground)}
+.shape{display:block;font:11px var(--font-mono,monospace);color:var(--muted-foreground)}
+.after{color:var(--success);font-weight:600}.ratio{width:92px;max-width:18%}
+.track{display:flex;gap:2px;height:5px;margin-top:4px}.beforebar{height:5px;background:var(--muted-foreground);opacity:.5}
+.afterbar{height:5px;background:var(--chart-2,var(--success))}
+.notes{font-size:12px;color:var(--muted-foreground);margin:12px 0 0}
+@media(max-width:440px){body{font-size:12px}th,td{padding:8px 3px}.shape{font-size:10px}.ratio{width:60px}}
+</style>
+<div class="controls" role="group" aria-label="linear の行数"><button data-m="1" aria-pressed="false">M = 1</button><button data-m="64" aria-pressed="true">M = 64</button><span class="hint">projection 単体の GEMM・µs</span></div>
+<div class="scroll"><table><thead><tr><th>projection / N × K / bit</th><th>before</th><th>after</th><th>重みのみ<br>下限</th><th class="ratio">after / 下限</th></tr></thead><tbody id="rows"></tbody></table></div>
+<p class="notes">5 run の p50 中央値。HIP event、128 MiB 書き込み前処理、seed 17 の合成 trellis。cache miss は未計測です。QKV / gate-up の launch 統合はこの表に含みません。下限は trellis bytes ÷ 636 GB/s で、activation、FP32 partial、回転、launch を含みません。</p>
+<script>
+const rows=[{"m": 1, "name": "K / V", "n": 512, "k": 2560, "bits": 4, "before": 19.919, "after": 18.979, "roof": 1.030440251572327}, {"m": 1, "name": "K / V", "n": 512, "k": 2560, "bits": 5, "before": 22.159, "after": 20.459, "roof": 1.2880503144654087}, {"m": 1, "name": "O", "n": 2560, "k": 3072, "bits": 4, "before": 24.918, "after": 24.939, "roof": 6.182641509433962}, {"m": 1, "name": "O", "n": 2560, "k": 3072, "bits": 5, "before": 30.778, "after": 30.278, "roof": 7.728301886792453}, {"m": 1, "name": "down", "n": 2560, "k": 10240, "bits": 4, "before": 61.8565, "after": 61.537, "roof": 20.60880503144654}, {"m": 1, "name": "Q", "n": 3072, "k": 2560, "bits": 4, "before": 25.519, "after": 25.598, "roof": 6.182641509433962}, {"m": 1, "name": "Q", "n": 3072, "k": 2560, "bits": 5, "before": 30.378, "after": 29.038, "roof": 7.728301886792453}, {"m": 1, "name": "gate / up", "n": 10240, "k": 2560, "bits": 4, "before": 62.717, "after": 62.0565, "roof": 20.60880503144654}, {"m": 1, "name": "lm_head", "n": 107520, "k": 2560, "bits": 8, "before": 617.967, "after": 617.6075, "roof": 432.7849056603774}, {"m": 64, "name": "K / V", "n": 512, "k": 2560, "bits": 4, "before": 34.0185, "after": 26.1985, "roof": 1.030440251572327}, {"m": 64, "name": "K / V", "n": 512, "k": 2560, "bits": 5, "before": 30.8585, "after": 35.3185, "roof": 1.2880503144654087}, {"m": 64, "name": "O", "n": 2560, "k": 3072, "bits": 4, "before": 42.238, "after": 36.998, "roof": 6.182641509433962}, {"m": 64, "name": "O", "n": 2560, "k": 3072, "bits": 5, "before": 43.2575, "after": 41.518, "roof": 7.728301886792453}, {"m": 64, "name": "down", "n": 2560, "k": 10240, "bits": 4, "before": 94.316, "after": 89.636, "roof": 20.60880503144654}, {"m": 64, "name": "Q", "n": 3072, "k": 2560, "bits": 4, "before": 43.7375, "after": 36.678, "roof": 6.182641509433962}, {"m": 64, "name": "Q", "n": 3072, "k": 2560, "bits": 5, "before": 43.818, "after": 43.478, "roof": 7.728301886792453}, {"m": 64, "name": "gate / up", "n": 10240, "k": 2560, "bits": 4, "before": 98.916, "after": 83.616, "roof": 20.60880503144654}, {"m": 64, "name": "lm_head", "n": 107520, "k": 2560, "bits": 8, "before": 849.9825, "after": 789.165, "roof": 432.7849056603774}];
+function render(m){
+  const selected=rows.filter(r=>r.m===m);
+  document.querySelector('#rows').innerHTML=selected.map(r=>{
+    const ratio=r.after/r.roof;
+    return `<tr><td>${r.name}<span class="shape">${r.n} × ${r.k} · ${r.bits} bit</span></td><td>${r.before.toFixed(2)}</td><td class="after">${r.after.toFixed(2)}</td><td>${r.roof.toFixed(2)}</td><td class="ratio">${ratio.toFixed(2)}×<div class="track"><span class="beforebar" style="width:${Math.min(46,r.before/r.roof*4)}px"></span><span class="afterbar" style="width:${Math.min(46,ratio*4)}px"></span></div></td></tr>`;
+  }).join('');
+  document.querySelectorAll('button[data-m]').forEach(b=>b.setAttribute('aria-pressed',Number(b.dataset.m)===m));
+  console.assert(selected.length===9,'shape count');
+}
+document.querySelectorAll('button[data-m]').forEach(b=>b.onclick=()=>render(Number(b.dataset.m)));
+console.assert(rows.every(r=>[r.before,r.after,r.roof].every(v=>Number.isFinite(v)&&v>0)),'finite times');
+render(1);render(64);console.log('M=1 / 64 の全18 shapeを検証');
+</script></html>

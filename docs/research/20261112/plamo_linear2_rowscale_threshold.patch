@@ -1,0 +1,15 @@
+--- a/src/shelf/inference/execution/optimized_dispatch.hip
++++ b/src/shelf/inference/execution/optimized_dispatch.hip
+@@ -1045,7 +1045,11 @@
+         ::shelf::kernel::PlamoExl3PrefillGroup prefill{};
+         prefill.projection = group;
+         prefill.cached = prefill_mode == 3u || (prefill_mode == 1u && weight.exl3_ka == 5u);
+-        prefill.rowscaled = rows >= 256u;
++        static const uint32_t rowscale_rows = [] {
++            const char* env = std::getenv("SHELF_PLAMO_EXL3_ROWSCALE_ROWS");
++            return env ? std::max(65u, static_cast<uint32_t>(std::strtoul(env, nullptr, 10))) : 256u;
++        }();
++        prefill.rowscaled = rows >= rowscale_rows;
+         static const float flag_share = [] {
+             const char* env = std::getenv("SHELF_EXL3_INT8_FLAG");
+             return env ? std::strtof(env, nullptr) : 0.5f;

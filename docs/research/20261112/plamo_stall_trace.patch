@@ -1,0 +1,39 @@
+diff --git a/src/shelf/models/qwen35/runtime/continuous_batcher.cpp b/src/shelf/models/qwen35/runtime/continuous_batcher.cpp
+index 1148c79..be849e1 100644
+--- a/src/shelf/models/qwen35/runtime/continuous_batcher.cpp
++++ b/src/shelf/models/qwen35/runtime/continuous_batcher.cpp
+@@ -466,0 +467,2 @@ Result<StepResult> ContinuousBatcher::step() {
++    const uint32_t diag_free_before = bt_wall ? kv_pool_.num_free_pages() : 0u;
++    uint32_t diag_admitted = 0;
+@@ -492,0 +495 @@ Result<StepResult> ContinuousBatcher::step() {
++        ++diag_admitted;
+@@ -696,0 +700,6 @@ Result<StepResult> ContinuousBatcher::step() {
++    const uint32_t diag_free_preexec = bt_wall ? kv_pool_.num_free_pages() : 0u;
++    uint32_t diag_min_len = UINT32_MAX, diag_max_len = 0;
++    if (bt_wall) for (const auto& s : plan.scheduled_requests) {
++        diag_min_len = std::min(diag_min_len, s.prefix_tokens + s.num_tokens);
++        diag_max_len = std::max(diag_max_len, s.prefix_tokens + s.num_tokens);
++    }
+@@ -698 +706,0 @@ Result<StepResult> ContinuousBatcher::step() {
+-    const bool bt_decode = plan.batch.num_tokens == plan.batch.num_requests;
+@@ -701,0 +710 @@ Result<StepResult> ContinuousBatcher::step() {
++    const uint32_t diag_free_postexec = bt_wall ? kv_pool_.num_free_pages() : 0u;
+@@ -893 +902 @@ Result<StepResult> ContinuousBatcher::step() {
+-    if (bt_wall && bt_decode) {
++    if (bt_wall) {
+@@ -898,7 +907,8 @@ Result<StepResult> ContinuousBatcher::step() {
+-        auto ms = [](auto x, auto y) {
+-            return std::chrono::duration<double, std::milli>(y - x).count();
+-        };
+-        std::fprintf(stderr, "STEPWALL rows=%u pre=%.3f exec_submit=%.3f sync=%.3f post=%.3f total=%.3f cpu=%.3f\n",
+-                     plan.batch.num_requests, ms(bt_step_t0, exec_started),
+-                     ms(exec_started, bt_exec_end), ms(bt_exec_end, bt_sync_end),
+-                     ms(bt_sync_end, bt_end), ms(bt_step_t0, bt_end), cpu_ms);
++        auto ms = [](auto x, auto y) { return std::chrono::duration<double, std::milli>(y - x).count(); };
++        std::fprintf(stderr, "STEPDIAG t=%.9f rows=%u tokens=%u prefill=%u decode=%u admit=%u free_before=%u free_preexec=%u free_postexec=%u free_after=%u min_len=%u max_len=%u pre=%.3f exec=%.3f copy=%.3f post=%.3f total=%.3f cpu=%.3f\n",
++            std::chrono::duration<double>(bt_step_t0.time_since_epoch()).count(),
++            plan.batch.num_requests, plan.batch.num_tokens, plan.batch.num_prefill_requests,
++            plan.batch.num_decode_requests, diag_admitted, diag_free_before, diag_free_preexec,
++            diag_free_postexec, kv_pool_.num_free_pages(), diag_min_len, diag_max_len, ms(bt_step_t0, exec_started),
++            ms(exec_started, bt_exec_end), ms(bt_exec_end, bt_sync_end), ms(bt_sync_end, bt_end),
++            ms(bt_step_t0, bt_end), cpu_ms);

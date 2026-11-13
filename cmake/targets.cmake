@@ -94,6 +94,8 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/linear/exl3_family/mul24/rotate_quantize.hip
     src/shelf/kernels/optimized/linear/exl3_family/mul24/grouped.hip
     src/shelf/kernels/optimized/linear/exl3_family/mul24/decode.hip
+    src/shelf/kernels/optimized/linear/exl3_family/mul24/projection.hip
+    src/shelf/kernels/optimized/linear/exl3_family/mul24/projection_prefill.hip
     src/shelf/kernels/optimized/linear/exl3_family/mul24/prefill.hip
     src/shelf/kernels/optimized/linear/exl3_family/mul24/prefill_wmma.hip
     src/shelf/kernels/optimized/linear/exl3_family/mul1/verify.hip

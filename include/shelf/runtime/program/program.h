@@ -55,6 +55,7 @@ struct WeightSlot {
     uint32_t output_col_offset = 0;
     uint32_t output_col_total = 0;
     bool plamo_exl3_split4 = false;
+    bool plamo_exl3_linear = false;
 };
 
 struct WeightTableView {

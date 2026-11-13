@@ -1,0 +1,61 @@
+diff --git a/src/apps/bench/quality.hip b/src/apps/bench/quality.hip
+index de91e4e..46c6614 100644
+--- a/src/apps/bench/quality.hip
++++ b/src/apps/bench/quality.hip
+@@ -31,6 +31,7 @@ struct QualityOptions {
+     int positions = 0;
+     int prefill_chunk = 2048;
+     int batch_size = 1;
++    int score_row = -1;
+     int page_tokens = 16;
+     std::vector<int> devices = {0};
+     int tp = 1;
+@@ -52,7 +53,7 @@ void print_usage(FILE* out) {
+         "                                (default context+1; must be > context)\n"
+         "  --positions N                scored positions (default 0 = to end, max 2048)\n"
+         "  --prefill-chunk N            prefill chunk size (default 2048)\n"
+-        "  --batch-size N               identical teacher-forced sequences (default 1, max 64)\n"
++        "  --batch-size N               identical teacher-forced sequences (default 1, max 512)\n"
+         "  --kv-cache-dtype bf16|fp8|octave:FORMAT (default bf16)\n"
+         "  --page-tokens N              (default 16)\n"
+         "  --arena-gib N|auto           (default auto = free VRAM minus 0.5 GiB)\n"
+@@ -144,10 +145,12 @@ bool parse_args(int argc, char** argv, QualityOptions& opts) {
+                 return false;
+             }
+         } else if (key == "--batch-size") {
+-            if (!parse_int(need_value(), opts.batch_size) || opts.batch_size < 1 || opts.batch_size > 64) {
++            if (!parse_int(need_value(), opts.batch_size) || opts.batch_size < 1 || opts.batch_size > 512) {
+                 fprintf(stderr, "invalid --batch-size\n");
+                 return false;
+             }
++        } else if (key == "--score-row") {
++            if (!parse_int(need_value(), opts.score_row) || opts.score_row < 0) return false;
+         } else if (key == "--page-tokens") {
+             if (!parse_int(need_value(), opts.page_tokens) || opts.page_tokens < 1) {
+                 fprintf(stderr, "invalid --page-tokens\n");
+@@ -220,6 +223,7 @@ bool parse_args(int argc, char** argv, QualityOptions& opts) {
+                 opts.tp, opts.tp, opts.devices.size());
+         return false;
+     }
++    if (opts.score_row >= opts.batch_size) return false;
+     if (opts.batch_size > 1 && opts.tp != 1) {
+         fprintf(stderr, "--batch-size greater than 1 requires --tensor-parallel 1\n");
+         return false;
+@@ -616,7 +620,7 @@ int run_quality(int argc, char** argv) {
+             req.token_begin = i;
+             req.num_tokens = 1u;
+             req.prefix_tokens = sequences[i].position;
+-            req.compute_logits = true;
++            req.compute_logits = opts.score_row < 0 || i == static_cast<uint32_t>(opts.score_row);
+             req.sample = false;
+         }
+         shelf::qwen35::ScheduledBatch batch;
+@@ -640,7 +644,7 @@ int run_quality(int argc, char** argv) {
+             return 1;
+         }
+         shelf::qwen35::BatchExecutionOutput out = std::move(result.release());
+-        if (out.num_outputs != batch_size) {
++        if (out.num_outputs != (opts.score_row < 0 ? batch_size : 1u)) {
+             fprintf(stderr, "teacher-forced step %u produced %u outputs\n", feed_index,
+                     out.num_outputs);
+             return 1;

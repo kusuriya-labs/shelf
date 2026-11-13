@@ -1,0 +1,54 @@
+diff --git a/src/shelf/inference/execution/program_executor.hip b/src/shelf/inference/execution/program_executor.hip
+index a3cf685..25638f4 100644
+--- a/src/shelf/inference/execution/program_executor.hip
++++ b/src/shelf/inference/execution/program_executor.hip
+@@ -394,6 +394,12 @@ Status execute_program_range(
+     if (!mode_result.ok()) return mode_result.status();
+     const KernelMode mode = mode_result.value();
+     const bool sync_each_op = g_op_dump_enabled || g_op_sync_enabled;
++    static const char* trace = std::getenv("SHELF_PLAMO_MIX_TRACE");
++    static uint32_t seen = 0u;
++    const uint32_t trace_step = begin == 0u ? ++seen : seen;
++    const bool capture = trace && begin == 0u && end == program.dispatches.size() &&
++        trace_step % 37u == 0u && semantic_timing_enabled();
++    if (capture) semantic_timing_begin(stream, 2048);
+     size_t i = begin;
+     while (i < end) {
+         const auto& binding = program.dispatches[i];
+@@ -544,6 +550,12 @@ Status execute_program_range(
+             ctx.staging_pool->bucket_ran[static_cast<std::size_t>(bidx)] = 1;
+     }
+ #endif
++    if (capture) {
++        char path[1024];
++        std::snprintf(path, sizeof(path), "%s-%06u-m%u-o%u-p%u.csv", trace, trace_step,
++                      ctx.actual_rows, ctx.actual_outputs, ctx.num_prefill_requests);
++        semantic_timing_end(stream, path);
++    }
+     return Status::make_ok();
+ }
+ 
+diff --git a/src/shelf/models/qwen35/runtime/continuous_batcher.cpp b/src/shelf/models/qwen35/runtime/continuous_batcher.cpp
+index 1148c79..b5f1363 100644
+--- a/src/shelf/models/qwen35/runtime/continuous_batcher.cpp
++++ b/src/shelf/models/qwen35/runtime/continuous_batcher.cpp
+@@ -890,7 +890,7 @@ Result<StepResult> ContinuousBatcher::step() {
+         return first_error;
+     }
+ 
+-    if (bt_wall && bt_decode) {
++    if (bt_wall) {
+         const auto bt_end = std::chrono::steady_clock::now();
+         clock_gettime(CLOCK_THREAD_CPUTIME_ID, &bt_cpu_end);
+         const double cpu_ms = (bt_cpu_end.tv_sec - bt_cpu_start.tv_sec) * 1000.0 +
+@@ -898,8 +898,8 @@ Result<StepResult> ContinuousBatcher::step() {
+         auto ms = [](auto x, auto y) {
+             return std::chrono::duration<double, std::milli>(y - x).count();
+         };
+-        std::fprintf(stderr, "STEPWALL rows=%u pre=%.3f exec_submit=%.3f sync=%.3f post=%.3f total=%.3f cpu=%.3f\n",
+-                     plan.batch.num_requests, ms(bt_step_t0, exec_started),
++        std::fprintf(stderr, "STEPWALL rows=%u tokens=%u decode=%d t=%.6f pre=%.3f exec_submit=%.3f sync=%.3f post=%.3f total=%.3f cpu=%.3f\n",
++                     plan.batch.num_requests, plan.batch.num_tokens, bt_decode, std::chrono::duration<double>(bt_step_t0.time_since_epoch()).count(), ms(bt_step_t0, exec_started),
+                      ms(exec_started, bt_exec_end), ms(bt_exec_end, bt_sync_end),
+                      ms(bt_sync_end, bt_end), ms(bt_step_t0, bt_end), cpu_ms);
+     }

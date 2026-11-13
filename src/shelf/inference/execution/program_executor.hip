@@ -453,9 +453,12 @@ Status execute_program_range(
         record_logical_dispatch(binding.kernel_id);
         if (mode == KernelMode::Auto) {
             const Result<OptimizedLaunchResult> optimized =
-                try_launch_optimized(program, i, ctx, stream);
+                try_launch_optimized(program, i, ctx, stream, end);
             if (!optimized.ok()) return optimized.status();
             if (optimized.value().kind == OptimizedLaunchKind::Launched) {
+                const uint32_t count = optimized.value().dispatch_count;
+                if (count == 0u || count > end - i)
+                    return Status::invalid_state("optimized dispatch range", __FILE__, __LINE__);
                 if (sync_each_op) {
                     const hipError_t herr = hipStreamSynchronize(stream);
                     if (herr != hipSuccess) {
@@ -469,14 +472,18 @@ Status execute_program_range(
                     }
                 }
                 record_optimized_dispatch(binding.kernel_id);
+                for (uint32_t j = 1; j < count; ++j) {
+                    record_logical_dispatch(program.dispatches[i + j].kernel_id);
+                    record_optimized_dispatch(program.dispatches[i + j].kernel_id);
+                }
                 if (sem_on)
                     semantic_timing_finish(stream, sem_seq, binding_as_kid,
-                                           static_cast<uint32_t>(SemPath::Optimized), 1);
+                                           static_cast<uint32_t>(SemPath::Optimized), count);
                 {
-                    Status tst = record_value_trace(program, i, 1, ctx, stream);
+                    Status tst = record_value_trace(program, i, count, ctx, stream);
                     if (!tst.ok()) return tst;
                 }
-                ++i;
+                i += count;
                 continue;
             }
         }

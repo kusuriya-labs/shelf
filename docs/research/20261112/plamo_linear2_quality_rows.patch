@@ -1,0 +1,22 @@
+diff --git a/src/apps/bench/quality.hip b/src/apps/bench/quality.hip
+index de91e4e..c0c00fe 100644
+--- a/src/apps/bench/quality.hip
++++ b/src/apps/bench/quality.hip
+@@ -52,7 +52,7 @@ void print_usage(FILE* out) {
+         "                                (default context+1; must be > context)\n"
+         "  --positions N                scored positions (default 0 = to end, max 2048)\n"
+         "  --prefill-chunk N            prefill chunk size (default 2048)\n"
+-        "  --batch-size N               identical teacher-forced sequences (default 1, max 64)\n"
++        "  --batch-size N               identical teacher-forced sequences (default 1, max 128)\n"
+         "  --kv-cache-dtype bf16|fp8|octave:FORMAT (default bf16)\n"
+         "  --page-tokens N              (default 16)\n"
+         "  --arena-gib N|auto           (default auto = free VRAM minus 0.5 GiB)\n"
+@@ -144,7 +144,7 @@ bool parse_args(int argc, char** argv, QualityOptions& opts) {
+                 return false;
+             }
+         } else if (key == "--batch-size") {
+-            if (!parse_int(need_value(), opts.batch_size) || opts.batch_size < 1 || opts.batch_size > 64) {
++            if (!parse_int(need_value(), opts.batch_size) || opts.batch_size < 1 || opts.batch_size > 128) {
+                 fprintf(stderr, "invalid --batch-size\n");
+                 return false;
+             }

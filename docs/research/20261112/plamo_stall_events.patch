@@ -1,0 +1,73 @@
+diff --git a/src/shelf/models/qwen35/runtime/executor.hip b/src/shelf/models/qwen35/runtime/executor.hip
+index 2e86f51..32a766c 100644
+--- a/src/shelf/models/qwen35/runtime/executor.hip
++++ b/src/shelf/models/qwen35/runtime/executor.hip
+@@ -14,0 +15 @@
++#include <shelf/runtime/program/kernel_id.h>
+@@ -19,0 +21 @@
++#include <algorithm>
+@@ -395,0 +398,10 @@ bool layer_output_dump_enabled() {
++// Temporary PLaMo stall diagnostic: the timing includes inter-kernel gaps.
++struct StallEventTrace {
++    std::vector<hipEvent_t> events;
++    std::vector<std::size_t> offsets;
++    const ::shelf::runtime::Program* program = nullptr;
++    bool active = false;
++    uint32_t rows = 0;
++};
++thread_local StallEventTrace stall_events;
++
+@@ -463,0 +476,25 @@ Status launch_program_run(
++    } else if (std::getenv("SHELF_STALL_GPU_EVENTS") != nullptr &&
++               ctx.layer_override_count == 0 && !dump_layers) {
++        constexpr std::size_t stride = 32;
++        const std::size_t count = (dispatch_count + stride - 1) / stride + 1;
++        while (stall_events.events.size() < count) {
++            hipEvent_t event = nullptr;
++            const hipError_t err = hipEventCreate(&event);
++            if (err != hipSuccess) return Status::hip_error("stall event create", hipGetErrorString(err), __FILE__, __LINE__);
++            stall_events.events.push_back(event);
++        }
++        stall_events.offsets.clear();
++        stall_events.program = &program;
++        stall_events.active = true;
++        stall_events.rows = ctx.actual_rows;
++        stall_events.offsets.push_back(0);
++        hipError_t event_error = hipEventRecord(stall_events.events[0], stream);
++        if (event_error != hipSuccess) return Status::hip_error("stall event record", hipGetErrorString(event_error), __FILE__, __LINE__);
++        for (std::size_t begin = 0; begin < dispatch_count; begin += stride) {
++            const std::size_t end = std::min(begin + stride, static_cast<std::size_t>(dispatch_count));
++            run = runtime::execute_program_range(program, ctx, stream, begin, end);
++            if (!run.ok()) break;
++            stall_events.offsets.push_back(end);
++            event_error = hipEventRecord(stall_events.events[stall_events.offsets.size() - 1], stream);
++            if (event_error != hipSuccess) return Status::hip_error("stall event record", hipGetErrorString(event_error), __FILE__, __LINE__);
++        }
+@@ -464,0 +502 @@ Status launch_program_run(
++        stall_events.active = false;
+@@ -2566,0 +2605 @@ Result<BatchExecutionOutput> complete_batch(
++    const auto stall_wait_start = stall_events.active ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+@@ -2567,0 +2607,23 @@ Result<BatchExecutionOutput> complete_batch(
++    const auto stall_wait_end = stall_events.active ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
++    if (se == hipSuccess && stall_events.active && stall_events.offsets.size() >= 2) {
++        float all_ms = 0;
++        (void)hipEventElapsedTime(&all_ms, stall_events.events[0], stall_events.events[stall_events.offsets.size() - 1]);
++        const double wait_ms = std::chrono::duration<double, std::milli>(stall_wait_end - stall_wait_start).count();
++        if (wait_ms >= 100 || all_ms >= 150) {
++            std::fprintf(stderr, "GPUSTALL wait=%.3f event_total=%.3f rows=%u\n", wait_ms, all_ms, stall_events.rows);
++            for (std::size_t j = 1; j < stall_events.offsets.size(); ++j) {
++                float part_ms = 0;
++                (void)hipEventElapsedTime(&part_ms, stall_events.events[j - 1], stall_events.events[j]);
++                const auto begin = stall_events.offsets[j - 1];
++                std::fprintf(stderr, "GPUSTALL_SEG begin=%zu end=%zu first_kernel=%s ms=%.3f\n", begin,
++                    stall_events.offsets[j], ::shelf::runtime::kernel_to_name(stall_events.program->dispatches[begin].kernel_id), part_ms);
++                if (part_ms >= 10.0f) {
++                    std::fprintf(stderr, "GPUSTALL_KERNELS");
++                    for (std::size_t op = begin; op < stall_events.offsets[j]; ++op)
++                        std::fprintf(stderr, " %zu:%s", op, ::shelf::runtime::kernel_to_name(stall_events.program->dispatches[op].kernel_id));
++                    std::fprintf(stderr, "\n");
++                }
++            }
++        }
++        stall_events.active = false;
++    }

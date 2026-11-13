@@ -1,0 +1,184 @@
+--- a/include/shelf/kernels/optimized/linear/exl3_family/mul24/projection.h
++++ b/include/shelf/kernels/optimized/linear/exl3_family/mul24/projection.h
+@@ -49,7 +49,7 @@
+     bool rowscaled = false;
+     float flag_share = 0.5f;
+     float *rowscale[3]{};
+-    int32_t *row_flags[3]{};
++    int32_t *slots[3]{};
+ };
+ 
+ hipError_t launch_plamo_exl3_projection_rotate(const PlamoExl3ProjectionGroup &args,
+--- a/src/shelf/kernels/optimized/linear/exl3_family/mul24/projection_prefill.hip
++++ b/src/shelf/kernels/optimized/linear/exl3_family/mul24/projection_prefill.hip
+@@ -3,6 +3,7 @@
+ #include <shelf/kernels/optimized/linear/exl3_family/mul24/decode.h>
+ #include <shelf/kernels/optimized/linear/exl3_family/mul24/projection.h>
+ #include <shelf/quantization/exl3/exl3_int8.h>
++#include <shelf/kernels/optimized/linear/exl3_mul24.h>
+ 
+ namespace shelf::kernel {
+ namespace {
+@@ -17,7 +18,7 @@
+     const uint16_t *trellis;
+     const int8_t *cache;
+     const float *rowscale;
+-    const int32_t *row_flags;
++    const int32_t *slots;
+     const uint16_t *svh;
+     shelf::bf16_t *out;
+     uint32_t rows, n, k, code_stride, scale_stride, out_stride;
+@@ -116,7 +117,7 @@
+ #pragma unroll
+             for (uint32_t i = 0u; i < 8u; ++i) {
+                 const uint32_t row = m0 + mt * 16u + half * 8u + i;
+-                if (row < a.rows && a.row_flags[row] >= 0)
++                if (row < a.rows && a.slots[row] >= 0)
+                     flagged[mt] |= 1u << i;
+             }
+     }
+@@ -272,7 +273,7 @@
+                  p.trellis,
+                  args.packed[i],
+                  args.rowscale[i],
+-                 args.row_flags[i],
++                 args.slots[i],
+                  p.svh,
+                  p.out,
+                  group.rows,
+@@ -290,7 +291,7 @@
+     const auto p = args.projection.p[blockIdx.z];
+     const auto scales = p.scales;
+     const auto rowscale = args.rowscale[blockIdx.z];
+-    const auto row_flags = args.row_flags[blockIdx.z];
++    const auto slots = args.slots[blockIdx.z];
+     const uint32_t scale_row_stride_floats = args.projection.scale_stride_bytes / 4u;
+     const uint32_t groups = args.projection.k / 128u;
+     const float share = args.flag_share;
+@@ -320,7 +321,37 @@
+             sm += red[1][i];
+         }
+         rowscale[m] = pk;
+-        row_flags[m] = (pk > 0.0f && pk * pk > share * sm) ? 1 : -1;
++        slots[m] = (pk > 0.0f && pk * pk > share * sm) ? 1 : -1;
++    }
++}
++
++__global__ void __launch_bounds__(1024) rowslot(PlamoExl3PrefillGroup args, uint32_t cap) {
++    const auto slots = args.slots[blockIdx.x];
++    const uint32_t rows = args.projection.rows;
++    __shared__ uint32_t partial[1024];
++    const uint32_t t = threadIdx.x;
++    const uint32_t per = (rows + 1023u) / 1024u;
++    const uint32_t lo = min(rows, t * per), hi = min(rows, lo + per);
++    uint32_t c = 0u;
++    for (uint32_t m = lo; m < hi; ++m)
++        c += slots[m] >= 0 ? 1u : 0u;
++    partial[t] = c;
++    __syncthreads();
++    if (t == 0u) {
++        uint32_t run = 0u;
++        for (uint32_t i = 0u; i < 1024u; ++i) {
++            const uint32_t v = partial[i];
++            partial[i] = run;
++            run += v;
++        }
++    }
++    __syncthreads();
++    uint32_t next = partial[t];
++    for (uint32_t m = lo; m < hi; ++m) {
++        if (slots[m] < 0)
++            continue;
++        slots[m] = next < cap ? static_cast<int32_t>(next) : -1;
++        ++next;
+     }
+ }
+ 
+@@ -329,13 +360,13 @@
+     const auto codes = p.codes;
+     const auto scales = p.scales;
+     const auto rowscale = args.rowscale[blockIdx.z];
+-    const auto row_flags = args.row_flags[blockIdx.z];
++    const auto slots = args.slots[blockIdx.z];
+     const uint32_t code_row_stride = args.projection.k;
+     const uint32_t scale_row_stride_floats = args.projection.scale_stride_bytes / 4u;
+     const uint32_t k = args.projection.k;
+     const uint32_t m = blockIdx.x;
+     const uint32_t t = threadIdx.x;
+-    const int32_t slot = row_flags[m];
++    const int32_t slot = slots[m];
+     int8_t *row = codes + static_cast<size_t>(m) * code_row_stride;
+     const float *srow = scales + static_cast<size_t>(m) * scale_row_stride_floats;
+     if (slot >= 0)
+@@ -360,7 +391,7 @@
+         const auto &p = a.p[i];
+         if (!p.n || p.n % 128u || !p.codes || !p.scales || !p.trellis || !p.svh || !p.out ||
+             p.out_stride < p.n || p.out_stride % 4u || (args.cached && !args.packed[i]) ||
+-            (args.rowscaled && (!args.rowscale[i] || !args.row_flags[i])))
++            (args.rowscaled && (!args.rowscale[i] || !args.slots[i])))
+             return false;
+     }
+     return true;
+@@ -393,6 +424,10 @@
+     hipError_t e = hipGetLastError();
+     if (e != hipSuccess)
+         return e;
++    rowslot<<<a.count, 1024, 0, stream>>>(args, static_cast<uint32_t>(exl3_mul24_flag_cap(a.rows)));
++    e = hipGetLastError();
++    if (e != hipSuccess)
++        return e;
+     rowfinish<<<dim3(a.rows, 1u, a.count), 256, 0, stream>>>(args);
+     return hipGetLastError();
+ }
+--- a/src/shelf/inference/execution/optimized_dispatch.hip
++++ b/src/shelf/inference/execution/optimized_dispatch.hip
+@@ -1053,7 +1053,7 @@
+         prefill.flag_share = flag_share;
+         for (uint32_t j = 0u; j < count; ++j) {
+             prefill.rowscale[j] = group.p[j].yprime;
+-            prefill.row_flags[j] = reinterpret_cast<int32_t*>(group.p[j].yprime + rows);
++            prefill.slots[j] = reinterpret_cast<int32_t*>(group.p[j].yprime + rows);
+         }
+         if (prefill.cached) {
+             if (ctx.exl3_dense == nullptr) return miss;
+@@ -1080,7 +1080,7 @@
+             err = stage(0xffff0001u, [&] {
+                 return ::shelf::kernel::launch_plamo_exl3_prefill_rowscale(prefill, stream);
+             });
+-            launch_count += 2u;
++            launch_count += 3u;
+         }
+         if (err == hipSuccess && prefill.cached) {
+             err = stage(0xffff0011u, [&] {
+--- a/tests/kernels/linear/test_plamo_exl3_prefill.hip
++++ b/tests/kernels/linear/test_plamo_exl3_prefill.hip
+@@ -27,7 +27,7 @@
+ bool run(uint32_t rows, uint32_t bits, uint32_t count, uint32_t k = 1024u, uint32_t n = 384u,
+          bool cached = false, bool rowscaled = false) {
+     const uint32_t splits = 1u;
+-    const uint32_t cap = rowscaled ? rows : shelf::kernel::exl3_mul24_flag_cap(rows);
++    const uint32_t cap = shelf::kernel::exl3_mul24_flag_cap(rows);
+     const uint32_t input_stride = k + 4, out_stride = n + 4;
+     const uint32_t ss = k / 128 * 4;
+     const size_t weights = size_t(n) * k * bits / 16;
+@@ -131,7 +131,7 @@
+     prefill.rowscaled = rowscaled;
+     for (uint32_t i = 0u; i < count; ++i) {
+         prefill.rowscale[i] = rs.p + size_t(rows) * i;
+-        prefill.row_flags[i] = slots.p + size_t(rows) * i;
++        prefill.slots[i] = slots.p + size_t(rows) * i;
+     }
+     for (uint32_t i = 0u; i < count; ++i)
+         prefill.packed[i] = packed.p + size_t(n) * k * i;
+@@ -144,10 +144,7 @@
+         check(hipMemcpy(got_rs.data(), rs.p, got_rs.size() * 4u, hipMemcpyDeviceToHost));
+         check(hipMemcpy(got_slots.data(), slots.p, got_slots.size() * 4u, hipMemcpyDeviceToHost));
+         check(hipMemcpy(got_codes.data(), codes.p, got_codes.size(), hipMemcpyDeviceToHost));
+-        bool flags_equal = true;
+-        for (size_t i = 0u; i < gold_slots.size(); ++i)
+-            flags_equal = flags_equal && ((gold_slots[i] >= 0) == (got_slots[i] >= 0));
+-        if (gold_rs != got_rs || !flags_equal || gold_codes != got_codes) {
++        if (gold_rs != got_rs || gold_slots != got_slots || gold_codes != got_codes) {
+             std::fprintf(stderr, "rowscale metadata mismatch\n");
+             return false;
+         }

@@ -36,6 +36,9 @@ Result<QH::HybridLoweredPrimitives> lower_to_primitives(const Config& c, const M
     QH::Emitter em{pg};
     auto weight = [&](const shelf::weights::MatrixWeight& m) {
         lowered.weights.push_back(QH::make_weight_slot(m));
+        lowered.weights.back().plamo_exl3_linear = exl3_2b &&
+            m.quant_spec == shelf::quantization::QuantSpecId::EXL3_MUL24_INT8_V1 &&
+            (m.exl3_ka == 4 || m.exl3_ka == 5 || m.exl3_ka == 8);
         return static_cast<uint32_t>(lowered.weights.size() - 1);
     };
     auto param = [&](const gpu::Tensor& t) {

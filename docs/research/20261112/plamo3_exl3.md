@@ -977,3 +977,256 @@ warmup はそれぞれ約 774 / 824 / 885 ms で、上の定常停止とは別�
 累積実装の次の暫定 gate を c=4 で 480、c=64 で 2600 token/s とするなら、
 現在の平均からそれぞれ約 +4.38% / +3.31% が必要。いずれも実現可能性を
 保証する値ではなく、次の改善候補を判断するための提案である。
+
+### 散発停止の過去ログ再集計（調査継続中）
+
+上の `plamo_mixed_timing.patch` による既存ログを、起動時を含めて step 順に
+[再集計](plamo_stall_legacy.py) した。[結果](plamo3_stall_legacy_analysis.json)。
+同一形状とはここでは要求数・token 行数・decode-only 判定の組であり、各要求の
+長さや prefill 件数、選択 kernel の一致は意味しない。
+
+c=64 の 350.623 ms は 4,707 step 中の index 2431（0 始まり）で、同じ
+62 要求・253 token 行・非 decode-only の組がそれまでに 5 回あった。
+その 5 回は 38.878〜39.433 ms、停止後の同じ組 6 回も 39.104〜39.654 ms。
+したがって少なくともこの組の初回実行であることは停止の必要条件ではない。
+c=128 の 308.018 ms は同じ組が初出で、この比較だけでは初回実行を除外できない。
+
+起動時の合成 step を除く c=64 の 4,706 step は計 115.230 秒で、そのうち
+非 decode-only が 2,429 step・計 78.720 秒、decode-only が 2,277 step・計
+36.510 秒。非 decode-only の各 step から decode-only 中央値 16.396 ms を引いた
+合計は 38.894 秒で、停止時の追加約 0.32 秒より大きい。これは行数や要求長、
+実行経路が異なる step を同じ基準とした粗い比較で、厳密な prefill の因果費用や
+HTTP 全体の分解ではない。測定には workload warmup と drain も含む。少なくとも
+この run の単発停止だけで継続投入と decode-only の約 36% の差は説明できない。
+
+追加調査用の一時パッチは [step 記録](plamo_stall_trace.patch)、
+[測定窓の単調時計](plamo_stall_window.patch)、および別 run の
+[GPU event](plamo_stall_events.patch)。step の要求数、token 行数、prefill／decode
+件数、受付数、実行前後と後処理後の空き KV page 数、最大／最小の可視長を記録する。
+page 数は差分であり、同じ区間の確保と解放が相殺される場合は両方を検出できない。
+同一形状の既出判定は要求数・行数・prefill 件数・decode 件数の組に限る。
+GPU event は 32 dispatch 区間の開始・終了を記録し、host 側の launch 間隙も含む。
+そのため長い event 区間だけでは、その区間の特定 kernel が長時間実行したか、
+投入待ちや他の要因があったかは判別できない。
+
+[監視スクリプト](plamo_stall_monitor.py) は R9700 の sysfs センサーを目標 50 ms
+間隔で読み、monotonic 時計、各読み出し終了時刻と取得間隔を記録する。
+hwmon 電力は driver が提供する平均値であり、瞬間電力ではない。host の PSI・
+vmstat、CPU 統計、対象 process の `/proc` を約 1 秒ごと、GPU 利用 PID の照会は
+別スレッドから記録する。[集計スクリプト](plamo_stall_analyze.py) は測定窓と
+各停止の時刻が重なるセンサー値を対応付ける。計測中の logging、sysfs 読み出し、
+プロセス照会および event は本来の実行時間と停止頻度に影響し得る。
+
+#### 測定中断と共有 GPU の扱い
+
+他作業の全回帰プロセスが終了したことだけを待機解除条件にしてしまい、全回帰が
+正常終了したか、再実行されるか、および他の GPU 利用がないかを確認しないまま
+c=64 の計測を起動した。ユーザーから GPU 使用停止の指示を受け、該当 server /
+compute と後続ジョブを停止した。後にユーザーから、全回帰の失敗は環境設定の
+誤りによるもので本タスクの責任ではないとの訂正があった。途中で打ち切った
+`/tmp/plamo-stall-20261112/trace-1-64.*` は測定完了・競合なしを保証できず、
+性能値や原因判定には使わない。
+
+以後は `/tmp/agentx/gpu_release` の作成を待ち、各 GPU 実行の直前に lock 内で
+`rocm-smi --showpids` を確認する。別の GPU process がある場合や一覧の取得に
+失敗した場合は起動しない。全回帰中は GPU を使わない。単一 PID の終了を
+再開許可の代わりにしない。
+
+コード読解の補足: EXL3 dense GEMM の heuristic は workspace 上限 0 を要求し、
+返却された `workspaceSize > 0` の場合にのみ `hipMalloc` / `hipFree` を呼ぶ。
+コードに呼び出しが存在するだけでは今回の workload で実行された証拠にならない。
+通常の algorithm cache は最大 16 entry で、満杯後の未登録形状は保存されない。
+したがって batch 行数が過去に出現したことだけでは hipBLASLt heuristic が cache hit
+したとは言えない。ただし上記 c=64 の 253 行停止は dense GEMM 対象外である。
+
+再実行時はまず各一時 patch を `git apply --unidiff-zero` で適用してビルドし、
+除去するときは同じ引数に `--reverse` を加える。`plamo_gpu_guard.py` は lock の
+代わりにはならないため、必ず `flock /tmp/r9700.lock` の子として使う。
+解除ファイルの存在に加え、R9700 の sysfs UUID と render device の対応、
+全回帰・ビルド・server process がないこと、`rocm-smi --showpids` が空であること、
+render device が空いていることを確認する。確認不能でも実行しない。
+[CPU 専用の guard 検証](test_plamo_gpu_guard.py) は GPU を使用しない。
+
+#### 解除後の途中観測
+
+[測定窓とセンサー値の集計](plamo3_stall_postrelease_interim.json)。
+
+解除ファイル作成後、各回の直前に lock 内の guard で GPU 利用 PID が空であることを
+確認して測定した。診断出力と sysfs 監視ありの値である。c=64 の最初の 90 秒は
+3,577 step、150 ms 以上 0 回、最大 65.512 ms。c=128 の最初の 90 秒は
+2,146 step 中、334.538 ms が 1 回あった。停止時は 128 要求・269 token 行、
+prefill 3／decode 125、新規受付 3、実行前後の空き page は 36068→36054。
+この要求数・行数・種別件数の組は既出だった。実行区間は 334.337 ms、
+step thread の CPU 時間は 326.506 ms（同期の busy wait を含む）。
+
+停止中の約 50 ms ごとの sysfs では GPU 使用率が 98→67→7→3→3→8→6%、
+sclk は 2948→2582→1359→38→41→1619→1229 MHz、平均電力は
+293→213→55→50→48→51→42 W と変化した。センサー値は瞬間値ではなく、
+特に電力は driver の平均値である。低クロックが停止の原因か、仕事が流れず
+低下した結果かは決まらない。前後の system vmstat では swap・直接 compaction
+stall は増加せず、major fault は 1 件増加したが当該 compute の major fault は
+増えていない。これらの counter は約 1 秒間隔であり停止区間だけの値ではない。
+起動前の `rocm-smi --showpids` は空、run 中の 30 秒・70 秒の照会では自身の
+compute のみだったが、停止瞬間の全 PID を保証するものではない。
+
+同じ 1 秒区間に `kcompactd0` の CPU 時間が約 350 ms 増え、前後数秒は 0 ms。
+これは停止と背景 compaction の強い時間相関であり、因果関係の証明ではない。
+次の run から当該 thread の `/proc/<pid>/stat` を約 50 ms ごとに採取し、
+背景 compaction の走査・page migration counter も追加する。プロセス限定で
+`prctl(PR_SET_THP_DISABLE)` を子孫に継承する[比較用 wrapper](plamo_disable_thp.py)
+を用意した。host 全体の THP 設定は変更しない。THP 無効化は明示的 hugepage や
+全ての compaction を無効にするものではない。
+
+同じ 2 run の測定窓で 1 秒間の `kcompactd0` CPU 時間が 100 ms 以上の区間は、
+c=64 で 3 回（140 / 120 / 250 ms）、c=128 で 2 回（350 / 160 ms）だった。
+各区間内で開始した step の最大は c=64 が 52.309 / 49.859 / 62.185 ms、
+c=128 が 334.538 / 64.553 ms。活動間隔は両 run とも約 32.1 秒。
+背景 compaction が起きても常に長い停止が起きるわけではなく、1 秒間隔の
+標本だけでは細かい時間順序や原因を確定できない。直接 compaction stall の
+counter が増えていないことは、background の `kcompactd0` が動いていないことを
+意味しない。
+
+この 90 秒窓の step 時間合計は c=64 の混在 61.746 秒／decode-only 27.489 秒、
+c=128 の混在 76.420 秒／decode-only 12.790 秒。混在 step それぞれから同じ run の
+decode-only 中央値（16.748 / 28.784 ms）を引いた差の合計は 29.775 / 27.315 秒、
+step 時間合計の 33.37 / 30.62% である。混在と decode-only は要求数・入力長・
+実行経路が異なるため、これは仮想基準との差であり、prefill の独立した実測時間や
+そのまま回収可能な速度損失ではない。step 外の queue、IPC、HTTP 完了処理も含まない。
+
+さらに測定窓の外を再集計すると、c=64 の workload warmup 中（最初の synthetic
+step から約 13.7 秒後）にも 348.491 ms の混在 step があった。64 要求・272 token 行、
+prefill 2／decode 62 の組はすでに 1 回実行済み。GPU 使用率は約 97→30→5→3%、
+sclk は 3029→2131→89→39 MHz と低下し、終了後に回復した。同じ 1 秒標本区間で
+`kcompactd0` の CPU 時間は 340 ms 増加していた。この例は計測窓の外なので、
+上記の「90 秒内 0 回」に含めない。c=64 / 128 の独立した 2 例で、約 340〜350 ms の
+background compaction 活動と GPU 遊休が同じ 1 秒区間に現れた。一方、前述の通り
+活動時に長い step がない例もあるため、因果や回避策は未確定。
+
+その後、別の全回帰を優先する新たな指示を受け、待機していた本タスクの `flock` と
+後続ジョブを停止した。その時点で本タスクの server / compute は実行されていない。
+解除ファイルは不在であり、新たに作成されるまで GPU 処理を行わない。
+
+次の解除後、c=64 の 90 秒窓内で 358.058 ms の停止を再現した。63 要求・341 行、
+prefill 2／decode 61 で、同じ組は既に 3 回出現していた。GPU 使用率は 99→75→9→
+5→3% と低下し、約 356 ms 後に戻り始めた。約 50 ms ごとの CPU tick 採取では、
+`kcompactd0` の連続活動は step 開始約 95 ms 前から終了付近まで、CPU 時間約
+360 ms だった。tick は標本間のどこで増えたかは分からない。同じ約 1 秒の host
+counter は background compaction の migrate scan が 11,016,389 page 増え、
+page migration の成功が 55,330 増えた。直接 compaction stall、swap in と major
+fault はこの区間では増えなかった。compute の step thread は 352.951 ms の CPU
+時間を使っており、単にスケジューリングされず待った時間とは異なる。これで
+GPU 遊休と background compaction の時間的一致は独立した 3 例となったが、
+因果の向きや driver 内部の待機箇所は未確定。
+
+同じ追加追跡の c=128・90 秒では 2,142 step 中に 305.823 ms が 1 回。
+126 要求・230 行、prefill 1／decode 125。約 50 ms ごとの `kcompactd0` tick 増加は
+step 開始約 74 ms 前から約 327 ms 後まで続き、その CPU 時間は約 330 ms。
+230 行は dense GEMM 対象外である。起動時 synthetic step の 895.790 ms は
+background compaction 活動と重ならず、既報の hipBLASLt 初期化とは別に扱う。
+4 件の定常 workload 上の長時間停止（うち 1 件は workload warmup）すべてが背景
+compaction 活動と重なった一方、活動に重なっても 150 ms 超にならない step はある。
+高頻度採取の集計は [スクリプト](plamo_compaction_analyze.py) で再現できる。
+
+HIP event を 32 dispatch ごとに挿入した別 run の c=64 では、90 秒の 3,554 step 中に
+417.584 ms が 1 回あり、同期待ち 401.185 ms、GPU event の全区間 417.092 ms。
+そのうち dispatch 32〜63 の区間が 374.400 ms で、直前の 0〜31 は 3.237 ms、
+直後の 64〜95 は 3.306 ms だった。この区間には RMSNorm、残差、EXL3 linear、
+SwiGLU、RoPE、KV append、attention が含まれる。event 区間には実際の kernel のほか
+GPU が仕事を待つ隙間も含まれ、特定の kernel 単体が 374 ms かかったとは言えない。
+同時に `kcompactd0` の活動は step 開始約 115 ms 前から約 391 ms 後まで続き、
+CPU 時間は約 430 ms。追加 event による性能への影響があるので、この run の
+2,493.14 token/s は診断なしの性能値として扱わない。
+
+HIP event ありの c=128 でも workload warmup 中に 348.982 ms の停止があり、
+127 要求・376 行・prefill 2／decode 125 の組は 3 回既出だった。
+全 event 区間 348.442 ms のうち dispatch 32〜63 が 300.315 ms。
+`kcompactd0` は約 350 ms 活動し、step 開始約 144 ms 前から終了後約 309 ms までの
+標本間に重なった。同じ dispatch 範囲への集中は c=64 と共通するが、event の中の
+個々の kernel と GPU 待機をまだ分離できない。
+
+もう 1 回の c=64・HIP event run の workload warmup 中には、decode-only 64 行の
+step が 357.028 ms となった。prefill と新規受付は 0、同じ組は既に 206 回実行済み。
+GPU event 全体 356.376 ms のうち dispatch 0〜31 が 338.945 ms、同期待ち 346.638 ms。
+`kcompactd0` は開始約 108 ms 前から終了付近まで約 390 ms 活動した。
+したがって停止は混在 step、prefill、新規要求、行数初出に限定されない。
+また長い event 区間は先の 32〜63 に固定されず、今回は 0〜31 である。
+
+2 回目の c=128・event run では workload warmup 中に 374.787 ms の停止があり、
+127 要求・273 行、prefill 1／decode 126。全 event 区間 374.215 ms のうち
+今度は dispatch 160〜191 が 325.522 ms だった。`kcompactd0` は約 370 ms 活動し、
+標本区間は step 開始約 75 ms 前から約 325 ms 後まで重なった。長い区間は複数の
+位置に現れるため、単一の固定 dispatch が原因とは結論できない。
+
+`HIP_LAUNCH_BLOCKING=1` の c=64・90 秒では、診断付き throughput 991.23 token/s、
+1,414 step 中の 150 ms 以上は 0、最大 128.684 ms。一方、workload warmup 中には
+403.812 ms があり、その前後に `kcompactd0` が約 300 ms 活動した。通常追跡の
+約 2,511〜2,514 token/s より低速で、窓外に停止も残るため採用しない。
+この比較は各 1〜2 run の診断値であり、全ての workload を代表するものではない。
+
+プロセスと子孫だけで THP を無効化し、compute の `/proc/<pid>/status` が
+`THP_enabled: 0` であることを確認した。最初の c=64・90 秒では診断付き
+2,512.22 token/s、3,575 step の 150 ms 以上は 0、最大 80.388 ms。しかし
+workload warmup 中に decode-only 64 行で 329.097 ms が再発し、同じ形状は既に
+193 回実行済みだった。背景 `kcompactd0` は約 350 ms 活動。プロセス単位の THP
+無効化では停止を解消できない。ホスト全体の proactive compaction はこの操作では
+無効にならないため、その原因や対策まで確定したわけではない。
+
+高頻度の `kcompactd0` tick を取得できた 12 run のうち、起動時 synthetic step を除く
+150 ms 以上の step は 13 件で、全件が tick 増加から構成した background compaction
+活動区間と重なった。測定窓内と workload warmup を含み、通常・event・blocking・
+THP 無効を混ぜた件数である。逆に compaction 活動があっても 150 ms 以上に至らない
+区間があり、これは観察上の相関で、driver 内部の因果を直接示すものではない。
+
+| 条件 | c=64 診断付き token/s | c=128 診断付き token/s | 90 秒窓内の 150 ms 以上 |
+| --- | ---: | ---: | --- |
+| 通常 | 2513.51 / 2510.89 | 3015.47 / 3008.83 | c=64 0 / 1、c=128 1 / 1 |
+| HIP event 追加 | 2493.14 / 2508.57 | 3012.67 / 3009.63 | c=64 1 / 0、c=128 0 / 0 |
+| `HIP_LAUNCH_BLOCKING=1` | 991.23 | 1289.12 | c=64 0、c=128 1 |
+| プロセス限定 THP 無効 | 2512.22 / 2510.52 | 3017.63 / 3010.11 | c=64 0 / 1、c=128 0 / 0 |
+
+条件ごとの窓外の warmup にも停止があるため、窓内 0 回は回避の証拠ではない。
+診断出力と監視がある値であり、後述する診断なしの性能再測定と区別する。
+全条件の件数・長さ・GPU 監視・background 活動の集計は
+[比較結果](plamo3_stall_comparison.json)、[集計スクリプト](plamo_stall_compare.py)。
+
+### 診断を除去した継続投入の再測定
+
+一時 patch を外し、元の compute を再ビルドして、同じ通常分布・90 秒×2 を
+1 回目昇順／2 回目降順で測定した。比較元は上記の累積採用後の値。
+今回は推論処理の修正を採用していないため、改善前後ではなく同じ実装の再測定である。
+[集計](plamo3_stall_clean_sweep.json)。
+
+| c | 前回 token/s | 今回 token/s | 平均差 |
+| ---: | ---: | ---: | ---: |
+| 1 | 128.21 / 127.68 | 127.68 / 127.10 | -0.44% |
+| 4 | 460.61 / 459.13 | 459.13 / 459.13 | -0.16% |
+| 16 | 1339.46 / 1341.31 | 1341.47 / 1341.98 | +0.10% |
+| 64 | 2517.09 / 2516.47 | 2521.71 / 2517.73 | +0.12% |
+| 128 | 3020.71 / 3020.71 | 3015.40 / 3025.33 | -0.01% |
+
+小さな差は測定変動と区別できない。この診断なし run は step 時間を記録しておらず、
+停止回数の比較には上の診断付き追跡を使う。c=64 の再測定平均 2,519.72 と以前の
+短い decode-only 窓約 3,927 token/s を単純比較すると約 35.8% の差が残る。
+両者の workload と測定範囲は異なるため、厳密な損失分解ではない。
+
+### 未解決の原因と次の検証
+
+背景 compaction と GPU 遊休には強い時間相関があるが、どの driver 内部の待ちが
+それを結びつけるか、compaction が原因か第三の共通原因かは未特定。GPU クロックの
+低下も負荷低下の結果である可能性が残る。kernel trace はこの環境では非特権で
+利用できず、`rocprofv3` は使用していない。初回形状 warmup、hipBLASLt dense 経路、
+新規要求、prefill だけでは全例を説明できない。KV page の空き数は停止時にも
+変化するが、多くの通常 step でも変化するため、それ単独の因果は未確定。
+
+現時点で検証済みの解消策はない。次の因果検証候補は、他の作業がない時間に管理者が
+`vm.compaction_proactiveness` の現値を保存し、一時的に 0 にした場合と元の値で同じ
+追跡を反復すること。現在値は 20 だった。これはホスト全体に影響し root が必要で、
+本タスクでは実行していない。検証後は保存した値に戻す。0 は全ての compaction を
+禁止しないため、background 活動そのものと停止を同時に再計測する必要がある。
+回避策として有効かどうかも未検証である。
+
+検証は、診断 patch 除去後の build で関連 ctest 9 件、PLaMo BF16 server 8 項目、
+実 EXL3 server 10 項目、合成 EXL3 server、Qwen3.8 EXL3 の
+`concurrency-cancel` 5 テストが通過。GPU 使用前には毎回 guard を通した。
+推論コードに変更を採用していないため、新たな logits byte 比較は実施していない。
+`--all` は実行していない。
