@@ -681,7 +681,8 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
     const ::shelf::runtime::Program& program,
     const ::shelf::runtime::DispatchBinding& b,
     HostExecutionContext& ctx,
-    hipStream_t stream, const ::shelf::kernel::Exl3SwigluProducer* producer = nullptr) {
+    hipStream_t stream, const ::shelf::kernel::Exl3SwigluProducer* producer,
+    const ::shelf::kernel::Exl3GdnProducer* gdn_producer) {
     if (b.output_count != 1 || b.input_count != 1)
         return Status::invalid_state("exl3 int8 linear: bad io count", __FILE__, __LINE__);
     if (b.weight_index >= ctx.weight_count || ctx.weights == nullptr)
@@ -891,7 +892,9 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
             if (e.plamo_exl3_split4 && ctx.num_prefill_requests == 0u && ctx.splitk_tuning_rows == 0u &&
                 n_rows > 16u && n_rows <= 64u && scratch_rows >= 4u * n_rows)
                 splits = 4u;
-            herr = producer ? ::shelf::kernel::launch_exl3_swiglu_rotate_rows(
+            herr = gdn_producer ? ::shelf::kernel::launch_exl3_gdn_rotate_rows(
+                *gdn_producer, suh, codes, scales, n_rows, k, code_stride, scale_stride_bytes, stream) :
+                producer ? ::shelf::kernel::launch_exl3_swiglu_rotate_rows(
                 *producer, suh, codes, scales, n_rows, k, code_stride, scale_stride_bytes, stream) :
                 ::shelf::kernel::launch_exl3_mul24_rotate_quantize(
                 x, in.row_stride, suh, codes, scales, n_rows, k, code_stride, scale_stride_bytes, stream);

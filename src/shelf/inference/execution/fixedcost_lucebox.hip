@@ -2,6 +2,8 @@
 #include <shelf/inference/execution/physical_launch.h>
 #include <shelf/inference/execution/program_executor.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
+#include <shelf/kernels/optimized/linear/exl3_family/mul24/producer_rotate_rows.h>
+#include <shelf/kernels/optimized/linear/exl3_family/mul24/workspace.h>
 #include <hip/hip_bf16.h>
 #include <hip/hip_runtime.h>
 #include <cstdlib>
@@ -120,6 +122,35 @@ Result<OptimizedLaunchResult> try_fixedcost_lucebox(
     const size_t input_bytes = ((capacity - 1) * norm.input_row_stride + norm.features) * 4u;
     if (overlaps(dst, output_bytes, gate_ptr, gate_bytes) ||
         overlaps(dst, output_bytes, norm.input, input_bytes)) return none;
+    static const bool rq_enabled = std::getenv("SHELF_DISABLE_GDN_RQ") == nullptr &&
+        std::getenv("SHELF_OP_DUMP") == nullptr && std::getenv("SHELF_OP_SYNC") == nullptr &&
+        std::getenv("SHELF_LINEAR_INPUT_DUMP") == nullptr && std::getenv("SHELF_EXL3_INT8_DENSE") == nullptr;
+    bool exclusive = true;
+    for (size_t j = i + 4; exclusive && j < p.dispatches.size(); ++j)
+        for (uint32_t k = 0; k < p.dispatches[j].input_count; ++k)
+            if (p.dispatches[j].input_slots[k] == c.output_slots[0]) exclusive = false;
+    if (rq_enabled && exclusive && rows <= 16u && ctx.num_prefill_requests == 0u &&
+        d.output_count == 1u && d.weight_index < ctx.weight_count && ctx.weights != nullptr) {
+        auto linear_out = resolve_host_value(p, ValueId{d.output_slots[0]}, ctx);
+        if (!linear_out.ok() || linear_out.value().row_domain != input.value().row_domain) return none;
+        const auto& w = ctx.weights[d.weight_index];
+        const auto layout = ::shelf::kernel::exl3_detail::mul24::make_workspace_layout(
+            rows, w.rows, w.cols, ctx.exl3_xrot_bytes, ctx.exl3_accum_bytes, ctx.exl3_dense_bytes);
+        if (w.rows == 5120u && w.cols == 6144u && w.k_padded == w.cols && w.exl3_ka == 4u &&
+            w.encoding == 4u && w.experts == 1u && !w.plamo_exl3_linear && !w.device_ptr &&
+            w.codes && w.exl3_suh && w.exl3_svh && !w.preshuffled && !w.exl3_half &&
+            !w.output_col_total && !w.output_col_offset && layout.chunk_rows == rows) {
+            ::shelf::kernel::Exl3GdnProducer producer{
+                reinterpret_cast<const float*>(norm.input),
+                static_cast<const ::shelf::bf16_t*>(gate.value().ptr),
+                reinterpret_cast<const ::shelf::bf16_t*>(norm.weight),
+                norm.input_row_stride, gate.value().row_stride, norm.eps};
+            auto result = try_launch_linear_exl3_mul24(p, d, ctx, stream, nullptr, &producer);
+            if (!result.ok()) return result;
+            if (result.value().kind == OptimizedLaunchKind::Launched)
+                return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 4};
+        }
+    }
     gdn_norm_gate<<<rows * (norm.features / norm.group_size), 32, 0, stream>>>(
         reinterpret_cast<const float*>(norm.input), reinterpret_cast<const bf16*>(norm.weight),
         static_cast<const bf16*>(gate.value().ptr), static_cast<bf16*>(out.value().ptr),

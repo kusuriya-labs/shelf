@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 
+namespace shelf::kernel { struct Exl3SwigluProducer; struct Exl3GdnProducer; }
 namespace shelf::execution {
 
 
@@ -26,6 +27,10 @@ struct OptimizedLaunchResult {
     OptimizedLaunchKind kind = OptimizedLaunchKind::NotApplicable;
     uint32_t dispatch_count = 1;
 };
+Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
+    const ::shelf::runtime::Program&, const ::shelf::runtime::DispatchBinding&,
+    HostExecutionContext&, hipStream_t, const ::shelf::kernel::Exl3SwigluProducer* = nullptr,
+    const ::shelf::kernel::Exl3GdnProducer* = nullptr);
 Result<OptimizedLaunchResult> try_launch_rmsnorm(
     const ::shelf::runtime::Program& program,
     const ::shelf::runtime::DispatchBinding& b,
