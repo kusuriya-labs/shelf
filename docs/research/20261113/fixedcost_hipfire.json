@@ -1,0 +1,200 @@
+{
+  "baseline_commit": "ca29aa1",
+  "baseline_profile": {
+    "EMBEDDING_LOOKUP": {
+      "calls": 1,
+      "logical_consumed": 1,
+      "event_us": 9.921,
+      "consumed_histogram": {
+        "1": 1
+      }
+    },
+    "RMS_NORM": {
+      "calls": 145,
+      "logical_consumed": 145,
+      "event_us": 1907.432,
+      "consumed_histogram": {
+        "1": 145
+      }
+    },
+    "LINEAR_EXL3_INT8": {
+      "calls": 97,
+      "logical_consumed": 169,
+      "event_us": 4479.527,
+      "consumed_histogram": {
+        "3": 24,
+        "1": 49,
+        "2": 24
+      }
+    },
+    "ROPE": {
+      "calls": 48,
+      "logical_consumed": 48,
+      "event_us": 452.415,
+      "consumed_histogram": {
+        "1": 48
+      }
+    },
+    "KV_APPEND": {
+      "calls": 24,
+      "logical_consumed": 24,
+      "event_us": 228.89,
+      "consumed_histogram": {
+        "1": 24
+      }
+    },
+    "PAGED_ATTENTION": {
+      "calls": 24,
+      "logical_consumed": 24,
+      "event_us": 364.377,
+      "consumed_histogram": {
+        "1": 24
+      }
+    },
+    "RESIDUAL_ADD": {
+      "calls": 48,
+      "logical_consumed": 48,
+      "event_us": 423.859,
+      "consumed_histogram": {
+        "1": 48
+      }
+    },
+    "SWIGLU": {
+      "calls": 24,
+      "logical_consumed": 24,
+      "event_us": 216.887,
+      "consumed_histogram": {
+        "1": 24
+      }
+    },
+    "OUTPUT_GATHER": {
+      "calls": 1,
+      "logical_consumed": 1,
+      "event_us": 9.641,
+      "consumed_histogram": {
+        "1": 1
+      }
+    },
+    "SCALE": {
+      "calls": 1,
+      "logical_consumed": 1,
+      "event_us": 9.8,
+      "consumed_histogram": {
+        "1": 1
+      }
+    },
+    "SAMPLING": {
+      "calls": 1,
+      "logical_consumed": 1,
+      "event_us": 14.921,
+      "consumed_histogram": {
+        "1": 1
+      }
+    }
+  },
+  "candidate_profile": {
+    "EMBEDDING_LOOKUP": {
+      "calls": 1,
+      "logical_consumed": 1,
+      "event_us": 10.16,
+      "consumed_histogram": {
+        "1": 1
+      }
+    },
+    "RMS_NORM": {
+      "calls": 145,
+      "logical_consumed": 266,
+      "event_us": 4169.395,
+      "consumed_histogram": {
+        "4": 24,
+        "1": 96,
+        "3": 24,
+        "2": 1
+      }
+    },
+    "ROPE": {
+      "calls": 48,
+      "logical_consumed": 48,
+      "event_us": 439.617,
+      "consumed_histogram": {
+        "1": 48
+      }
+    },
+    "KV_APPEND": {
+      "calls": 24,
+      "logical_consumed": 24,
+      "event_us": 221.61,
+      "consumed_histogram": {
+        "1": 24
+      }
+    },
+    "PAGED_ATTENTION": {
+      "calls": 24,
+      "logical_consumed": 24,
+      "event_us": 365.013,
+      "consumed_histogram": {
+        "1": 24
+      }
+    },
+    "LINEAR_EXL3_INT8": {
+      "calls": 24,
+      "logical_consumed": 24,
+      "event_us": 662.865,
+      "consumed_histogram": {
+        "1": 24
+      }
+    },
+    "RESIDUAL_ADD": {
+      "calls": 48,
+      "logical_consumed": 48,
+      "event_us": 439.215,
+      "consumed_histogram": {
+        "1": 48
+      }
+    },
+    "SWIGLU": {
+      "calls": 24,
+      "logical_consumed": 48,
+      "event_us": 1126.444,
+      "consumed_histogram": {
+        "2": 24
+      }
+    },
+    "OUTPUT_GATHER": {
+      "calls": 1,
+      "logical_consumed": 1,
+      "event_us": 9.28,
+      "consumed_histogram": {
+        "1": 1
+      }
+    },
+    "SCALE": {
+      "calls": 1,
+      "logical_consumed": 1,
+      "event_us": 9.561,
+      "consumed_histogram": {
+        "1": 1
+      }
+    },
+    "SAMPLING": {
+      "calls": 1,
+      "logical_consumed": 1,
+      "event_us": 14.52,
+      "consumed_histogram": {
+        "1": 1
+      }
+    }
+  },
+  "note": "HIP event 区間は重複し、launch/event overhead を含む。",
+  "interim": {
+    "baseline_tok_s": [
+      155.27777777777777
+    ],
+    "candidate_tok_s": [
+      159.07777777777778
+    ],
+    "quality_cases_completed": 3,
+    "final_quality": "未完了",
+    "note": "ABAB 各3回と品質全例は GPU ロック待ち。暫定値。"
+  }
+}
