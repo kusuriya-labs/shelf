@@ -620,9 +620,6 @@ def _validate_model_dirs(opts) -> None:
 
 
 async def _serve(opts) -> int:
-    processor = await asyncio.to_thread(
-        codec.load_processor, opts.model_dir, max_seq_len=opts.max_seq_len)
-
     try:
         config = json.loads((Path(opts.model_dir) / "config.json").read_text())
     except (OSError, ValueError):
@@ -633,6 +630,8 @@ async def _serve(opts) -> int:
     if is_plamo and opts.max_seq_len > 2048:
         _log("PLaMo 3 requires --max-seq-len <= 2048")
         return 2
+    processor = await asyncio.to_thread(
+        codec.load_processor, opts.model_dir, max_seq_len=opts.max_seq_len)
     reasoning_capability = ({"thinking": False, "effort": False, "close_token": -1}
                             if is_plamo else await asyncio.to_thread(
                                 codec.reasoning_capability, processor))
