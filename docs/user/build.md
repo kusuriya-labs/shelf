@@ -73,8 +73,9 @@ cmake -S . -B build -DSHELF_HIP_GRAPH=OFF
 
 PLaMo 3 の c=1 decode の graph だけを実行時に無効にする場合は `SHELF_PLAMO_HIP_GRAPH=0` を指定する。
 
-Qwen3.5 系の DFlash2 target では、条件を満たす単一 request の greedy verify を
-既定で graph 実行する。tree verify も対象に含まれる。実行時に
+Qwen3.5 系の DFlash2 target では、条件を満たす単一 request の 8 行または 10 行の
+greedy verify を既定で graph 実行する。tree verify も対象に含まれる。それ以外の
+行数は通常経路で実行する。実行時に
 `SHELF_GRAPH_VERIFY=0` を指定すると verify の graph を無効にできる。
 複数 request、stochastic verify、QSA / PLE history、TP schedule、および対応する
 metadata が揃わない tree verify は通常の実行経路に戻る。

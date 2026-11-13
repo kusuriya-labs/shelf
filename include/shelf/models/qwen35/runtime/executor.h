@@ -209,6 +209,7 @@ struct Executor {
     DispatchStagingPool staging_pool;
     std::vector<ProgramStagingMeta> program_staging_meta;
     std::array<GraphCacheSlot, ::shelf::runtime::ProgramSet::kRowBucketCount> graph_cache{};
+    std::array<GraphCacheSlot, 2> dflash_verify_graph_cache{};
     void* host_token_graph_staging = nullptr;
     size_t host_token_graph_staging_bytes = 0;
     ::shelf::runtime::DeviceBatchContext* host_ctx_graph_staging = nullptr;

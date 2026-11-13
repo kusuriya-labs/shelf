@@ -1024,6 +1024,8 @@ Result<PendingBatch> submit_co_batch(
          options.tree_anc_offsets != nullptr && options.tree_anc_positions != nullptr &&
          options.tree_committed_end_rows != nullptr &&
          options.tree_row_parent != nullptr && options.rope_positions != nullptr);
+    const bool dflash_verify = dflash_target && verify_graph;
+    const bool dflash_verify_rows_supported = !dflash_verify || N == 8u || N == 10u;
     const bool plamo = executor.model.config->declared_model_type == "plamo3";
     const char* plamo_graph_env = std::getenv("SHELF_PLAMO_HIP_GRAPH");
     const bool plamo_graph_enabled = plamo_graph_env == nullptr ||
@@ -1042,6 +1044,7 @@ Result<PendingBatch> submit_co_batch(
         !executor.external_input_preparer &&
         !spec_verify_without_history &&
         graph_tree_supported &&
+        dflash_verify_rows_supported &&
         (exec_role == ::shelf::runtime::ExecutionRole::Decode || verify_graph);
     auto stage_graph_inputs = [&]() {
         if (!token_ids_on_device) {
@@ -1137,7 +1140,9 @@ Result<PendingBatch> submit_co_batch(
     if (graph_active) {
         const int gslot_idx = graph_slot_idx;
         if (gslot_idx >= 0) {
-            GraphCacheSlot* gslot = &executor.graph_cache[gslot_idx];
+            GraphCacheSlot* gslot = dflash_verify
+                ? &executor.dflash_verify_graph_cache[N == 8u ? 0u : 1u]
+                : &executor.graph_cache[gslot_idx];
             if (gslot->valid && gslot->token_count == N &&
                 gslot->num_outputs == prep.num_outputs &&
                 gslot->num_sampled == prep.num_sampled_outputs &&
@@ -1187,6 +1192,11 @@ Result<PendingBatch> submit_co_batch(
                              gslot_idx, N, program->dispatches.size());
             if (graph_warm) {
                 if (gslot->valid) {
+                    if (dflash_verify && graph_debug_enabled())
+                        std::fprintf(stderr,
+                                     "[graph] replace bucket=%d N=%u old_N=%u attention=%u old_attention=%u\n",
+                                     gslot_idx, N, gslot->token_count, attention_plan_key,
+                                     gslot->attention_plan_key);
                     shelf::gpu::discard_cleanup_result(hipGraphExecDestroy(gslot->exec));
                     *gslot = GraphCacheSlot{};
                 }
@@ -1230,9 +1240,15 @@ Result<PendingBatch> submit_co_batch(
                             gslot->valid = true;
                             if (hipGraphLaunch(ge, stream) == hipSuccess) {
                                 enqueued = true;
-                                if (graph_debug_enabled())
-                                    std::fprintf(stderr, "[graph] capture ok bucket=%d N=%u nodes=%zu host_ms=%.3f\n",
-                                                 gslot_idx, N, node_count, capture_ms);
+                                if (graph_debug_enabled()) {
+                                    if (dflash_verify)
+                                        std::fprintf(stderr, "[graph] capture ok bucket=%d N=%u nodes=%zu host_ms=%.3f attention=%u\n",
+                                                     gslot_idx, N, node_count, capture_ms,
+                                                     attention_plan_key);
+                                    else
+                                        std::fprintf(stderr, "[graph] capture ok bucket=%d N=%u nodes=%zu host_ms=%.3f\n",
+                                                     gslot_idx, N, node_count, capture_ms);
+                                }
                             } else {
                                 if (graph_debug_enabled())
                                     std::fprintf(stderr, "[graph] capture launch failed bucket=%d N=%u\n",
@@ -1350,6 +1366,7 @@ Executor::Executor(Executor&& other) noexcept
       staging_pool(std::move(other.staging_pool)),
       program_staging_meta(std::move(other.program_staging_meta)),
       graph_cache(other.graph_cache),
+      dflash_verify_graph_cache(other.dflash_verify_graph_cache),
       host_token_graph_staging(other.host_token_graph_staging),
       host_token_graph_staging_bytes(other.host_token_graph_staging_bytes),
       host_ctx_graph_staging(other.host_ctx_graph_staging),
@@ -1408,6 +1425,7 @@ Executor::Executor(Executor&& other) noexcept
     other.staging_pool = DispatchStagingPool{};
     other.program_staging_meta.clear();
     other.graph_cache = {};
+    other.dflash_verify_graph_cache = {};
     other.host_token_graph_staging = nullptr;
     other.host_token_graph_staging_bytes = 0;
     other.host_ctx_graph_staging = nullptr;
@@ -1500,6 +1518,7 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         program_staging_meta = std::move(other.program_staging_meta);
         other.program_staging_meta.clear();
         graph_cache = other.graph_cache;
+        dflash_verify_graph_cache = other.dflash_verify_graph_cache;
         host_token_graph_staging = other.host_token_graph_staging;
         host_token_graph_staging_bytes = other.host_token_graph_staging_bytes;
         host_ctx_graph_staging = other.host_ctx_graph_staging;
@@ -1549,6 +1568,7 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         other.dispatch_staging_bytes = 0;
         other.host_dispatch_staging = nullptr;
         other.graph_cache = {};
+        other.dflash_verify_graph_cache = {};
         other.host_token_graph_staging = nullptr;
         other.host_token_graph_staging_bytes = 0;
         other.host_ctx_graph_staging = nullptr;
@@ -1667,6 +1687,16 @@ Status executor_shutdown(Executor& ex) noexcept {
             hipError_t err = hipGraphExecDestroy(slot.exec);
             if (first_error.ok() && err != hipSuccess) {
                 first_error = Status::hip_error("hipGraphExecDestroy graph_cache",
+                                                 hipGetErrorString(err), __FILE__, __LINE__);
+            }
+            slot = GraphCacheSlot{};
+        }
+    }
+    for (auto& slot : ex.dflash_verify_graph_cache) {
+        if (slot.valid) {
+            hipError_t err = hipGraphExecDestroy(slot.exec);
+            if (first_error.ok() && err != hipSuccess) {
+                first_error = Status::hip_error("hipGraphExecDestroy dflash_verify_graph_cache",
                                                  hipGetErrorString(err), __FILE__, __LINE__);
             }
             slot = GraphCacheSlot{};
