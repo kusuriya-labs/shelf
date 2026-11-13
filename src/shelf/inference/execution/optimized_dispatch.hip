@@ -953,7 +953,8 @@ Result<OptimizedLaunchResult> try_launch_linear_bf16(
 
 Result<OptimizedLaunchResult> try_launch_exl3_projection(
     const ::shelf::runtime::Program& program, size_t first, size_t end,
-    HostExecutionContext& ctx, hipStream_t stream) {
+    HostExecutionContext& ctx, hipStream_t stream,
+    const ::shelf::runtime::DispatchBinding* producer = nullptr) {
     const auto miss = OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     const auto& binding = program.dispatches[first];
     if (binding.weight_index >= ctx.weight_count || ctx.weights == nullptr) return miss;
@@ -1079,6 +1080,52 @@ Result<OptimizedLaunchResult> try_launch_exl3_projection(
     }
     uint32_t launch_count = 0u;
     hipError_t err = hipSuccess;
+    if (producer != nullptr && producer->kernel_id == KernelId::SWIGLU) {
+        const auto* swiglu = producer;
+        if (!is_plamo || rows != 1u || count != 1u || weight.cols != 10240u ||
+            weight.rows != 2560u || swiglu->input_count != 2u || swiglu->output_count != 1u ||
+            swiglu->output_slots[0] != binding.input_slots[0]) return miss;
+        auto gate = resolve_host_value(program, ::shelf::runtime::ValueId{swiglu->input_slots[0]}, ctx);
+        auto up = resolve_host_value(program, ::shelf::runtime::ValueId{swiglu->input_slots[1]}, ctx);
+        if (!gate.ok()) return gate.status();
+        if (!up.ok()) return up.status();
+        if (gate.value().dtype != ValueDType::BF16 || up.value().dtype != ValueDType::BF16 ||
+            gate.value().feature_count != group.k || up.value().feature_count != group.k ||
+            rows_for(gate.value(), ctx) != 1u || rows_for(up.value(), ctx) != 1u) return miss;
+        const uintptr_t out = reinterpret_cast<uintptr_t>(input.value().ptr);
+        const auto safe = [&](const void* p) {
+            const uintptr_t x = reinterpret_cast<uintptr_t>(p);
+            return x == out || x + group.k * 2u <= out || out + group.k * 2u <= x;
+        };
+        if (!safe(gate.value().ptr) || !safe(up.value().ptr)) return miss;
+        err = ::shelf::kernel::launch_plamo_exl3_swiglu_rotate(
+            group, static_cast<const ::shelf::bf16_t*>(gate.value().ptr),
+            static_cast<const ::shelf::bf16_t*>(up.value().ptr),
+            static_cast<::shelf::bf16_t*>(input.value().ptr), swiglu->flags != 0u, stream);
+        if (err != hipSuccess)
+            return Status::hip_error("plamo swiglu rotate", hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    if (producer != nullptr && producer->kernel_id == KernelId::RMS_NORM) {
+        if (!is_plamo || rows != 1u || group.k != 2560u ||
+            producer->output_count != 1u || producer->output_slots[0] != binding.input_slots[0] ||
+            producer->flags != static_cast<uint32_t>(::shelf::runtime::RmsNormWeightMode::OFFSET_BF16)) return miss;
+        PhysicalRmsNormLaunch norm{};
+        auto resolved = resolve_rmsnorm_physical(program, *producer, ctx, norm);
+        if (!resolved.ok()) return resolved.status();
+        if (resolved.value() != PhysicalResolveStatus::Applicable || norm.rows != 1u ||
+            norm.features != group.k || norm.group_size != group.k ||
+            norm.weight_layout != ::shelf::kernel::RmsNormWeightLayout::PER_FEATURE ||
+            norm.input_dtype != ::shelf::kernel::RmsNormDataType::BF16 ||
+            norm.output_dtype != ::shelf::kernel::RmsNormDataType::BF16 ||
+            (norm.input + group.k * 2u > norm.output && norm.output + group.k * 2u > norm.input))
+            return miss;
+        err = ::shelf::kernel::launch_plamo_exl3_norm_rotate(
+            group, reinterpret_cast<const ::shelf::bf16_t*>(norm.input),
+            reinterpret_cast<const ::shelf::bf16_t*>(norm.weight),
+            reinterpret_cast<::shelf::bf16_t*>(norm.output), norm.eps, norm.weight_offset, stream);
+        if (err != hipSuccess)
+            return Status::hip_error("plamo norm rotate", hipGetErrorString(err), __FILE__, __LINE__);
+    }
     if (use_prefill) {
         ::shelf::kernel::PlamoExl3PrefillGroup prefill{};
         prefill.projection = group;
@@ -1134,7 +1181,8 @@ Result<OptimizedLaunchResult> try_launch_exl3_projection(
         }
     } else {
         err = ::shelf::kernel::launch_plamo_exl3_projection(group, weight.exl3_ka, stream, &launch_count,
-                                                            is_plamo);
+                                                            is_plamo, producer != nullptr);
+        if (producer != nullptr) ++launch_count;
     }
     if (err != hipSuccess)
         return Status::hip_error(is_plamo ? "plamo exl3 projection" : "exl3 grouped projection",
@@ -1201,16 +1249,53 @@ Result<OptimizedLaunchResult> try_launch_optimized(
         }
         case KernelId::LINEAR_BF16:
             return try_launch_linear_bf16(program, b, ctx, stream);
-        case KernelId::RMS_NORM:
+        case KernelId::RMS_NORM: {
+            static const bool enabled = [] {
+                const char* env = std::getenv("SHELF_PLAMO_EXL3_NORM_ROTATE");
+                return (env == nullptr || std::strcmp(env, "0") != 0) &&
+                    std::getenv("SHELF_OP_DUMP") == nullptr && std::getenv("SHELF_OP_SYNC") == nullptr &&
+                    std::getenv("SHELF_LINEAR_INPUT_DUMP") == nullptr;
+            }();
+            if (enabled && ctx.value_trace == nullptr && ctx.layer_override_count == 0u &&
+                ctx.num_prefill_requests == 0u && ctx.num_verify_requests == 0u &&
+                dispatch_index + 1u < dispatch_end &&
+                program.dispatches[dispatch_index + 1u].kernel_id == KernelId::LINEAR_EXL3_INT8) {
+                auto projected = try_launch_exl3_projection(program, dispatch_index + 1u, dispatch_end,
+                                                             ctx, stream, &b);
+                if (!projected.ok()) return projected;
+                if (projected.value().kind == OptimizedLaunchKind::Launched)
+                    return OptimizedLaunchResult{OptimizedLaunchKind::Launched,
+                                                 projected.value().dispatch_count + 1u};
+            }
             return try_launch_rmsnorm(program, b, ctx, stream);
+        }
         case KernelId::ROPE:
             return try_launch_rope(program, dispatch_index, ctx, stream);
         case KernelId::OUTPUT_GATHER:
             return try_launch_output_gather(program, b, ctx, stream);
         case KernelId::L2_NORMALIZE:
             return try_launch_l2_normalize(program, dispatch_index, ctx, stream);
+        case KernelId::SWIGLU: {
+            static const bool producer_enabled = [] {
+                const char* env = std::getenv("SHELF_PLAMO_EXL3_PRODUCER_ROTATE");
+                return (env == nullptr || std::strcmp(env, "0") != 0) &&
+                    std::getenv("SHELF_OP_DUMP") == nullptr && std::getenv("SHELF_OP_SYNC") == nullptr &&
+                    std::getenv("SHELF_LINEAR_INPUT_DUMP") == nullptr;
+            }();
+            if (producer_enabled && ctx.value_trace == nullptr && ctx.layer_override_count == 0u &&
+                ctx.num_prefill_requests == 0u && ctx.num_verify_requests == 0u &&
+                dispatch_index + 1u < dispatch_end &&
+                program.dispatches[dispatch_index + 1u].kernel_id == KernelId::LINEAR_EXL3_INT8) {
+                auto projected = try_launch_exl3_projection(program, dispatch_index + 1u, dispatch_end,
+                                                             ctx, stream, &b);
+                if (!projected.ok()) return projected;
+                if (projected.value().kind == OptimizedLaunchKind::Launched)
+                    return OptimizedLaunchResult{OptimizedLaunchKind::Launched,
+                                                 projected.value().dispatch_count + 1u};
+            }
+            return try_launch_elementwise(program, dispatch_index, ctx, stream);
+        }
         case KernelId::SPLIT:
-        case KernelId::SWIGLU:
         case KernelId::SIGMOID:
         case KernelId::RESIDUAL_ADD:
         case KernelId::SILU:
