@@ -11,6 +11,12 @@ struct Exl3SwigluProducer {
     uint32_t up_stride;
     bool intermediate;
 };
+struct Exl3AttnProducer {
+    const float* input;
+    const bf16_t* gate;
+    uint32_t input_stride;
+    uint32_t gate_stride;
+};
 struct Exl3GdnProducer {
     const float* input;
     const bf16_t* gate;
@@ -19,6 +25,8 @@ struct Exl3GdnProducer {
     uint32_t gate_stride;
     float eps;
 };
+hipError_t launch_exl3_attn_rotate_rows(const Exl3AttnProducer&, const uint16_t*, int8_t*, float*,
+                                       uint32_t, uint32_t, uint32_t, uint32_t, hipStream_t);
 hipError_t launch_exl3_gdn_rotate_rows(const Exl3GdnProducer&, const uint16_t*, int8_t*, float*,
                                       uint32_t, uint32_t, uint32_t, uint32_t, hipStream_t);
 hipError_t launch_exl3_swiglu_rotate_rows(const Exl3SwigluProducer&, const uint16_t*, int8_t*, float*,

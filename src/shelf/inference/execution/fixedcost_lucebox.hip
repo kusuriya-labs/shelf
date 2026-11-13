@@ -130,13 +130,15 @@ Result<OptimizedLaunchResult> try_fixedcost_lucebox(
         for (uint32_t k = 0; k < p.dispatches[j].input_count; ++k)
             if (p.dispatches[j].input_slots[k] == c.output_slots[0]) exclusive = false;
     if (rq_enabled && exclusive && rows <= 16u && ctx.num_prefill_requests == 0u &&
+        ::shelf::runtime::is_target_execution_class(p.execution_class) &&
+        p.execution_class != ::shelf::runtime::ExecutionClass::PREFILL &&
         d.output_count == 1u && d.weight_index < ctx.weight_count && ctx.weights != nullptr) {
         auto linear_out = resolve_host_value(p, ValueId{d.output_slots[0]}, ctx);
-        if (!linear_out.ok() || linear_out.value().row_domain != input.value().row_domain) return none;
         const auto& w = ctx.weights[d.weight_index];
         const auto layout = ::shelf::kernel::exl3_detail::mul24::make_workspace_layout(
             rows, w.rows, w.cols, ctx.exl3_xrot_bytes, ctx.exl3_accum_bytes, ctx.exl3_dense_bytes);
-        if (w.rows == 5120u && w.cols == 6144u && w.k_padded == w.cols && w.exl3_ka == 4u &&
+        if (linear_out.ok() && linear_out.value().row_domain == input.value().row_domain &&
+            w.rows == 5120u && w.cols == 6144u && w.k_padded == w.cols && w.exl3_ka == 4u &&
             w.encoding == 4u && w.experts == 1u && !w.plamo_exl3_linear && !w.device_ptr &&
             w.codes && w.exl3_suh && w.exl3_svh && !w.preshuffled && !w.exl3_half &&
             !w.output_col_total && !w.output_col_offset && layout.chunk_rows == rows) {

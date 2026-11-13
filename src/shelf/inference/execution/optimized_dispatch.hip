@@ -682,7 +682,8 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
     const ::shelf::runtime::DispatchBinding& b,
     HostExecutionContext& ctx,
     hipStream_t stream, const ::shelf::kernel::Exl3SwigluProducer* producer,
-    const ::shelf::kernel::Exl3GdnProducer* gdn_producer) {
+    const ::shelf::kernel::Exl3GdnProducer* gdn_producer,
+    const ::shelf::kernel::Exl3AttnProducer* attn_producer) {
     if (b.output_count != 1 || b.input_count != 1)
         return Status::invalid_state("exl3 int8 linear: bad io count", __FILE__, __LINE__);
     if (b.weight_index >= ctx.weight_count || ctx.weights == nullptr)
@@ -892,7 +893,9 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
             if (e.plamo_exl3_split4 && ctx.num_prefill_requests == 0u && ctx.splitk_tuning_rows == 0u &&
                 n_rows > 16u && n_rows <= 64u && scratch_rows >= 4u * n_rows)
                 splits = 4u;
-            herr = gdn_producer ? ::shelf::kernel::launch_exl3_gdn_rotate_rows(
+            herr = attn_producer ? ::shelf::kernel::launch_exl3_attn_rotate_rows(
+                *attn_producer, suh, codes, scales, n_rows, k, code_stride, scale_stride_bytes, stream) :
+                gdn_producer ? ::shelf::kernel::launch_exl3_gdn_rotate_rows(
                 *gdn_producer, suh, codes, scales, n_rows, k, code_stride, scale_stride_bytes, stream) :
                 producer ? ::shelf::kernel::launch_exl3_swiglu_rotate_rows(
                 *producer, suh, codes, scales, n_rows, k, code_stride, scale_stride_bytes, stream) :
@@ -1306,18 +1309,22 @@ Result<OptimizedLaunchResult> try_launch_optimized(
                 std::getenv("SHELF_LINEAR_INPUT_DUMP") == nullptr &&
                 std::getenv("SHELF_EXL3_INT8_DENSE") == nullptr;
             if (rq_enabled && ctx.value_trace == nullptr && ctx.layer_override_count == 0u &&
+                ::shelf::runtime::is_target_execution_class(program.execution_class) &&
+                program.execution_class != ::shelf::runtime::ExecutionClass::PREFILL &&
                 ctx.num_prefill_requests == 0u && dispatch_index >= 2u && dispatch_index + 1u < dispatch_end &&
                 program.dispatches[dispatch_index - 1u].kernel_id == KernelId::LINEAR_EXL3_INT8 &&
                 program.dispatches[dispatch_index - 2u].kernel_id == KernelId::LINEAR_EXL3_INT8 &&
                 b.input_count == 2u && b.output_count == 1u) {
                 const auto& linear = program.dispatches[dispatch_index + 1u];
                 bool exclusive = linear.kernel_id == KernelId::LINEAR_EXL3_INT8 && linear.input_count == 1u &&
-                    linear.input_slots[0] == b.output_slots[0] && linear.weight_index < ctx.weight_count && ctx.weights;
+                    linear.output_count == 1u && linear.input_slots[0] == b.output_slots[0] && linear.weight_index < ctx.weight_count && ctx.weights;
                 for (size_t j = dispatch_index + 2u; exclusive && j < program.dispatches.size(); ++j)
                     for (uint32_t n = 0; n < program.dispatches[j].input_count; ++n)
                         if (program.dispatches[j].input_slots[n] == b.output_slots[0]) exclusive = false;
                 if (exclusive) {
                     const auto& w = ctx.weights[linear.weight_index];
+                    auto linear_out = resolve_host_value(program, ::shelf::runtime::ValueId{linear.output_slots[0]}, ctx);
+                    auto gate = resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
                     PhysicalElementwiseLaunch elem{};
                     auto resolved = resolve_elementwise_physical(program, b, ctx, elem);
                     if (!resolved.ok()) return resolved.status();
@@ -1330,6 +1337,7 @@ Result<OptimizedLaunchResult> try_launch_optimized(
                         w.codes && w.exl3_suh && w.exl3_svh && !w.preshuffled && !w.exl3_half &&
                         !w.output_col_total && !w.output_col_offset && binding &&
                         binding->storage == ::shelf::runtime::ValueStorage::WORKSPACE &&
+                        linear_out.ok() && gate.ok() && linear_out.value().row_domain == gate.value().row_domain &&
                         elem.features == w.cols && layout.chunk_rows == elem.rows) {
                         ::shelf::kernel::Exl3SwigluProducer producer{
                             reinterpret_cast<const ::shelf::bf16_t*>(elem.in0),
@@ -1366,7 +1374,70 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             if (!fused.ok() || fused.value().kind == OptimizedLaunchKind::Launched) return fused;
             return try_launch_elementwise(program, dispatch_index, ctx, stream);
         }
-        case KernelId::SIGMOID:
+        case KernelId::SIGMOID: {
+            static const bool rq_enabled = std::getenv("SHELF_DISABLE_ATTN_RQ") == nullptr &&
+                std::getenv("SHELF_OP_DUMP") == nullptr && std::getenv("SHELF_OP_SYNC") == nullptr &&
+                std::getenv("SHELF_LINEAR_INPUT_DUMP") == nullptr && std::getenv("SHELF_EXL3_INT8_DENSE") == nullptr;
+            if (rq_enabled && ctx.value_trace == nullptr && ctx.layer_override_count == 0u &&
+                ::shelf::runtime::is_target_execution_class(program.execution_class) &&
+                program.execution_class != ::shelf::runtime::ExecutionClass::PREFILL &&
+                ctx.num_prefill_requests == 0u && dispatch_index > 0u && dispatch_index + 2u < dispatch_end &&
+                program.dispatches[dispatch_index - 1u].kernel_id == KernelId::PAGED_ATTENTION &&
+                b.input_count == 1u && b.output_count == 1u) {
+                const auto& attn = program.dispatches[dispatch_index - 1u];
+                const auto& mul = program.dispatches[dispatch_index + 1u];
+                const auto& linear = program.dispatches[dispatch_index + 2u];
+                bool exclusive = attn.output_count == 1u && mul.kernel_id == KernelId::MUL &&
+                    mul.input_count == 2u && mul.output_count == 1u && mul.input_slots[0] == attn.output_slots[0] &&
+                    mul.input_slots[1] == b.output_slots[0] && linear.kernel_id == KernelId::LINEAR_EXL3_INT8 &&
+                    linear.input_count == 1u && linear.output_count == 1u && linear.input_slots[0] == mul.output_slots[0] &&
+                    linear.weight_index < ctx.weight_count && ctx.weights;
+                for (size_t j = dispatch_index + 2u; exclusive && j < program.dispatches.size(); ++j)
+                    for (uint32_t n = 0; n < program.dispatches[j].input_count; ++n)
+                        if (program.dispatches[j].input_slots[n] == b.output_slots[0] ||
+                            (j > dispatch_index + 2u && program.dispatches[j].input_slots[n] == mul.output_slots[0])) exclusive = false;
+                if (exclusive) {
+                    PhysicalElementwiseLaunch sigmoid{}, product{};
+                    auto rs = resolve_elementwise_physical(program, b, ctx, sigmoid);
+                    auto rm = resolve_elementwise_physical(program, mul, ctx, product);
+                    if (!rs.ok()) return rs.status();
+                    if (!rm.ok()) return rm.status();
+                    auto linear_out = resolve_host_value(program, ::shelf::runtime::ValueId{linear.output_slots[0]}, ctx);
+                    auto gate = resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
+                    const auto* sb = program.find_value(::shelf::runtime::ValueId{b.output_slots[0]});
+                    const auto* mb = program.find_value(::shelf::runtime::ValueId{mul.output_slots[0]});
+                    const auto& w = ctx.weights[linear.weight_index];
+                    const auto layout = ::shelf::kernel::exl3_detail::mul24::make_workspace_layout(
+                        product.rows, w.rows, w.cols, ctx.exl3_xrot_bytes, ctx.exl3_accum_bytes, ctx.exl3_dense_bytes);
+                    const auto disjoint = [](uint64_t a, size_t an, uint64_t x, size_t xn) {
+                        return a + an <= x || x + xn <= a;
+                    };
+                    const size_t sig_bytes = ((size_t(sigmoid.rows - 1u) * sigmoid.out0_stride) + sigmoid.features) * 4u;
+                    const size_t attn_bytes = ((size_t(product.rows - 1u) * product.in0_stride) + product.features) * 4u;
+                    if (rs.value() == PhysicalResolveStatus::Applicable && rm.value() == PhysicalResolveStatus::Applicable &&
+                        sigmoid.profile == ElementwiseProfile::SigmoidBf16ToF32 &&
+                        product.profile == ElementwiseProfile::MulF32F32ToBf16 &&
+                        product.rows >= 1u && product.rows <= 16u && sigmoid.rows == product.rows &&
+                        sigmoid.features == 6144u && product.features == 6144u &&
+                        disjoint(sigmoid.out0, sig_bytes, product.in0, attn_bytes) &&
+                        gate.ok() && linear_out.ok() && gate.value().row_domain == linear_out.value().row_domain &&
+                        sb && mb && sb->storage == ::shelf::runtime::ValueStorage::WORKSPACE &&
+                        mb->storage == ::shelf::runtime::ValueStorage::WORKSPACE &&
+                        w.rows == 5120u && w.cols == 6144u && w.k_padded == w.cols && w.exl3_ka == 4u &&
+                        w.encoding == 4u && w.experts == 1u && !w.plamo_exl3_linear && !w.device_ptr &&
+                        w.codes && w.exl3_suh && w.exl3_svh && !w.preshuffled && !w.exl3_half &&
+                        !w.output_col_total && !w.output_col_offset && layout.chunk_rows == product.rows) {
+                        ::shelf::kernel::Exl3AttnProducer producer{reinterpret_cast<const float*>(product.in0),
+                            reinterpret_cast<const ::shelf::bf16_t*>(sigmoid.in0), product.in0_stride, sigmoid.in0_stride};
+                        auto result = try_launch_linear_exl3_mul24(program, linear, ctx, stream, nullptr, nullptr, &producer);
+                        if (!result.ok()) return result;
+                        if (result.value().kind == OptimizedLaunchKind::Launched)
+                            return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 3u};
+                    }
+                }
+            }
+            return try_launch_elementwise(program, dispatch_index, ctx, stream);
+        }
         case KernelId::RESIDUAL_ADD:
         case KernelId::SILU:
         case KernelId::MUL:
