@@ -167,8 +167,8 @@ bool run(uint32_t rows, uint32_t bits, uint32_t count, uint32_t k = 1024u, uint3
         return false;
     return true;
 }
-bool run_flag(uint32_t rows, uint32_t active, uint32_t bits) {
-    constexpr uint32_t k = 1024, n = 384, ss = k / 128u * 4u;
+bool run_flag(uint32_t rows, uint32_t active, uint32_t bits, uint32_t n = 384u, uint32_t k = 1024u) {
+    const uint32_t ss = (k / 128u * 4u + 15u) & ~15u;
     Buffer<int8_t> codes(size_t(rows) * k);
     Buffer<float> scales(size_t(rows) * ss / 4u), y0(size_t(rows) * n), y1(size_t(rows) * n);
     Buffer<uint16_t> trellis(size_t(n) * k * bits / 16u);
@@ -189,8 +189,9 @@ bool run_flag(uint32_t rows, uint32_t active, uint32_t bits) {
     check(hipMemcpy(count.p, &active, 4u, hipMemcpyHostToDevice));
     check(hipMemset(y0.p, 0x55, size_t(rows) * n * 4u));
     check(hipMemset(y1.p, 0x55, size_t(rows) * n * 4u));
+    const uint32_t* active_rows = active == rows && rows <= 64u ? nullptr : count.p;
     check(shelf::kernel::launch_exl3_mul24_gemm(codes.p, scales.p, k, ss, trellis.p, bits, y0.p, rows, n, k,
-                                                1u, nullptr, count.p));
+                                                1u, nullptr, active_rows));
     check(shelf::kernel::launch_plamo_exl3_flagged_gemm(codes.p, scales.p, k, ss, trellis.p, bits, y1.p,
                                                         rows, count.p, n, k, nullptr));
     std::vector<uint32_t> h0(size_t(rows) * n), h1(h0.size());
@@ -293,6 +294,18 @@ int main() {
     if (!run(1u, 4u, 3u, 2560u, 3072u) || !run(1u, 4u, 1u, 3072u, 2560u) ||
         !run(1u, 4u, 1u, 10240u, 2560u, 9u))
         return 1;
+    for (uint32_t n : {512u, 1024u})
+        for (uint32_t k : {1024u, 5120u}) {
+            for (uint32_t rows : {49u, 56u, 64u})
+                if (!run_flag(rows, rows, 4u, n, k)) return 1;
+            for (uint32_t rows : {17u, 32u, 40u, 64u})
+                if (!run_flag(rows, rows, 5u, n, k)) return 1;
+        }
+    for (uint32_t rows : {49u, 56u, 64u})
+        if (!run_flag(rows, rows, 4u, 1024u, 8192u)) return 1;
+    for (uint32_t k : {8192u, 17408u})
+        for (uint32_t rows : {17u, 32u, 33u, 48u, 49u, 64u})
+            if (!run_flag(rows, rows, 5u, 1024u, k)) return 1;
     for (uint32_t rows : {16u, 32u, 48u, 64u, 128u, 256u})
         for (uint32_t active : {0u, 1u, 17u, 63u, 256u})
             for (uint32_t bits : {4u, 5u, 8u})
