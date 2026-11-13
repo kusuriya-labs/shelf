@@ -258,5 +258,1091 @@
       "sample_sd": 1.061154740231632
     },
     "change_percent": 1.7674418604651132
+  },
+  "quality_cases": {
+    "ja-en": [
+      {
+        "name": "heldout-ja-en-0",
+        "tokens": 35,
+        "metrics": {
+          "QUALITY_POSITIONS": "33",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-0.candidate",
+          "QUALITY_DUMP_POSITIONS": "33",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-0.baseline",
+          "QUALITY_PPL_BASELINE": "5107.23707",
+          "QUALITY_PPL_CANDIDATE": "4965.16068",
+          "QUALITY_PPL_DELTA_PCT": "-2.78186402",
+          "QUALITY_NLL_DELTA_MEAN": "-0.0282129077",
+          "QUALITY_KL_MEAN": "0.0200861576",
+          "QUALITY_TOP1_AGREEMENT": "0.848484848",
+          "QUALITY_TOP5_OVERLAP": "0.945454545",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "2.3125"
+        },
+        "target_metrics": {
+          "positions": 7,
+          "mean_kl": 3.5979745007352903e-05,
+          "top1_agreement": 1.0,
+          "ref_ppl": 1.0006287097930908,
+          "candidate_ppl": 1.0007243156433105
+        }
+      },
+      {
+        "name": "heldout-ja-en-1",
+        "tokens": 31,
+        "metrics": {
+          "QUALITY_POSITIONS": "29",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-1.candidate",
+          "QUALITY_DUMP_POSITIONS": "29",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-1.baseline",
+          "QUALITY_PPL_BASELINE": "8910.74127",
+          "QUALITY_PPL_CANDIDATE": "9830.8511",
+          "QUALITY_PPL_DELTA_PCT": "10.3258506",
+          "QUALITY_NLL_DELTA_MEAN": "0.0982680792",
+          "QUALITY_KL_MEAN": "0.0454364513",
+          "QUALITY_TOP1_AGREEMENT": "0.931034483",
+          "QUALITY_TOP5_OVERLAP": "0.937931034",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "3.296875"
+        },
+        "target_metrics": {
+          "positions": 6,
+          "mean_kl": 0.086937814950943,
+          "top1_agreement": 1.0,
+          "ref_ppl": 17.70979118347168,
+          "candidate_ppl": 31.738569259643555
+        }
+      },
+      {
+        "name": "heldout-ja-en-2",
+        "tokens": 31,
+        "metrics": {
+          "QUALITY_POSITIONS": "29",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-2.candidate",
+          "QUALITY_DUMP_POSITIONS": "29",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-2.baseline",
+          "QUALITY_PPL_BASELINE": "15870.0673",
+          "QUALITY_PPL_CANDIDATE": "15745.4866",
+          "QUALITY_PPL_DELTA_PCT": "-0.785004318",
+          "QUALITY_NLL_DELTA_MEAN": "-0.00788101697",
+          "QUALITY_KL_MEAN": "0.0133891764",
+          "QUALITY_TOP1_AGREEMENT": "0.896551724",
+          "QUALITY_TOP5_OVERLAP": "0.951724138",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "1.46875"
+        },
+        "target_metrics": {
+          "positions": 5,
+          "mean_kl": 0.0036370549350976944,
+          "top1_agreement": 1.0,
+          "ref_ppl": 54.69524002075195,
+          "candidate_ppl": 55.27772903442383
+        }
+      },
+      {
+        "name": "heldout-ja-en-3",
+        "tokens": 35,
+        "metrics": {
+          "QUALITY_POSITIONS": "33",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-3.candidate",
+          "QUALITY_DUMP_POSITIONS": "33",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-3.baseline",
+          "QUALITY_PPL_BASELINE": "9407.00988",
+          "QUALITY_PPL_CANDIDATE": "9779.26215",
+          "QUALITY_PPL_DELTA_PCT": "3.95717954",
+          "QUALITY_NLL_DELTA_MEAN": "0.0388088932",
+          "QUALITY_KL_MEAN": "0.0141776837",
+          "QUALITY_TOP1_AGREEMENT": "0.96969697",
+          "QUALITY_TOP5_OVERLAP": "0.939393939",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "2.3046875"
+        },
+        "target_metrics": {
+          "positions": 9,
+          "mean_kl": 0.0001582535624038428,
+          "top1_agreement": 1.0,
+          "ref_ppl": 2.6111409664154053,
+          "candidate_ppl": 2.6491475105285645
+        }
+      },
+      {
+        "name": "heldout-ja-en-4",
+        "tokens": 38,
+        "metrics": {
+          "QUALITY_POSITIONS": "36",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-4.candidate",
+          "QUALITY_DUMP_POSITIONS": "36",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-4.baseline",
+          "QUALITY_PPL_BASELINE": "4545.30457",
+          "QUALITY_PPL_CANDIDATE": "4290.78777",
+          "QUALITY_PPL_DELTA_PCT": "-5.59955453",
+          "QUALITY_NLL_DELTA_MEAN": "-0.0576243939",
+          "QUALITY_KL_MEAN": "0.0447531213",
+          "QUALITY_TOP1_AGREEMENT": "0.944444444",
+          "QUALITY_TOP5_OVERLAP": "0.922222222",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "2.875"
+        },
+        "target_metrics": {
+          "positions": 9,
+          "mean_kl": 0.013761181384325027,
+          "top1_agreement": 1.0,
+          "ref_ppl": 6.759908199310303,
+          "candidate_ppl": 6.087576866149902
+        }
+      },
+      {
+        "name": "heldout-ja-en-5",
+        "tokens": 37,
+        "metrics": {
+          "QUALITY_POSITIONS": "35",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-5.candidate",
+          "QUALITY_DUMP_POSITIONS": "35",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-5.baseline",
+          "QUALITY_PPL_BASELINE": "6586.08414",
+          "QUALITY_PPL_CANDIDATE": "6228.37502",
+          "QUALITY_PPL_DELTA_PCT": "-5.43128685",
+          "QUALITY_NLL_DELTA_MEAN": "-0.0558434924",
+          "QUALITY_KL_MEAN": "0.0139827257",
+          "QUALITY_TOP1_AGREEMENT": "0.914285714",
+          "QUALITY_TOP5_OVERLAP": "0.942857143",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "2.5"
+        },
+        "target_metrics": {
+          "positions": 8,
+          "mean_kl": 0.0007363623008131981,
+          "top1_agreement": 1.0,
+          "ref_ppl": 4.191568851470947,
+          "candidate_ppl": 4.244740009307861
+        }
+      },
+      {
+        "name": "heldout-ja-en-6",
+        "tokens": 33,
+        "metrics": {
+          "QUALITY_POSITIONS": "31",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-6.candidate",
+          "QUALITY_DUMP_POSITIONS": "31",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-6.baseline",
+          "QUALITY_PPL_BASELINE": "14665.0324",
+          "QUALITY_PPL_CANDIDATE": "15517.6081",
+          "QUALITY_PPL_DELTA_PCT": "5.81366353",
+          "QUALITY_NLL_DELTA_MEAN": "0.05650947",
+          "QUALITY_KL_MEAN": "0.0132065352",
+          "QUALITY_TOP1_AGREEMENT": "0.870967742",
+          "QUALITY_TOP5_OVERLAP": "0.961290323",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "2.625"
+        },
+        "target_metrics": {
+          "positions": 7,
+          "mean_kl": 0.001269770902581513,
+          "top1_agreement": 1.0,
+          "ref_ppl": 1.5624569654464722,
+          "candidate_ppl": 1.6360145807266235
+        }
+      },
+      {
+        "name": "heldout-ja-en-7",
+        "tokens": 28,
+        "metrics": {
+          "QUALITY_POSITIONS": "26",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-7.candidate",
+          "QUALITY_DUMP_POSITIONS": "26",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-7.baseline",
+          "QUALITY_PPL_BASELINE": "17915.6034",
+          "QUALITY_PPL_CANDIDATE": "17345.1282",
+          "QUALITY_PPL_DELTA_PCT": "-3.18423652",
+          "QUALITY_NLL_DELTA_MEAN": "-0.0323603591",
+          "QUALITY_KL_MEAN": "0.00809125374",
+          "QUALITY_TOP1_AGREEMENT": "0.961538462",
+          "QUALITY_TOP5_OVERLAP": "0.938461538",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "3.03125"
+        },
+        "target_metrics": {
+          "positions": 5,
+          "mean_kl": 7.109073774103081e-09,
+          "top1_agreement": 1.0,
+          "ref_ppl": 1.0000001192092896,
+          "candidate_ppl": 1.0000001192092896
+        }
+      },
+      {
+        "name": "heldout-ja-en-8",
+        "tokens": 31,
+        "metrics": {
+          "QUALITY_POSITIONS": "29",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-8.candidate",
+          "QUALITY_DUMP_POSITIONS": "29",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-8.baseline",
+          "QUALITY_PPL_BASELINE": "28886.3472",
+          "QUALITY_PPL_CANDIDATE": "27711.2662",
+          "QUALITY_PPL_DELTA_PCT": "-4.06794617",
+          "QUALITY_NLL_DELTA_MEAN": "-0.0415300177",
+          "QUALITY_KL_MEAN": "0.0089962109",
+          "QUALITY_TOP1_AGREEMENT": "0.931034483",
+          "QUALITY_TOP5_OVERLAP": "0.95862069",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "1.7421875"
+        },
+        "target_metrics": {
+          "positions": 5,
+          "mean_kl": 0.0002143773454008624,
+          "top1_agreement": 1.0,
+          "ref_ppl": 549.0612182617188,
+          "candidate_ppl": 521.4305419921875
+        }
+      },
+      {
+        "name": "heldout-ja-en-9",
+        "tokens": 39,
+        "metrics": {
+          "QUALITY_POSITIONS": "37",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-9.candidate",
+          "QUALITY_DUMP_POSITIONS": "37",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-9.baseline",
+          "QUALITY_PPL_BASELINE": "7921.72849",
+          "QUALITY_PPL_CANDIDATE": "8727.3496",
+          "QUALITY_PPL_DELTA_PCT": "10.1697643",
+          "QUALITY_NLL_DELTA_MEAN": "0.096852302",
+          "QUALITY_KL_MEAN": "0.0153659802",
+          "QUALITY_TOP1_AGREEMENT": "0.891891892",
+          "QUALITY_TOP5_OVERLAP": "0.935135135",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "3.5"
+        },
+        "target_metrics": {
+          "positions": 9,
+          "mean_kl": 0.0017983452416956425,
+          "top1_agreement": 1.0,
+          "ref_ppl": 2.6752350330352783,
+          "candidate_ppl": 2.5223567485809326
+        }
+      },
+      {
+        "name": "heldout-ja-en-10",
+        "tokens": 53,
+        "metrics": {
+          "QUALITY_POSITIONS": "51",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-10.candidate",
+          "QUALITY_DUMP_POSITIONS": "51",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-10.baseline",
+          "QUALITY_PPL_BASELINE": "1742.49602",
+          "QUALITY_PPL_CANDIDATE": "1589.9748",
+          "QUALITY_PPL_DELTA_PCT": "-8.75303145",
+          "QUALITY_NLL_DELTA_MEAN": "-0.0916004154",
+          "QUALITY_KL_MEAN": "0.0245033999",
+          "QUALITY_TOP1_AGREEMENT": "0.921568627",
+          "QUALITY_TOP5_OVERLAP": "0.925490196",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "2.8125"
+        },
+        "target_metrics": {
+          "positions": 18,
+          "mean_kl": 0.004467747639864683,
+          "top1_agreement": 1.0,
+          "ref_ppl": 6.162318229675293,
+          "candidate_ppl": 5.795968532562256
+        }
+      },
+      {
+        "name": "heldout-ja-en-11",
+        "tokens": 46,
+        "metrics": {
+          "QUALITY_POSITIONS": "44",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-11.candidate",
+          "QUALITY_DUMP_POSITIONS": "44",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-11.baseline",
+          "QUALITY_PPL_BASELINE": "3255.1629",
+          "QUALITY_PPL_CANDIDATE": "3302.88667",
+          "QUALITY_PPL_DELTA_PCT": "1.46609461",
+          "QUALITY_NLL_DELTA_MEAN": "0.0145545134",
+          "QUALITY_KL_MEAN": "0.0147889569",
+          "QUALITY_TOP1_AGREEMENT": "0.931818182",
+          "QUALITY_TOP5_OVERLAP": "0.927272727",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "2.078125"
+        },
+        "target_metrics": {
+          "positions": 12,
+          "mean_kl": 0.0002225984208052978,
+          "top1_agreement": 1.0,
+          "ref_ppl": 1.5071533918380737,
+          "candidate_ppl": 1.507989764213562
+        }
+      },
+      {
+        "name": "heldout-ja-en-12",
+        "tokens": 69,
+        "metrics": {
+          "QUALITY_POSITIONS": "67",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-12.candidate",
+          "QUALITY_DUMP_POSITIONS": "67",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-12.baseline",
+          "QUALITY_PPL_BASELINE": "2281.84449",
+          "QUALITY_PPL_CANDIDATE": "2181.18705",
+          "QUALITY_PPL_DELTA_PCT": "-4.41123167",
+          "QUALITY_NLL_DELTA_MEAN": "-0.0451148589",
+          "QUALITY_KL_MEAN": "0.00958869745",
+          "QUALITY_TOP1_AGREEMENT": "0.940298507",
+          "QUALITY_TOP5_OVERLAP": "0.949253731",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "2.375"
+        },
+        "target_metrics": {
+          "positions": 26,
+          "mean_kl": 0.0006236200570128858,
+          "top1_agreement": 1.0,
+          "ref_ppl": 8.619077682495117,
+          "candidate_ppl": 8.868025779724121
+        }
+      },
+      {
+        "name": "heldout-ja-en-13",
+        "tokens": 82,
+        "metrics": {
+          "QUALITY_POSITIONS": "80",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-13.candidate",
+          "QUALITY_DUMP_POSITIONS": "80",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-13.baseline",
+          "QUALITY_PPL_BASELINE": "1211.78285",
+          "QUALITY_PPL_CANDIDATE": "1259.97388",
+          "QUALITY_PPL_DELTA_PCT": "3.97686957",
+          "QUALITY_NLL_DELTA_MEAN": "0.0389982804",
+          "QUALITY_KL_MEAN": "0.0210141793",
+          "QUALITY_TOP1_AGREEMENT": "0.9375",
+          "QUALITY_TOP5_OVERLAP": "0.9425",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "1.875"
+        },
+        "target_metrics": {
+          "positions": 30,
+          "mean_kl": 0.02081754431128502,
+          "top1_agreement": 0.9333333373069763,
+          "ref_ppl": 6.46347713470459,
+          "candidate_ppl": 6.723694801330566
+        }
+      },
+      {
+        "name": "heldout-ja-en-14",
+        "tokens": 85,
+        "metrics": {
+          "QUALITY_POSITIONS": "83",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-14.candidate",
+          "QUALITY_DUMP_POSITIONS": "83",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-14.baseline",
+          "QUALITY_PPL_BASELINE": "1748.68913",
+          "QUALITY_PPL_CANDIDATE": "1855.98435",
+          "QUALITY_PPL_DELTA_PCT": "6.13575123",
+          "QUALITY_NLL_DELTA_MEAN": "0.0595487607",
+          "QUALITY_KL_MEAN": "0.0268910337",
+          "QUALITY_TOP1_AGREEMENT": "0.903614458",
+          "QUALITY_TOP5_OVERLAP": "0.925301205",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "5.5"
+        },
+        "target_metrics": {
+          "positions": 31,
+          "mean_kl": 0.019055059179663658,
+          "top1_agreement": 0.9354838728904724,
+          "ref_ppl": 5.191397666931152,
+          "candidate_ppl": 5.095877170562744
+        }
+      },
+      {
+        "name": "heldout-ja-en-15",
+        "tokens": 83,
+        "metrics": {
+          "QUALITY_POSITIONS": "81",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-15.candidate",
+          "QUALITY_DUMP_POSITIONS": "81",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-15.baseline",
+          "QUALITY_PPL_BASELINE": "682.844542",
+          "QUALITY_PPL_CANDIDATE": "671.521196",
+          "QUALITY_PPL_DELTA_PCT": "-1.65826127",
+          "QUALITY_NLL_DELTA_MEAN": "-0.0167216434",
+          "QUALITY_KL_MEAN": "0.0159638606",
+          "QUALITY_TOP1_AGREEMENT": "0.987654321",
+          "QUALITY_TOP5_OVERLAP": "0.920987654",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "2.5"
+        },
+        "target_metrics": {
+          "positions": 35,
+          "mean_kl": 0.0032666604965925217,
+          "top1_agreement": 1.0,
+          "ref_ppl": 2.3040363788604736,
+          "candidate_ppl": 2.286146640777588
+        }
+      },
+      {
+        "name": "heldout-ja-en-16",
+        "tokens": 81,
+        "metrics": {
+          "QUALITY_POSITIONS": "79",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-16.candidate",
+          "QUALITY_DUMP_POSITIONS": "79",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-16.baseline",
+          "QUALITY_PPL_BASELINE": "1252.09666",
+          "QUALITY_PPL_CANDIDATE": "1192.51514",
+          "QUALITY_PPL_DELTA_PCT": "-4.75854024",
+          "QUALITY_NLL_DELTA_MEAN": "-0.0487548373",
+          "QUALITY_KL_MEAN": "0.0106628571",
+          "QUALITY_TOP1_AGREEMENT": "0.936708861",
+          "QUALITY_TOP5_OVERLAP": "0.949367089",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "2.4765625"
+        },
+        "target_metrics": {
+          "positions": 33,
+          "mean_kl": 0.006640488747507334,
+          "top1_agreement": 1.0,
+          "ref_ppl": 2.4299275875091553,
+          "candidate_ppl": 2.3249542713165283
+        }
+      },
+      {
+        "name": "heldout-ja-en-17",
+        "tokens": 74,
+        "metrics": {
+          "QUALITY_POSITIONS": "72",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-17.candidate",
+          "QUALITY_DUMP_POSITIONS": "72",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-ja-en/heldout-ja-en-17.baseline",
+          "QUALITY_PPL_BASELINE": "1237.68009",
+          "QUALITY_PPL_CANDIDATE": "1255.48555",
+          "QUALITY_PPL_DELTA_PCT": "1.43861571",
+          "QUALITY_NLL_DELTA_MEAN": "0.0142836582",
+          "QUALITY_KL_MEAN": "0.0144132306",
+          "QUALITY_TOP1_AGREEMENT": "0.930555556",
+          "QUALITY_TOP5_OVERLAP": "0.925",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "2.46875"
+        },
+        "target_metrics": {
+          "positions": 29,
+          "mean_kl": 0.0018918410642072558,
+          "top1_agreement": 1.0,
+          "ref_ppl": 1.942525029182434,
+          "candidate_ppl": 1.9522761106491089
+        }
+      }
+    ],
+    "en-ja": [
+      {
+        "name": "heldout-en-ja-0",
+        "tokens": 35,
+        "metrics": {
+          "QUALITY_POSITIONS": "33",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-0.candidate",
+          "QUALITY_DUMP_POSITIONS": "33",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-0.baseline",
+          "QUALITY_PPL_BASELINE": "9420.70565",
+          "QUALITY_PPL_CANDIDATE": "9000.21826",
+          "QUALITY_PPL_DELTA_PCT": "-4.46343839",
+          "QUALITY_NLL_DELTA_MEAN": "-0.0456611677",
+          "QUALITY_KL_MEAN": "0.0124618086",
+          "QUALITY_TOP1_AGREEMENT": "0.96969697",
+          "QUALITY_TOP5_OVERLAP": "0.963636364",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "2.0390625"
+        },
+        "target_metrics": {
+          "positions": 9,
+          "mean_kl": 0.001721783191896975,
+          "top1_agreement": 1.0,
+          "ref_ppl": 1.9471403360366821,
+          "candidate_ppl": 1.8465352058410645
+        }
+      },
+      {
+        "name": "heldout-en-ja-1",
+        "tokens": 31,
+        "metrics": {
+          "QUALITY_POSITIONS": "29",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-1.candidate",
+          "QUALITY_DUMP_POSITIONS": "29",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-1.baseline",
+          "QUALITY_PPL_BASELINE": "7044.06268",
+          "QUALITY_PPL_CANDIDATE": "6636.40552",
+          "QUALITY_PPL_DELTA_PCT": "-5.7872449",
+          "QUALITY_NLL_DELTA_MEAN": "-0.0596146091",
+          "QUALITY_KL_MEAN": "0.0664455464",
+          "QUALITY_TOP1_AGREEMENT": "0.896551724",
+          "QUALITY_TOP5_OVERLAP": "0.931034483",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "6.06640625"
+        },
+        "target_metrics": {
+          "positions": 6,
+          "mean_kl": 0.006321425084024668,
+          "top1_agreement": 1.0,
+          "ref_ppl": 32.88078689575195,
+          "candidate_ppl": 27.506973266601562
+        }
+      },
+      {
+        "name": "heldout-en-ja-2",
+        "tokens": 31,
+        "metrics": {
+          "QUALITY_POSITIONS": "29",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-2.candidate",
+          "QUALITY_DUMP_POSITIONS": "29",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-2.baseline",
+          "QUALITY_PPL_BASELINE": "12586.9685",
+          "QUALITY_PPL_CANDIDATE": "13351.336",
+          "QUALITY_PPL_DELTA_PCT": "6.07268957",
+          "QUALITY_NLL_DELTA_MEAN": "0.0589544238",
+          "QUALITY_KL_MEAN": "0.00678766265",
+          "QUALITY_TOP1_AGREEMENT": "0.896551724",
+          "QUALITY_TOP5_OVERLAP": "0.937931034",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "1.4375"
+        },
+        "target_metrics": {
+          "positions": 7,
+          "mean_kl": 0.0032160114496946335,
+          "top1_agreement": 0.8571428656578064,
+          "ref_ppl": 4.617800712585449,
+          "candidate_ppl": 4.469097137451172
+        }
+      },
+      {
+        "name": "heldout-en-ja-3",
+        "tokens": 35,
+        "metrics": {
+          "QUALITY_POSITIONS": "33",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-3.candidate",
+          "QUALITY_DUMP_POSITIONS": "33",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-3.baseline",
+          "QUALITY_PPL_BASELINE": "21100.0638",
+          "QUALITY_PPL_CANDIDATE": "20216.6428",
+          "QUALITY_PPL_DELTA_PCT": "-4.1868168",
+          "QUALITY_NLL_DELTA_MEAN": "-0.0427698987",
+          "QUALITY_KL_MEAN": "0.0135208606",
+          "QUALITY_TOP1_AGREEMENT": "0.909090909",
+          "QUALITY_TOP5_OVERLAP": "0.945454545",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "1.66992188"
+        },
+        "target_metrics": {
+          "positions": 7,
+          "mean_kl": 0.016680138185620308,
+          "top1_agreement": 0.8571428656578064,
+          "ref_ppl": 20.45688247680664,
+          "candidate_ppl": 23.04770278930664
+        }
+      },
+      {
+        "name": "heldout-en-ja-4",
+        "tokens": 38,
+        "metrics": {
+          "QUALITY_POSITIONS": "36",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-4.candidate",
+          "QUALITY_DUMP_POSITIONS": "36",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-4.baseline",
+          "QUALITY_PPL_BASELINE": "4693.02733",
+          "QUALITY_PPL_CANDIDATE": "4328.63369",
+          "QUALITY_PPL_DELTA_PCT": "-7.76457536",
+          "QUALITY_NLL_DELTA_MEAN": "-0.080825914",
+          "QUALITY_KL_MEAN": "0.0112255443",
+          "QUALITY_TOP1_AGREEMENT": "0.972222222",
+          "QUALITY_TOP5_OVERLAP": "0.944444444",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "2.09375"
+        },
+        "target_metrics": {
+          "positions": 10,
+          "mean_kl": 0.0020824125967919827,
+          "top1_agreement": 1.0,
+          "ref_ppl": 108.71002197265625,
+          "candidate_ppl": 91.25968170166016
+        }
+      },
+      {
+        "name": "heldout-en-ja-5",
+        "tokens": 37,
+        "metrics": {
+          "QUALITY_POSITIONS": "35",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-5.candidate",
+          "QUALITY_DUMP_POSITIONS": "35",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-5.baseline",
+          "QUALITY_PPL_BASELINE": "9202.22833",
+          "QUALITY_PPL_CANDIDATE": "9392.03567",
+          "QUALITY_PPL_DELTA_PCT": "2.06262363",
+          "QUALITY_NLL_DELTA_MEAN": "0.0204163961",
+          "QUALITY_KL_MEAN": "0.0066269385",
+          "QUALITY_TOP1_AGREEMENT": "0.971428571",
+          "QUALITY_TOP5_OVERLAP": "0.977142857",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "2.09375"
+        },
+        "target_metrics": {
+          "positions": 10,
+          "mean_kl": 0.0006037894636392593,
+          "top1_agreement": 1.0,
+          "ref_ppl": 36.71092224121094,
+          "candidate_ppl": 37.43169403076172
+        }
+      },
+      {
+        "name": "heldout-en-ja-6",
+        "tokens": 33,
+        "metrics": {
+          "QUALITY_POSITIONS": "31",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-6.candidate",
+          "QUALITY_DUMP_POSITIONS": "31",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-6.baseline",
+          "QUALITY_PPL_BASELINE": "22193.8479",
+          "QUALITY_PPL_CANDIDATE": "24001.3969",
+          "QUALITY_PPL_DELTA_PCT": "8.14436946",
+          "QUALITY_NLL_DELTA_MEAN": "0.0782969027",
+          "QUALITY_KL_MEAN": "0.00817360756",
+          "QUALITY_TOP1_AGREEMENT": "0.935483871",
+          "QUALITY_TOP5_OVERLAP": "0.95483871",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "1.5625"
+        },
+        "target_metrics": {
+          "positions": 7,
+          "mean_kl": 0.0038591509219259024,
+          "top1_agreement": 1.0,
+          "ref_ppl": 6.667535305023193,
+          "candidate_ppl": 7.660669803619385
+        }
+      },
+      {
+        "name": "heldout-en-ja-7",
+        "tokens": 28,
+        "metrics": {
+          "QUALITY_POSITIONS": "26",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-7.candidate",
+          "QUALITY_DUMP_POSITIONS": "26",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-7.baseline",
+          "QUALITY_PPL_BASELINE": "21622.3874",
+          "QUALITY_PPL_CANDIDATE": "22329.9675",
+          "QUALITY_PPL_DELTA_PCT": "3.27244181",
+          "QUALITY_NLL_DELTA_MEAN": "0.0322003764",
+          "QUALITY_KL_MEAN": "0.00870757839",
+          "QUALITY_TOP1_AGREEMENT": "0.923076923",
+          "QUALITY_TOP5_OVERLAP": "0.946153846",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "1.8125"
+        },
+        "target_metrics": {
+          "positions": 4,
+          "mean_kl": 0.0019569455180317163,
+          "top1_agreement": 0.75,
+          "ref_ppl": 1.1906516551971436,
+          "candidate_ppl": 1.1561064720153809
+        }
+      },
+      {
+        "name": "heldout-en-ja-8",
+        "tokens": 31,
+        "metrics": {
+          "QUALITY_POSITIONS": "29",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-8.candidate",
+          "QUALITY_DUMP_POSITIONS": "29",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-8.baseline",
+          "QUALITY_PPL_BASELINE": "17499.8399",
+          "QUALITY_PPL_CANDIDATE": "18671.4587",
+          "QUALITY_PPL_DELTA_PCT": "6.69502571",
+          "QUALITY_NLL_DELTA_MEAN": "0.0648043518",
+          "QUALITY_KL_MEAN": "0.00774371561",
+          "QUALITY_TOP1_AGREEMENT": "0.965517241",
+          "QUALITY_TOP5_OVERLAP": "0.944827586",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "1.5"
+        },
+        "target_metrics": {
+          "positions": 7,
+          "mean_kl": 0.001703224261291325,
+          "top1_agreement": 1.0,
+          "ref_ppl": 7.385766983032227,
+          "candidate_ppl": 7.59213399887085
+        }
+      },
+      {
+        "name": "heldout-en-ja-9",
+        "tokens": 39,
+        "metrics": {
+          "QUALITY_POSITIONS": "37",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-9.candidate",
+          "QUALITY_DUMP_POSITIONS": "37",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-9.baseline",
+          "QUALITY_PPL_BASELINE": "10757.313",
+          "QUALITY_PPL_CANDIDATE": "11923.3838",
+          "QUALITY_PPL_DELTA_PCT": "10.8397959",
+          "QUALITY_NLL_DELTA_MEAN": "0.102915693",
+          "QUALITY_KL_MEAN": "0.0152211963",
+          "QUALITY_TOP1_AGREEMENT": "0.945945946",
+          "QUALITY_TOP5_OVERLAP": "0.945945946",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "3.34375"
+        },
+        "target_metrics": {
+          "positions": 11,
+          "mean_kl": 0.0045461407862603664,
+          "top1_agreement": 1.0,
+          "ref_ppl": 25.331893920898438,
+          "candidate_ppl": 27.14877700805664
+        }
+      },
+      {
+        "name": "heldout-en-ja-10",
+        "tokens": 53,
+        "metrics": {
+          "QUALITY_POSITIONS": "51",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-10.candidate",
+          "QUALITY_DUMP_POSITIONS": "51",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-10.baseline",
+          "QUALITY_PPL_BASELINE": "1800.02223",
+          "QUALITY_PPL_CANDIDATE": "1878.96642",
+          "QUALITY_PPL_DELTA_PCT": "4.38573426",
+          "QUALITY_NLL_DELTA_MEAN": "0.0429228351",
+          "QUALITY_KL_MEAN": "0.0179420486",
+          "QUALITY_TOP1_AGREEMENT": "0.862745098",
+          "QUALITY_TOP5_OVERLAP": "0.952941176",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "1.875"
+        },
+        "target_metrics": {
+          "positions": 16,
+          "mean_kl": 0.008266113698482513,
+          "top1_agreement": 0.8125,
+          "ref_ppl": 5.144214630126953,
+          "candidate_ppl": 5.177610397338867
+        }
+      },
+      {
+        "name": "heldout-en-ja-11",
+        "tokens": 46,
+        "metrics": {
+          "QUALITY_POSITIONS": "44",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-11.candidate",
+          "QUALITY_DUMP_POSITIONS": "44",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-11.baseline",
+          "QUALITY_PPL_BASELINE": "1116.60707",
+          "QUALITY_PPL_CANDIDATE": "1086.201",
+          "QUALITY_PPL_DELTA_PCT": "-2.72307628",
+          "QUALITY_NLL_DELTA_MEAN": "-0.0276083912",
+          "QUALITY_KL_MEAN": "0.0178061586",
+          "QUALITY_TOP1_AGREEMENT": "0.931818182",
+          "QUALITY_TOP5_OVERLAP": "0.940909091",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "2"
+        },
+        "target_metrics": {
+          "positions": 15,
+          "mean_kl": 0.0013660372933372855,
+          "top1_agreement": 0.9333333373069763,
+          "ref_ppl": 2.127214193344116,
+          "candidate_ppl": 2.12111496925354
+        }
+      },
+      {
+        "name": "heldout-en-ja-12",
+        "tokens": 69,
+        "metrics": {
+          "QUALITY_POSITIONS": "67",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-12.candidate",
+          "QUALITY_DUMP_POSITIONS": "67",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-12.baseline",
+          "QUALITY_PPL_BASELINE": "1369.38418",
+          "QUALITY_PPL_CANDIDATE": "1348.74177",
+          "QUALITY_PPL_DELTA_PCT": "-1.50742223",
+          "QUALITY_NLL_DELTA_MEAN": "-0.0151889933",
+          "QUALITY_KL_MEAN": "0.0212213519",
+          "QUALITY_TOP1_AGREEMENT": "0.970149254",
+          "QUALITY_TOP5_OVERLAP": "0.946268657",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "1.859375"
+        },
+        "target_metrics": {
+          "positions": 24,
+          "mean_kl": 0.0016874914290383458,
+          "top1_agreement": 1.0,
+          "ref_ppl": 5.413040637969971,
+          "candidate_ppl": 5.386807441711426
+        }
+      },
+      {
+        "name": "heldout-en-ja-13",
+        "tokens": 82,
+        "metrics": {
+          "QUALITY_POSITIONS": "80",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-13.candidate",
+          "QUALITY_DUMP_POSITIONS": "80",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-13.baseline",
+          "QUALITY_PPL_BASELINE": "2198.25717",
+          "QUALITY_PPL_CANDIDATE": "2281.49088",
+          "QUALITY_PPL_DELTA_PCT": "3.78635002",
+          "QUALITY_NLL_DELTA_MEAN": "0.0371642734",
+          "QUALITY_KL_MEAN": "0.0119062277",
+          "QUALITY_TOP1_AGREEMENT": "0.95",
+          "QUALITY_TOP5_OVERLAP": "0.94",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "1.9140625"
+        },
+        "target_metrics": {
+          "positions": 33,
+          "mean_kl": 0.0037313851062208414,
+          "top1_agreement": 0.939393937587738,
+          "ref_ppl": 53.84197998046875,
+          "candidate_ppl": 54.94550704956055
+        }
+      },
+      {
+        "name": "heldout-en-ja-14",
+        "tokens": 85,
+        "metrics": {
+          "QUALITY_POSITIONS": "83",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-14.candidate",
+          "QUALITY_DUMP_POSITIONS": "83",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-14.baseline",
+          "QUALITY_PPL_BASELINE": "2239.50648",
+          "QUALITY_PPL_CANDIDATE": "2225.13338",
+          "QUALITY_PPL_DELTA_PCT": "-0.641797948",
+          "QUALITY_NLL_DELTA_MEAN": "-0.00643866326",
+          "QUALITY_KL_MEAN": "0.0112484978",
+          "QUALITY_TOP1_AGREEMENT": "0.951807229",
+          "QUALITY_TOP5_OVERLAP": "0.930120482",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "1.90625"
+        },
+        "target_metrics": {
+          "positions": 35,
+          "mean_kl": 0.005939122289419174,
+          "top1_agreement": 0.9714285731315613,
+          "ref_ppl": 26.795494079589844,
+          "candidate_ppl": 28.468292236328125
+        }
+      },
+      {
+        "name": "heldout-en-ja-15",
+        "tokens": 83,
+        "metrics": {
+          "QUALITY_POSITIONS": "81",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-15.candidate",
+          "QUALITY_DUMP_POSITIONS": "81",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-15.baseline",
+          "QUALITY_PPL_BASELINE": "808.787524",
+          "QUALITY_PPL_CANDIDATE": "856.309001",
+          "QUALITY_PPL_DELTA_PCT": "5.87564416",
+          "QUALITY_NLL_DELTA_MEAN": "0.0570950511",
+          "QUALITY_KL_MEAN": "0.0137877994",
+          "QUALITY_TOP1_AGREEMENT": "0.925925926",
+          "QUALITY_TOP5_OVERLAP": "0.933333333",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "1.9140625"
+        },
+        "target_metrics": {
+          "positions": 29,
+          "mean_kl": 0.0019165462581440806,
+          "top1_agreement": 1.0,
+          "ref_ppl": 4.047954082489014,
+          "candidate_ppl": 4.199159145355225
+        }
+      },
+      {
+        "name": "heldout-en-ja-16",
+        "tokens": 81,
+        "metrics": {
+          "QUALITY_POSITIONS": "79",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-16.candidate",
+          "QUALITY_DUMP_POSITIONS": "79",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-16.baseline",
+          "QUALITY_PPL_BASELINE": "571.038213",
+          "QUALITY_PPL_CANDIDATE": "599.244656",
+          "QUALITY_PPL_DELTA_PCT": "4.93950192",
+          "QUALITY_NLL_DELTA_MEAN": "0.048213826",
+          "QUALITY_KL_MEAN": "0.0164451927",
+          "QUALITY_TOP1_AGREEMENT": "0.936708861",
+          "QUALITY_TOP5_OVERLAP": "0.93164557",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "1.90625"
+        },
+        "target_metrics": {
+          "positions": 29,
+          "mean_kl": 0.004093852825462818,
+          "top1_agreement": 1.0,
+          "ref_ppl": 1.7981208562850952,
+          "candidate_ppl": 1.791006088256836
+        }
+      },
+      {
+        "name": "heldout-en-ja-17",
+        "tokens": 74,
+        "metrics": {
+          "QUALITY_POSITIONS": "72",
+          "QUALITY_CONTEXT": "1",
+          "QUALITY_BATCH_SIZE": "1",
+          "QUALITY_SCORE_START": "2",
+          "QUALITY_VOCAB": "107520",
+          "QUALITY_KV_DTYPE": "bf16",
+          "QUALITY_DUMP": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-17.candidate",
+          "QUALITY_DUMP_POSITIONS": "72",
+          "QUALITY_BASELINE": "/tmp/fc_hipfire/quality-en-ja/heldout-en-ja-17.baseline",
+          "QUALITY_PPL_BASELINE": "1158.32678",
+          "QUALITY_PPL_CANDIDATE": "1175.50242",
+          "QUALITY_PPL_DELTA_PCT": "1.48279669",
+          "QUALITY_NLL_DELTA_MEAN": "0.0147191074",
+          "QUALITY_KL_MEAN": "0.0127013635",
+          "QUALITY_TOP1_AGREEMENT": "0.916666667",
+          "QUALITY_TOP5_OVERLAP": "0.927777778",
+          "QUALITY_LOGIT_MAX_ABS_DELTA": "2"
+        },
+        "target_metrics": {
+          "positions": 26,
+          "mean_kl": 0.001530099892988801,
+          "top1_agreement": 1.0,
+          "ref_ppl": 10.425544738769531,
+          "candidate_ppl": 10.727275848388672
+        }
+      }
+    ]
   }
 }
