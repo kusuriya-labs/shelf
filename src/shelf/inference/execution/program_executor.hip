@@ -554,6 +554,12 @@ Status execute_program_tp_ranges(
     const ::shelf::runtime::TpExecutionSchedule& schedule,
     ::shelf::runtime::TpBarrierHook* barrier,
     int rank) {
+    struct TpActiveGuard {
+        bool& active;
+        bool previous;
+        ~TpActiveGuard() { active = previous; }
+    } guard{ctx.tp_active, ctx.tp_active};
+    ctx.tp_active = true;
     if (barrier == nullptr) {
         return Status::invalid_state("tp barrier hook not bound", __FILE__, __LINE__);
     }

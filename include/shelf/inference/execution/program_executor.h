@@ -114,6 +114,7 @@ struct HostExecutionContext {
     uint32_t staged_verify_request_count = 0;
     uint32_t tp_peer_value = 0;
     void* tp_peer_out = nullptr;
+    bool tp_active = false;
     bool tp_peer_armed = false;
     bool tp_peer_written = false;
     const LayerInputOverride* layer_overrides = nullptr;
