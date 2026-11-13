@@ -245,6 +245,9 @@ clamp される（R8192 = 参照実装の CHUNK と同じ 8192 行）。
 10. `SHELF_HIP_GRAPH` 有効時、`graph_cache` がある bucket に対しては capture / launch を試行
     - 既存 graph があるなら `hipGraphLaunch`
     - 無いなら `hipStreamBeginCapture` → `enqueue_batch` → `hipStreamEndCapture` → `hipGraphInstantiate` → `hipGraphLaunch`
+    - Qwen3.5 系 DFlash2 target の単一 request の greedy verify は 8 行と 10 行を既定で対象とし、行数ごとに graph を保持する。その他の行数は通常経路で実行する。`SHELF_GRAPH_VERIFY=0` で verify の graph を無効化できる
+    - tree verify は行ごとの committed end と ancestor / parent / RoPE の device 配列を使い、各 round で内容を更新する。行数と配列 pointer、GDN history / compact log の条件が一致する graph を再利用する
+    - 複数 request、stochastic verify、QSA / PLE history、TP schedule、および未対応の tree metadata は通常経路で実行する
     - 失敗時は `graph_failed = true` にして fallback
 11. `enqueue_batch`（通常経路）:
     - `upload(input_ids, token_src, N * sizeof(int32_t))`

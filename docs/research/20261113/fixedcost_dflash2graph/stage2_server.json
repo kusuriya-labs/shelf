@@ -1,0 +1,82 @@
+[
+  {
+    "drafter": "bf16",
+    "variant": "baseline",
+    "runs": [
+      {
+        "elapsed_s": 1.933896710863337,
+        "completion_tokens": 128,
+        "tokens_per_s": 66.18760933868997,
+        "finish_reason": "length",
+        "token_ids_sha256": "a63ba056293d5436139988fa9046a171705a4f85ed8e4c4d03e08cd2f091c6b8"
+      },
+      {
+        "elapsed_s": 1.8655496500432491,
+        "completion_tokens": 128,
+        "tokens_per_s": 68.61248640422546,
+        "finish_reason": "length",
+        "token_ids_sha256": "a63ba056293d5436139988fa9046a171705a4f85ed8e4c4d03e08cd2f091c6b8"
+      }
+    ]
+  },
+  {
+    "drafter": "bf16",
+    "variant": "candidate",
+    "runs": [
+      {
+        "elapsed_s": 1.97306540585123,
+        "completion_tokens": 128,
+        "tokens_per_s": 64.87367302696059,
+        "finish_reason": "length",
+        "token_ids_sha256": "a63ba056293d5436139988fa9046a171705a4f85ed8e4c4d03e08cd2f091c6b8"
+      },
+      {
+        "elapsed_s": 1.839600428007543,
+        "completion_tokens": 128,
+        "tokens_per_s": 69.58032736415255,
+        "finish_reason": "length",
+        "token_ids_sha256": "a63ba056293d5436139988fa9046a171705a4f85ed8e4c4d03e08cd2f091c6b8"
+      }
+    ]
+  },
+  {
+    "drafter": "mul24",
+    "variant": "baseline",
+    "runs": [
+      {
+        "elapsed_s": 1.7596890819258988,
+        "completion_tokens": 128,
+        "tokens_per_s": 72.74012285165166,
+        "finish_reason": "length",
+        "token_ids_sha256": "a63ba056293d5436139988fa9046a171705a4f85ed8e4c4d03e08cd2f091c6b8"
+      },
+      {
+        "elapsed_s": 1.6972643351182342,
+        "completion_tokens": 128,
+        "tokens_per_s": 75.41547733699555,
+        "finish_reason": "length",
+        "token_ids_sha256": "a63ba056293d5436139988fa9046a171705a4f85ed8e4c4d03e08cd2f091c6b8"
+      }
+    ]
+  },
+  {
+    "drafter": "mul24",
+    "variant": "candidate",
+    "runs": [
+      {
+        "elapsed_s": 1.7994555330369622,
+        "completion_tokens": 128,
+        "tokens_per_s": 71.13262742534843,
+        "finish_reason": "length",
+        "token_ids_sha256": "a63ba056293d5436139988fa9046a171705a4f85ed8e4c4d03e08cd2f091c6b8"
+      },
+      {
+        "elapsed_s": 1.6716625338885933,
+        "completion_tokens": 128,
+        "tokens_per_s": 76.57047843397469,
+        "finish_reason": "length",
+        "token_ids_sha256": "a63ba056293d5436139988fa9046a171705a4f85ed8e4c4d03e08cd2f091c6b8"
+      }
+    ]
+  }
+]

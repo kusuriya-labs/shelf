@@ -1,0 +1,211 @@
+{
+  "fixed_prompts": [
+    {
+      "phase": "stage1",
+      "drafter": "bf16",
+      "prompt": "code",
+      "tokens": 256,
+      "equal": true,
+      "token_ids_sha256": "8691b7b8ba5a61764daca86929f1e6f7f78e9947de9321ad22011c9dc1313d41",
+      "captures": 1,
+      "replays": 42,
+      "capture_logs": [
+        "[graph] capture ok bucket=0 N=10 nodes=1775 host_ms=27.033"
+      ]
+    },
+    {
+      "phase": "stage1",
+      "drafter": "bf16",
+      "prompt": "prose",
+      "tokens": 256,
+      "equal": true,
+      "token_ids_sha256": "a948bea0ed14dc8598f2d92b7fbc79d2cd15cd1b2b023ca22f2381dfab336a00",
+      "captures": 2,
+      "replays": 76,
+      "capture_logs": [
+        "[graph] capture ok bucket=0 N=10 nodes=1775 host_ms=28.847",
+        "[graph] capture ok bucket=0 N=5 nodes=1775 host_ms=27.707"
+      ]
+    },
+    {
+      "phase": "stage1",
+      "drafter": "bf16",
+      "prompt": "ja",
+      "tokens": 256,
+      "equal": true,
+      "token_ids_sha256": "6fade1dbf5971f5b0a9c3f43e962729976c5c36d5354f041617fc65d3ea30874",
+      "captures": 3,
+      "replays": 81,
+      "capture_logs": [
+        "[graph] capture ok bucket=0 N=10 nodes=1775 host_ms=28.892",
+        "[graph] capture ok bucket=0 N=5 nodes=1775 host_ms=27.403",
+        "[graph] capture ok bucket=0 N=1 nodes=1775 host_ms=41.117"
+      ]
+    },
+    {
+      "phase": "stage1",
+      "drafter": "mul24",
+      "prompt": "code",
+      "tokens": 256,
+      "equal": true,
+      "token_ids_sha256": "8691b7b8ba5a61764daca86929f1e6f7f78e9947de9321ad22011c9dc1313d41",
+      "captures": 1,
+      "replays": 44,
+      "capture_logs": [
+        "[graph] capture ok bucket=0 N=10 nodes=1775 host_ms=27.544"
+      ]
+    },
+    {
+      "phase": "stage1",
+      "drafter": "mul24",
+      "prompt": "prose",
+      "tokens": 256,
+      "equal": true,
+      "token_ids_sha256": "a948bea0ed14dc8598f2d92b7fbc79d2cd15cd1b2b023ca22f2381dfab336a00",
+      "captures": 2,
+      "replays": 76,
+      "capture_logs": [
+        "[graph] capture ok bucket=0 N=10 nodes=1775 host_ms=26.425",
+        "[graph] capture ok bucket=0 N=5 nodes=1775 host_ms=28.057"
+      ]
+    },
+    {
+      "phase": "stage1",
+      "drafter": "mul24",
+      "prompt": "ja",
+      "tokens": 256,
+      "equal": true,
+      "token_ids_sha256": "b7b8328e173f13705f7c3d50ecea9beee5af8cee2d8664704bbba41c2bcfa5c9",
+      "captures": 2,
+      "replays": 83,
+      "capture_logs": [
+        "[graph] capture ok bucket=0 N=10 nodes=1775 host_ms=26.092",
+        "[graph] capture ok bucket=0 N=5 nodes=1775 host_ms=27.696"
+      ]
+    },
+    {
+      "phase": "stage2",
+      "drafter": "bf16",
+      "prompt": "code",
+      "tokens": 256,
+      "equal": true,
+      "token_ids_sha256": "8691b7b8ba5a61764daca86929f1e6f7f78e9947de9321ad22011c9dc1313d41",
+      "captures": 1,
+      "replays": 42,
+      "capture_logs": [
+        "[graph] capture ok bucket=0 N=10 nodes=1775 host_ms=29.017 attention=5"
+      ]
+    },
+    {
+      "phase": "stage2",
+      "drafter": "bf16",
+      "prompt": "prose",
+      "tokens": 256,
+      "equal": true,
+      "token_ids_sha256": "a948bea0ed14dc8598f2d92b7fbc79d2cd15cd1b2b023ca22f2381dfab336a00",
+      "captures": 1,
+      "replays": 76,
+      "capture_logs": [
+        "[graph] capture ok bucket=0 N=10 nodes=1775 host_ms=29.101 attention=5"
+      ]
+    },
+    {
+      "phase": "stage2",
+      "drafter": "bf16",
+      "prompt": "ja",
+      "tokens": 256,
+      "equal": true,
+      "token_ids_sha256": "6fade1dbf5971f5b0a9c3f43e962729976c5c36d5354f041617fc65d3ea30874",
+      "captures": 2,
+      "replays": 81,
+      "capture_logs": [
+        "[graph] capture ok bucket=0 N=10 nodes=1775 host_ms=29.002 attention=5",
+        "[graph] capture ok bucket=0 N=1 nodes=1775 host_ms=42.684 attention=5"
+      ]
+    },
+    {
+      "phase": "stage2",
+      "drafter": "mul24",
+      "prompt": "code",
+      "tokens": 256,
+      "equal": true,
+      "token_ids_sha256": "8691b7b8ba5a61764daca86929f1e6f7f78e9947de9321ad22011c9dc1313d41",
+      "captures": 1,
+      "replays": 44,
+      "capture_logs": [
+        "[graph] capture ok bucket=0 N=10 nodes=1775 host_ms=27.398 attention=5"
+      ]
+    },
+    {
+      "phase": "stage2",
+      "drafter": "mul24",
+      "prompt": "prose",
+      "tokens": 256,
+      "equal": true,
+      "token_ids_sha256": "a948bea0ed14dc8598f2d92b7fbc79d2cd15cd1b2b023ca22f2381dfab336a00",
+      "captures": 1,
+      "replays": 76,
+      "capture_logs": [
+        "[graph] capture ok bucket=0 N=10 nodes=1775 host_ms=29.373 attention=5"
+      ]
+    },
+    {
+      "phase": "stage2",
+      "drafter": "mul24",
+      "prompt": "ja",
+      "tokens": 256,
+      "equal": true,
+      "token_ids_sha256": "b7b8328e173f13705f7c3d50ecea9beee5af8cee2d8664704bbba41c2bcfa5c9",
+      "captures": 1,
+      "replays": 83,
+      "capture_logs": [
+        "[graph] capture ok bucket=0 N=10 nodes=1775 host_ms=27.243 attention=5"
+      ]
+    }
+  ],
+  "stress": {
+    "off": {
+      "requests": 36,
+      "tree_rounds": 2460,
+      "captures": 1,
+      "replays": 11,
+      "replacements": 0,
+      "graph_errors": 0,
+      "output_sha256": "b59744cb1e1d9e27b329786f495eabcbfec55a5e7bbb20934a68d80b97e1758b"
+    },
+    "on": {
+      "requests": 36,
+      "tree_rounds": 2460,
+      "captures": 3,
+      "replays": 2408,
+      "replacements": 0,
+      "graph_errors": 0,
+      "output_sha256": "b59744cb1e1d9e27b329786f495eabcbfec55a5e7bbb20934a68d80b97e1758b"
+    }
+  },
+  "context": {
+    "2000": {
+      "tokens": 256,
+      "equal": true,
+      "capture_logs": [
+        "[graph] capture ok bucket=0 N=10 nodes=1775 host_ms=28.650 attention=5",
+        "[graph] replace bucket=0 N=10 old_N=10 attention=65 old_attention=5",
+        "[graph] capture ok bucket=0 N=10 nodes=1775 host_ms=28.521 attention=65"
+      ],
+      "replays": 49
+    },
+    "2038": {
+      "tokens": 256,
+      "equal": true,
+      "capture_logs": [
+        "[graph] capture ok bucket=0 N=10 nodes=1775 host_ms=28.460 attention=65"
+      ],
+      "replays": 54
+    }
+  },
+  "failure_injection": {
+    "equal": true,
+    "tokens": 256,
+    "failure_logged": true
+  }
+}
