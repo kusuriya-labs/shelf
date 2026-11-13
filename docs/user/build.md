@@ -53,7 +53,7 @@ Shelfが対象とするのは `gfx1201`（AMD Radeon AI PRO R9700）のみであ
 | `SHELF_BUILD_TESTS` | ON | test suite build |
 | `SHELF_BUILD_OPTIONAL_TESTS` | OFF | external model を要する optional / heavy test |
 | `SHELF_BUILD_BENCHMARKS` | ON | benchmark executables（bench + E2E前提） |
-| `SHELF_HIP_GRAPH` | OFF | HIP graph execution mode |
+| `SHELF_HIP_GRAPH` | ON | HIP graph execution mode |
 | `SHELF_LIBCXX_LLVM_ROOT` | `/usr/lib/llvm-23` | host libc++ 23 root |
 | `CMAKE_HIP_ARCHITECTURES` | 必須 | 対象GPUアーキテクチャ（`gfx1201` のみ） |
 
@@ -64,12 +64,14 @@ MTP は `SHELF_MODEL_DIR_MTP`、DFlash2 draft は
 `SHELF_MODEL_DIR_DFLASH2_TARGET`、TP は `SHELF_TP_MODEL_DIR` を使う。
 指定が無い test は exit 77 で skip する。
 
-`SHELF_HIP_GRAPH` は graph capture / replay による execution mode である。
-有効にする場合:
+`SHELF_HIP_GRAPH` は graph capture / replay による execution mode で、既定で有効である。
+無効にする場合:
 
 ```bash
-cmake -S . -B build -DSHELF_HIP_GRAPH=ON
+cmake -S . -B build -DSHELF_HIP_GRAPH=OFF
 ```
+
+PLaMo 3 の c=1 decode の graph だけを実行時に無効にする場合は `SHELF_PLAMO_HIP_GRAPH=0` を指定する。
 
 単一 request の speculative verify も graph で実行する場合は、実行時に
 `SHELF_GRAPH_VERIFY=1` を指定する。tree verify、stochastic verify、QSA / PLE

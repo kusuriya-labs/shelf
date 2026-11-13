@@ -61,10 +61,10 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
 cmake --build build --parallel
 ```
 
-HIP graph execution mode を使う場合は別 option で指定する。
+HIP graph execution mode は既定で有効である。無効にする場合は次のとおり指定する。
 
 ```bash
-cmake -S . -B build -DSHELF_HIP_GRAPH=ON
+cmake -S . -B build -DSHELF_HIP_GRAPH=OFF
 ```
 
 要件・option 一覧: [docs/user/build.md](docs/user/build.md)。

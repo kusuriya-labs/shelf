@@ -207,7 +207,7 @@ option(SHELF_BUILD_OPTIONAL_TESTS "Build optional / external / heavy tests" OFF)
 option(SHELF_BUILD_BENCHMARKS "Build Shelf benchmark executables" ON)
 
 # HIP graph execution mode for the Qwen3.5 runtime (capture/replay of the
-# per-submission kernel sequence). Experimental.
-option(SHELF_HIP_GRAPH "Enable HIP graph execution mode" OFF)
+# per-submission kernel sequence). Enabled by default.
+option(SHELF_HIP_GRAPH "Enable HIP graph execution mode" ON)
 
 
