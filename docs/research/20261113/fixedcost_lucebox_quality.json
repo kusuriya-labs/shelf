@@ -1,0 +1,22 @@
+{
+  "base_quality_positions": "256",
+  "base_quality_context": "128",
+  "base_quality_batch_size": "1",
+  "base_quality_score_start": "129",
+  "base_quality_vocab": "248320",
+  "base_quality_kv_dtype": "bf16",
+  "candidate_quality_positions": "256",
+  "candidate_quality_context": "128",
+  "candidate_quality_batch_size": "1",
+  "candidate_quality_score_start": "129",
+  "candidate_quality_vocab": "248320",
+  "candidate_quality_kv_dtype": "bf16",
+  "candidate_quality_ppl_baseline": "22.6990172",
+  "candidate_quality_ppl_candidate": "22.3631134",
+  "candidate_quality_ppl_delta_pct": "-1.47981638",
+  "candidate_quality_nll_delta_mean": "-0.0149087489",
+  "candidate_quality_kl_mean": "0.00128366384",
+  "candidate_quality_top1_agreement": "0.98828125",
+  "candidate_quality_top5_overlap": "0.98671875",
+  "candidate_quality_logit_max_abs_delta": "1.15759014"
+}
