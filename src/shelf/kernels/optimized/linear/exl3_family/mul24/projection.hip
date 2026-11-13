@@ -542,7 +542,8 @@ hipError_t launch_plamo_exl3_projection_rotate(const PlamoExl3ProjectionGroup &a
     return hipGetLastError();
 }
 hipError_t launch_plamo_exl3_projection(const PlamoExl3ProjectionGroup &args, uint32_t bits,
-                                        hipStream_t stream, uint32_t *launch_count) {
+                                        hipStream_t stream, uint32_t *launch_count,
+                                        bool allow_shape_fusion) {
     if (launch_count)
         *launch_count = 0u;
     if (args.count == 0u || args.count > 3u || args.rows == 0u || args.rows >= 256u ||
@@ -561,7 +562,7 @@ hipError_t launch_plamo_exl3_projection(const PlamoExl3ProjectionGroup &args, ui
     }
     if (launch_count)
         *launch_count = 3u;
-    if (args.rows == 1u && bits == 4u &&
+    if (allow_shape_fusion && args.rows == 1u && bits == 4u &&
         ((args.k == 2560u && args.p[0].n == 3072u) || (args.k == 3072u && args.p[0].n == 2560u))) {
         if (launch_count)
             *launch_count = 2u;
@@ -574,7 +575,7 @@ hipError_t launch_plamo_exl3_projection(const PlamoExl3ProjectionGroup &args, ui
     hipError_t err = hipGetLastError();
     if (err != hipSuccess)
         return err;
-    bool fused_output = args.rows <= 16u && args.p[0].n >= 10240u;
+    bool fused_output = allow_shape_fusion && args.rows <= 16u && args.p[0].n >= 10240u;
     for (uint32_t i = 0u; i < args.count; ++i)
         fused_output = fused_output && args.p[i].splits == 1u;
     if (fused_output) {

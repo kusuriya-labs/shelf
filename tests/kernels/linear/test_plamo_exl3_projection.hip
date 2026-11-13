@@ -24,7 +24,7 @@ template <class T> struct Buffer {
 };
 
 bool run(uint32_t rows, uint32_t bits, uint32_t count, uint32_t k = 1024u, uint32_t n = 384u,
-         uint32_t splits = 0u) {
+         uint32_t splits = 0u, bool allow_shape_fusion = true) {
     const uint32_t input_stride = k + 4, out_stride = n + 4;
     const uint32_t ss = k / 128 * 4;
     const size_t weights = size_t(n) * k * bits / 16;
@@ -80,11 +80,11 @@ bool run(uint32_t rows, uint32_t bits, uint32_t count, uint32_t k = 1024u, uint3
     check(hipMemcpy(baseline.data(), out.p, baseline.size() * 2, hipMemcpyDeviceToHost));
     check(hipMemset(out.p, 0x55, plane * count * 2));
     uint32_t launches = 99u;
-    check(shelf::kernel::launch_plamo_exl3_projection(args, bits, nullptr, &launches));
+    check(shelf::kernel::launch_plamo_exl3_projection(args, bits, nullptr, &launches, allow_shape_fusion));
     const bool input_fused = rows == 1u && bits == 4u &&
                              ((k == 2560u && args.p[0].n == 3072u) || (k == 3072u && args.p[0].n == 2560u));
     const bool output_fused = rows <= 16u && args.p[0].n >= 10240u && count == 1u;
-    if (launches != (input_fused || output_fused ? 2u : 3u)) {
+    if (launches != (allow_shape_fusion && (input_fused || output_fused) ? 2u : 3u)) {
         std::fprintf(stderr, "launch count rows=%u n=%u k=%u bits=%u actual=%u\n", rows, n, k, bits,
                      launches);
         return false;
@@ -186,6 +186,12 @@ int main() {
             for (uint32_t count : {1u, 2u, 3u})
                 if (!run(rows, bits, count))
                     return 1;
+    for (uint32_t rows : {1u, 8u, 16u, 17u, 32u, 40u, 64u})
+        for (uint32_t count : {2u, 3u})
+            if (!run(rows, 4u, count, 1024u, 384u, 0u, false))
+                return 1;
+    if (!run(1u, 4u, 2u, 1024u, 10240u, 1u, false))
+        return 1;
     for (uint32_t rows : {1u, 4u, 16u})
         if (!run(rows, 4u, 1u, 1024u, 10240u) || !run(rows, 8u, 1u, 256u, 107520u))
             return 1;
