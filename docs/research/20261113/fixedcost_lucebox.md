@@ -68,3 +68,34 @@ BetterBench の 29 cases、2,203 tokens から corpus を生成し、context 128
 生成確認は code と prose の固定 prompt が各 256 token を完走し、確認範囲で文字化け・明白な反復・早期 EOS はなかった。日本語 prompt は未完了。[fixedcost_lucebox_greedy.json](fixedcost_lucebox_greedy.json) に取得分を保存した。
 
 排他待ちが指示された時間の目安を大幅に超えたため、待機中の自分の実行を停止した。非投機の各 3 回と BF16 / mul24 drafter の速度比較、日本語 prompt の 256 token 生成、draft step と verify 前後の launch 内訳は未完了。DFlash2 の速度・品質や全部入りの採否は判断できない。上記 script は保存済み JSON を初期値として成功済み run を飛ばし、残りを `/tmp/fc_lucebox/bench.json` に記録する。統合前に残項目を実施する。
+
+## 複数行対応と一致性（2026-11-13）
+
+DFlash2 の verify では 8 行前後の target 実行が従来経路となる一方、1 行の decode では融合経路となり、数値差によって greedy の完全一致が崩れていた。両 kernel の grid に行を加え、各 block がそれぞれの行と 128 要素の group を担当する。入力・出力の row stride を個別に使い、1 行当たりの reduction、BF16 丸め、演算順序は変更していない。通常 kernel の selector にある行数上限を融合対象の判定へ持ち込まないよう、形状の判定は 1 行で行い、実際の行数で融合 kernel を launch する。重なりは実際の行数ではなく workspace の確保済み行容量全体で判定する。対象形状、後続演算、trace / override 条件、無効化環境変数は維持した。
+
+変更前の 1 行 kernel と、変更後に 1、8、10、16、257 行をまとめて実行した結果を、各行の全要素についてビット単位で比較した。各入力行は異なる値とし、入力・出力 stride に padding を含めた。257 行を 7 行ずつの chunk に分割した場合も一致した。これらは一時的な HIP 検証であり、実モデルの end-to-end 一致とは別の確認である。
+
+実モデルの prefill dispatch 診断では、1、8、10、16、128 行の各実行で Q/K 融合が 48 層、出力融合が 45 層だった。DFlash2 draft 7 の実 verify 4 回でも各 forward の L2 normalize dispatch は融合有効時 48、無効時 96、SiLU は 51 対 96、MUL は 19 対 64 だった。Q scale の 48 回も Q/K 融合に含まれるため、verify 1 回で Q/K が 96、出力側が 90、計 186 launch 減る。診断には `SHELF_OP_DUMP=1` を用いたため、速度測定には用いていない。非投機 decode の既存診断では 1,767 → 1,581 launch/token だった。
+
+`shelf-bench quality` は同じ BetterBench corpus、context 128、256 位置、BF16 KV の基準 dump と候補 dump を比較した。平均 KL は **0.00189127688**、top-1 一致率は **99.21875%**、top-5 overlap は 98.125%、perplexity は 22.6990 → 23.3707。目安の KL < 0.005、top-1 ≥ 98% を満たした。corpus の SHA-256 は前節と同一である。
+
+指定された統合テストをそれぞれ単独で GPU lock 下に実行した。
+
+| テスト | 結果 |
+|---|---|
+| `test_compute_dflash2.py` | 99/99 成功。BF16 / FP8 / Octave KV で投機 serve と非投機 greedy が完全一致 |
+| `test_compute_dflash2_unaligned.py` | 7/7 成功。非整列 prefill と prefix 復元を含め非投機 greedy と完全一致 |
+| `test_compute_dflash2_prefix_long.py` | 8/8 成功。2048 以降の chunk 境界からの prefix 復元が cache 無効時および非投機 greedy と完全一致 |
+| `test_server_dflash2_tree.py` | 成功。budget 8 の chain 一致と、budget 10 / auto の単一 request tree との一致を確認 |
+
+全体 regression と `test_compute_dflash2_tree.py` は実行していない。
+
+同じ code prompt、128 token、temperature 0、最大 sequence 長 1024、単一 request の `shelf-compute` を使い、基準と候補を ABAB 順に各 3 回比較した。DFlash2 は draft 7。BF16 drafter の基準 1 回が低かったため、その組を除外せず追加で 1 組測定した。各 run は別 process とし、GPU lock の取得ごとに 270 秒の timeout を設けた。生成した 128 token の列は全 20 run で一致した。
+
+| 条件 | 基準の各 run (tok/s) | 候補の各 run (tok/s) | 平均の基準 → 候補 | 中央値の基準 → 候補 |
+|---|---|---|---|---|
+| 非投機 | 29.33, 28.15, 29.48 | 29.99, 30.25, 30.04 | 28.99 → 30.09（+3.82%） | 29.33 → 30.04 |
+| DFlash2 BF16 | 90.74, 80.37, 90.89, 90.94 | 91.93, 92.02, 92.06, 91.98 | 88.24 → 92.00（+4.26%） | 90.82 → 92.00 |
+| DFlash2 mul24 | 90.83, 90.53, 89.13 | 92.06, 91.74, 92.00 | 90.16 → 91.93（+1.96%） | 90.53 → 92.00 |
+
+BF16 baseline の 80.37 tok/s の原因は特定できていない。全 run を含む平均はこの 1 回の影響を受けるため、中央値も示した。共有 GPU の別作業とは process ごとに排他し、baseline build と toolchain は変更していない。
