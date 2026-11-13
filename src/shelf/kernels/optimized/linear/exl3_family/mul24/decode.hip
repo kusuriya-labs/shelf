@@ -20,7 +20,7 @@ using namespace exl3_detail::mul24;
 // kHighOcc selects that cap. Measured per bit width (MT=4, 64 rows, gate/up shape): 4 bit 231 -> 185 us, but 3 bit
 // 180 -> 210, 5 bit 202 -> 276, 6 bit 207 -> 276 (the wider windows need more live registers and spill), so only the
 // 4 bit kernels use it. The 4 bit gain holds from n = 5120 up to the 248320-row lm_head.
-template <int BITS, int MT, bool kHighOcc>
+template <int BITS, int MT, bool kHighOcc, bool kPipe>
 __global__ void __launch_bounds__(128) __attribute__((amdgpu_waves_per_eu((MT >= 3 && kHighOcc) ? 8 : 1))) exl3_mul24_gemm_kernel(
     const int8_t* __restrict__ codes,
     const float* __restrict__ scales,
@@ -93,7 +93,16 @@ __global__ void __launch_bounds__(128) __attribute__((amdgpu_waves_per_eu((MT >=
         cur[s][2] = kNeedW2 ? tile[i2] : 0u;
     }
     for (uint32_t g = g0; g < g1; ++g) {
-        if (g + 1u < g1) {
+        if constexpr (!kPipe) {
+            #pragma unroll
+            for (uint32_t s = 0u; s < 8u; ++s) {
+                const uint32_t* tile = tile_base + static_cast<size_t>(g * 8u + s) * kt_stride;
+                cur[s][0] = tile[i0];
+                cur[s][1] = tile[i1];
+                cur[s][2] = kNeedW2 ? tile[i2] : 0u;
+            }
+        }
+        if (kPipe && g + 1u < g1) {
             #pragma unroll
             for (uint32_t s = 0u; s < 8u; ++s) {
                 const uint32_t* tile = tile_base + static_cast<size_t>((g + 1u) * 8u + s) * kt_stride;
@@ -158,7 +167,7 @@ __global__ void __launch_bounds__(128) __attribute__((amdgpu_waves_per_eu((MT >=
         }
 
         #pragma unroll
-        for (uint32_t s = 0u; s < 8u; ++s) {
+        for (uint32_t s = 0u; kPipe && s < 8u; ++s) {
             cur[s][0] = nxt[s][0];
             cur[s][1] = nxt[s][1];
             cur[s][2] = nxt[s][2];
@@ -198,18 +207,35 @@ hipError_t launch_gemm_bits(
     // One K-split slice per blockIdx.z. The row-tile width follows the row count so a launch decodes the trellis once:
     // 16 rows per WMMA tile, MT tiles per wave.
     constexpr bool high_occ = BITS == 4;
-    auto go = [&](auto mt_tag) {
+    auto go = [&](auto mt_tag, auto pipe_tag) {
         constexpr int MT = decltype(mt_tag)::value;
+        constexpr bool pipe = decltype(pipe_tag)::value;
         const uint32_t rb = (rows + 16u * MT - 1u) / (16u * MT);
         const dim3 grid((n / 64u) * rb, 1, sp);
-        exl3_mul24_gemm_kernel<BITS, MT, high_occ><<<grid, block, 0, stream>>>(
+        exl3_mul24_gemm_kernel<BITS, MT, high_occ, pipe><<<grid, block, 0, stream>>>(
             codes, scales, code_stride, sstride, trellis, yprime, rows, active_rows, n, k, gps, rb);
     };
     using std::integral_constant;
-    if (rows <= 16u) go(integral_constant<int, 1>{});
-    else if (rows <= 32u) go(integral_constant<int, 2>{});
-    else if (rows <= 48u) go(integral_constant<int, 3>{});
-    else go(integral_constant<int, 4>{});
+    if constexpr (BITS == 5) {
+        if (rows > 16u && rows <= 64u && k >= 1024u && active_rows == nullptr &&
+            ((n == 512u && k <= 17408u) ||
+             (n == 1024u && (k <= 8192u || (rows > 32u && k <= 17408u))))) {
+            go(integral_constant<int, 4>{}, std::false_type{});
+            return hipGetLastError();
+        }
+    }
+    if constexpr (BITS == 4) {
+        if (rows > 48u && rows <= 64u && k >= 1024u && active_rows == nullptr &&
+            ((n == 512u && k <= 17408u) ||
+             (n == 1024u && (k <= 5120u || (rows >= 56u && k <= 8192u))))) {
+            go(integral_constant<int, 2>{}, std::true_type{});
+            return hipGetLastError();
+        }
+    }
+    if (rows <= 16u) go(integral_constant<int, 1>{}, std::true_type{});
+    else if (rows <= 32u) go(integral_constant<int, 2>{}, std::true_type{});
+    else if (rows <= 48u) go(integral_constant<int, 3>{}, std::true_type{});
+    else go(integral_constant<int, 4>{}, std::true_type{});
     return hipGetLastError();
 }
 
@@ -237,10 +263,7 @@ __global__ void __launch_bounds__(kBlock) exl3_mul24_rotate_out_kernel(
     }
 }
 
-// Same math, float4 form: one CTA per 8 rows, 8 waves, one wave per row (the exl3_dense_epilogue_kernel
-// structure). The K-split sum, H128 and svh stay inside one wave; no shared memory and no barrier.
-// Each wave walks the whole output row.
-template <bool BF16>
+template <bool BF16, bool TILED>
 __global__ void __launch_bounds__(256) exl3_mul24_rotate_out_f4_kernel(
     const float* __restrict__ yprime,
     const uint16_t* __restrict__ svh,
@@ -249,10 +272,12 @@ __global__ void __launch_bounds__(256) exl3_mul24_rotate_out_f4_kernel(
     const uint32_t out_row_stride,
     const uint32_t splits,
     const uint32_t rows) {
-    const uint32_t m = blockIdx.x * 8u + (threadIdx.x >> 5u);
+    const uint32_t m = TILED ? blockIdx.x : blockIdx.x * 8u + (threadIdx.x >> 5u);
     if (m >= rows) return;
     const uint32_t lane = threadIdx.x & 31u;
-    for (uint32_t cb = 0u; cb < n / kBlock; ++cb) {
+    const uint32_t first = TILED ? blockIdx.y * 8u + (threadIdx.x >> 5u) : 0u;
+    const uint32_t limit = TILED ? min(n / kBlock, (blockIdx.y + 1u) * 8u) : n / kBlock;
+    for (uint32_t cb = first; cb < limit; cb += TILED ? 8u : 1u) {
         const uint32_t col = cb * kBlock + lane * 4u;
         float v0 = 0.0f, v1 = 0.0f, v2 = 0.0f, v3 = 0.0f;
         for (uint32_t z = 0u; z < splits; ++z) {
@@ -317,12 +342,12 @@ hipError_t launch_exl3_mul24_gemm(
     }
 }
 
-template <bool kF4, bool kBF16>
+template <bool kF4, bool kBF16, bool kTiled = false>
 hipError_t launch_rotate_out_impl(const float* yprime, const uint16_t* svh, void* out, uint32_t rows, uint32_t n,
                                   uint32_t out_row_stride, uint32_t splits, hipStream_t stream) {
     if constexpr (kF4) {
-        const dim3 grid((rows + 7u) / 8u);
-        exl3_mul24_rotate_out_f4_kernel<kBF16>
+        const dim3 grid(kTiled ? rows : (rows + 7u) / 8u, kTiled ? (n / kBlock + 7u) / 8u : 1u);
+        exl3_mul24_rotate_out_f4_kernel<kBF16, kTiled>
             <<<grid, 256, 0, stream>>>(yprime, svh, out, n, out_row_stride, splits, rows);
     } else {
         const dim3 grid(rows, n / kBlock);
@@ -337,8 +362,24 @@ hipError_t launch_exl3_mul24_rotate_out(
     uint32_t n, uint32_t out_row_stride, uint32_t splits, hipStream_t stream) {
     if (rows == 0u) return hipSuccess;
     if (n == 0u || (n % kBlock) != 0u) return hipErrorInvalidValue;
-    const bool f4 = rotate_f4_enabled() && rows >= kRotateOutF4MinRows && (out_row_stride % 4u) == 0u;
+    const bool aligned = rotate_f4_enabled() && (out_row_stride % 4u) == 0u;
     const bool bf16 = out_dtype == Exl3OutputDType::BF16;
+    const bool tiled_rows = rows < 256u ||
+        (rows < kRotateOutF4MinRows &&
+         ((n == 5120u && rows > 256u) || n == 6144u || n == 10240u ||
+          n == 12288u || n == 17408u || n >= 65536u));
+    const uint64_t plane_bytes = static_cast<uint64_t>(rows) * n * sizeof(float);
+    const bool tiled = aligned && tiled_rows &&
+        plane_bytes != 4ull * 1024ull * 1024ull && plane_bytes != 5ull * 1024ull * 1024ull &&
+        plane_bytes != 6ull * 1024ull * 1024ull &&
+        !(bf16 && n == 5120u && rows == 255u && splits == 1u) &&
+        (reinterpret_cast<uintptr_t>(yprime) % 16u) == 0u &&
+        (reinterpret_cast<uintptr_t>(out) % (bf16 ? 8u : 16u)) == 0u &&
+        ((rows >= 8u && n >= 5120u) || n >= 65536u);
+    const bool f4 = aligned && rows >= kRotateOutF4MinRows;
+    if (tiled)
+        return bf16 ? launch_rotate_out_impl<true, true, true>(yprime, svh, out, rows, n, out_row_stride, splits, stream)
+                    : launch_rotate_out_impl<true, false, true>(yprime, svh, out, rows, n, out_row_stride, splits, stream);
     if (f4)
         return bf16 ? launch_rotate_out_impl<true, true>(yprime, svh, out, rows, n, out_row_stride, splits, stream)
                     : launch_rotate_out_impl<true, false>(yprime, svh, out, rows, n, out_row_stride, splits, stream);

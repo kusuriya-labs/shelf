@@ -355,9 +355,10 @@ linear kernel 内で行い、出力は `svh` を掛けてから BF16 / F32 で�
   EXL3 の lm_head に対して vocab shard は行わない。
 - tensor partition（TP）は EXL3 の trellis / `suh` / `svh` / marker を軸ごとに分割できる
   （`materialize_rank_local_canonical`。n 軸は kt ごとに nt を、k 軸は kt を選ぶ）。mul24 の INT8 実行は下記。
-- DFlash2 drafter の重みは EXL3 を受理しない。MoE routed expert（Qwen4Exp）は grouped EXL3 として受理する（mul24 は下記）。
-- DFlash2 の verify が使う target lm_head は EXL3 を受理し、融合 W16A16 で
-  logits を計算する（drafter の重みは BF16 / FP8 のまま）。
+- DFlash2 drafter の量子化 bundle は対象 linear に EXL3-INT8（mul24）または FP8 を受理する。
+  MoE routed expert は grouped EXL3 として受理する（mul24 は下記）。
+- DFlash2 が使う target lm_head は W16A16 と EXL3-INT8 の両方を受理し、各形式の kernel で
+  logits を計算する。
 
 
 ### EXL3-INT8（mul24）
@@ -381,6 +382,20 @@ marker の値が `0xDCD12D` の EXL3 を、`EXL3_MUL24_INT8_V1` / `EXL3_MUL24_IN
   int8 化（codes は自然な k 順）。(2) trellis を復号し、LDS を使わず直接 WMMA の B にして iu8 WMMA で
   128 ごとに int32 で厳密に累積、F32 の scale と `kExl3Int8GridStep` を掛ける。(3) 128 ごとの Hadamard と
   `svh` で bf16 / f32 に戻す。scale は fp32 のまま GEMM の外で掛ける。
+- BF16 入出力、64 行以下の 4 bit linear が同じ入力 slot を共有して連続する場合、最大 3 個を
+  1 組として入力回転・GEMM・出力回転の各 launch にまとめる。各 projection の重み、scale、
+  split 数と加算順を保持する。workspace 不足、入出力の重なり、出力列の部分書き込み、
+  debug override などの条件では個別実行へ戻る。routed expert と DFlash2 の独立した linear 実行は
+  この dispatch 統合の対象外である。
+- 出力回転は、整列した buffer と stride を満たす小・中行数について 128 列単位を wave に分ける。
+  256〜511 行では N=5120（256 行を除く）、6144、10240、12288、17408、65536 以上を対象とし、
+  512 行以上は従来の f4 経路を使う。新しい列分割では、F32 plane が 4 / 5 / 6 MiB の場合と、
+  BF16・N=5120・255 行・split=1 は scalar 経路に戻る。split の加算順は変えない。
+- 通常 GEMM は active rows の device 指定がなく、N=512 または 1024 の一部の 4 / 5 bit 形状で
+  行数と K に応じて tile を選ぶ。K は 1024 以上を要する。4 bit の N=512 は K<=17408・49〜64 行、
+  N=1024 は K<=5120・49〜64 行または K<=8192・56〜64 行が対象。5 bit の N=512 は K<=17408・
+  17〜64 行、N=1024 は K<=8192・17〜64 行または K<=17408・33〜64 行が対象で、次の K group の
+  先読みを省略する。適用外の形状と device 指定の補正行は従来の tile を使う。
 - decode（rows <= 16）の GEMM は K を split して wave を埋める（各 split が F32 出力の別スライスに書き、
   (3) が足す。決定的）。n の小さい線形は wave が足りず帯域が落ちるため。
 - prefill（rows >= 256、`SHELF_EXL3_INT8_DENSE` で変更、0 で無効）は W16A16 の dense 経路と同じ構造で、

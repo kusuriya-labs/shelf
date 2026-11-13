@@ -1,0 +1,56 @@
+--- a/src/shelf/inference/execution/optimized_dispatch.hip
++++ b/src/shelf/inference/execution/optimized_dispatch.hip
+@@ -890,15 +890,45 @@
+             if (e.plamo_exl3_split4 && ctx.num_prefill_requests == 0u && ctx.splitk_tuning_rows == 0u &&
+                 n_rows > 16u && n_rows <= 64u && scratch_rows >= 4u * n_rows)
+                 splits = 4u;
++            struct TraceKey { uint32_t m, n, k, bits, count; };
++            static TraceKey seen[512]{};
++            static uint32_t used = 0u;
++            bool capture = false;
++            uint32_t sample = 0u;
++            if (std::getenv("SHELF_EXL3_STAGE_TRACE") != nullptr) {
++                uint32_t i = 0u;
++                for (; i < used; ++i)
++                    if (seen[i].m == n_rows && seen[i].n == n && seen[i].k == k && seen[i].bits == e.exl3_ka) break;
++                if (i == used && used < 512u) seen[used++] = {n_rows, n, k, e.exl3_ka, 0u};
++                if (i < used && seen[i].count < 3u) { sample = seen[i].count++; capture = true; }
++            }
++            hipEvent_t ev[4]{};
++            if (capture) {
++                for (auto& event : ev) (void)hipEventCreate(&event);
++                (void)hipEventRecord(ev[0], stream);
++            }
+             herr = ::shelf::kernel::launch_exl3_mul24_rotate_quantize(
+                 x, in.row_stride, suh, codes, scales, n_rows, k, code_stride, scale_stride_bytes, stream);
++            if (capture) (void)hipEventRecord(ev[1], stream);
+             if (herr == hipSuccess)
+                 herr = ::shelf::kernel::launch_exl3_mul24_gemm(
+                     codes, scales, code_stride, scale_stride_bytes, static_cast<const uint16_t*>(e.codes), e.exl3_ka,
+                     yprime, n_rows, n, k, splits, stream);
++            if (capture) (void)hipEventRecord(ev[2], stream);
+             if (herr == hipSuccess)
+                 herr = ::shelf::kernel::launch_exl3_mul24_rotate_out(
+                     yprime, svh, out_ptr, out_dtype, n_rows, n, dst.row_stride, splits, stream);
++            if (capture) {
++                (void)hipEventRecord(ev[3], stream);
++                (void)hipEventSynchronize(ev[3]);
++                float a = 0.0f, b = 0.0f, c = 0.0f;
++                (void)hipEventElapsedTime(&a, ev[0], ev[1]);
++                (void)hipEventElapsedTime(&b, ev[1], ev[2]);
++                (void)hipEventElapsedTime(&c, ev[2], ev[3]);
++                std::fprintf(stderr, "EXL3_STAGE rows=%u n=%u k=%u bits=%u splits=%u sample=%u in_us=%.3f gemm_us=%.3f out_us=%.3f\n",
++                             n_rows, n, k, e.exl3_ka, splits, sample, a * 1000.0f, b * 1000.0f, c * 1000.0f);
++                for (auto& event : ev) (void)hipEventDestroy(event);
++            }
+             launches += 3u;
+         }
+         if (herr != hipSuccess)
+@@ -959,6 +989,7 @@
+     if (binding.weight_index >= ctx.weight_count || ctx.weights == nullptr) return miss;
+     const auto& weight = ctx.weights[binding.weight_index];
+     const bool is_plamo = weight.plamo_exl3_linear;
++    if (!is_plamo && std::getenv("SHELF_EXL3_STAGE_TRACE") != nullptr) return miss;
+     static const bool generic_enabled = std::getenv("SHELF_EXL3_INT8_ROTATE_F4") == nullptr &&
+         std::getenv("SHELF_OP_DUMP") == nullptr && std::getenv("SHELF_OP_SYNC") == nullptr;
+     if (!is_plamo && (weight.exl3_ka != 4u || ctx.layer_override_count != 0u || !generic_enabled))
