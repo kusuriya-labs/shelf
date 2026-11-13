@@ -1212,6 +1212,9 @@ Result<KernelMode> read_kernel_mode() {
     return Status::invalid_argument("invalid SHELF_QWEN35_KERNEL_MODE", __FILE__, __LINE__);
 }
 
+Result<OptimizedLaunchResult> try_launch_boundary_i1(
+    const ::shelf::runtime::Program&, size_t, size_t, HostExecutionContext&, hipStream_t);
+
 Result<OptimizedLaunchResult> try_fixedcost_lucebox(
     const ::shelf::runtime::Program&, size_t, size_t, HostExecutionContext&, hipStream_t);
 
@@ -1452,7 +1455,11 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             }
             return try_launch_elementwise(program, dispatch_index, ctx, stream);
         }
-        case KernelId::RESIDUAL_ADD:
+        case KernelId::RESIDUAL_ADD: {
+            auto fused = try_launch_boundary_i1(program, dispatch_index, dispatch_end, ctx, stream);
+            if (!fused.ok() || fused.value().kind == OptimizedLaunchKind::Launched) return fused;
+            return try_launch_elementwise(program, dispatch_index, ctx, stream);
+        }
         case KernelId::SILU:
         case KernelId::MUL:
         case KernelId::SCALE:
