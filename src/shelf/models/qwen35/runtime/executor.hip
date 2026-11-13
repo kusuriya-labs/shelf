@@ -1014,8 +1014,14 @@ Result<PendingBatch> submit_co_batch(
         options.tree_anc_offsets != nullptr || options.tree_anc_positions != nullptr ||
         options.tree_committed_end != 0u || options.rope_positions != nullptr ||
         options.tree_row_parent != nullptr || options.tree_committed_end_rows != nullptr;
+    const bool plamo = executor.model.config->declared_model_type == "plamo3";
+    const char* plamo_graph_env = std::getenv("SHELF_PLAMO_HIP_GRAPH");
+    const bool plamo_graph_enabled = plamo_graph_env == nullptr ||
+        (plamo_graph_env[0] != '\0' && std::strcmp(plamo_graph_env, "0") != 0);
     const bool graph_eligible =
         !executor.graph_failed &&
+        (!plamo || (plamo_graph_enabled && R == 1u && N == 1u &&
+                    exec_role == ::shelf::runtime::ExecutionRole::Decode)) &&
         !prep.has_token_bitmask &&
         executor.tp_schedules.empty() &&
         N > 0 &&
