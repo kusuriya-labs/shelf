@@ -543,7 +543,7 @@ hipError_t launch_plamo_exl3_projection_rotate(const PlamoExl3ProjectionGroup &a
 }
 hipError_t launch_plamo_exl3_projection(const PlamoExl3ProjectionGroup &args, uint32_t bits,
                                         hipStream_t stream, uint32_t *launch_count,
-                                        bool allow_shape_fusion) {
+                                        bool allow_shape_fusion, bool input_rotated) {
     if (launch_count)
         *launch_count = 0u;
     if (args.count == 0u || args.count > 3u || args.rows == 0u || args.rows >= 256u ||
@@ -562,16 +562,20 @@ hipError_t launch_plamo_exl3_projection(const PlamoExl3ProjectionGroup &args, ui
     }
     if (launch_count)
         *launch_count = 3u;
-    if (allow_shape_fusion && args.rows == 1u && bits == 4u &&
+    if (!input_rotated && allow_shape_fusion && args.rows == 1u && bits == 4u &&
         ((args.k == 2560u && args.p[0].n == 3072u) || (args.k == 3072u && args.p[0].n == 2560u))) {
         if (launch_count)
             *launch_count = 2u;
         return launch_fused_input(args, stream);
     }
-    if (args.rows >= 32u && args.input_stride % 4u == 0u)
-        group_rotate_f4<<<dim3(args.rows, 1, args.count), 256, 0, stream>>>(args);
-    else
-        group_rotate<<<dim3(args.rows, args.k / 128u, args.count), 128, 0, stream>>>(args);
+    if (!input_rotated) {
+        if (args.rows >= 32u && args.input_stride % 4u == 0u)
+            group_rotate_f4<<<dim3(args.rows, 1, args.count), 256, 0, stream>>>(args);
+        else
+            group_rotate<<<dim3(args.rows, args.k / 128u, args.count), 128, 0, stream>>>(args);
+    } else if (launch_count) {
+        *launch_count = 2u;
+    }
     hipError_t err = hipGetLastError();
     if (err != hipSuccess)
         return err;
@@ -580,7 +584,7 @@ hipError_t launch_plamo_exl3_projection(const PlamoExl3ProjectionGroup &args, ui
         fused_output = fused_output && args.p[i].splits == 1u;
     if (fused_output) {
         if (launch_count)
-            *launch_count = 2u;
+            *launch_count = input_rotated ? 1u : 2u;
         return launch_fused_output(args, bits, stream);
     }
     if (bits == 4u)

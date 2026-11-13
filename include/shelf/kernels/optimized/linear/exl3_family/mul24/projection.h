@@ -31,7 +31,11 @@ struct PlamoExl3ProjectionGroup {
 
 hipError_t launch_plamo_exl3_projection(const PlamoExl3ProjectionGroup &args, uint32_t bits,
                                         hipStream_t stream, uint32_t *launch_count = nullptr,
-                                        bool allow_shape_fusion = true);
+                                        bool allow_shape_fusion = true, bool input_rotated = false);
+
+hipError_t launch_plamo_exl3_swiglu_rotate(const PlamoExl3ProjectionGroup &args,
+                                            const bf16_t *gate, const bf16_t *up,
+                                            bf16_t *product, bool intermediate, hipStream_t stream);
 
 hipError_t launch_plamo_exl3_flagged_gemm(const int8_t *codes, const float *scales, uint32_t code_stride,
                                           uint32_t scale_stride_bytes, const uint16_t *trellis,
