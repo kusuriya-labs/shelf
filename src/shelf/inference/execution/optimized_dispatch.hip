@@ -1316,13 +1316,25 @@ Result<OptimizedLaunchResult> try_launch_optimized(
                 program.dispatches[dispatch_index - 2u].kernel_id == KernelId::LINEAR_EXL3_INT8 &&
                 b.input_count == 2u && b.output_count == 1u) {
                 const auto& linear = program.dispatches[dispatch_index + 1u];
+                const auto& gate_linear = program.dispatches[dispatch_index - 2u];
+                const auto& up_linear = program.dispatches[dispatch_index - 1u];
                 bool exclusive = linear.kernel_id == KernelId::LINEAR_EXL3_INT8 && linear.input_count == 1u &&
-                    linear.output_count == 1u && linear.input_slots[0] == b.output_slots[0] && linear.weight_index < ctx.weight_count && ctx.weights;
+                    linear.output_count == 1u && linear.input_slots[0] == b.output_slots[0] &&
+                    gate_linear.input_count == 1u && up_linear.input_count == 1u &&
+                    gate_linear.output_count == 1u && up_linear.output_count == 1u &&
+                    gate_linear.output_slots[0] == b.input_slots[0] && up_linear.output_slots[0] == b.input_slots[1] &&
+                    gate_linear.input_slots[0] == up_linear.input_slots[0] &&
+                    gate_linear.weight_index < ctx.weight_count && up_linear.weight_index < ctx.weight_count &&
+                    linear.weight_index < ctx.weight_count && ctx.weights;
                 for (size_t j = dispatch_index + 2u; exclusive && j < program.dispatches.size(); ++j)
                     for (uint32_t n = 0; n < program.dispatches[j].input_count; ++n)
-                        if (program.dispatches[j].input_slots[n] == b.output_slots[0]) exclusive = false;
+                        if (program.dispatches[j].input_slots[n] == b.output_slots[0] ||
+                            program.dispatches[j].input_slots[n] == b.input_slots[0] ||
+                            program.dispatches[j].input_slots[n] == b.input_slots[1]) exclusive = false;
                 if (exclusive) {
                     const auto& w = ctx.weights[linear.weight_index];
+                    const auto& gw = ctx.weights[gate_linear.weight_index];
+                    const auto& uw = ctx.weights[up_linear.weight_index];
                     auto linear_out = resolve_host_value(program, ::shelf::runtime::ValueId{linear.output_slots[0]}, ctx);
                     auto gate = resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
                     PhysicalElementwiseLaunch elem{};
@@ -1332,6 +1344,8 @@ Result<OptimizedLaunchResult> try_launch_optimized(
                     const auto layout = ::shelf::kernel::exl3_detail::mul24::make_workspace_layout(
                         elem.rows, w.rows, w.cols, ctx.exl3_xrot_bytes, ctx.exl3_accum_bytes, ctx.exl3_dense_bytes);
                     if (resolved.value() == PhysicalResolveStatus::Applicable && elem.rows >= 1u && elem.rows <= 16u &&
+                        gw.rows == 17408u && gw.cols == 5120u && uw.rows == 17408u && uw.cols == 5120u &&
+                        gw.experts == 1u && uw.experts == 1u && !gw.plamo_exl3_linear && !uw.plamo_exl3_linear &&
                         w.rows == 5120u && w.cols == 17408u && w.k_padded == w.cols && w.exl3_ka == 4u &&
                         w.encoding == 4u && w.experts == 1u && !w.plamo_exl3_linear && !w.device_ptr &&
                         w.codes && w.exl3_suh && w.exl3_svh && !w.preshuffled && !w.exl3_half &&
