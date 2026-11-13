@@ -1,0 +1,36 @@
+diff --git a/src/shelf/kernels/optimized/linear/exl3_family/mul24/decode.hip b/src/shelf/kernels/optimized/linear/exl3_family/mul24/decode.hip
+index 9c1e8ac..3946972 100644
+--- a/src/shelf/kernels/optimized/linear/exl3_family/mul24/decode.hip
++++ b/src/shelf/kernels/optimized/linear/exl3_family/mul24/decode.hip
+@@ -249,10 +249,10 @@ __global__ void __launch_bounds__(256) exl3_mul24_rotate_out_f4_kernel(
+     const uint32_t out_row_stride,
+     const uint32_t splits,
+     const uint32_t rows) {
+-    const uint32_t m = blockIdx.x * 8u + (threadIdx.x >> 5u);
++    const uint32_t m = blockIdx.x;
+     if (m >= rows) return;
+     const uint32_t lane = threadIdx.x & 31u;
+-    for (uint32_t cb = 0u; cb < n / kBlock; ++cb) {
++    for (uint32_t cb = blockIdx.y * 8u + (threadIdx.x >> 5u); cb < n / kBlock && cb < (blockIdx.y + 1u) * 8u; cb += 8u) {
+         const uint32_t col = cb * kBlock + lane * 4u;
+         float v0 = 0.0f, v1 = 0.0f, v2 = 0.0f, v3 = 0.0f;
+         for (uint32_t z = 0u; z < splits; ++z) {
+@@ -321,7 +321,7 @@ template <bool kF4, bool kBF16>
+ hipError_t launch_rotate_out_impl(const float* yprime, const uint16_t* svh, void* out, uint32_t rows, uint32_t n,
+                                   uint32_t out_row_stride, uint32_t splits, hipStream_t stream) {
+     if constexpr (kF4) {
+-        const dim3 grid((rows + 7u) / 8u);
++        const dim3 grid(rows, (n / kBlock + 7u) / 8u);
+         exl3_mul24_rotate_out_f4_kernel<kBF16>
+             <<<grid, 256, 0, stream>>>(yprime, svh, out, n, out_row_stride, splits, rows);
+     } else {
+@@ -337,7 +337,8 @@ hipError_t launch_exl3_mul24_rotate_out(
+     uint32_t n, uint32_t out_row_stride, uint32_t splits, hipStream_t stream) {
+     if (rows == 0u) return hipSuccess;
+     if (n == 0u || (n % kBlock) != 0u) return hipErrorInvalidValue;
+-    const bool f4 = rotate_f4_enabled() && rows >= kRotateOutF4MinRows && (out_row_stride % 4u) == 0u;
++    const bool f4 = rotate_f4_enabled() && (out_row_stride % 4u) == 0u &&
++                    ((rows >= 8u && n >= 5120u) || n >= 65536u);
+     const bool bf16 = out_dtype == Exl3OutputDType::BF16;
+     if (f4)
+         return bf16 ? launch_rotate_out_impl<true, true>(yprime, svh, out, rows, n, out_row_stride, splits, stream)
