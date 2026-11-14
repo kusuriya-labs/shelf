@@ -1,5 +1,6 @@
 #include <shelf/inference/execution/optimized_dispatch.h>
 #include <shelf/inference/execution/boundary_deferred.h>
+#include <shelf/inference/execution/final_producer.h>
 #include <shelf/inference/execution/exl3_dispatch_decision.h>
 #include <shelf/inference/execution/physical_launch.h>
 #include <shelf/quantization/quant_contract.h>
@@ -684,7 +685,8 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
     HostExecutionContext& ctx,
     hipStream_t stream, const ::shelf::kernel::Exl3SwigluProducer* producer,
     const ::shelf::kernel::Exl3GdnProducer* gdn_producer,
-    const ::shelf::kernel::Exl3AttnProducer* attn_producer, BoundaryDeferred* deferred) {
+    const ::shelf::kernel::Exl3AttnProducer* attn_producer, BoundaryDeferred* deferred,
+    const FinalProducer* final_producer) {
     if (deferred) *deferred = {};
     if (b.output_count != 1 || b.input_count != 1)
         return Status::invalid_state("exl3 int8 linear: bad io count", __FILE__, __LINE__);
@@ -895,7 +897,9 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
             if (e.plamo_exl3_split4 && ctx.num_prefill_requests == 0u && ctx.splitk_tuning_rows == 0u &&
                 n_rows > 16u && n_rows <= 64u && scratch_rows >= 4u * n_rows)
                 splits = 4u;
-            herr = attn_producer ? ::shelf::kernel::launch_exl3_attn_rotate_rows(
+            herr = final_producer ? launch_final_gather_norm_rotate(
+                *final_producer, suh, codes, scales, n_rows, code_stride, scale_stride_bytes, stream) :
+                attn_producer ? ::shelf::kernel::launch_exl3_attn_rotate_rows(
                 *attn_producer, suh, codes, scales, n_rows, k, code_stride, scale_stride_bytes, stream) :
                 gdn_producer ? ::shelf::kernel::launch_exl3_gdn_rotate_rows(
                 *gdn_producer, suh, codes, scales, n_rows, k, code_stride, scale_stride_bytes, stream) :
@@ -1249,6 +1253,79 @@ Result<OptimizedLaunchResult> try_launch_attn_q(
 Result<OptimizedLaunchResult> try_launch_attn_kv(
     const ::shelf::runtime::Program&, size_t, size_t, HostExecutionContext&, hipStream_t);
 
+Result<OptimizedLaunchResult> try_launch_final_gather(
+    const ::shelf::runtime::Program& program, size_t i, size_t end,
+    HostExecutionContext& ctx, hipStream_t stream) {
+    const OptimizedLaunchResult miss{OptimizedLaunchKind::NotApplicable};
+    static const bool enabled = std::getenv("SHELF_DISABLE_FINAL_RQ") == nullptr &&
+        std::getenv("SHELF_OP_DUMP") == nullptr && std::getenv("SHELF_OP_SYNC") == nullptr &&
+        std::getenv("SHELF_LINEAR_INPUT_DUMP") == nullptr && std::getenv("SHELF_EXL3_INT8_DENSE") == nullptr;
+    if (!enabled || ctx.value_trace || ctx.layer_override_count || ctx.tp_active ||
+        ctx.num_prefill_requests || ctx.num_requests > 1u || !ctx.batch_context ||
+        ctx.actual_rows == 0u || ctx.actual_rows > 16u || ctx.actual_outputs == 0u ||
+        ctx.actual_outputs > 16u || i + 2u >= end || !ctx.weights) return miss;
+    const auto& gather = program.dispatches[i];
+    const auto& norm = program.dispatches[i + 1u];
+    const auto& linear = program.dispatches[i + 2u];
+    if (gather.input_count != 1u || gather.output_count != 1u ||
+        norm.kernel_id != KernelId::RMS_NORM || norm.input_count != 1u || norm.output_count != 1u ||
+        linear.kernel_id != KernelId::LINEAR_EXL3_INT8 || linear.input_count != 1u || linear.output_count != 1u ||
+        gather.output_slots[0] != norm.input_slots[0] || norm.output_slots[0] != linear.input_slots[0] ||
+        linear.weight_index >= ctx.weight_count) return miss;
+    const auto& w = ctx.weights[linear.weight_index];
+    if (w.rows != 248320u || w.cols != 5120u || w.k_padded != w.cols || w.exl3_ka != 6u ||
+        w.encoding != 4u || w.experts != 1u || w.plamo_exl3_linear || w.device_ptr ||
+        !w.codes || !w.exl3_suh || !w.exl3_svh || w.preshuffled || w.exl3_half ||
+        w.output_col_total || w.output_col_offset) return miss;
+    auto input = resolve_host_value(program, ::shelf::runtime::ValueId{gather.input_slots[0]}, ctx);
+    auto gathered = resolve_host_value(program, ::shelf::runtime::ValueId{gather.output_slots[0]}, ctx);
+    auto normalized = resolve_host_value(program, ::shelf::runtime::ValueId{norm.output_slots[0]}, ctx);
+    auto output = resolve_host_value(program, ::shelf::runtime::ValueId{linear.output_slots[0]}, ctx);
+    if (!input.ok() || !gathered.ok() || !normalized.ok() || !output.ok()) return miss;
+    if (input.value().dtype != ValueDType::BF16 || gathered.value().dtype != ValueDType::BF16 ||
+        normalized.value().dtype != ValueDType::BF16 || input.value().feature_count != 5120u ||
+        gathered.value().feature_count != 5120u || normalized.value().feature_count != 5120u ||
+        input.value().row_stride < 5120u || (input.value().row_stride % 4u) != 0u ||
+        input.value().row_domain != ValueRowDomain::TOKEN_ROWS ||
+        gathered.value().row_domain != ValueRowDomain::OUTPUT_ROWS ||
+        output.value().row_domain != ValueRowDomain::OUTPUT_ROWS || !input.value().ptr) return miss;
+    const auto* gathered_binding = program.find_value(::shelf::runtime::ValueId{gather.output_slots[0]});
+    const auto* norm_binding = program.find_value(::shelf::runtime::ValueId{norm.output_slots[0]});
+    if (!gathered_binding || !norm_binding ||
+        (gathered_binding->storage != ::shelf::runtime::ValueStorage::EXTERNAL_OUTPUT &&
+         gathered_binding->storage != ::shelf::runtime::ValueStorage::WORKSPACE &&
+         gathered_binding->storage != ::shelf::runtime::ValueStorage::WORKSPACE_VIEW) ||
+        (norm_binding->storage != ::shelf::runtime::ValueStorage::WORKSPACE &&
+         norm_binding->storage != ::shelf::runtime::ValueStorage::WORKSPACE_VIEW)) return miss;
+    if (!gathered.value().ptr || gathered.value().row_stride < 5120u) return miss;
+    const auto src_start = reinterpret_cast<uintptr_t>(input.value().ptr);
+    const auto dst_start = reinterpret_cast<uintptr_t>(gathered.value().ptr);
+    const size_t src_size = (size_t(ctx.actual_rows - 1u) * input.value().row_stride + 5120u) * 2u;
+    const size_t dst_size = (size_t(ctx.actual_outputs - 1u) * gathered.value().row_stride + 5120u) * 2u;
+    if (src_start < dst_start + dst_size && dst_start < src_start + src_size) return miss;
+    for (size_t j = i + 3u; j < program.dispatches.size(); ++j)
+        for (uint32_t k = 0; k < program.dispatches[j].input_count; ++k)
+            if (program.dispatches[j].input_slots[k] == norm.output_slots[0]) return miss;
+    PhysicalRmsNormLaunch n{};
+    auto resolved = resolve_rmsnorm_physical(program, norm, ctx, n);
+    if (!resolved.ok()) return resolved.status();
+    if (resolved.value() != PhysicalResolveStatus::Applicable ||
+        n.variant != PhysicalRmsNormVariant::Bf16PfOnePlus || n.rows != ctx.actual_outputs ||
+        n.features != 5120u || n.group_size != 5120u || n.workgroup != 256u || !n.weight) return miss;
+    const auto layout = ::shelf::kernel::exl3_detail::mul24::make_workspace_layout(
+        ctx.actual_outputs, w.rows, w.cols, ctx.exl3_xrot_bytes, ctx.exl3_accum_bytes, ctx.exl3_dense_bytes);
+    if (layout.chunk_rows != ctx.actual_outputs) return miss;
+    FinalProducer producer{static_cast<const ::shelf::bf16_t*>(input.value().ptr),
+        reinterpret_cast<const ::shelf::bf16_t*>(n.weight),
+        static_cast<::shelf::bf16_t*>(gathered.value().ptr), ctx.batch_context,
+        input.value().row_stride, gathered.value().row_stride, n.eps};
+    auto result = try_launch_linear_exl3_mul24(program, linear, ctx, stream, nullptr, nullptr, nullptr, nullptr, &producer);
+    if (!result.ok()) return result;
+    if (result.value().kind == OptimizedLaunchKind::Launched)
+        return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 3u};
+    return miss;
+}
+
 Result<OptimizedLaunchResult> try_launch_linear_exl3_with_boundary(
     const ::shelf::runtime::Program& program, size_t index, size_t dispatch_end,
     HostExecutionContext& ctx, hipStream_t stream,
@@ -1259,7 +1336,7 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_with_boundary(
     static const bool i9_enabled = std::getenv("SHELF_DISABLE_BOUNDARY_I9") == nullptr &&
         std::getenv("SHELF_DISABLE_BOUNDARY_I8") == nullptr && std::getenv("SHELF_DISABLE_BOUNDARY_I1") == nullptr;
     if (i9_enabled && !ctx.tp_active && !ctx.value_trace && !ctx.layer_override_count &&
-        ctx.actual_rows == 1u && ctx.actual_outputs <= 1u && index + 4u < dispatch_end &&
+        ctx.actual_rows > 0 && ctx.actual_rows <= 16 && index + 4u < dispatch_end &&
         program.dispatches[index + 1u].kernel_id == KernelId::RESIDUAL_ADD &&
         program.dispatches[index + 2u].kernel_id == KernelId::RMS_NORM &&
         program.dispatches[index + 3u].kernel_id == KernelId::LINEAR_EXL3_INT8 &&
@@ -1354,8 +1431,11 @@ Result<OptimizedLaunchResult> try_launch_optimized(
         }
         case KernelId::ROPE:
             return try_launch_rope(program, dispatch_index, ctx, stream);
-        case KernelId::OUTPUT_GATHER:
+        case KernelId::OUTPUT_GATHER: {
+            auto fused = try_launch_final_gather(program, dispatch_index, dispatch_end, ctx, stream);
+            if (!fused.ok() || fused.value().kind == OptimizedLaunchKind::Launched) return fused;
             return try_launch_output_gather(program, b, ctx, stream);
+        }
         case KernelId::L2_NORMALIZE: {
             auto fused = try_fixedcost_lucebox_qk(program, dispatch_index, dispatch_end, ctx, stream);
             if (!fused.ok() || fused.value().kind == OptimizedLaunchKind::Launched) return fused;

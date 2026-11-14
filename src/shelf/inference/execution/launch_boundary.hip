@@ -36,11 +36,14 @@ __global__ void residual_norm(const bf16* a, const bf16* b, bf16* residual,
 }
 }
 
-hipError_t launch_boundary_rotate(const ::shelf::kernel::PlamoExl3ProjectionGroup&,
-    const bf16*, const bf16*, bf16*, const bf16*, bf16*, uint32_t, uint32_t, uint32_t, uint32_t, float, hipStream_t);
-
 hipError_t launch_boundary_out_rotate(const ::shelf::kernel::PlamoExl3ProjectionGroup&, const BoundaryDeferred&,
     const bf16*, bf16*, const bf16*, bf16*, uint32_t, uint32_t, uint32_t, float, bool, bool, hipStream_t);
+
+hipError_t launch_boundary_rotate_fast(const ::shelf::kernel::PlamoExl3ProjectionGroup&,
+    const bf16*, const bf16*, bf16*, const bf16*, bf16*, uint32_t, uint32_t, uint32_t, uint32_t, float, hipStream_t);
+
+hipError_t launch_boundary_out_rotate_fast(const ::shelf::kernel::PlamoExl3ProjectionGroup&, const BoundaryDeferred&,
+    const bf16*, bf16*, const bf16*, bf16*, uint32_t, uint32_t, uint32_t, float, bool, hipStream_t);
 
 Result<OptimizedLaunchResult> try_launch_boundary_core(
     const Program& p, size_t i, size_t end, HostExecutionContext& ctx, hipStream_t stream,
@@ -87,7 +90,7 @@ Result<OptimizedLaunchResult> try_launch_boundary_core(
         av.value().row_domain != rv.value().row_domain || bv.value().row_domain != rv.value().row_domain ||
         nv.value().row_domain != rv.value().row_domain) return none;
     const uint32_t rows = rv.value().row_domain == ValueRowDomain::OUTPUT_ROWS ? ctx.actual_outputs : ctx.actual_rows;
-    if (rows == 0 || rows > 16 || (group && rows != 1)) return none;
+    if (rows == 0 || rows > 16) return none;
     const auto overlap = [](uint64_t x, size_t xn, uint64_t y, size_t yn) {
         return x < y + yn && y < x + xn;
     };
@@ -117,11 +120,15 @@ Result<OptimizedLaunchResult> try_launch_boundary_core(
                     if (p.dispatches[j].input_slots[k] == p.dispatches[i - 1].output_slots[0]) return none;
             const bool first = source->output == reinterpret_cast<void*>(a.in0);
             static const bool serial = std::getenv("SHELF_BOUNDARY_I9_SERIAL") != nullptr;
-            err = launch_boundary_out_rotate(*group, *source,
+            if (serial) err = launch_boundary_out_rotate(*group, *source,
                 reinterpret_cast<const bf16*>(first ? a.in1 : a.in0), reinterpret_cast<bf16*>(a.out0),
                 reinterpret_cast<const bf16*>(n.weight), reinterpret_cast<bf16*>(n.output),
-                first ? a.in1_stride : a.in0_stride, a.out0_stride, n.output_row_stride, n.eps, first, serial, stream);
-        } else err = launch_boundary_rotate(*group, reinterpret_cast<const bf16*>(a.in0),
+                first ? a.in1_stride : a.in0_stride, a.out0_stride, n.output_row_stride, n.eps, first, true, stream);
+            else err = launch_boundary_out_rotate_fast(*group, *source,
+                reinterpret_cast<const bf16*>(first ? a.in1 : a.in0), reinterpret_cast<bf16*>(a.out0),
+                reinterpret_cast<const bf16*>(n.weight), reinterpret_cast<bf16*>(n.output),
+                first ? a.in1_stride : a.in0_stride, a.out0_stride, n.output_row_stride, n.eps, first, stream);
+        } else err = launch_boundary_rotate_fast(*group, reinterpret_cast<const bf16*>(a.in0),
             reinterpret_cast<const bf16*>(a.in1), reinterpret_cast<bf16*>(a.out0),
             reinterpret_cast<const bf16*>(n.weight), reinterpret_cast<bf16*>(n.output),
             a.in0_stride, a.in1_stride, a.out0_stride, n.output_row_stride, n.eps, stream);

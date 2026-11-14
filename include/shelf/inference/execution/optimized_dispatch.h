@@ -11,6 +11,7 @@ namespace shelf::execution {
 
 struct HostExecutionContext;
 struct BoundaryDeferred;
+struct FinalProducer;
 
 enum class KernelMode : uint8_t {
     Correctness,
@@ -32,7 +33,8 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
     const ::shelf::runtime::Program&, const ::shelf::runtime::DispatchBinding&,
     HostExecutionContext&, hipStream_t, const ::shelf::kernel::Exl3SwigluProducer* = nullptr,
     const ::shelf::kernel::Exl3GdnProducer* = nullptr,
-    const ::shelf::kernel::Exl3AttnProducer* = nullptr, BoundaryDeferred* = nullptr);
+    const ::shelf::kernel::Exl3AttnProducer* = nullptr, BoundaryDeferred* = nullptr,
+    const FinalProducer* = nullptr);
 Result<OptimizedLaunchResult> try_launch_linear_exl3_with_boundary(
     const ::shelf::runtime::Program&, size_t, size_t, HostExecutionContext&, hipStream_t,
     const ::shelf::kernel::Exl3SwigluProducer* = nullptr,

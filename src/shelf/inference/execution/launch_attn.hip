@@ -125,9 +125,7 @@ Result<OptimizedLaunchResult> try_launch_attn_q(
     const OptimizedLaunchResult none{OptimizedLaunchKind::NotApplicable};
     static const bool enabled = std::getenv("SHELF_DISABLE_ATTN_Q_FUSION") == nullptr;
     if (!enabled || ctx.value_trace || ctx.layer_override_count || ctx.actual_rows == 0 ||
-        ctx.actual_rows > 16 || ctx.num_prefill_requests || ctx.num_requests > 1 || ctx.spec.tree_anc_offsets ||
-        ctx.spec.tree_row_parent || ctx.spec.tree_anc_positions || ctx.spec.tree_committed_end_rows ||
-        ctx.spec.tree_committed_end || i == 0 || i + 6 >= end)
+        ctx.actual_rows > 16 || ctx.num_prefill_requests || ctx.num_requests > 1 || i == 0 || i + 6 >= end)
         return none;
     const auto& s = p.dispatches[i];
     const auto& n = p.dispatches[i + 1];
@@ -214,9 +212,7 @@ Result<OptimizedLaunchResult> try_launch_attn_kv(
     const OptimizedLaunchResult none{OptimizedLaunchKind::NotApplicable};
     static const bool enabled = std::getenv("SHELF_DISABLE_ATTN_KV_FUSION") == nullptr;
     if (!enabled || ctx.value_trace || ctx.layer_override_count || ctx.actual_rows == 0 ||
-        ctx.actual_rows > 16 || ctx.num_prefill_requests || ctx.num_requests > 1 || ctx.spec.tree_anc_offsets ||
-        ctx.spec.tree_row_parent || ctx.spec.tree_anc_positions || ctx.spec.tree_committed_end_rows ||
-        ctx.spec.tree_committed_end || i < 3 || i + 3 >= end) return none;
+        ctx.actual_rows > 16 || ctx.num_prefill_requests || ctx.num_requests > 1 || i < 3 || i + 3 >= end) return none;
     const auto& split = p.dispatches[i - 3];
     const auto& qn = p.dispatches[i - 2];
     const auto& qr = p.dispatches[i - 1];
