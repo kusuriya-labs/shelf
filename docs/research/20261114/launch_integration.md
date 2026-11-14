@@ -51,3 +51,38 @@ boundary 単独の過去測定で GPU event −2.84% に対して生成 +1.02% �
 Release / gfx1201 build は `nice -n 19 ninja -C build-gfx1201 -j8` で対象を build した。launch は `SHELF_QWEN35_PERF_STATS=1 shelf-bench tg --mode forward --context 128 --tokens 8 --warmup 1 --perf-stats-output <json>` と `trace_names.cpp` の LD_PRELOAD を併用した。品質は共有 corpus、context 128、256 位置、BF16 KV を `shelf-bench quality --compare /tmp/ln_baseline/base_ctx128_p256.psq` で比較した。各 GPU コマンドは指定 GPU と `flock /tmp/r9700.lock timeout -k 5 280` を使用した。
 
 DFlash2 速度低下の kernel 単位の原因と、tree に既存の低 margin 差は未解決。`run_server_regression.py --all` は本作業では実行していない。TP や混在 request の実モデル評価は行っていない。
+
+## 追試: DFlash2 の低下と行数制限
+
+同じ R9700 とモデルで、前節の統合 binary を使い、DFlash2 code prompt、drafts 7、BF16 drafter、256 token を全部入りと各無効化で交互測定した。まず各 1 ペアで探索し、改善した候補は各 3 ペアを追加した。GPU は各 run で排他し、開始時の load average が 8 未満であることを確認した。全測定で生成 ID は同一。
+
+| 無効化 | 全部入り tok/s | 無効 tok/s | ペア数 | 変化 |
+|---|---:|---:|---:|---:|
+| 全融合 | 102.147 ± 0.108 | 109.247 ± 0.116 | 3 | +6.95% |
+| I1 | 101.967 ± 0.061 | 110.170 ± 0.050 | 3 | +8.05% |
+| I8 | 101.863 ± 0.071 | 109.840 ± 0.101 | 3 | +7.83% |
+| I9 | 101.877 ± 0.040 | 106.803 ± 0.067 | 3 | +4.84% |
+| I2 | 102.17 | 101.86 | 1 | −0.30% |
+| I7a | 102.19 | 101.88 | 1 | −0.30% |
+| I7b | 102.12 | 101.98 | 1 | −0.14% |
+| attention Q | 102.05 | 102.07 | 1 | +0.02% |
+| attention KV | 102.07 | 101.92 | 1 | −0.15% |
+
+I1 の無効化は I8・I9 も無効にし、I8 の無効化は I9 も無効にする。そのため各行は単独効果ではない。I1 を残して I8・I9 を止めても回復することから、I8／I9 のみ実行行数 1 に制限した。出力 domain の行数も検査し、I9 は複数行では出力回転を遅延しない。I1 と rq、attention は複数行でも従来どおり適用する。1 行だけに限定する変更は、この追試での明示指示に基づく。256 位置の 1 行 logits 一致だけで全入力・全行数の bit 一致が証明されたわけではないため、以下の実モデル試験を実施した。
+
+変更前後の DFlash2 64 token、graph debug、N=10 verify graph の capture を一時的な `hipGraphGetNodes` フックで調べた。kernel node は 1,067 → 1,317（+250）、全 node は 1,073 → 1,323。これは capture された graph の node 数であり、graph replay の host launch 数ではない。`shelf-compute` は verify 窓の perf stats を出力しないため、perf stats による verify 値ではない。通常 decode の perf stats は変更後も 1,001 launch/token。
+
+変更後は baseline build と交互に 5 ペア測定した。条件は非投機・DFlash2 とも code prompt、256 token、最大長 1024、temperature 0、DFlash2 は drafts 7。平均 ± 標本 SD は次の通り。途中の正しさ試験は GPU lock で排他されており、終了時の最大 load average は 2.94。
+
+| 指標 | baseline | 変更後 | 変化 |
+|---|---:|---:|---:|
+| 非投機 tok/s | 30.918 ± 0.189 | 31.604 ± 0.038 | +2.22% |
+| DFlash2 tok/s | 108.842 ± 0.096 | 108.950 ± 0.121 | +0.10% |
+
+非投機の平均差は両群の標本 SD を超える。DFlash2 の平均差 0.108 tok/s はペア差の標本 SD 0.145 tok/s より小さく、baseline と同程度と判断する。全 20 run の生成 ID は共有 baseline と一致した。非投機 +2% 以上、DFlash2 が baseline の −1% 以内という今回の目標を満たした。
+
+BetterBench 256 位置の mean KL 0、top-1 一致率 100%、最大 logit 絶対差 0。固定 code / prose / ja の各 256 token は baseline と一致し、通常 DFlash2 試験は BF16・FP8・Octave 合計 99/99、関連 ctest は 12/12 成功した。
+
+修正後の tree 試験は baseline・変更後とも 3 prompt でテスト成功。target、chain、tree0/1/2/4、budget8/10/12/16/24 の対応する各 256 token 列は全 prompt で baseline と一致した。既存の chain 対 target の差は 12／132／213 token、最初の位置は 244／118／43 で変わらない。最初の margin は 0.010727／0.004416／0.029339。各 mode の不一致位置を JSON の `dflash_followup.tree` に記録した。差はテストの許容条件内だが、投機と非投機の完全一致ではなく、既存の問題として残る。
+
+行数制限の実装は `68edead1`。DFlash2 の低下について、I8／I9 の複数行無効化で回復したことは観測したが、冗長な norm 計算など kernel 内の支配的な原因は計測していない。単発の項目別結果はばらつきの範囲を判定できず、対象外モデルや未測定の入力全般への数値同一性も証明していない。`run_server_regression.py --all` は実行していない。
