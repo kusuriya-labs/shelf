@@ -69,13 +69,13 @@ def main() -> int:
             time.sleep(0.5)
         checker.check("server reached Ready", "Ready." in log_text, log_text[-500:])
         checker.check("log reports DFlash2",
-                      "Speculative:  DFlash2" in log_text, log_text[-800:])
+                      "Speculative:        DFlash2" in log_text, log_text[-800:])
         checker.check("log reports kv dtype",
-                      f"KV dtype:     {KV_DTYPE}" in log_text, log_text[-800:])
+                      f"KV dtype:           {KV_DTYPE}" in log_text, log_text[-800:])
         checker.check("log reports prefix cache capability",
                       "capabilities.prefix_cache=" in log_text, log_text[-800:])
         checker.check("log concurrency is 1",
-                      "Concurrency:  1" in log_text, log_text[-800:])
+                      "Concurrency:        1" in log_text, log_text[-800:])
         checker.check("compute reports dflash2 enabled",
                       "DFLASH2_ENABLED=1" in log_text, log_text[-800:])
 

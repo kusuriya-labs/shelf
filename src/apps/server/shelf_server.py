@@ -62,6 +62,10 @@ def _log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
+def _banner(label: str, value: str) -> str:
+    return f"{label:<19} {value}"
+
+
 def _resolve_compute_binary(explicit: str | None) -> str:
     if explicit:
         candidate = Path(explicit).resolve()
@@ -748,47 +752,52 @@ async def _serve(opts) -> int:
     _log("")
     _log("Shelf Server")
     _log("")
-    _log(f"Model:        {opts.model} ({Path(opts.model_dir).name})")
-    _log(f"Endpoint:     {address}/v1")
-    _log(f"Context:      {opts.max_seq_len}")
-    _log(f"Concurrency:  {opts.max_concurrent_requests}")
-    _log(f"Token budget: {opts.max_num_batched_tokens}")
-    _log(f"KV dtype:     {opts.kv_cache_dtype}")
-    _log(f"Prefix cache: "
-         f"{'enabled' if compute.capabilities.prefix_cache else 'disabled'} "
-         f"(strategy={opts.prefix_cache_strategy}, "
-         f"concurrency={opts.prefix_cache_concurrency}, "
-         f"capabilities.prefix_cache="
-         f"{str(compute.capabilities.prefix_cache).lower()})")
+    _log(_banner("Model:", f"{opts.model} ({Path(opts.model_dir).name})"))
+    _log(_banner("Endpoint:", f"{address}/v1"))
+    _log(_banner("Context:", str(opts.max_seq_len)))
+    _log(_banner("Concurrency:", str(opts.max_concurrent_requests)))
+    _log(_banner("Token budget:", str(opts.max_num_batched_tokens)))
+    _log(_banner("KV dtype:", opts.kv_cache_dtype))
+    _log(_banner("Prefix cache:",
+                 f"{'enabled' if compute.capabilities.prefix_cache else 'disabled'} "
+                 f"(strategy={opts.prefix_cache_strategy}, "
+                 f"concurrency={opts.prefix_cache_concurrency}, "
+                 f"capabilities.prefix_cache="
+                 f"{str(compute.capabilities.prefix_cache).lower()}"))
     if opts.dflash2_model_dir:
-        _log(f"Speculative:  DFlash2 ({opts.dflash2_drafts} drafts)")
-        _log(f"Draft model:  {Path(opts.dflash2_model_dir).name}")
-    _log(f"Inference budget: {opts.inference_budget_tokens} tokens"
-         f" (thinking {thinking_budget_tokens(opts.inference_budget_tokens)}, "
-         f"answer reserve {answer_reserve_tokens(opts.inference_budget_tokens)})")
+        _log(_banner("Speculative:", f"DFlash2 ({opts.dflash2_drafts} drafts)"))
+        _log(_banner("Draft model:", Path(opts.dflash2_model_dir).name))
+    _log(_banner("Inference budget:",
+                 f"{opts.inference_budget_tokens} tokens "
+                 f"(thinking {thinking_budget_tokens(opts.inference_budget_tokens)}, "
+                 f"answer reserve {answer_reserve_tokens(opts.inference_budget_tokens)})"))
     if opts.large_context_tokens > 0:
-        _log(f"  prompt > {opts.large_context_tokens}: "
-             f"{opts.large_context_inference_budget_tokens} tokens "
-             f"(thinking "
-             f"{thinking_budget_tokens(opts.large_context_inference_budget_tokens)})")
+        _log(_banner(f"  prompt > {opts.large_context_tokens}:",
+                     f"{opts.large_context_inference_budget_tokens} tokens "
+                     f"(thinking "
+                     f"{thinking_budget_tokens(opts.large_context_inference_budget_tokens)})"))
     if reasoning_capability["thinking"] and reasoning_capability["close_token"] < 0:
         _log("  thinking budget is not enforced "
              "(the reasoning close tag is not one token)")
     if reasoning_capability["thinking"]:
-        _log(f"Reasoning:    enabled (thinking on, effort "
-             f"{codec.DEFAULT_REASONING_EFFORT}, preserve_thinking on)")
-        _log(f"Efforts:      {', '.join(codec.REASONING_EFFORTS)}")
+        _log(_banner("Reasoning:",
+                     f"enabled (thinking on, effort "
+                     f"{codec.DEFAULT_REASONING_EFFORT}, preserve_thinking on)"))
+        _log(_banner("Efforts:", ", ".join(codec.REASONING_EFFORTS)))
     else:
-        _log("Reasoning:    disabled")
+        _log(_banner("Reasoning:", "disabled"))
     _log("")
     if is_plamo:
-        _log("Supported:   Chat Completions, Responses, SSE, translation, sampling, "
-             "concurrency, cancel")
-        _log("Unsupported: structured output, strict tools")
+        _log(_banner("Supported:",
+                     "Chat Completions, Responses, SSE, translation, sampling, "
+                     "concurrency, cancel"))
+        _log(_banner("Unsupported:", "structured output, strict tools"))
     else:
-        _log("Supported:   Chat Completions, Responses, SSE, tools, reasoning, sampling, "
-             "concurrency, cancel")
-        _log("Structured output: json_object, json_schema, strict tools (requires xgrammar)")
+        _log(_banner("Supported:",
+                     "Chat Completions, Responses, SSE, tools, reasoning, sampling, "
+                     "concurrency, cancel"))
+        _log(_banner("Structured output:",
+                     "json_object, json_schema, strict tools (requires xgrammar)"))
     _log("")
     _log("Ready.")
 

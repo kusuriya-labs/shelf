@@ -43,20 +43,20 @@ request ごとに compute process を起動しない。server が ready にな�
 ```text
 Shelf Server
 
-Model:        shelf (Qwen3.8-27B-FP8)
-Endpoint:     http://127.0.0.1:8000/v1
-Context:      32768
-Concurrency:  4
-KV dtype:     bf16
-Prefix cache: enabled (capabilities.prefix_cache=true)
-Inference budget: 32768 tokens (thinking 24576, answer reserve 8192)
-  prompt > 262144: 65536 tokens (thinking 49152)
+Model:              shelf (Qwen3.8-27B-FP8)
+Endpoint:           http://127.0.0.1:8000/v1
+Context:            32768
+Concurrency:        4
+KV dtype:           bf16
+Prefix cache:       enabled (capabilities.prefix_cache=true)
+Inference budget:   32768 tokens (thinking 24576, answer reserve 8192)
+  prompt > 262144:  65536 tokens (thinking 49152)
 
-Reasoning:    enabled (thinking on, effort xhigh, preserve_thinking on)
-Efforts:      low, medium, xhigh
+Reasoning:          enabled (thinking on, effort xhigh, preserve_thinking on)
+Efforts:            low, medium, xhigh
 
-Supported:   Chat Completions, Responses, SSE, tools, reasoning, sampling, concurrency, cancel
-Structured output: json_object, json_schema, strict tools (requires xgrammar)
+Supported:          Chat Completions, Responses, SSE, tools, reasoning, sampling, concurrency, cancel
+Structured output:  json_object, json_schema, strict tools (requires xgrammar)
 
 Ready.
 ```
