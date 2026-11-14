@@ -39,3 +39,40 @@ serial は行ごとに 1 CTA で重複を避ける既存 kernel の試験であ�
 改善候補が得られなかったため、最終品質・速度受入の ABAB 5 ペア、baseline / 修正前 / 修正後の 3 条件、logits・3 prompt・DFlash2 99/99・tree・関連 ctest は今回実行していない。上表の 1 prompt 一致は全品質基準の達成を意味しない。非投機速度、8 / 10 行の全 launch 数、および目標とする baseline 比 +1% の再受入も未実施。I9 有効の replay は同一調査内の無効条件より 0.677 ms 遅く、目標 (1) を満たさない。他の目標は今回のデータでは判定できない。
 
 追加 launch と grid-wide sync を使わず、異なる CTA 間で bit 一致を保って norm と出力回転を共有する方法は未実装。split-K 12 の重複読み込み量、L2 hit、占有率、graph 内の依存と間隔の寄与を分ける追加計測が必要。行数やモデルによる新たな分岐、I9 無効化への切替は行っていない。
+
+## 追加調査: 冷却・常駐条件・CTA の担当数
+
+I9 を保持したまま無効時以下の replay 時間を得る目標は、今回も達成できなかった。案 C は既存 I9 を改善したが、実モデルの単発 graph replay では I9 無効に届かないため、production には採用しなかった。以下の試作と生ログは `/tmp/ln_i9/` に置いた。前回の `.i9-diagnostic/` も同所に移した。
+
+### 冷却を挟む単体計測
+
+8 行、hidden 5,120、split-K 2 / 12、後続 2 / 3 projection。既存 I9 と、出力回転に続く既存 I8 相当を HIP event で測り、各条件 40 回の中央値を採った。冷却は各測定直前に 128 MiB の別バッファを GPU で読み出した。実 weight を読んだものではない。入力も合成値である。単体の出力回転は既存 kernel と同じ split 加算と回転を持つ試作用 kernel である。実モデルの 1 projection は直前 GEMM、下表の projection は後続 group の数であり、両者は別の意味である。
+
+| split-K | 後続 projection | 冷却 | I9 µs | 出力回転 + I8 µs |
+|---:|---:|:---:|---:|---:|
+| 2 | 2 | あり | 20.90 | 20.68 |
+| 2 | 3 | あり | 25.28 | 23.32 |
+| 12 | 2 | あり | 34.90 | 23.30 |
+| 12 | 3 | あり | 44.16 | 25.90 |
+
+split-K 12 / 3 projection の 44.16 / 25.90 µs は前回の実モデル 41.82 / 27.76 µs と方向・大きさが近い。しかし split-K 2 は実モデルで I9 が速いという関係を再現していない。冷却なしの split-K 12 / 3 projection は 39.24 / 23.24 µs。したがって重複読み込み量の寄与と整合するが、帯域や cache miss を測った証明ではなく、全形状の実モデル時間を再現したとも言えない。
+
+### 案 A の常駐上限
+
+指定の 256 thread block、全 grid 同時常駐という安全条件を、`hipOccupancyMaxActiveBlocksPerMultiprocessor` で調べた。R9700 は `multiProcessorCount=32`、LDS を使わない小 kernel の上限が 8 block / multiprocessor、合計 256 CTA だった。8 行の I9 は 320 または 640 CTA なので、資源使用量が最小の kernel ですら指定条件を満たせない。10 / 16 行も同様である。実際の案 A kernel の occupancy は未測定だが、上限を超える対象では実装しても安全条件により fallback するため、barrier kernel の実行実験は行わなかった。カウンタの初期化・再利用や memory ordering も未検証である。
+
+### 案 C の試作
+
+各 CTA の二乗和計算を維持し、正規化・回転の担当 group を 1 個から 2 個へ増やして CTA 数を半減する試作を、新規 kernel として build した。同一 binary で `SHELF_DISABLE_BOUNDARY_I9_SHARED=1` により既存 I9 に戻す切替を一時的に設けた。これは共有 barrier 案ではない。合成入力の 1 / 8 / 10 / 16 行、split-K 2 / 12、2 / 3 projection、residual 加算の両順序の 32 条件で、旧 I9 に対して residual・norm・codes・scales は bit 一致した。乱数入力を使用したが網羅的な品質検証ではない。
+
+前回と同じ HIP event 挿入による実モデル 8 行 stream の各 1 process の中央値（µs）。分類は直前 GEMM の split-K と I9 の projection 対数。
+
+| split-K | projection 対 | 件数 | 旧 I9 | 案 C | 出力回転 + I8 |
+|---:|---:|---:|---:|---:|---:|
+| 2 | 1 | 63 | 19.00 | 17.12 | 23.96 |
+| 12 | 1 | 46 | 29.98 | 24.10 | 24.68 |
+| 12 | 2 | 16 | 41.16 | 31.42 | 27.68 |
+
+同一 binary の 256 token graph replay、最初を除く 43 回の平均、条件ごとに 1 process: 旧 I9 34.4618 ms、案 C 34.2272 ms、I9 無効 33.7933 ms。生成速度は順に 124.94 / 125.40 / 126.66 tok/s。この単発測定は ABAB 受入ではないが、案 C は I9 無効より 0.434 ms 長かった。group を 4 個担当する別試作の冷却単体値は split-K 12 / 2 projection 32.00 µs、3 projection 32.04 µs（既存 I9 34.96 / 44.52 µs、未融合 23.08 / 25.80 µs）。2 group 案の同条件 29.80 / 36.80 µs に対し、一方は悪化し他方も未融合を超えた。4 group 案の bit 一致と実モデルは測っていない。
+
+案 B は実装・計測していない。直前 GEMM 内の split reduction を launch を増やさずに完了する設計や、その丸め順と workspace の成立は未検証。案 C の production 変更は取り消したため、新しい env 切替も残していない。最終受入の ABAB、logits、3 prompt、DFlash2 / tree、ctest、launch 数、非投機速度は実施しておらず、残りの目標の達否は未確認。前回の品質値を今回の新しい受入結果として扱わない。
