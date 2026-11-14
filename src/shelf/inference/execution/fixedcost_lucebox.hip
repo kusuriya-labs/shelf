@@ -147,10 +147,10 @@ Result<OptimizedLaunchResult> try_fixedcost_lucebox(
                 static_cast<const ::shelf::bf16_t*>(gate.value().ptr),
                 reinterpret_cast<const ::shelf::bf16_t*>(norm.weight),
                 norm.input_row_stride, gate.value().row_stride, norm.eps};
-            auto result = try_launch_linear_exl3_mul24(p, d, ctx, stream, nullptr, &producer);
+            auto result = try_launch_linear_exl3_with_boundary(p, i + 3u, end, ctx, stream, nullptr, &producer);
             if (!result.ok()) return result;
             if (result.value().kind == OptimizedLaunchKind::Launched)
-                return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 4};
+                return OptimizedLaunchResult{OptimizedLaunchKind::Launched, result.value().dispatch_count + 3u};
         }
     }
     gdn_norm_gate<<<rows * (norm.features / norm.group_size), 32, 0, stream>>>(

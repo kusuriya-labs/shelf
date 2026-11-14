@@ -33,6 +33,11 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
     HostExecutionContext&, hipStream_t, const ::shelf::kernel::Exl3SwigluProducer* = nullptr,
     const ::shelf::kernel::Exl3GdnProducer* = nullptr,
     const ::shelf::kernel::Exl3AttnProducer* = nullptr, BoundaryDeferred* = nullptr);
+Result<OptimizedLaunchResult> try_launch_linear_exl3_with_boundary(
+    const ::shelf::runtime::Program&, size_t, size_t, HostExecutionContext&, hipStream_t,
+    const ::shelf::kernel::Exl3SwigluProducer* = nullptr,
+    const ::shelf::kernel::Exl3GdnProducer* = nullptr,
+    const ::shelf::kernel::Exl3AttnProducer* = nullptr);
 Result<OptimizedLaunchResult> try_launch_rmsnorm(
     const ::shelf::runtime::Program& program,
     const ::shelf::runtime::DispatchBinding& b,

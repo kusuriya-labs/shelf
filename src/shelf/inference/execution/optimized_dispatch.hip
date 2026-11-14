@@ -1249,6 +1249,39 @@ Result<OptimizedLaunchResult> try_launch_attn_q(
 Result<OptimizedLaunchResult> try_launch_attn_kv(
     const ::shelf::runtime::Program&, size_t, size_t, HostExecutionContext&, hipStream_t);
 
+Result<OptimizedLaunchResult> try_launch_linear_exl3_with_boundary(
+    const ::shelf::runtime::Program& program, size_t index, size_t dispatch_end,
+    HostExecutionContext& ctx, hipStream_t stream,
+    const ::shelf::kernel::Exl3SwigluProducer* producer,
+    const ::shelf::kernel::Exl3GdnProducer* gdn_producer,
+    const ::shelf::kernel::Exl3AttnProducer* attn_producer) {
+    const auto& b = program.dispatches[index];
+    static const bool i9_enabled = std::getenv("SHELF_DISABLE_BOUNDARY_I9") == nullptr &&
+        std::getenv("SHELF_DISABLE_BOUNDARY_I8") == nullptr && std::getenv("SHELF_DISABLE_BOUNDARY_I1") == nullptr;
+    if (i9_enabled && !ctx.tp_active && !ctx.value_trace && !ctx.layer_override_count &&
+        ctx.actual_rows > 0 && ctx.actual_rows <= 16 && index + 4u < dispatch_end &&
+        program.dispatches[index + 1u].kernel_id == KernelId::RESIDUAL_ADD &&
+        program.dispatches[index + 2u].kernel_id == KernelId::RMS_NORM &&
+        program.dispatches[index + 3u].kernel_id == KernelId::LINEAR_EXL3_INT8 &&
+        program.dispatches[index + 4u].kernel_id == KernelId::LINEAR_EXL3_INT8) {
+        BoundaryDeferred deferred{};
+        auto linear = try_launch_linear_exl3_mul24(program, b, ctx, stream, producer, gdn_producer, attn_producer, &deferred);
+        if (!linear.ok() || !deferred.yprime) return linear;
+        auto fused = try_launch_exl3_projection(program, index + 3u, dispatch_end, ctx, stream,
+                          &program.dispatches[index + 1u], &deferred);
+        if (!fused.ok()) return fused;
+        if (fused.value().kind == OptimizedLaunchKind::Launched)
+            return OptimizedLaunchResult{OptimizedLaunchKind::Launched, fused.value().dispatch_count + 3u};
+        const auto err = ::shelf::kernel::launch_exl3_mul24_rotate_out(
+            deferred.yprime, deferred.svh, deferred.output, ::shelf::kernel::Exl3OutputDType::BF16,
+            deferred.rows, deferred.features, deferred.output_stride, deferred.splits, stream);
+        if (err != hipSuccess) return Status::hip_error("boundary rotate fallback", hipGetErrorString(err), __FILE__, __LINE__);
+        record_physical_launch(1);
+        return linear;
+    }
+    return try_launch_linear_exl3_mul24(program, b, ctx, stream, producer, gdn_producer, attn_producer);
+}
+
 Result<OptimizedLaunchResult> try_launch_optimized(
     const ::shelf::runtime::Program& program,
     size_t dispatch_index,
@@ -1291,30 +1324,7 @@ Result<OptimizedLaunchResult> try_launch_optimized(
         case KernelId::LINEAR_EXL3_INT8: {
             auto projected = try_launch_exl3_projection(program, dispatch_index, dispatch_end, ctx, stream);
             if (!projected.ok() || projected.value().kind == OptimizedLaunchKind::Launched) return projected;
-            static const bool i9_enabled = std::getenv("SHELF_DISABLE_BOUNDARY_I9") == nullptr &&
-                std::getenv("SHELF_DISABLE_BOUNDARY_I8") == nullptr && std::getenv("SHELF_DISABLE_BOUNDARY_I1") == nullptr;
-            if (i9_enabled && !ctx.tp_active && !ctx.value_trace && !ctx.layer_override_count &&
-                ctx.actual_rows > 0 && ctx.actual_rows <= 16 && dispatch_index + 4u < dispatch_end &&
-                program.dispatches[dispatch_index + 1u].kernel_id == KernelId::RESIDUAL_ADD &&
-                program.dispatches[dispatch_index + 2u].kernel_id == KernelId::RMS_NORM &&
-                program.dispatches[dispatch_index + 3u].kernel_id == KernelId::LINEAR_EXL3_INT8 &&
-                program.dispatches[dispatch_index + 4u].kernel_id == KernelId::LINEAR_EXL3_INT8) {
-                BoundaryDeferred deferred{};
-                auto linear = try_launch_linear_exl3_mul24(program, b, ctx, stream, nullptr, nullptr, nullptr, &deferred);
-                if (!linear.ok() || !deferred.yprime) return linear;
-                auto fused = try_launch_exl3_projection(program, dispatch_index + 3u, dispatch_end, ctx, stream,
-                                                          &program.dispatches[dispatch_index + 1u], &deferred);
-                if (!fused.ok()) return fused;
-                if (fused.value().kind == OptimizedLaunchKind::Launched)
-                    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, fused.value().dispatch_count + 3u};
-                const auto err = ::shelf::kernel::launch_exl3_mul24_rotate_out(
-                    deferred.yprime, deferred.svh, deferred.output, ::shelf::kernel::Exl3OutputDType::BF16,
-                    deferred.rows, deferred.features, deferred.output_stride, deferred.splits, stream);
-                if (err != hipSuccess) return Status::hip_error("boundary rotate fallback", hipGetErrorString(err), __FILE__, __LINE__);
-                record_physical_launch(1);
-                return linear;
-            }
-            return try_launch_linear_exl3_mul24(program, b, ctx, stream);
+            return try_launch_linear_exl3_with_boundary(program, dispatch_index, dispatch_end, ctx, stream);
         }
         case KernelId::LINEAR_BF16:
             return try_launch_linear_bf16(program, b, ctx, stream);
@@ -1405,10 +1415,10 @@ Result<OptimizedLaunchResult> try_launch_optimized(
                             reinterpret_cast<const ::shelf::bf16_t*>(elem.in0),
                             reinterpret_cast<const ::shelf::bf16_t*>(elem.in1), elem.in0_stride, elem.in1_stride,
                             elem.aux != 0u};
-                        auto result = try_launch_linear_exl3_mul24(program, linear, ctx, stream, &producer);
+                        auto result = try_launch_linear_exl3_with_boundary(program, dispatch_index + 1u, dispatch_end, ctx, stream, &producer);
                         if (!result.ok()) return result;
                         if (result.value().kind == OptimizedLaunchKind::Launched)
-                            return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 2u};
+                            return OptimizedLaunchResult{OptimizedLaunchKind::Launched, result.value().dispatch_count + 1u};
                     }
                 }
             }
@@ -1491,10 +1501,10 @@ Result<OptimizedLaunchResult> try_launch_optimized(
                         !w.output_col_total && !w.output_col_offset && layout.chunk_rows == product.rows) {
                         ::shelf::kernel::Exl3AttnProducer producer{reinterpret_cast<const float*>(product.in0),
                             reinterpret_cast<const ::shelf::bf16_t*>(sigmoid.in0), product.in0_stride, sigmoid.in0_stride};
-                        auto result = try_launch_linear_exl3_mul24(program, linear, ctx, stream, nullptr, nullptr, &producer);
+                        auto result = try_launch_linear_exl3_with_boundary(program, dispatch_index + 2u, dispatch_end, ctx, stream, nullptr, nullptr, &producer);
                         if (!result.ok()) return result;
                         if (result.value().kind == OptimizedLaunchKind::Launched)
-                            return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 3u};
+                            return OptimizedLaunchResult{OptimizedLaunchKind::Launched, result.value().dispatch_count + 2u};
                     }
                 }
             }
