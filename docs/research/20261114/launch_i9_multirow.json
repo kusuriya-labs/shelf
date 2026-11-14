@@ -1,0 +1,32 @@
+{
+  "status": "unresolved",
+  "source_revision": "4bc0e412",
+  "production_changes": false,
+  "stream_measurement": {
+    "graph_verify": false,
+    "rows": 8,
+    "independent_runs_per_condition": 1,
+    "unit": "microseconds",
+    "statistic": "median across matching kernels in one forward",
+    "groups": [
+      {"previous_split_k": 2, "i9_grid_z": 1, "count": 63, "i9": 19.48, "output_rotate_plus_i8": 23.88, "next_gemm_on": 183.04, "next_gemm_off": 182.88},
+      {"previous_split_k": 12, "i9_grid_z": 1, "count": 46, "i9": 29.88, "output_rotate_plus_i8": 24.90, "next_gemm_on": 87.26, "next_gemm_off": 87.24},
+      {"previous_split_k": 12, "i9_grid_z": 2, "count": 16, "i9": 41.82, "output_rotate_plus_i8": 27.76, "next_gemm_on": 83.98, "next_gemm_off": 84.12}
+    ],
+    "limitations": ["HIP events inserted around each kernel", "first verify forward only", "L2 hit rate and DRAM traffic not measured"]
+  },
+  "resources": {"i9_lds_bytes": 11328, "i9_vgpr": 35, "i9_sgpr": 40, "private_bytes": 0, "wave_size": 32, "occupancy_measured": false},
+  "graph_replay": {
+    "independent_runs_per_condition": 1,
+    "replays_averaged_per_run": 43,
+    "unit": "ms",
+    "conditions": {
+      "current": {"kernel_nodes": 1001, "mean_ms": 34.5025, "tokens_per_second": 124.66},
+      "i9_disabled": {"kernel_nodes": 1126, "mean_ms": 33.8254, "tokens_per_second": 126.50},
+      "i8_disabled": {"kernel_nodes": 1251, "mean_ms": 34.2965, "tokens_per_second": 124.24},
+      "i1_disabled": {"kernel_nodes": 1376, "mean_ms": 34.2572, "tokens_per_second": 124.37},
+      "existing_serial_i9": {"kernel_nodes": 1001, "mean_ms": 41.6179, "tokens_per_second": 108.05}
+    }
+  },
+  "acceptance": {"i9_replay_no_slower_than_disabled": false, "other_targets": "not requalified", "full_quality_suite": "not run", "abab_speed_suite": "not run"}
+}
