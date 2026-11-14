@@ -1259,7 +1259,7 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_with_boundary(
     static const bool i9_enabled = std::getenv("SHELF_DISABLE_BOUNDARY_I9") == nullptr &&
         std::getenv("SHELF_DISABLE_BOUNDARY_I8") == nullptr && std::getenv("SHELF_DISABLE_BOUNDARY_I1") == nullptr;
     if (i9_enabled && !ctx.tp_active && !ctx.value_trace && !ctx.layer_override_count &&
-        ctx.actual_rows > 0 && ctx.actual_rows <= 16 && index + 4u < dispatch_end &&
+        ctx.actual_rows == 1u && ctx.actual_outputs <= 1u && index + 4u < dispatch_end &&
         program.dispatches[index + 1u].kernel_id == KernelId::RESIDUAL_ADD &&
         program.dispatches[index + 2u].kernel_id == KernelId::RMS_NORM &&
         program.dispatches[index + 3u].kernel_id == KernelId::LINEAR_EXL3_INT8 &&

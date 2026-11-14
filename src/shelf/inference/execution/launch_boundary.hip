@@ -87,7 +87,7 @@ Result<OptimizedLaunchResult> try_launch_boundary_core(
         av.value().row_domain != rv.value().row_domain || bv.value().row_domain != rv.value().row_domain ||
         nv.value().row_domain != rv.value().row_domain) return none;
     const uint32_t rows = rv.value().row_domain == ValueRowDomain::OUTPUT_ROWS ? ctx.actual_outputs : ctx.actual_rows;
-    if (rows == 0 || rows > 16) return none;
+    if (rows == 0 || rows > 16 || (group && rows != 1)) return none;
     const auto overlap = [](uint64_t x, size_t xn, uint64_t y, size_t yn) {
         return x < y + yn && y < x + xn;
     };
