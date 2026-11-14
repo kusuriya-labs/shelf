@@ -52,7 +52,7 @@ Result<OptimizedLaunchResult> try_launch_boundary_core(
     static const bool enabled = std::getenv("SHELF_DISABLE_BOUNDARY_I1") == nullptr;
     static const bool rotate_enabled = std::getenv("SHELF_DISABLE_BOUNDARY_I8") == nullptr;
     static const bool out_enabled = std::getenv("SHELF_DISABLE_BOUNDARY_I9") == nullptr;
-    if ((source && !out_enabled) || (group && !rotate_enabled) || !enabled || ctx.value_trace || ctx.layer_override_count || i == 0 || i + 3 >= end ||
+    if ((source && (!out_enabled || source->splits == 12u)) || (group && !rotate_enabled) || !enabled || ctx.value_trace || ctx.layer_override_count || i == 0 || i + 3 >= end ||
         ctx.actual_rows == 0 || ctx.actual_rows > 16 || ctx.tp_active) return none;
     const auto& add = p.dispatches[i];
     const auto& norm = p.dispatches[i + 1];

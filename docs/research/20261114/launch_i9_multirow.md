@@ -76,3 +76,65 @@ split-K 12 / 3 projection の 44.16 / 25.90 µs は前回の実モデル 41.82 /
 同一 binary の 256 token graph replay、最初を除く 43 回の平均、条件ごとに 1 process: 旧 I9 34.4618 ms、案 C 34.2272 ms、I9 無効 33.7933 ms。生成速度は順に 124.94 / 125.40 / 126.66 tok/s。この単発測定は ABAB 受入ではないが、案 C は I9 無効より 0.434 ms 長かった。group を 4 個担当する別試作の冷却単体値は split-K 12 / 2 projection 32.00 µs、3 projection 32.04 µs（既存 I9 34.96 / 44.52 µs、未融合 23.08 / 25.80 µs）。2 group 案の同条件 29.80 / 36.80 µs に対し、一方は悪化し他方も未融合を超えた。4 group 案の bit 一致と実モデルは測っていない。
 
 案 B は実装・計測していない。直前 GEMM 内の split reduction を launch を増やさずに完了する設計や、その丸め順と workspace の成立は未検証。案 C の production 変更は取り消したため、新しい env 切替も残していない。最終受入の ABAB、logits、3 prompt、DFlash2 / tree、ctest、launch 数、非投機速度は実施しておらず、残りの目標の達否は未確認。前回の品質値を今回の新しい受入結果として扱わない。
+
+## 追加調査: split-K に連動した選択適用
+
+既存の launch 計画の直前 GEMM の split-K が 12 の場合に限って I9 を使わず、出力回転と I8 へ戻す。split-K 2 と、今回現れなかった他の split-K は従来どおり I9 を使う。行数やモデル名による新しい分岐は設けず、`SHELF_DISABLE_BOUNDARY_I9` は引き続き全無効にできる。案 C は後述の replay 比較で採用しなかった。
+
+対象 GPU、model、BF16 drafter / KV、code prompt、draft 7、chain、256 token、最大長 1024、temperature 0 は前節と同じ。GPU process は指定 GPU、ライブラリ、`flock /tmp/r9700.lock` と `timeout -k 5 280` を用い、lock 内で load average < 8 を確認した。各 run は別 process、交互に 5 ペア。± は run 間の標本 SD。測定中の区分切替、案 C、形状出力は一時実装で、commit には含めない。
+
+実行時に I9 の対象として解決された形状は、1 / 8 / 10 / 16 行の各 forward で同じだった。split-K 2・後続 2 projection は 63 か所、split-K 12・後続 2 projection は 46 か所、split-K 12・後続 3 projection は 16 か所。後続 projection の出力幅は順に `(17408, 17408)`、`(10240, 6144)`、`(12288, 1024, 1024)`。ただし split-K は launch 計画の結果であり、一般に行数で変わり得る。
+
+### 8 行の区分別 replay
+
+`graph_events.cpp` の event 間隔を使い、初回を除く 43 replay を各 run で平均した。以下は各区分だけを無効化した値で、差は全有効 minus 区分無効。負なら無効化で遅くなる。対応する all-on run は直前に交互実行した別 process であり、表の全有効値は行ごとに異なる。
+
+| 無効化した区分 | 全有効 ms | 区分無効 ms | 差 µs | kernel node 有効→無効 |
+|---|---:|---:|---:|---:|
+| split-K 2 | 34.8787 ± 0.2592 | 34.7882 ± 0.2386 | +90.6 ± 50.2 | 1001→1064 |
+| split-K 12・後続 2 projection | 34.9004 ± 0.1653 | 34.3249 ± 0.0233 | +575.6 ± 149.3 | 1001→1047 |
+| split-K 12・後続 3 projection | 34.9426 ± 0.1467 | 34.4702 ± 0.0695 | +472.4 ± 91.8 | 1001→1017 |
+| split-K 12 全体 | 34.9566 ± 0.0974 | 34.2211 ± 0.0789 | +735.5 ± 21.5 | 1001→1063 |
+| 全 I9 | 34.9478 ± 0.1542 | 34.1102 ± 0.0984 | +837.6 ± 63.1 | 1001→1126 |
+
+split-K 12 の個別区分差の和は約 1048 µs で、同時無効の 736 µs と一致しない。run 間変動と区分間の相互作用を含むため、これらの観測値の加算性は確認できない。先行する stream kernel の中央値からの単純見積もりと graph の差には大きな開きがあるが、event 挿入、cache、依存・間隔を含む異なる測定を直接差し引いて kernel 外の寄与と断定することはできない。約 0.5 ms の内訳は未解決。split-K 12 全体の差を増加した 62 node で割ると約 11.9 µs/node だが、kernel の計算変更を含む正味差であり launch 単価ではない。
+
+### 他の行数と案 C
+
+1 行 decode も同じ一時区分切替を 5 ペアで比較した。graph event を使用したため下記の生成速度はフック付きであり、フックなしの最終受入とは分ける。差は replay が全有効 minus 無効、tok/s が無効 minus 全有効。
+
+| 無効化した区分 | replay 差 µs | 生成速度差 tok/s |
+|---|---:|---:|
+| split-K 2 | −76.1 ± 71.0 | −0.106 ± 0.078 |
+| split-K 12・後続 2 projection | +251.2 ± 28.8 | +0.232 ± 0.029 |
+| split-K 12・後続 3 projection | +75.6 ± 26.0 | +0.070 ± 0.028 |
+| split-K 12 全体 | +325.8 ± 28.1 | +0.294 ± 0.034 |
+| 全 I9 | +325.1 ± 41.3 | +0.328 ± 0.040 |
+
+split-K 2 の 1 行 replay 差は SD と同程度であり、その値だけで効果を断定しない。split-K 12 全体の無効化は 1 行と 8 行の両方で改善した。tree budget 10 の候補条件は全有効 41.4924 ± 0.0111 ms、候補 40.5109 ± 0.0218 ms、ペア差 981.4 ± 26.3 µs/replay の改善。budget 16 は現行 executor の graph 対象外なので、verify GPU event / round の全有効 49.301 ± 0.016 ms、候補 47.580 ± 0.052 ms、ペア差 1.721 ± 0.053 ms を記録した。この区間には staging 等も含まれる。各 5 ペア。tree の各区分の単発比較は傾向の確認に限る。
+
+案 C は split-K 12・後続 3 projection のみに使用し、同・後続 2 projection は両条件で未融合に揃えた。8 行 graph replay 5 ペアの案 C minus 未融合は +85.9 ± 28.1 µs で、未融合より遅いため採用しない。先行の 32 合成条件での bit 一致は最終品質受入とは別である。
+
+### フックなし速度受入
+
+同一時期に baseline `44da8fe`、修正前 `4bc0e412`、修正後を各比較 5 ペアで実行した。比率は各ペア群の平均の比、差の SD はペア差の標本 SD。code prompt の生成 ID は全 run で一致した。
+
+| 条件 | 比較元 tok/s | 修正後 tok/s | 差 tok/s | 比較元比 |
+|---|---:|---:|---:|---:|
+| DFlash2 baseline | 123.078 ± 0.063 | 124.892 ± 0.100 | +1.814 ± 0.127 | +1.47% |
+| DFlash2 修正前 | 123.216 ± 0.118 | 124.848 ± 0.078 | +1.632 ± 0.143 | +1.32% |
+| 非投機 baseline | 30.880 ± 0.130 | 31.920 ± 0.096 | +1.040 ± 0.040 | +3.37% |
+| 非投機 修正前 | 31.510 ± 0.019 | 31.810 ± 0.012 | +0.300 ± 0.012 | +0.95% |
+
+DFlash2 の baseline 比 +1% と、非投機が修正前を下回らない目標を満たした。非投機の比較元同士に変動があるため、baseline 比と修正前比の値はそれぞれ同時期の独立した 5 ペアとして扱う。
+
+### 品質・launch 数の受入
+
+- BetterBench corpus、context 128、256 位置、BF16 KV の baseline logits と bit 一致。mean KL 0、top-1 一致率 100%、最大絶対差 0。
+- code / prose / ja の非投機 greedy は、各 256 token の生成 ID が共有 baseline と完全一致。
+- `test_compute_dflash2.py` の同じ `run_suite` を BF16、FP8、Octave の各 dtype ごとに実行し、各 33/33、合計 99/99 成功。1 lock の保持を 280 秒以内にするため dtype ごとに分割した。
+- `test_compute_dflash2_tree.py` は各 compute process を個別に lock / timeout して全 prompt 成功。chain 対 target の既存差は 12 / 132 / 213 token のまま。tree の各比較も既存テストの許容条件を満たした。
+- `test_exl3_mul24_linear`、`test_exl3_mul24_grouped`、`test_exl3_launch_plan`、`test_plamo3_lowering`、`test_plamo_exl3_projection` の ctest 5/5 成功。`run_server_regression.py --all` は実行していない。
+- 非投機 `shelf-bench tg --mode forward --context 128` の perf stats は 1,061 physical launch/token。trace の decode step も 1,061。非投機 compute、chain 8、tree budget 8 / 10 の capture は各 1,063 kernel node。verify graph は descriptor 準備 kernel 1 個を含み、forward 内は 1,062 node。bench と compute graph は前後処理を含む範囲が異なるため同じ数として扱わない。全 I9 無効フラグでは chain 8 の kernel node が 1,126 となり、全無効化が維持されることを確認した。launch 数は記録のみで、1,000 以下は要求していない。
+
+約 0.5 ms の残差の原因は、kernel 外と特定できていない。16 行には verify graph がなく、同一の replay 指標では比較できない。これらの制限と、今回実測しなかった split-K 値の性能は未解決である。
