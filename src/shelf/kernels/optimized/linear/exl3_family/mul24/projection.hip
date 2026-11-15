@@ -189,24 +189,25 @@ group_body(const int8_t *__restrict__ codes, const float *__restrict__ scales,
         yprime += static_cast<size_t>(tile_z) * rows * n;
     const uint32_t *tile_base = trellis + static_cast<size_t>(nt) * (k >> 4u) * kWords;
     constexpr size_t kt_stride = kWords;
+    const uint32_t *wp0 = tile_base + static_cast<size_t>(g0 * 8u) * kt_stride + i0;
+    const uint32_t *wp1 = tile_base + static_cast<size_t>(g0 * 8u) * kt_stride + i1;
+    const uint32_t *wp2 = tile_base + static_cast<size_t>(g0 * 8u) * kt_stride + i2;
     uint32_t cur[8][3];
     uint32_t nxt[8][3];
 #pragma unroll
     for (uint32_t s = 0u; s < 8u; ++s) {
-        const uint32_t *tile = tile_base + static_cast<size_t>(g0 * 8u + s) * kt_stride;
-        cur[s][0] = tile[i0];
-        cur[s][1] = tile[i1];
-        cur[s][2] = kNeedW2 ? tile[i2] : 0u;
+        cur[s][0] = wp0[s * kt_stride];
+        cur[s][1] = wp1[s * kt_stride];
+        cur[s][2] = kNeedW2 ? wp2[s * kt_stride] : 0u;
     }
     for (uint32_t g = g0; g < g1; ++g) {
         if constexpr (PIPE)
             if (g + 1u < g1) {
 #pragma unroll
                 for (uint32_t s = 0u; s < 8u; ++s) {
-                    const uint32_t *tile = tile_base + static_cast<size_t>((g + 1u) * 8u + s) * kt_stride;
-                    nxt[s][0] = tile[i0];
-                    nxt[s][1] = tile[i1];
-                    nxt[s][2] = kNeedW2 ? tile[i2] : 0u;
+                    nxt[s][0] = wp0[(8u + s) * kt_stride];
+                    nxt[s][1] = wp1[(8u + s) * kt_stride];
+                    nxt[s][2] = kNeedW2 ? wp2[(8u + s) * kt_stride] : 0u;
                 }
             }
         int32x2_t afrag[MT][8];
@@ -229,10 +230,9 @@ group_body(const int8_t *__restrict__ codes, const float *__restrict__ scales,
 #pragma unroll
         for (uint32_t s = 0u; s < 8u; ++s) {
             int32x2_t b;
-            const uint32_t *tile = tile_base + static_cast<size_t>(g * 8u + s) * kt_stride;
-            const uint32_t w0 = PIPE ? cur[s][0] : tile[i0];
-            const uint32_t w1 = PIPE ? cur[s][1] : tile[i1];
-            const uint32_t w2 = PIPE ? cur[s][2] : (kNeedW2 ? tile[i2] : 0u);
+            const uint32_t w0 = PIPE ? cur[s][0] : wp0[s * kt_stride];
+            const uint32_t w1 = PIPE ? cur[s][1] : wp1[s * kt_stride];
+            const uint32_t w2 = PIPE ? cur[s][2] : (kNeedW2 ? wp2[s * kt_stride] : 0u);
             uint32_t packed[2] = {0u, 0u};
 #pragma unroll
             for (uint32_t i = 0u; i < 8u; ++i) {
@@ -274,6 +274,9 @@ group_body(const int8_t *__restrict__ codes, const float *__restrict__ scales,
             cur[s][1] = nxt[s][1];
             cur[s][2] = nxt[s][2];
         }
+        wp0 += 8u * kt_stride;
+        wp1 += 8u * kt_stride;
+        wp2 += 8u * kt_stride;
 
 #pragma unroll
         for (int mt = 0; mt < MT; ++mt) {
