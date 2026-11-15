@@ -1,8 +1,8 @@
 #include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/kernels/optimized/linear/config.h>
-#include <shelf/kernels/optimized/moe/combine.h>
-#include <shelf/kernels/optimized/moe/router.h>
+#include <shelf/kernels/fused/moe/combine.h>
+#include <shelf/kernels/fused/moe/router.h>
 
 #include <hip/hip_runtime.h>
 

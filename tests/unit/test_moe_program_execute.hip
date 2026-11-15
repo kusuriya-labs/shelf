@@ -2,8 +2,8 @@
 #include <shelf/kernels/optimized/activation_quantize.h>
 #include <shelf/kernels/optimized/elementwise.h>
 #include <shelf/kernels/optimized/linear/mxfp4.h>
-#include <shelf/kernels/optimized/moe/combine.h>
-#include <shelf/kernels/optimized/moe/router.h>
+#include <shelf/kernels/fused/moe/combine.h>
+#include <shelf/kernels/fused/moe/router.h>
 #include <shelf/quantization/mxfp4/mxfp4_native.h>
 #include <shelf/quantization/quantization_types.h>
 #include <shelf/runtime/program/device_program.h>

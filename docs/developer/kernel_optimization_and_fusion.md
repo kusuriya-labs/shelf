@@ -114,10 +114,11 @@ kernel 家族ごとに「share、実効 GB/s、資源値、occupancy 拘束条�
 9. **dispatch / launch を減らすのは prefill 主体で見積もる。**
    replay できる平坦な純 launch 列は HIP graph と併用を検討する。
 
-## 4. 融合ルール（未実装）
+## 4. 融合ルール
 
-現在、実装済みのカーネル融合は存在しない（`src/shelf/kernels/optimized/` に
-fused kernel を置かない）。融合を行う場合は次の手順を通す。
+複数の論理演算を 1 launch で行う kernel は `src/shelf/kernels/fused/` に置く。
+`src/shelf/kernels/optimized/` に fused kernel を置かない。配置と依存方向は
+[kernels.md](kernels.md) を正本とする。融合を行う場合は次の手順を通す。
 
 1. 素材 kernel の律速分類（§2）を計測で確定する。分類 ②（L3 / pass 律速）で
    計算を削れないなら、融合だけでは速くならない。

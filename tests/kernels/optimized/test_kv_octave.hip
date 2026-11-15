@@ -1,5 +1,7 @@
 #include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/memory/types.h>
+#include <shelf/kernels/fused/attention/octave.h>
+#include <shelf/kernels/fused/kv_append_octave.h>
 #include <shelf/kernels/optimized/kv_append.h>
 #include <shelf/kernels/optimized/attention/paged_attention.h>
 #include <hip/hip_fp16.h>

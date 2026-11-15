@@ -1,5 +1,6 @@
 #include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/memory/types.h>
+#include <shelf/kernels/fused/qsa_key_cache.h>
 #include <shelf/kernels/optimized/qsa.h>
 
 #include <hip/hip_runtime.h>

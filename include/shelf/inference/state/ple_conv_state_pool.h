@@ -6,7 +6,7 @@
 #include <shelf/core/memory/types.h>
 #include <shelf/core/status.h>
 #include <shelf/inference/execution/spec_decode_context.h>
-#include <shelf/kernels/optimized/ple_conv.h>
+#include <shelf/kernels/fused/ple_conv.h>
 #include <hip/hip_runtime.h>
 
 #include <cstddef>

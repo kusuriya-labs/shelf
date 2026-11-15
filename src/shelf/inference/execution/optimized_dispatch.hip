@@ -1,3 +1,8 @@
+#include <shelf/kernels/fused/exl3/decode.h>
+#include <shelf/kernels/fused/exl3/rotate_out.h>
+#include <shelf/kernels/fused/exl3/rotate_quantize.h>
+#include <shelf/kernels/fused/exl3/epilogue.h>
+#include <shelf/kernels/fused/exl3/grouped.h>
 #include <shelf/inference/execution/optimized_dispatch.h>
 #include <shelf/inference/execution/boundary_deferred.h>
 #include <shelf/inference/execution/final_producer.h>
@@ -19,7 +24,8 @@
 #include <shelf/kernels/optimized/linear/exl3_family/mul1/launch_plan.h>
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/workspace.h>
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/projection.h>
-#include <shelf/kernels/optimized/linear/exl3_family/mul24/producer_rotate_rows.h>
+#include <shelf/kernels/fused/exl3/producer_rotate.h>
+#include <shelf/kernels/fused/exl3/producer_rotate_rows.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/exl3_dense_gemm.h>
 #include <shelf/inference/execution/gemm_lt.h>

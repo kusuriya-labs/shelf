@@ -1,4 +1,4 @@
-#include <shelf/kernels/optimized/linear/exl3_family/mul24/producer_rotate_rows.h>
+#include <shelf/kernels/fused/exl3/producer_rotate_rows.h>
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/decode.h>
 #include <shelf/quantization/exl3/exl3_int8.h>
 #include <hip/hip_bf16.h>

@@ -1,7 +1,6 @@
 #include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/kernels/fused/hyper_connection.h>
-#include <shelf/kernels/optimized/hyper_connection.h>
 
 #include <hip/hip_runtime.h>
 

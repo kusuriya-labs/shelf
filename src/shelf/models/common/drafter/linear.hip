@@ -1,3 +1,4 @@
+#include <shelf/kernels/fused/exl3/rotate_quantize.h>
 #include <shelf/models/common/drafter/linear.h>
 #include <shelf/inference/execution/selectors/linear_selector.h>
 #include <shelf/kernels/optimized/activation_quantize.h>

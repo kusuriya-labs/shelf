@@ -1,3 +1,4 @@
+#include <shelf/kernels/fused/exl3/epilogue.h>
 #include <shelf/kernels/optimized/linear/exl3_mul1.h>
 #include <shelf/kernels/optimized/linear/exl3_family/mul1/decode.h>
 #include <hip/hip_bf16.h>

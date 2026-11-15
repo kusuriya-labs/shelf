@@ -88,15 +88,9 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/linear/fp8.hip
     src/shelf/kernels/optimized/linear/fp8_ptpc.hip
     src/shelf/kernels/optimized/linear/mxfp4.hip
-    src/shelf/kernels/optimized/linear/exl3_family/mul1/decode.hip
     src/shelf/kernels/optimized/linear/exl3_family/mul1/prefill.hip
-    src/shelf/kernels/optimized/linear/exl3_family/mul1/epilogue.hip
-    src/shelf/kernels/optimized/linear/exl3_family/mul24/rotate_quantize.hip
-    src/shelf/kernels/optimized/linear/exl3_family/mul24/grouped.hip
     src/shelf/kernels/optimized/linear/exl3_family/mul24/decode.hip
     src/shelf/kernels/optimized/linear/exl3_family/mul24/projection.hip
-    src/shelf/kernels/optimized/linear/exl3_family/mul24/producer_rotate.hip
-    src/shelf/kernels/optimized/linear/exl3_family/mul24/producer_rotate_rows.hip
     src/shelf/kernels/optimized/linear/exl3_family/mul24/projection_prefill.hip
     src/shelf/kernels/optimized/linear/exl3_family/mul24/prefill.hip
     src/shelf/kernels/optimized/linear/exl3_family/mul24/prefill_wmma.hip
@@ -105,8 +99,6 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/linear/exl3_family/mul1/launch_plan.cpp
     src/shelf/kernels/optimized/linear/exl3_family/mul24/split_plan.cpp
     src/shelf/kernels/optimized/linear/exl3_family/variant.cpp
-    src/shelf/kernels/optimized/moe/router.hip
-    src/shelf/kernels/optimized/moe/combine.hip
     src/shelf/kernels/optimized/attention/paged_decode.hip
     src/shelf/kernels/optimized/attention/paged_prefill.hip
     src/shelf/kernels/optimized/attention/octave.hip
@@ -114,10 +106,8 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/embedding.hip
     src/shelf/kernels/optimized/elementwise.hip
     src/shelf/kernels/optimized/rmsnorm.hip
-    src/shelf/kernels/optimized/hyper_connection.hip
     src/shelf/kernels/optimized/mean_streams.hip
     src/shelf/kernels/optimized/ple.hip
-    src/shelf/kernels/optimized/ple_conv.hip
     src/shelf/kernels/optimized/repeat_streams.hip
     src/shelf/kernels/optimized/qsa.hip
     src/shelf/kernels/optimized/l2_normalize.hip
@@ -134,7 +124,21 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
 # Fused kernels: more than one logical operation in one launch, separate from the
 # single-operation optimized family.
 set(SHELF_FUSED_KERNEL_SOURCES
+    src/shelf/kernels/fused/attention/octave.hip
+    src/shelf/kernels/fused/exl3/decode.hip
+    src/shelf/kernels/fused/exl3/epilogue.hip
+    src/shelf/kernels/fused/exl3/group_gemm.hip
+    src/shelf/kernels/fused/exl3/grouped.hip
+    src/shelf/kernels/fused/exl3/producer_rotate.hip
+    src/shelf/kernels/fused/exl3/producer_rotate_rows.hip
+    src/shelf/kernels/fused/exl3/rotate_out.hip
+    src/shelf/kernels/fused/exl3/rotate_quantize.hip
     src/shelf/kernels/fused/hyper_connection.hip
+    src/shelf/kernels/fused/kv_append_octave.hip
+    src/shelf/kernels/fused/moe/combine.hip
+    src/shelf/kernels/fused/moe/router.hip
+    src/shelf/kernels/fused/ple_conv.hip
+    src/shelf/kernels/fused/qsa_key_cache.hip
     src/shelf/kernels/fused/silu_scale.hip
     src/shelf/kernels/fused/tp_combine.hip
 )

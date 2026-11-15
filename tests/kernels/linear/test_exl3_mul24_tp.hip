@@ -2,6 +2,8 @@
 // (shelf::weights::materialize_rank_local_canonical), the same INT8 kernels each rank would run, and the
 // combine a TP step does (concatenate for an n split, sum for a k split). The combined result is compared
 // with the unsharded run of the same path. A real multi-GPU run only adds the collective on top of this.
+#include <shelf/kernels/fused/exl3/rotate_out.h>
+#include <shelf/kernels/fused/exl3/rotate_quantize.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/inference/execution/exl3_dense_gemm.h>
 #include <shelf/kernels/optimized/linear/exl3_mul1.h>

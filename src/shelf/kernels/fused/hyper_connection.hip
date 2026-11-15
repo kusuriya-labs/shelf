@@ -56,6 +56,26 @@ __global__ __launch_bounds__(kBlock) void hyper_inject_kernel(HyperInjectArgs ar
     }
 }
 
+__global__ __launch_bounds__(kBlock) void hyper_apply_kernel(HyperApplyArgs args) {
+    const uint32_t row = blockIdx.x;
+    const shelf::bf16_t* raw = static_cast<const shelf::bf16_t*>(args.raw) +
+                               static_cast<std::uint64_t>(row) * args.raw_stride;
+    const shelf::bf16_t* y = static_cast<const shelf::bf16_t*>(args.y) +
+                             static_cast<std::uint64_t>(row) * args.y_stride;
+    const shelf::bf16_t* injection = static_cast<const shelf::bf16_t*>(args.injection) +
+                                     static_cast<std::uint64_t>(row) * args.injection_stride;
+    shelf::bf16_t* output = static_cast<shelf::bf16_t*>(args.output) +
+                            static_cast<std::uint64_t>(row) * args.output_stride;
+    const uint32_t width = args.hc * args.hidden;
+    for (uint32_t index = threadIdx.x; index < width; index += blockDim.x) {
+        const uint32_t h = index / args.hidden;
+        const uint32_t i = index % args.hidden;
+        const float value = bf16_load(raw + index) +
+                            bf16_load(y + i) * bf16_load(injection + h);
+        output[index] = bf16_store(value);
+    }
+}
+
 }  // namespace
 
 hipError_t launch_hyper_mix(const HyperMixArgs& args, hipStream_t stream) {
@@ -79,6 +99,21 @@ hipError_t launch_hyper_inject(const HyperInjectArgs& args, hipStream_t stream) 
     if (args.input_stride < args.hc || args.output_stride < args.hc)
         return hipErrorInvalidValue;
     hyper_inject_kernel<<<args.rows, 64, 0, stream>>>(args);
+    return hipGetLastError();
+}
+
+hipError_t launch_hyper_apply(const HyperApplyArgs& args, hipStream_t stream) {
+    if (args.raw == nullptr || args.y == nullptr || args.injection == nullptr ||
+        args.output == nullptr) {
+        return hipErrorInvalidValue;
+    }
+    if (args.rows == 0u || args.hc == 0u || args.hidden == 0u) return hipErrorInvalidValue;
+    if (args.raw_stride < args.hc * args.hidden || args.y_stride < args.hidden ||
+        args.injection_stride < args.hc ||
+        args.output_stride < args.hc * args.hidden) {
+        return hipErrorInvalidValue;
+    }
+    hyper_apply_kernel<<<args.rows, kBlock, 0, stream>>>(args);
     return hipGetLastError();
 }
 

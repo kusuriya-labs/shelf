@@ -1,3 +1,4 @@
+#include <shelf/kernels/fused/exl3/rotate_quantize.h>
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>

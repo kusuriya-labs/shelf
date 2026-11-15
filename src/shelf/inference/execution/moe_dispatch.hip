@@ -1,11 +1,12 @@
+#include <shelf/kernels/fused/exl3/decode.h>
 #include <shelf/inference/execution/moe_dispatch.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/program_executor.h>
 #include <shelf/kernels/optimized/linear/mxfp4.h>
 #include <shelf/kernels/optimized/linear/exl3_mul1.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
-#include <shelf/kernels/optimized/moe/combine.h>
-#include <shelf/kernels/optimized/moe/router.h>
+#include <shelf/kernels/fused/moe/combine.h>
+#include <shelf/kernels/fused/moe/router.h>
 #include <shelf/runtime/program/int8_activation_workspace.h>
 #include <shelf/quantization/mxfp4/mxfp4_native.h>
 #include <shelf/quantization/quantization_types.h>

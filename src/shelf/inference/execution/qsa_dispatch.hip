@@ -3,6 +3,7 @@
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/program_executor.h>
 #include <shelf/kernels/model_dispatch_state.h>
+#include <shelf/kernels/fused/qsa_key_cache.h>
 #include <shelf/kernels/optimized/qsa.h>
 
 #include <algorithm>

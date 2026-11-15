@@ -34,7 +34,22 @@ struct HyperInjectArgs {
     float inverse_hc = 1.0f;
 };
 
+struct HyperApplyArgs {
+    const void* raw = nullptr;
+    const void* y = nullptr;
+    const void* injection = nullptr;
+    void* output = nullptr;
+    uint32_t rows = 0;
+    uint32_t hc = 0;
+    uint32_t hidden = 0;
+    uint32_t raw_stride = 0;
+    uint32_t y_stride = 0;
+    uint32_t injection_stride = 0;
+    uint32_t output_stride = 0;
+};
+
 hipError_t launch_hyper_mix(const HyperMixArgs& args, hipStream_t stream);
 hipError_t launch_hyper_inject(const HyperInjectArgs& args, hipStream_t stream);
+hipError_t launch_hyper_apply(const HyperApplyArgs& args, hipStream_t stream);
 
 }  // namespace shelf::kernel

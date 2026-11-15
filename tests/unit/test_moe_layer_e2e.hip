@@ -5,8 +5,8 @@
 #include <shelf/kernels/optimized/linear/config.h>
 #include <shelf/kernels/optimized/elementwise.h>
 #include <shelf/kernels/optimized/linear/mxfp4.h>
-#include <shelf/kernels/optimized/moe/combine.h>
-#include <shelf/kernels/optimized/moe/router.h>
+#include <shelf/kernels/fused/moe/combine.h>
+#include <shelf/kernels/fused/moe/router.h>
 #include <shelf/models/qwen35moe/model/qwen35moe_config.h>
 #include <shelf/models/qwen35moe/weights/moe_expert_load.h>
 #include <shelf/models/qwen35moe/weights/moe_weight_plan.h>

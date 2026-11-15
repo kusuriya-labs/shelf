@@ -1,5 +1,6 @@
 #include <shelf/core/memory/arena.h>
 #include <shelf/inference/state/qsa_state_pool.h>
+#include <shelf/kernels/fused/qsa_key_cache.h>
 #include <shelf/kernels/optimized/qsa.h>
 #include <shelf/runtime/batch/device_batch_context.h>
 

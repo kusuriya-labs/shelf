@@ -4,7 +4,7 @@
 #include <shelf/inference/execution/program_executor.h>
 #include <shelf/kernels/model_dispatch_state.h>
 #include <shelf/kernels/optimized/ple.h>
-#include <shelf/kernels/optimized/ple_conv.h>
+#include <shelf/kernels/fused/ple_conv.h>
 #include <shelf/kernels/optimized/repeat_streams.h>
 
 namespace shelf::execution {

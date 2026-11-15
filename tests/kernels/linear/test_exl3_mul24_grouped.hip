@@ -4,6 +4,7 @@
 // printed. A synthetic rank-3 expert plane (canonical [kt][nt] trellis, as the Qwen4Exp loader leaves it) is
 // checked against a CPU reference built on exl3_decode_int8. Covers several bit rates, experts with no / few / many
 // tokens (fused groups of one expert), token-row gather, and BF16 / F32 output.
+#include <shelf/kernels/fused/exl3/decode.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/kernels/optimized/linear/exl3_mul1.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>

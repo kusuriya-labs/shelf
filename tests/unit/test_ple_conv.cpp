@@ -1,6 +1,6 @@
 #include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/memory/types.h>
-#include <shelf/kernels/optimized/ple_conv.h>
+#include <shelf/kernels/fused/ple_conv.h>
 #include <shelf/runtime/batch/device_batch_context.h>
 
 #include <hip/hip_runtime.h>

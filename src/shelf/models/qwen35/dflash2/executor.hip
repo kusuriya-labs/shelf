@@ -1,3 +1,5 @@
+#include <shelf/kernels/fused/exl3/decode.h>
+#include <shelf/kernels/fused/exl3/rotate_quantize.h>
 #include <shelf/models/qwen35/dflash2/executor.h>
 #include <shelf/quantization/quant_contract.h>
 #include <shelf/models/qwen35/dflash2/context_state.h>

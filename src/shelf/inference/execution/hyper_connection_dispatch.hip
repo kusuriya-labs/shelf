@@ -3,7 +3,6 @@
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/program_executor.h>
 #include <shelf/kernels/fused/hyper_connection.h>
-#include <shelf/kernels/optimized/hyper_connection.h>
 #include <shelf/kernels/optimized/mean_streams.h>
 
 namespace shelf::execution {

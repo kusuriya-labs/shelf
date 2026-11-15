@@ -23,17 +23,6 @@ inline constexpr std::size_t exl3_mul24_flag_cap(std::size_t rows) noexcept {
 //    (uint16 [N/16][K/16][16 * bits], tiles in n-major order) on every read; no int8 weight matrix exists in memory.
 //    The activation codes are in natural K order (the tile order of the trellis is handled inside the kernel).
 // 3. rotate_out: out = H128(sum over the K splits of yprime) * svh, per 128-wide output block.
-hipError_t launch_exl3_mul24_rotate_quantize(
-    const ::shelf::bf16_t* input,
-    uint32_t input_row_stride,
-    const uint16_t* suh,
-    int8_t* codes,
-    float* scales,
-    uint32_t rows,
-    uint32_t k,
-    uint32_t code_row_stride_bytes,
-    uint32_t scale_row_stride_bytes,
-    hipStream_t stream);
 
 hipError_t launch_exl3_mul24_gemm(
     const int8_t* codes,
@@ -99,17 +88,7 @@ hipError_t launch_exl3_mul24_recon(
 hipError_t launch_exl3_mul24_recon_wmma(
     const uint16_t* trellis, uint32_t bits, int8_t* dense, uint32_t n, uint32_t k, hipStream_t stream);
 
-// out = H128(v) * svh, with v = acc * rowscale[row] * S_FIX, or yprime2[slots[row]] for rows with a slot.
-hipError_t launch_exl3_mul24_rotate_out_i32(
-    const int32_t* acc, const float* rowscale, const int32_t* slots, const float* yprime2, const uint16_t* svh,
-    void* out, Exl3OutputDType out_dtype, uint32_t rows, uint32_t n, uint32_t out_row_stride, hipStream_t stream);
 
-// Grouped mul24 GEMM (exl3_family/mul24/grouped.hip). `args` is the grouped plan as
-// launch_gemm_exl3_w16a16_grouped builds it (rows = one group tile, groups = fused
-// groups per block, 1 or 2; more is run as 2). int8_act selects INT8 activations with
-// an iu8 WMMA; otherwise an FP16 WMMA on the exact integer weights. n_tiles is 1 or 2
 // (128 output columns each).
-hipError_t launch_exl3_mul24_grouped(const Exl3GemmArgs& args, bool int8_act, uint32_t n_tiles,
-                                     uint32_t grid_x, uint32_t grid_z, hipStream_t stream);
 
 }  // namespace shelf::kernel

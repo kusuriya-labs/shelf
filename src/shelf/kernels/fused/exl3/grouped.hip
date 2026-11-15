@@ -1,3 +1,4 @@
+#include <shelf/kernels/fused/exl3/grouped.h>
 #include <shelf/kernels/optimized/linear/exl3_mul1.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
 #include <shelf/kernels/optimized/linear/exl3_family/mul1/decode.h>

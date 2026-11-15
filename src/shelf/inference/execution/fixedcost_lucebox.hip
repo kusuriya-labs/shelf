@@ -2,7 +2,7 @@
 #include <shelf/inference/execution/physical_launch.h>
 #include <shelf/inference/execution/program_executor.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
-#include <shelf/kernels/optimized/linear/exl3_family/mul24/producer_rotate_rows.h>
+#include <shelf/kernels/fused/exl3/producer_rotate_rows.h>
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/workspace.h>
 #include <hip/hip_bf16.h>
 #include <hip/hip_runtime.h>

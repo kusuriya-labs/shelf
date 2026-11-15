@@ -1,4 +1,4 @@
-#include <shelf/kernels/optimized/ple_conv.h>
+#include <shelf/kernels/fused/ple_conv.h>
 
 #include <hip/hip_bf16.h>
 #include <hip/hip_runtime.h>

@@ -96,12 +96,4 @@ launch_kv_append_fp8_e4m3(
 
     hipStream_t stream);
 
-hipError_t launch_kv_append_octave(
-    const KvAppendCommonArgs& common,
-    uint8_t* k_pool,
-    uint8_t* v_pool,
-    const float* levels,
-    OctaveKVCacheFormat format,
-    hipStream_t stream);
-
 }  // namespace shelf::kernel

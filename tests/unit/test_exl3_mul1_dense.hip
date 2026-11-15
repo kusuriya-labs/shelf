@@ -1,3 +1,5 @@
+#include <shelf/kernels/fused/exl3/decode.h>
+#include <shelf/kernels/fused/exl3/epilogue.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/kernels/optimized/linear/exl3_mul1.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>

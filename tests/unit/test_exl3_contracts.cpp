@@ -1,6 +1,10 @@
 // Boundary checks for the EXL3 launch contracts. Every case returns before launching a
 // kernel, so the test only needs the HIP runtime, not a working device workload.
 
+#include <shelf/kernels/fused/exl3/decode.h>
+#include <shelf/kernels/fused/exl3/rotate_out.h>
+#include <shelf/kernels/fused/exl3/rotate_quantize.h>
+#include <shelf/kernels/fused/exl3/grouped.h>
 #include <shelf/kernels/optimized/linear/exl3_mul1.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
 

@@ -1,6 +1,7 @@
 #pragma once
 #include <shelf/core/status.h>
 #include <shelf/runtime/program/program.h>
+#include <shelf/kernels/fused/attention/octave.h>
 #include <shelf/kernels/optimized/attention/paged_attention.h>
 #include <shelf/kernels/kv_types.h>
 #include <shelf/inference/execution/optimized_dispatch.h>

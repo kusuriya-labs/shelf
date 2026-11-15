@@ -158,7 +158,6 @@ struct QsaKeyCacheArgs {
     float eps = 1e-6f;
 };
 
-hipError_t launch_qsa_key_cache(const QsaKeyCacheArgs& args, hipStream_t stream);
 
 // Multi-sequence key cache. One block owns one request, appends that request's rows in
 // order, and resolves the per-sequence slot from the descriptor. `positions` and the
@@ -198,9 +197,5 @@ struct QsaKeyCacheBatchArgs {
     float eps = 1e-6f;
 };
 
-hipError_t launch_qsa_key_cache_batch(const QsaKeyCacheBatchArgs& args,
-                                      hipStream_t stream);
-hipError_t launch_qsa_key_cache_blocks(const QsaKeyCacheBatchArgs& args,
-                                       hipStream_t stream);
 
 }  // namespace shelf::kernel

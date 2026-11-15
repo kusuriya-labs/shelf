@@ -1,4 +1,5 @@
 #include <shelf/inference/execution/kv_append_dispatch.h>
+#include <shelf/kernels/fused/kv_append_octave.h>
 #include <shelf/inference/execution/program_executor.h>
 #include <shelf/kernels/correctness/model_dispatch_correctness.h>
 #include <shelf/inference/execution/physical_launch.h>
