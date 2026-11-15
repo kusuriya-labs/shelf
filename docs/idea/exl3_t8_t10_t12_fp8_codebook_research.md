@@ -1,159 +1,249 @@
-# EXL3 T8/T10/T12 × FP8ターゲットCodebook 研究・実装検証案
+# EXL3 T12 × Finegrained FP8 Codebook 研究・実装計画（不採用）
 
 - 作成日：2026-11-05
-- 対象：AMD Radeon AI PRO R9700（gfx1201）、EXL3 mul1系Trellis量子化、HIP / hipBLASLt
-- ステータス：**研究仮説／未検証の設計案**
-- 目的：量子化率・品質を維持しつつ、オンライン復号コストおよびGEMM実行時間を削減する
+- 改稿日：2026-11-14
+- 試行日：2026-11-15
+- 対象：AMD Radeon AI PRO R9700（gfx1201）、EXL3 系 Trellis 量子化、HIP
+- ステータス：**試行済み・不採用（2026-11-15）**
+- 目的：T12 Trellis を復号して FP8 E4M3 の重みへ展開し、128×128 ブロック単位の FP32 scale で GEMM する構成を実装・評価する
 
-## 1. 背景と問題設定
+## 0. 試行結果
 
-現行実装では、EXL3重みをFP16 dense行列へ展開してからhipBLASLtのFP16 GEMMを実行する方式が、従来の復号融合WMMA方式より大幅に高速だった。
+T12 Trellis を復号して FP8 E4M3 へ展開し、128×128 ブロック単位の FP32 scale で GEMM する構成を試したが、採用しなかった。
 
-現時点の参考測定値：
+本文の計画は試行時の記録であり、現在の実装方針ではない。以降の実装は行わない。
+T12 形式、Finegrained FP8、128×128 block scale、exllamav3 fork のいずれも、この試行の結果として採用しない。
 
-| 項目 | 実測値・条件 |
-|---|---:|
-| PP2048（FP16展開 + hipBLASLt） | 約1,390〜1,400 tok/s |
-| 代表的な1層 Rotate | 0.044 ms |
-| 同 Recon | 0.140 ms |
-| 同 hipBLASLt FP16 GEMM | 0.744 ms |
-| 同 Epilogue | 0.060 ms |
-| 同 合計 | 0.988 ms |
+## 1. 試行時の方針
 
-上記はユーザー報告の参考値であり、実測条件が異なる個別ベンチマークとの直接比較には注意する。
+以下は試行時に固定した方針である。
 
-一方、EXL3をFP16展開して単純なper-column INT8重みへ再量子化する方式（A方式）は、固定の品質ゲートに不合格となった。1024 positionでは重みのみのINT8化で mean KL≈0.0139、Top-1≈94.1%であり、特に重み再量子化の誤差が課題である。
+- Trellis は **T12**（12-bit state、4,096 状態）を使う。
+- 復号後の重みは **FP8 E4M3** とする。
+- 重みの scale は **128×128 ブロック（16,384 重み）ごとに FP32** を1つ持つ。
+- 活性側は **K=128 単位**で量子化する。
+- Hadamard 回転は、E2E でコストが無視できる場合に適用する。固定で必須とはしない。
+- T8 / T10 は今回の対象外とし、T12 を比較・実装の中心に置く。
 
-そこで、**完成したEXL3重みを後からFP8へ丸めるのではなく、量子化探索そのものをFP8ターゲットCodebookで実施する**構成を検討する。さらにTrellisの状態数をT16からT8/T10/T12へ縮小し、ハッシュ／SAD復号を小型LUT参照に置き換える。
+実装基盤は次の方針とする。
 
-## 2. 提案の基本構造
+- **exllamav3 を fork し、T12 符号化と Finegrained FP8 を追加する**。
+- dsx は T16 形式の仕様、独立参照実装、exllamav3 へのパッチ手順の参考として使う。
+- vendor/quark は本体実装には使わない。FP8 ベースラインの生成や品質比較の補助に限定する。
+- gfx1201 における hipBLASLt FP8 GEMM の成立確認は、本計画の前提条件にしない。GEMM バックエンドは復号経路と block scale の設計後に選ぶ。
 
-EXL3をそのまま使うのではなく、CPUで展開が速い、以下の変種を使用する。
+## 2. 目標形式
 
-`https://github.com/lxe/dsx/blob/main/docs/t16-format.md`
+### 2.1 重み表現
+
+概念的には次の形にする。
+
+\[
+\widehat{W}_{k,n} = s_{kb,nb} \cdot C_{8}[z_{k,n}]
+\]
+
+- `z`：T12 Trellis の状態。12 bit、4,096 状態。
+- `C8`：FP8 E4M3 の Codebook。1状態につき1バイト。
+- `s`：128×128 ブロック単位の FP32 scale。`kb = k / 128`、`nb = n / 128`。
+
+T12 の状態数は 4,096 だが、**FP8 E4M3 の符号は 256 通り、有限値は 254 種類**である。したがって 4,096 状態の Codebook は、多くの状態が同じ FP8 値へ写る多対一の写像になる。T12 は値の種類を増やすのではなく、Trellis の遷移履歴・制約の自由度を増やすために使う。
+
+Codebook の LUT 容量は 1状態1バイトなら 4 KiB である。実際に現れる値は 254 種類でも、状態から値への対応表は 4,096 entry 必要になる。
+
+### 2.2 ブロック scale
+
+- 1ブロックは **N=128、K=128**、重み 16,384 個。
+- scale は FP32 を1個。
+- scale のオーバーヘッドは `32 / 16384 = 0.00195 bpw`。
+- scale は重みの量子化前に決め、Trellis 探索では固定値として扱う。
+
+現行 EXL3 の `suh` / `svh`（入力側・出力側の per-channel scale）は、128×128 ブロック scale と役割が重複する。今回の形式では **ブロック scale を重み scale の正本**とし、`suh` / `svh` は廃止するか、Hadamard の符号・回転用に限定する。どちらにするかは Phase 0 で確定する。
+
+### 2.3 活性側
+
+- 活性は K=128 ブロックごとに量子化する。
+- 重みの 128×128 ブロックと K 境界が一致するため、K ブロックごとの部分和に重み scale を掛けて加算できる。
+- Hadamard を適用する場合、H128 のブロック境界も 128 に揃う。
+
+### 2.4 artifact
+
+checkpoint には最低限、次を持たせる。
+
+- `trellis`：T12 のビット列。
+- `block_scale`：`[n/128][k/128]` の FP32。
+- `marker`：T12 + FP8 Codebook を識別する専用値。
+- `format_version`：T12 形式の版。
+- 必要なら `codebook` の識別子。
+
+既存 EXL3 の `mul1` marker は流用しない。`mul1` を付けると、既存の exllamav3 系 runtime が T12 を 16-bit state として復号し、**エラーを出さずに誤った重みを生成する**危険がある。T12 は必ず別 marker とする。
+
+## 3. T12 の定義
+
+本稿では T12 を **12-bit state（4,096 状態）** と定義する。T12 は bits per weight ではない。実際の bpw は Trellis の 1ステップ当たりのビット数 `K` で決まる。
+
+現行 EXL3 は 16-bit state（65,536 状態）を前提にしている。
 
 ```text
-[オフライン量子化]
-高精度の元重み
-    ↓
-FP8 E4M3ターゲットCodebookの設計
-    ↓
-T8 / T10 / T12 の状態遷移制約に基づく探索（例：Viterbi）
-    ↓
-圧縮済みTrellis重み + Codebook + Scale
-
-[推論：案A / 展開方式]
-圧縮済みTrellis重み
-    ↓  bit/state復号
-FP8 LUT参照 + FP8重み行列への展開
-    ↓
-hipBLASLt FP8 GEMM（対応レイアウト・Scale条件を満たす場合）
-    ↓
-Scale補正・既存のHadamard/SVH等の処理
-
-[推論：案B / 融合方式]
-圧縮済みTrellis重み
-    ↓
-FP8 LUT参照 → WMMA向けタイル配置 → FP8 WMMA
-    ↓
-Scale補正・Epilogue
+edges = 65536 >> K
 ```
 
-案Aは現行の「展開→hipBLASLt」構造を再利用でき、まず性能の上限を見積もりやすい。案Bは展開用VRAMトラフィックを削減できる可能性がある一方、過去に問題となったWMMAタイル構成、レジスタ・LDS供給効率を再度最適化する必要がある。
+T12 ではこれを `4096 >> K` に変更する。必要な変更は以下。
 
-## 3. T8/T10/T12のLUT容量
+- Viterbi の状態数と履歴バッファ。
+- 状態 mask と出力 index の幅。
+- 12-bit 窓を使う ring bitstream の packing / unpacking。
+- Codebook の 4,096 entry 化。
+- 復号カーネルと CPU 参照実装。
 
-**以下は「Tnがn-bitのLUT索引であり、全2^n状態に1バイトのFP8値を1つ保持する」という仮定に基づく。** 実際のEXL3形式でTが表す意味（state幅、遷移制約、Codebookの索引幅）をコードで確認すること。状態数と圧縮率（bpw）は同義ではない。
+T12 にすると状態数が 1/16 になるため、Viterbi のスクラッチと計算量は減る。一方で、遷移履歴の表現力は T16 より下がる。品質は必ず実測で確認する。
 
-| 方式 | 仮定する状態数 | FP8 LUT（1 byte/entry） | FP16 LUT（2 bytes/entry） |
-|---|---:|---:|---:|
-| T8 | 256 | 256 B | 512 B |
-| T10 | 1,024 | 1 KiB | 2 KiB |
-| T12 | 4,096 | 4 KiB | 8 KiB |
-| T16 | 65,536 | 64 KiB | 128 KiB |
+## 4. オフライン量子化
 
-補足：
-- 「256 B / 1 KiB / 4 KiBがキャッシュライン1本に収まる」というわけではない。キャッシュラインを128 Bと仮定すれば、それぞれ2 / 8 / 32ラインになる。**実機のラインサイズは別途確認が必要**。
-- 容量としてキャッシュに乗ることと、Wave内の分散したLUT参照が高速であることは別問題。
-- 複数Codebook、複数Scale、追加メタデータがある場合、実際の常駐容量は増える。
-- Tを小さくすることで探索空間・遷移制約・品質が変化するため、LUT容量だけで優劣は決められない。
+### 4.1 基本パイプライン
 
-## 4. FP8ターゲットCodebookの設計
+```text
+高精度の元重み
+    ↓
+Hadamard / 正則化（採用する場合）
+    ↓
+128×128 ブロック scale の決定
+    ↓
+FP8 E4M3 Codebook を使った T12 Viterbi 探索
+    ↓
+trellis + block_scale + marker
+```
 
-第一候補はE4M3を使い、**最終的にFP8で表現できる値を前提にオフライン量子化探索を実施する**方式とする。
+### 4.2 ブロック scale の決め方
 
-概念的には次のような重み表現を検討する：
+各 128×128 ブロックで、まず scale を決める。第一候補は E4M3 の最大値 448 を使う。
 
-\[
-\widehat{W}_{k,n} = s_n \cdot C_{8}[z_{k,n}]
-\]
+```text
+s = amax(block) / 448
+```
 
-- `C8`：FP8 E4M3形式のCodebook値
-- `z`：Trellis復号で得た状態（具体的な状態定義は要確認）
-- `s_n`：出力列単位のScaleの例
+その後、`W / s` を E4M3 の Codebook へ写す。scale を探索する場合は、ブロックごとに複数候補を試し、Viterbi 後の再構成誤差が最小になる値を選ぶ。ただし探索コストが大きいため、最初は amax 固定で品質を見る。
 
-上式は**一つの設計案**であり、既存EXL3のScale、符号化・回転・逆変換と完全互換であると確認されたものではない。ScaleをK方向にも変化させる場合、部分和ごとにScale適用が必要になり、単純な1回GEMM＋列Scaleでは扱えない。
+### 4.3 Codebook
 
-### 品質上の要点
+- 初期実装は **全層共通の 4,096 entry Codebook** とする。
+- Codebook の値は FP8 E4M3 の有限値 254 種類から選ぶ。
+- 層ごと・ブロックごとに Codebook を変えると artifact と LUT が増えるため、初期段階では採用しない。
+- 共通 Codebook で品質が不足する場合だけ、層グループ単位の複数 Codebook を検討する。
 
-1. FP16展開後にFP8へ丸めるだけでは、元のTrellis量子化がFP8丸め誤差を考慮していない。
-2. FP8ターゲット値を使った探索により、最終表現での誤差を直接最適化する。
-3. Codebookの共通化、Scale粒度、重み分布、探索目的関数（MSE、Activation-weighted等）が品質に影響する。
-4. GEMMにFP8入力Activationが必要なら、**重みのFP8化とは別にActivation由来の誤差**が生じる。これを独立に評価する。
-5. 4bpw維持を目指す場合、Trellis索引、遷移符号、Scale/Codebook等のメタデータを含む**実効bpw**を算出する。
+### 4.4 Viterbi 探索
 
-## 5. オンライン復号とLUT配置
+- 状態数：4,096。
+- 1ステップの入力ビット数：`K`。
+- 誤差評価：復号値 `C8[state] * s` と元重みの二乗誤差。
+- Hadamard を適用する場合、探索対象は回転後の重み `H W H` とする。
+- ブロック scale は探索中に固定し、状態遷移のコストへ反映する。
 
-比較する復号方式：
+### 4.5 実装基盤
 
-| 方式 | メリット | 懸念事項 |
-|---|---|---|
-| Global Memory LUT（キャッシュ経由） | 実装が容易 | Wave内の不規則参照、ロード遅延、キャッシュアクセス効率 |
-| LDS LUT | 小型テーブルを共有できる | Bank conflict、初期ロード、LDS使用量 |
-| Wave内レジスタ分散LUT（特にT8） | 外部メモリLUTロードを回避できる可能性 | Lane間shuffle/gather命令数、レジスタ圧力 |
-| 現行hash/SAD | メモリLUT不要、比較基準に適する | 演算命令数と復号結果のフォーマット変換 |
+#### exllamav3 fork
 
-T8の256 B LUTを32 laneに分散すると平均8 B/laneで保持できるが、任意の索引を取り出すコストは無視できない。**LUTが小さい＝必ず速い、ではない。**
+T12 符号化の本体は exllamav3 の fork で実装する。
 
-計測対象：
-- 復号1重み当たりの命令数、ロード数
-- キャッシュヒット率／メモリアクセス効率
-- LDS bank conflict、LDS使用量
-- VGPR/SGPR使用量とOccupancy
-- WMMAへのタイル供給・再配置コスト
-- `Recon`単独時間と、`Recon + GEMM`の全体時間
+- Trellis の Viterbi、LDLQ、Hadamard、packing が既にある。
+- RDNA / gfx1201 向けの HIP カーネルがある。
+- `tests/testlib/trellis.py` に独立した NumPy 参照実装がある。
+- MIT ライセンスである。
 
-## 6. 性能検証の段階
+変更対象は以下。
 
-| Stage | 重み復号・生成 | GEMM | 主目的 |
+- `quantize_tiles_kernel.cuh` などの状態数・edge 数。
+- `pack.cu` の 12-bit 窓 packing。
+- `codebook.cuh` の FP8 Codebook。
+- `quantize.py` の block scale と artifact 出力。
+- CPU 参照実装とテスト。
+
+#### dsx
+
+dsx は T16 の完成品であり、T12 でも Finegrained FP8 でもない。そのまま使うのではなく、次の参考として使う。
+
+- `docs/t16-format.md` の byte-exact な形式記述。
+- `quant/t16/t16_ref.py` の独立 decoder。
+- `quant/t16/make_mul16_exllamav3.sh` の exllamav3 パッチ手順。
+- 専用 marker と private type id で既存形式と分離する設計。
+- `from_exl3` のタイル並べ替えと byte swap。
+
+dsx の AMD runner は MI325X（gfx942）向けであり、R9700（gfx1201）用ではない。dsx の runtime は流用しない。
+
+#### vendor/quark
+
+vendor/quark は本体実装には使わない。
+
+- 2D per-block の量子化は `PerBlock2DMinMaxObserver` が placeholder で、calibration が未実装。
+- T12 Trellis の符号化・復号がない。
+- EXL3 の `trellis` / `suh` / `svh` / `mul1` を出力できない。
+- 128×128 の FP32 block scale を生成する経路がない。
+
+Quark は FP8 ベースラインの生成、量子化設定の参照、品質比較の補助に限定する。
+
+## 5. 実行時
+
+### 5.1 復号方式
+
+比較する方式は2つ。
+
+| 方式 | 内容 | 長所 | 短所 |
 |---|---|---|---|
-| F0 | 現行EXL3 mul1 → FP16 dense | hipBLASLt FP16 | 品質・速度Baseline |
-| F1 | T8 → FP8 LUT → FP8 dense | hipBLASLt FP8 | 最小LUTでの品質・速度 |
-| F2 | T10 → FP8 LUT → FP8 dense | hipBLASLt FP8 | 中間候補 |
-| F3 | T12 → FP8 LUT → FP8 dense | hipBLASLt FP8 | 品質寄り候補 |
-| F4 | 各TのFP8 LUT出力 → FP16変換 | hipBLASLt FP16 | Codebook品質とFP8 GEMM/Activation誤差の分離 |
-| F5（任意） | FP8 LUT復号をカーネル内融合 | FP8 WMMA | オンライン展開の成立性 |
+| D0 | load 時または層単位で T12 を FP8 dense へ展開 | GEMM が単純 | FP8 dense のメモリ帯域と展開コスト |
+| D1 | GEMM カーネル内で T12 を復号 | 展開済み重みを持たない | 復号命令と LUT 参照が GEMM に乗る |
 
-**重要な順番：**
+最初は D0 で品質と GEMM の上限を測り、その後に D1 を検討する。
 
-1. 対象gfx1201/ROCm環境で、E4M3のhipBLASLt FP8 GEMMが必要な形状・Transpose・Scale条件で利用できることを確認する。可能なら**事前に用意したFP8 dense重み**でGEMM単独性能を測定する。
-2. 次にT8/T10/T12のオフライン再量子化を行い、GPU実装より先に品質を評価する。
-3. 品質ゲートに合格した候補のみ、LUT復号の性能実装へ進める。
-4. 最終的にPP2048全体のtok/sで比較する。
+### 5.2 block scale 付き GEMM
 
-### 性能試算（実測ではない）
+128×128 ブロック scale を持つため、GEMM は K ブロックごとの部分和に scale を掛けて加算する。
 
-参考内訳：Rotate 0.044ms / Recon 0.140ms / GEMM 0.744ms / Epilogue 0.060ms。
+```text
+C[n] = Σ_kb s[kb][nb] * (A[kb] @ W[kb][nb])
+```
 
-仮にReconが0.100ms、FP8 GEMMがFP16比1.7倍の速度で動作し、その他が不変なら、
+- A 側も K=128 で量子化するため、K ブロック境界が一致する。
+- 各 K ブロックの部分和を FP32 で保持し、scale を掛けてから加算する。
+- 単純な1回の GEMM に1つの scale を掛ける構成にはしない。
 
-\[
-0.044 + 0.100 + 0.744/1.7 + 0.060 \simeq 0.642 \ \mathrm{ms}
-\]
+### 5.3 Hadamard
 
-現行0.988msに対して1層単位で**約1.54倍**。これは仮説上の算術試算であり、FP8変換、Activation量子化、Scale処理、アルゴリズム選択、PP全体の非GEMM処理によって変化する。**PPトークン速度を1.54倍と断定しない。**
+Hadamard は次の条件で適用を判断する。
 
-## 7. 固定品質ゲート
+- H128 のブロック境界と 128×128 scale 境界が一致する。
+- A 側の H128 を K=128 の活性量子化カーネルへ融合できる。
+- 出力側の H128 を epilogue へ融合できる。
+- 回転を含めた E2E が、回転なしより速い。
+
+現行 EXL3 では回転に層あたり約 0.044 ms かかっている。FP8 dense に移行しても無料にはならないため、**「タダ同然」と仮定せず必ず測る**。回転を入れる場合は、重み側の回転をオフラインで `H W H` に吸収し、実行時は A 側と出力側だけに限定する。
+
+## 6. 現行ベースライン
+
+参考値として、現行の EXL3 mul1 → FP16 dense → hipBLASLt FP16 GEMM の内訳を残す。
+
+| 項目 | 参考値 |
+|---|---:|
+| PP2048 | 約1,390〜1,400 tok/s |
+| Rotate | 0.044 ms |
+| Recon | 0.140 ms |
+| GEMM | 0.744 ms |
+| Epilogue | 0.060 ms |
+| 合計 | 0.988 ms |
+
+これらはユーザー報告の参考値であり、今回の T12 形式の実測値ではない。
+
+## 7. 試行時の検証段階
+
+| Stage | 内容 | 主目的 |
+|---|---|---|
+| P0 | T12 形式・Codebook・block scale・marker・参照 decoder の確定 | 形式の固定 |
+| P1 | exllamav3 fork で T12 + FP8 Codebook + block scale を生成 | 品質の確認 |
+| P2 | T12 → FP8 dense 展開と block scale 付き GEMM | 復号・GEMM の成立確認 |
+| P3 | D0 / D1、Hadamard あり / なしの比較 | 実行方式の選択 |
+| P4 | PP2048 全体の tok/s | E2E の判定 |
+
+gfx1201 の hipBLASLt FP8 GEMM 成立確認は P0 の前提にしない。P2 で必要になった時点で、利用可能な GEMM バックエンドを評価する。
+
+## 8. 固定品質ゲート
 
 既存のプロジェクトゲートを変更せず適用する。
 
@@ -164,63 +254,74 @@ T8の256 B LUTを32 laneに分散すると平均8 B/laneで保持できるが、
 | Top-1 agreement | 98%以上 |
 | Top-5 overlap | 98.5%以上 |
 
-- BetterBench v1、固定corpus・固定ハッシュ、context 128、BF16 KV、評価positionを揃える。
-- 少なくとも既存比較で用いた短い32 positionと長い1024 positionの両方を記録する。
-- PPLが負方向へ変化しても、KL / Top-1 / Top-5に失敗した候補は不合格とする。
-- 評価対象を**FP8 Codebook + FP16 GEMM**と**FP8 Codebook + FP8 GEMM**に分け、Activation誤差を切り分ける。
+- BetterBench v1、固定 corpus・固定ハッシュ、context 128、BF16 KV、評価 position を揃える。
+- 短い 32 position と長い 1024 position の両方を記録する。
+- PPL が負方向へ変化しても、KL / Top-1 / Top-5 に失敗した候補は不合格とする。
+- 評価を **FP8 Codebook + FP16 GEMM** と **FP8 Codebook + FP8 GEMM** に分け、重みの FP8 化と活性の FP8 化を切り分ける。
+- Codebook、block scale、marker、format metadata を含む実効 bpw を算出する。
 
-### 参考：以前のINT8再量子化の棄却理由
+## 9. リスクと確認事項
 
-- FP16展開済み重みをper-column INT8へ丸める方式は、1024 positionでKL約0.0139、Top-1約94.1%となり不合格。
-- これは今回の**FP8ターゲットCodebookを用いた再探索**の不合格を意味しない。
-- 逆に、FP8ターゲット化すれば合格するという保証もない。
+1. **T12 の定義**：12-bit state とするか、別の意味にするか。本稿は 12-bit state を前提とする。
+2. **FP8 の値域**：T12 でも Codebook の値は E4M3 の有限値 254 種類に限られる。T12 の状態数は値の表現力を増やさない。
+3. **ブロック scale の粒度**：128×128 で品質が足りるか。層・列・グループ単位へ細分化する必要があるか。
+4. **Codebook の共有範囲**：全層共通で足りるか。層グループごとに分ける必要があるか。
+5. **Viterbi の品質**：T16 から T12 へ状態数を減らすことで、遷移履歴の表現力がどこまで落ちるか。
+6. **Hadamard のコスト**：A 側 K128 量子化と epilogue への融合で、本当に無視できるか。
+7. **GEMM の scale 適用**：K ブロックごとの部分和と scale 適用が、FP8 GEMM の性能を損なわないか。
+8. **marker の分離**：既存の `mul1` と混同しない専用 marker が必要。
+9. **実装基盤の分離**：`../references/exllamav3` を直接改造せず、fork と参照実装を分ける。
 
-## 8. 主要リスクと確認事項
+## 10. 試行時の Go / No-Go
 
-1. **Tの定義：** 実コードでT8/T10/T12/T16と状態幅・遷移表現・実効bpwの対応を確認する。
-2. **Codebook粒度：** 1テーブルで十分か、層/グループ/列ごとに複数必要かでLUT容量が変わる。
-3. **FP8表現：** E4M3の正確な符号化、NaN/特殊値、ZeroとScale処理を確認する。
-4. **GEMM API：** hipBLASLtのFP8入力レイアウト、スケーリング方式、Epilogueの対応状況はROCm版・gfx1201向けに実機で確認する。
-5. **品質：** T縮小によるTrellis探索自由度の低下とFP8数値精度の制約が重なる。
-6. **供給効率：** 過去の融合WMMA実装では復号なしでも性能が低かった。融合経路を作る場合、LUT最適化だけでは解決しない可能性がある。
-7. **計測：** 単独GEMM TFLOPSとモデル全体tok/sを区別し、Recon、変換、Scale、Epilogueを含むE2Eで判定する。
+### Phase 0：形式の確定
 
-## 9. 優先順位とGo/No-Go
+- [ ] T12 の状態幅、K、Codebook、block scale の配置を確定
+- [ ] marker と format version を確定
+- [ ] NumPy の参照 decoder を作る
+- [ ] T12 の packing / unpacking が bit-exact であることを確認
 
-### Phase 0：成立性確認
-
-- [ ] Tの定義と圧縮率維持条件をコードで確認
-- [ ] gfx1201のhipBLASLt FP8 GEMMを実形状でベンチマーク
-- [ ] FP8 Activation単独の品質を確認
-
-**No-Go：** FP8 GEMMがFP16とほぼ同速以下、または必要なScale方式が対応困難な場合は、FP8 GEMM移行を再評価する。
+**No-Go：** 参照 decoder と符号化器が一致しない場合、または block scale の適用位置が確定しない場合は先へ進まない。
 
 ### Phase 1：量子化品質
 
-- [ ] FP8ターゲットCodebookを使いT8を生成
-- [ ] 同条件でT10、T12を生成
-- [ ] FP16演算でCodebook/重み起因の誤差を比較
-- [ ] FP8 GEMM込みで固定品質ゲートを実行
-- [ ] Codebook/Scale込みの実効bpwを確認
+- [ ] T12 + FP8 Codebook + 128×128 block scale を生成
+- [ ] FP8 Codebook + FP16 GEMM で品質を評価
+- [ ] 現行 EXL3 mul1 / FP16 と比較
+- [ ] 実効 bpw を算出
+- [ ] Codebook の共有範囲と scale 粒度を比較
 
-**No-Go：** 全候補が品質ゲートを満たさない場合はFP8移行を保留する。
+**No-Go：** 固定品質ゲートを満たさない場合は、T12 の状態幅、Codebook、scale 粒度を見直す。
 
-### Phase 2：復号・性能
+### Phase 2：復号・GEMM
 
-- [ ] Global LUT、LDS LUT、T8レジスタ分散LUTの小規模ベンチ
-- [ ] F0〜F4を同一Linear・同一shapeで比較
-- [ ] PP2048全体のtok/sを確認
-- [ ] 必要ならF5の融合FP8 WMMAを検討
+- [ ] T12 → FP8 dense 展開を実装
+- [ ] block scale 付き GEMM を実装
+- [ ] A 側 K128 量子化を実装
+- [ ] Hadamard あり / なしを比較
+- [ ] D0 / D1 を比較
 
-**Go：** 固定品質ゲートを満たし、展開・FP8量子化・Scaleを含むE2Eで現行FP16方式を上回ること。
+**No-Go：** block scale 付き GEMM が成立しない、または D0 の時点で現行方式に劣る場合は、形式または実行方式を再検討する。
 
-## 10. 暫定結論
+### Phase 3：E2E
 
-- **T10を第一候補、T8とT12を比較対象**とする。ただしこれはLUT容量と表現力のバランスに基づく研究上の優先順位であり、品質実測による結論ではない。
-- EXLR8型のFP8ターゲット探索を、Trellis状態数縮小および小型LUT化と組み合わせることに価値がある。
-- 最初は現行の「展開→hipBLASLt」アーキテクチャを維持し、FP8 dense展開でFP8 GEMMの実利を測定する。
-- **品質ゲートを最優先**し、合格候補についてのみオンラインLUT／FP8 WMMA融合を最適化する。
+- [ ] PP2048 全体の tok/s を測定
+- [ ] 品質ゲートを再確認
+- [ ] 現行 FP16 方式との比較
+
+**Go：** 固定品質ゲートを満たし、T12 復号・FP8 化・block scale 適用を含む E2E で現行方式を上回ること。
+
+## 11. 試行時の暫定結論
+
+- 目標形式は **T12 Trellis → FP8 E4M3 dense、128×128 ブロックごとの FP32 scale** とする。
+- T12 は 12-bit state であり、bpw ではない。実際の bpw は `K` で決まる。
+- T12 の 4,096 状態は FP8 の値の種類を増やさない。Codebook の値は E4M3 の有限値 254 種類に限られる。
+- 実装の本命は **exllamav3 の fork** である。
+- dsx は T16 形式の仕様、独立 decoder、exllamav3 パッチ手順の参考として使う。
+- vendor/quark は本体実装に使わず、FP8 ベースラインと品質比較の補助に限定する。
+- Hadamard は「タダ同然」と仮定せず、A 側 K128 量子化と epilogue への融合を含めて測る。
+- 品質ゲートを最優先し、合格候補についてのみ GEMM 融合と性能最適化を進める。
 
 ---
 
-*本書は議論に基づく研究計画であり、T8/T10/T12の実装可否・品質・gfx1201のFP8性能を実測で保証するものではない。*
+*本稿は試行時の設計方針と実装計画であり、現在の実装方針ではない。T12 の品質・128×128 block scale の妥当性・gfx1201 の FP8 GEMM 性能を実測で保証するものではない。試行の結果、本方式は不採用とする。*
