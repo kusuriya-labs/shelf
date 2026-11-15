@@ -42,7 +42,10 @@ TP、pipeline parallel、MTP、DFlash2、2048 token 超の長文は未対応。
 | `--top-k N` | keep the N highest logits (default 0 = disabled) |
 | `--seed N` | sampling seed (default 0) |
 | `--dflash2-model-dir PATH` | DFlash2 draft model directory; enables speculative decoding (greedy / stochastic) |
+| `--dflash2-tree-budget N\|auto` | tree verify rows (default auto; 0 disables) auto: 10 for one decoding request if speculative, else 8 |
+| `--dflash2-tree-extra B` | enable experimental tree verification (B=0,1,2,4) |
 | `--dflash2-drafts N` | speculative draft tokens per round (default 7) |
+| `--dflash2-adaptive` | control speculation with a batch policy |
 | `--dflash2-max-sessions N` | requests that may speculate at once (serve; default min(--max-concurrent-requests, 8)); the rest decode without speculation |
 | `--dflash2-stats 0\|1` | print speculative decode statistics (default 1) |
 | `--mtp` | enable the checkpoint's MTP block as the drafter |
