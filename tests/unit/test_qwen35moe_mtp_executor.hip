@@ -1,3 +1,4 @@
+#include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/memory/arena.h>
 #include <shelf/inference/execution/program_executor.h>
 #include <shelf/inference/state/paged_kv_pool.h>
@@ -174,23 +175,36 @@ PlaneBytes read_plane(const shelf::weights::MatrixWeight& w) {
     p.codes.resize(static_cast<std::size_t>(w.codes_batch_stride_bytes) * w.experts);
     p.scales.resize(static_cast<std::size_t>(w.scales_batch_stride_bytes) * w.experts);
     p.row_ref.resize(static_cast<std::size_t>(w.experts) * w.rows);
-    hipMemcpy(p.codes.data(), w.codes.data<void>(), p.codes.size(), hipMemcpyDeviceToHost);
-    hipMemcpy(p.scales.data(), w.scales.data<void>(), p.scales.size(), hipMemcpyDeviceToHost);
-    hipMemcpy(p.row_ref.data(), w.row_ref.data<void>(), p.row_ref.size(),
-              hipMemcpyDeviceToHost);
+    check(hipMemcpy(p.codes.data(), w.codes.data<void>(), p.codes.size(),
+                    hipMemcpyDeviceToHost) == hipSuccess, "d2h codes");
+    check(hipMemcpy(p.scales.data(), w.scales.data<void>(), p.scales.size(),
+                    hipMemcpyDeviceToHost) == hipSuccess, "d2h scales");
+    check(hipMemcpy(p.row_ref.data(), w.row_ref.data<void>(), p.row_ref.size(),
+                    hipMemcpyDeviceToHost) == hipSuccess, "d2h row_ref");
     return p;
 }
 
 void zero_plane(const shelf::weights::MatrixWeight& w) {
-    hipMemset(w.codes.data<void>(), 0, static_cast<std::size_t>(w.codes_batch_stride_bytes) * w.experts);
-    hipMemset(w.scales.data<void>(), 0, static_cast<std::size_t>(w.scales_batch_stride_bytes) * w.experts);
-    hipMemset(w.row_ref.data<void>(), 0, static_cast<std::size_t>(w.experts) * w.rows);
+    check(hipMemset(w.codes.data<void>(), 0,
+                    static_cast<std::size_t>(w.codes_batch_stride_bytes) * w.experts) ==
+              hipSuccess,
+          "memset codes");
+    check(hipMemset(w.scales.data<void>(), 0,
+                    static_cast<std::size_t>(w.scales_batch_stride_bytes) * w.experts) ==
+              hipSuccess,
+          "memset scales");
+    check(hipMemset(w.row_ref.data<void>(), 0,
+                    static_cast<std::size_t>(w.experts) * w.rows) == hipSuccess,
+          "memset row_ref");
 }
 
 void restore_plane(const shelf::weights::MatrixWeight& w, const PlaneBytes& p) {
-    hipMemcpy(w.codes.data<void>(), p.codes.data(), p.codes.size(), hipMemcpyHostToDevice);
-    hipMemcpy(w.scales.data<void>(), p.scales.data(), p.scales.size(), hipMemcpyHostToDevice);
-    hipMemcpy(w.row_ref.data<void>(), p.row_ref.data(), p.row_ref.size(), hipMemcpyHostToDevice);
+    check(hipMemcpy(w.codes.data<void>(), p.codes.data(), p.codes.size(),
+                    hipMemcpyHostToDevice) == hipSuccess, "h2d codes");
+    check(hipMemcpy(w.scales.data<void>(), p.scales.data(), p.scales.size(),
+                    hipMemcpyHostToDevice) == hipSuccess, "h2d scales");
+    check(hipMemcpy(w.row_ref.data<void>(), p.row_ref.data(), p.row_ref.size(),
+                    hipMemcpyHostToDevice) == hipSuccess, "h2d row_ref");
 }
 
 void zero_bf16_matrix(const shelf::weights::MatrixWeight& w) {
@@ -198,7 +212,7 @@ void zero_bf16_matrix(const shelf::weights::MatrixWeight& w) {
     if (payload.ndim() == 0) return;
     std::size_t bytes = 0;
     if (!payload.required_span_bytes(bytes).ok() || bytes == 0u) return;
-    hipMemset(payload.data<void>(), 0, bytes);
+    check(hipMemset(payload.data<void>(), 0, bytes) == hipSuccess, "memset payload");
 }
 
 bool hidden_differs(const Round& a, const Round& b, const std::string& tag) {

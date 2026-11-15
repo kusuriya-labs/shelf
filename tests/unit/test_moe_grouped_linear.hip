@@ -1,3 +1,4 @@
+#include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/kernels/optimized/activation_quantize.h>
 #include <shelf/kernels/optimized/linear/config.h>
@@ -614,30 +615,30 @@ int main() {
               d.group_count, 0u, stream) != hipSuccess,
           "zero group capacity is rejected");
 
-    hipFree(d.w13_codes);
-    hipFree(d.w13_scales);
-    hipFree(d.w13_ref);
-    hipFree(d.w2_codes);
-    hipFree(d.w2_scales);
-    hipFree(d.w2_ref);
-    hipFree(d.logits);
-    hipFree(d.sel_expert);
-    hipFree(d.sel_weight);
-    hipFree(d.tile_counts);
-    hipFree(d.row_begin);
-    hipFree(d.tile_base);
-    hipFree(d.group_begin);
-    hipFree(d.group_expert);
-    hipFree(d.group_rows);
-    hipFree(d.group_count);
-    hipFree(d.row_token);
-    hipFree(d.slot_row_of);
-    hipFree(d.hidden13);
-    hipFree(d.hidden2);
-    hipFree(d.plane_codes);
-    hipFree(d.plane_scales);
-    hipFree(d.out13);
-    hipFree(d.out2);
+    shelf::gpu::discard_cleanup_result(hipFree(d.w13_codes));
+    shelf::gpu::discard_cleanup_result(hipFree(d.w13_scales));
+    shelf::gpu::discard_cleanup_result(hipFree(d.w13_ref));
+    shelf::gpu::discard_cleanup_result(hipFree(d.w2_codes));
+    shelf::gpu::discard_cleanup_result(hipFree(d.w2_scales));
+    shelf::gpu::discard_cleanup_result(hipFree(d.w2_ref));
+    shelf::gpu::discard_cleanup_result(hipFree(d.logits));
+    shelf::gpu::discard_cleanup_result(hipFree(d.sel_expert));
+    shelf::gpu::discard_cleanup_result(hipFree(d.sel_weight));
+    shelf::gpu::discard_cleanup_result(hipFree(d.tile_counts));
+    shelf::gpu::discard_cleanup_result(hipFree(d.row_begin));
+    shelf::gpu::discard_cleanup_result(hipFree(d.tile_base));
+    shelf::gpu::discard_cleanup_result(hipFree(d.group_begin));
+    shelf::gpu::discard_cleanup_result(hipFree(d.group_expert));
+    shelf::gpu::discard_cleanup_result(hipFree(d.group_rows));
+    shelf::gpu::discard_cleanup_result(hipFree(d.group_count));
+    shelf::gpu::discard_cleanup_result(hipFree(d.row_token));
+    shelf::gpu::discard_cleanup_result(hipFree(d.slot_row_of));
+    shelf::gpu::discard_cleanup_result(hipFree(d.hidden13));
+    shelf::gpu::discard_cleanup_result(hipFree(d.hidden2));
+    shelf::gpu::discard_cleanup_result(hipFree(d.plane_codes));
+    shelf::gpu::discard_cleanup_result(hipFree(d.plane_scales));
+    shelf::gpu::discard_cleanup_result(hipFree(d.out13));
+    shelf::gpu::discard_cleanup_result(hipFree(d.out2));
     fs::remove_all(root, ec);
     gpu_arena.shutdown();
     if (hipStreamDestroy(stream) != hipSuccess)

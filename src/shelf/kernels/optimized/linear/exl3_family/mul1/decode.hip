@@ -62,7 +62,6 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
     if (args.group_expert != nullptr &&
         !exl3_detail::resolve_group_plan<kGroups>(args, group_index, r0, active_rows))
         return;
-    const __half* xrot_global = static_cast<const __half*>(args.xrot);
 
     __shared__ __align__(16) __half xrot[kPre ? 1u : kRows * kXrotPitch];
     __shared__ __align__(16) SharedArea area;

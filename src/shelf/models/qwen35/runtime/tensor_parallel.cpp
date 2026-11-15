@@ -37,13 +37,6 @@ std::uint32_t count_attention_layers(const shelf::qwen_hybrid::QwenHybridConfig&
         shelf::qwen_hybrid::count_layer_topology(tc).attention_layers);
 }
 
-std::uint64_t tensor_bytes(const gpu::Tensor& t) {
-    if (t.ndim() == 0) return 0;
-    std::size_t bytes = 0;
-    if (!t.required_span_bytes(bytes).ok()) return 0;
-    return bytes;
-}
-
 }
 
 TpRankRuntime::~TpRankRuntime() noexcept {

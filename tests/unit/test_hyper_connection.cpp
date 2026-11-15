@@ -1,3 +1,4 @@
+#include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/kernels/fused/hyper_connection.h>
 #include <shelf/kernels/optimized/hyper_connection.h>
@@ -100,13 +101,16 @@ int main() {
     check(hipMalloc(&d_apply, kRows * kWidth * sizeof(shelf::bf16_t)) == hipSuccess,
           "hipMalloc apply");
 
-    hipMemcpy(d_gate, gate.data(), gate.size() * sizeof(shelf::bf16_t), hipMemcpyHostToDevice);
-    hipMemcpy(d_normed, normed.data(), normed.size() * sizeof(shelf::bf16_t),
-              hipMemcpyHostToDevice);
-    hipMemcpy(d_raw, raw.data(), raw.size() * sizeof(shelf::bf16_t), hipMemcpyHostToDevice);
-    hipMemcpy(d_y, y.data(), y.size() * sizeof(shelf::bf16_t), hipMemcpyHostToDevice);
-    hipMemcpy(d_injection, injection.data(), injection.size() * sizeof(shelf::bf16_t),
-              hipMemcpyHostToDevice);
+    check(hipMemcpy(d_gate, gate.data(), gate.size() * sizeof(shelf::bf16_t),
+                    hipMemcpyHostToDevice) == hipSuccess, "h2d d_gate");
+    check(hipMemcpy(d_normed, normed.data(), normed.size() * sizeof(shelf::bf16_t),
+          hipMemcpyHostToDevice) == hipSuccess, "h2d d_normed");
+    check(hipMemcpy(d_raw, raw.data(), raw.size() * sizeof(shelf::bf16_t),
+                    hipMemcpyHostToDevice) == hipSuccess, "h2d d_raw");
+    check(hipMemcpy(d_y, y.data(), y.size() * sizeof(shelf::bf16_t),
+                    hipMemcpyHostToDevice) == hipSuccess, "h2d d_y");
+    check(hipMemcpy(d_injection, injection.data(), injection.size() * sizeof(shelf::bf16_t),
+          hipMemcpyHostToDevice) == hipSuccess, "h2d d_injection");
 
     shelf::kernel::HyperMixArgs mix_args;
     mix_args.gate = d_gate;
@@ -141,10 +145,10 @@ int main() {
 
     std::vector<shelf::bf16_t> got_mix(kRows * kHidden);
     std::vector<shelf::bf16_t> got_apply(kRows * kWidth);
-    hipMemcpy(got_mix.data(), d_mix, got_mix.size() * sizeof(shelf::bf16_t),
-              hipMemcpyDeviceToHost);
-    hipMemcpy(got_apply.data(), d_apply, got_apply.size() * sizeof(shelf::bf16_t),
-              hipMemcpyDeviceToHost);
+    check(hipMemcpy(got_mix.data(), d_mix, got_mix.size() * sizeof(shelf::bf16_t),
+          hipMemcpyDeviceToHost) == hipSuccess, "d2h got_mix.data()");
+    check(hipMemcpy(got_apply.data(), d_apply, got_apply.size() * sizeof(shelf::bf16_t),
+          hipMemcpyDeviceToHost) == hipSuccess, "d2h got_apply.data()");
 
     double max_mix = 0.0;
     double max_apply = 0.0;
@@ -165,8 +169,10 @@ int main() {
     check(hipMalloc(&d_inject_out, kRows * kHc * sizeof(shelf::bf16_t)) == hipSuccess,
           "hipMalloc inject out");
     const auto inject_logits = random_bf16(kRows * kHc, rng);
-    hipMemcpy(d_inject_in, inject_logits.data(),
-              inject_logits.size() * sizeof(shelf::bf16_t), hipMemcpyHostToDevice);
+    check(hipMemcpy(d_inject_in, inject_logits.data(),
+                    inject_logits.size() * sizeof(shelf::bf16_t), hipMemcpyHostToDevice) ==
+              hipSuccess,
+          "h2d d_inject_in");
     shelf::kernel::HyperInjectArgs inject_args;
     inject_args.input = d_inject_in;
     inject_args.output = d_inject_out;
@@ -180,8 +186,8 @@ int main() {
           "hyper inject launch");
     check(hipDeviceSynchronize() == hipSuccess, "hyper inject sync");
     std::vector<shelf::bf16_t> got_inject(kRows * kHc);
-    hipMemcpy(got_inject.data(), d_inject_out, got_inject.size() * sizeof(shelf::bf16_t),
-              hipMemcpyDeviceToHost);
+    check(hipMemcpy(got_inject.data(), d_inject_out, got_inject.size() * sizeof(shelf::bf16_t),
+          hipMemcpyDeviceToHost) == hipSuccess, "d2h got_inject.data()");
     double max_inject = 0.0;
     for (std::size_t i = 0; i < got_inject.size(); ++i) {
         const float x = bf16_to_float(inject_logits[i].data) /

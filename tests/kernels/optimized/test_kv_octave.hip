@@ -1,3 +1,4 @@
+#include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/kernels/optimized/kv_append.h>
 #include <shelf/kernels/optimized/attention/paged_attention.h>
@@ -92,9 +93,9 @@ void run_wmma_layout_test() {
     }
     std::printf("gfx12 WMMA layout max_abs=%.7f\n", maximum);
     check(ok && maximum < 1.0e-5f, "gfx12 WMMA operand/result layout");
-    if (da != nullptr) hipFree(da);
-    if (db != nullptr) hipFree(db);
-    if (dc != nullptr) hipFree(dc);
+    if (da != nullptr) shelf::gpu::discard_cleanup_result(hipFree(da));
+    if (db != nullptr) shelf::gpu::discard_cleanup_result(hipFree(db));
+    if (dc != nullptr) shelf::gpu::discard_cleanup_result(hipFree(dc));
 }
 
 double phi(double x) {
@@ -384,16 +385,16 @@ void run_gpu_case(OctaveKVCacheFormat format, const char* name,
         }
         check(max_difference < 0.02f, name);
     }
-    if (d_k != nullptr) hipFree(d_k);
-    if (d_v != nullptr) hipFree(d_v);
-    if (d_k_pool != nullptr) hipFree(d_k_pool);
-    if (d_v_pool != nullptr) hipFree(d_v_pool);
-    if (d_levels != nullptr) hipFree(d_levels);
-    if (d_k_scratch != nullptr) hipFree(d_k_scratch);
-    if (d_v_scratch != nullptr) hipFree(d_v_scratch);
-    if (d_slot != nullptr) hipFree(d_slot);
-    if (d_position != nullptr) hipFree(d_position);
-    if (d_table != nullptr) hipFree(d_table);
+    if (d_k != nullptr) shelf::gpu::discard_cleanup_result(hipFree(d_k));
+    if (d_v != nullptr) shelf::gpu::discard_cleanup_result(hipFree(d_v));
+    if (d_k_pool != nullptr) shelf::gpu::discard_cleanup_result(hipFree(d_k_pool));
+    if (d_v_pool != nullptr) shelf::gpu::discard_cleanup_result(hipFree(d_v_pool));
+    if (d_levels != nullptr) shelf::gpu::discard_cleanup_result(hipFree(d_levels));
+    if (d_k_scratch != nullptr) shelf::gpu::discard_cleanup_result(hipFree(d_k_scratch));
+    if (d_v_scratch != nullptr) shelf::gpu::discard_cleanup_result(hipFree(d_v_scratch));
+    if (d_slot != nullptr) shelf::gpu::discard_cleanup_result(hipFree(d_slot));
+    if (d_position != nullptr) shelf::gpu::discard_cleanup_result(hipFree(d_position));
+    if (d_table != nullptr) shelf::gpu::discard_cleanup_result(hipFree(d_table));
 }
 
 double normalized_mse(uint32_t bits, const std::vector<float>& levels) {
@@ -661,8 +662,8 @@ void run_attention_parity(OctaveKVCacheFormat format, uint32_t query_rows,
             std::printf("%s gpu_ms_p50=%.4f rows=%u context=%u\n", name,
                         elapsed[elapsed.size() / 2u], query_rows, tokens);
         }
-        if (start != nullptr) hipEventDestroy(start);
-        if (stop != nullptr) hipEventDestroy(stop);
+        if (start != nullptr) shelf::gpu::discard_cleanup_result(hipEventDestroy(start));
+        if (stop != nullptr) shelf::gpu::discard_cleanup_result(hipEventDestroy(stop));
     }
     std::vector<float> reference(q.size()), fused(q.size()), legacy(q.size());
     if (ok) {
@@ -697,7 +698,7 @@ void run_attention_parity(OctaveKVCacheFormat format, uint32_t query_rows,
             check(new_legacy_maximum < 0.025f, name);
         }
     }
-    for (void* pointer : allocations) hipFree(pointer);
+    for (void* pointer : allocations) shelf::gpu::discard_cleanup_result(hipFree(pointer));
 }
 
 }  // namespace

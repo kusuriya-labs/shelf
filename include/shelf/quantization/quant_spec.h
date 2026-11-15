@@ -103,6 +103,8 @@ inline std::optional<WeightScaleSpec> default_weight_scale_spec(
             return std::nullopt;
         case manifest::QuantizedEncoding::Exl3:
             return std::nullopt;
+        case manifest::QuantizedEncoding::Fp8PerChannel:
+            return std::nullopt;
         case manifest::QuantizedEncoding::Fp8:
             return WeightScaleSpec{
                 ScaleGranularity::MatrixBlock,

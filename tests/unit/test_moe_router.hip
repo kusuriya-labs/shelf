@@ -1,3 +1,4 @@
+#include <shelf/core/gpu/cleanup.h>
 #include <shelf/kernels/optimized/linear/config.h>
 #include <shelf/kernels/optimized/moe/router.h>
 #include <shelf/runtime/program/device_program.h>
@@ -622,20 +623,20 @@ int main() {
     run_unsafe_logits_case(b, stream);
     run_expert_axis_split_case(b, stream);
 
-    hipFree(b.logits);
-    hipFree(b.error_word);
-    hipFree(b.sel_expert);
-    hipFree(b.sel_weight);
-    hipFree(b.tile_counts);
-    hipFree(b.expert_row_begin);
-    hipFree(b.tile_base);
-    hipFree(b.expert_group_begin);
-    hipFree(b.group_expert);
-    hipFree(b.group_rows);
-    hipFree(b.group_count);
-    hipFree(b.row_token);
-    hipFree(b.slot_row_of);
-    hipStreamDestroy(stream);
+    shelf::gpu::discard_cleanup_result(hipFree(b.logits));
+    shelf::gpu::discard_cleanup_result(hipFree(b.error_word));
+    shelf::gpu::discard_cleanup_result(hipFree(b.sel_expert));
+    shelf::gpu::discard_cleanup_result(hipFree(b.sel_weight));
+    shelf::gpu::discard_cleanup_result(hipFree(b.tile_counts));
+    shelf::gpu::discard_cleanup_result(hipFree(b.expert_row_begin));
+    shelf::gpu::discard_cleanup_result(hipFree(b.tile_base));
+    shelf::gpu::discard_cleanup_result(hipFree(b.expert_group_begin));
+    shelf::gpu::discard_cleanup_result(hipFree(b.group_expert));
+    shelf::gpu::discard_cleanup_result(hipFree(b.group_rows));
+    shelf::gpu::discard_cleanup_result(hipFree(b.group_count));
+    shelf::gpu::discard_cleanup_result(hipFree(b.row_token));
+    shelf::gpu::discard_cleanup_result(hipFree(b.slot_row_of));
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
 
     std::printf("test_moe_router: %s (fail=%d)\n", g_fail == 0 ? "PASS" : "FAIL", g_fail);
     return g_fail == 0 ? 0 : 1;

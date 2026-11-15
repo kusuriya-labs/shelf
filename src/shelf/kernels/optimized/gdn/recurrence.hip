@@ -664,7 +664,6 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
             for (uint32_t e = 0; e < 8u; ++e) st_f16(sp + static_cast<size_t>(e) * hv, Sacc[ki * 2u + vj][e]);
         }
 }
-#pragma clang diagnostic pop
 
 // Experimental one-row specialization; the existing kernels retain their original loops.
 extern "C" __global__ __launch_bounds__(256)
@@ -683,6 +682,7 @@ __attribute__((amdgpu_num_vgpr(256)))
 void shelf_gdn_recurrence_wmma_exact(GdnRecurrenceArgs a) {
     gdn_recurrence_wmma_body<false>(a);
 }
+#pragma clang diagnostic pop
 
 struct RowSmem {
     float S[gdngfx12::kWk][gdngfx12::kSp];

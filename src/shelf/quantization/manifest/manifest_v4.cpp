@@ -138,13 +138,8 @@ std::string internal_scale_tag(QuantScalarType dtype) {
 }
 
 QuantScalarType scale_semantic_dtype(QuantizedEncoding enc) {
-    return default_weight_scale_spec(enc)->dtype;
-}
-
-QuantScalarType scale_semantic_dtype_from_tag(QuantizedEncoding enc, const std::string& tag) {
-    (void)enc;
-    if (tag == "F32") return QuantScalarType::F32;
-    return QuantScalarType::BF16;
+    const std::optional<WeightScaleSpec> spec = default_weight_scale_spec(enc);
+    return spec.has_value() ? spec->dtype : QuantScalarType::F32;
 }
 
 std::vector<uint64_t> codes_shape_of(

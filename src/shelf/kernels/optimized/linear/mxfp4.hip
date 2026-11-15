@@ -203,8 +203,6 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_mxfp4_w4a8_wmma_kernel(
                 for (int t = 0; t < MB; ++t) {
                     int32x2_t a0 = {};
                     int32x2_t a1 = {};
-                    const bool rv =
-                        (row_start + static_cast<uint32_t>(t) * kTileRow + m_lane) < rows;
                     if constexpr (!kGuarded) {
                         const uint8_t* ap = arow[t] + aoff;
                         a0 = *reinterpret_cast<const int32x2_t*>(ap);
@@ -660,6 +658,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_mxfp4_w4a8_grouped_kern
     const uint32_t g = blockIdx.y;
     if (g >= group_count[0])
         return;
+    (void)out_features;
     const uint32_t tid = threadIdx.x;
     const uint32_t m_lane = tid & 15u;
     const uint32_t k_group = tid >> 4u;

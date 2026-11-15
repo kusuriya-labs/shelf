@@ -1,3 +1,4 @@
+#include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/memory/arena.h>
 #include <shelf/io/safetensors_reader.h>
 #include <shelf/models/model_weights_factory.h>
@@ -194,7 +195,7 @@ int main() {
     if (!loaded.ok()) {
         std::printf("load status: %s\n", loaded.status().message().c_str());
         gpu_arena.shutdown();
-        hipStreamDestroy(stream);
+        shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
         return 1;
     }
     const double seconds = std::chrono::duration<double>(end - begin).count();
@@ -204,7 +205,7 @@ int main() {
     check(m != nullptr, "the factory holds MoE weights only");
     if (m == nullptr) {
         gpu_arena.shutdown();
-        hipStreamDestroy(stream);
+        shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
         return 1;
     }
     check(std::get_if<q35::Qwen35ModelWeights>(&w) == nullptr,

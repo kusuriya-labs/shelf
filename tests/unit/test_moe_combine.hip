@@ -1,3 +1,4 @@
+#include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/kernels/optimized/linear/config.h>
 #include <shelf/kernels/optimized/moe/combine.h>
@@ -425,22 +426,22 @@ int main() {
                                   stream) != hipSuccess,
           "a shared gate plane with no row stride is rejected");
 
-    hipFree(d.logits);
-    hipFree(d.sel_expert);
-    hipFree(d.sel_weight);
-    hipFree(d.tile_counts);
-    hipFree(d.row_begin);
-    hipFree(d.tile_base);
-    hipFree(d.group_begin);
-    hipFree(d.group_expert);
-    hipFree(d.group_rows);
-    hipFree(d.group_count);
-    hipFree(d.row_token);
-    hipFree(d.slot_row_of);
-    hipFree(d.expert_out);
-    hipFree(d.shared_out);
-    hipFree(d.shared_gate);
-    hipFree(d.out);
+    shelf::gpu::discard_cleanup_result(hipFree(d.logits));
+    shelf::gpu::discard_cleanup_result(hipFree(d.sel_expert));
+    shelf::gpu::discard_cleanup_result(hipFree(d.sel_weight));
+    shelf::gpu::discard_cleanup_result(hipFree(d.tile_counts));
+    shelf::gpu::discard_cleanup_result(hipFree(d.row_begin));
+    shelf::gpu::discard_cleanup_result(hipFree(d.tile_base));
+    shelf::gpu::discard_cleanup_result(hipFree(d.group_begin));
+    shelf::gpu::discard_cleanup_result(hipFree(d.group_expert));
+    shelf::gpu::discard_cleanup_result(hipFree(d.group_rows));
+    shelf::gpu::discard_cleanup_result(hipFree(d.group_count));
+    shelf::gpu::discard_cleanup_result(hipFree(d.row_token));
+    shelf::gpu::discard_cleanup_result(hipFree(d.slot_row_of));
+    shelf::gpu::discard_cleanup_result(hipFree(d.expert_out));
+    shelf::gpu::discard_cleanup_result(hipFree(d.shared_out));
+    shelf::gpu::discard_cleanup_result(hipFree(d.shared_gate));
+    shelf::gpu::discard_cleanup_result(hipFree(d.out));
     if (hipStreamDestroy(stream) != hipSuccess)
         check(false, "stream destroy");
 

@@ -1,3 +1,4 @@
+#include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/kernels/optimized/qsa.h>
 
@@ -161,15 +162,15 @@ void run_scenario(const Scenario& s, bool split = false, std::uint32_t tiles = 1
     ok = ok && hipMemset(d_mask, 0, rows * mask_row_bytes) == hipSuccess;
     check(ok, label + ": device setup");
     if (!ok) {
-        hipFree(d_q);
-        hipFree(d_pooled);
-        hipFree(d_positions);
-        hipFree(d_slots);
-        hipFree(d_selected);
-        hipFree(d_mask);
-        hipFree(d_scores);
-        hipFree(d_state_scores);
-        hipFree(d_state_indices);
+        shelf::gpu::discard_cleanup_result(hipFree(d_q));
+        shelf::gpu::discard_cleanup_result(hipFree(d_pooled));
+        shelf::gpu::discard_cleanup_result(hipFree(d_positions));
+        shelf::gpu::discard_cleanup_result(hipFree(d_slots));
+        shelf::gpu::discard_cleanup_result(hipFree(d_selected));
+        shelf::gpu::discard_cleanup_result(hipFree(d_mask));
+        shelf::gpu::discard_cleanup_result(hipFree(d_scores));
+        shelf::gpu::discard_cleanup_result(hipFree(d_state_scores));
+        shelf::gpu::discard_cleanup_result(hipFree(d_state_indices));
         return;
     }
 

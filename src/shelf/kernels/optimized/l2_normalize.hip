@@ -16,7 +16,6 @@ using bf16 = __hip_bfloat16;
 constexpr uint32_t kL2Threads = detail::kGdnL2Threads;
 static_assert(kL2Threads == 32u);
 static_assert(kL2Threads == kL2NormalizeThreads);
-constexpr uint32_t kL2ElemsPerLane = detail::kGdnL2ElemsPerLane;
 
 __device__ __forceinline__ void l2_normalize_bf16_f32_body(
     const bf16* __restrict__ input, uint32_t input_row_stride,

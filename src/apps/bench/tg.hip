@@ -10,6 +10,7 @@
 #include <shelf/models/qwen35/weights/model_weights.h>
 #include <shelf/models/qwen35/state/state_types.h>
 #include <shelf/core/status.h>
+#include <shelf/core/gpu/cleanup.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <hip/hip_runtime.h>
 
@@ -750,7 +751,12 @@ int run_tg(int argc, char** argv) {
     if (opts.mode == "forward") {
         shelf::qwen35::BatchExecutionOutput last_out;
         for (int i = 0; i < opts.tokens; ++i) {
-            hipEventRecord(token_start_events[static_cast<std::size_t>(i)], stream);
+            hip_err = hipEventRecord(token_start_events[static_cast<std::size_t>(i)], stream);
+            if (hip_err != hipSuccess) {
+                fprintf(stderr, "hipEventRecord failed at %d: %s\n", i,
+                        hipGetErrorString(hip_err));
+                return 1;
+            }
             std::vector<int32_t> token_ids = {token_id};
             shelf::qwen35::ScheduledRequest req;
             req.sequence = &seq; req.handle = seq.request_handle();
@@ -775,7 +781,12 @@ int run_tg(int argc, char** argv) {
                 return 1;
             }
             last_out = std::move(res.release());
-            hipEventRecord(token_stop_events[static_cast<std::size_t>(i)], stream);
+            hip_err = hipEventRecord(token_stop_events[static_cast<std::size_t>(i)], stream);
+            if (hip_err != hipSuccess) {
+                fprintf(stderr, "hipEventRecord failed at %d: %s\n", i,
+                        hipGetErrorString(hip_err));
+                return 1;
+            }
         }
         hip_err = hipEventRecord(stop_event, stream);
         if (hip_err != hipSuccess) {
@@ -814,7 +825,12 @@ int run_tg(int argc, char** argv) {
         std::vector<int32_t> sampled_tokens;
         sampled_tokens.reserve(opts.tokens);
         for (int i = 0; i < opts.tokens; ++i) {
-            hipEventRecord(token_start_events[static_cast<std::size_t>(i)], stream);
+            hip_err = hipEventRecord(token_start_events[static_cast<std::size_t>(i)], stream);
+            if (hip_err != hipSuccess) {
+                fprintf(stderr, "hipEventRecord failed at %d: %s\n", i,
+                        hipGetErrorString(hip_err));
+                return 1;
+            }
             std::vector<int32_t> token_ids = {token_id};
             shelf::qwen35::ScheduledRequest req;
             req.sequence = &seq; req.handle = seq.request_handle();
@@ -858,7 +874,12 @@ int run_tg(int argc, char** argv) {
             token_id = sampled;
             sampled_tokens.push_back(sampled);
             token_sum += sampled;
-            hipEventRecord(token_stop_events[static_cast<std::size_t>(i)], stream);
+            hip_err = hipEventRecord(token_stop_events[static_cast<std::size_t>(i)], stream);
+            if (hip_err != hipSuccess) {
+                fprintf(stderr, "hipEventRecord failed at %d: %s\n", i,
+                        hipGetErrorString(hip_err));
+                return 1;
+            }
         }
         printf("GREEDY_TOKEN_SUM=%d\n", token_sum);
         printf("GREEDY_FIRST_TOKENS=");
@@ -914,11 +935,18 @@ int run_tg(int argc, char** argv) {
         static_cast<double>(measured_tokens) / (wall_ms / 1000.0);
     std::vector<float> token_ms(static_cast<std::size_t>(opts.tokens));
     for (int i = 0; i < opts.tokens; ++i) {
-        hipEventElapsedTime(&token_ms[static_cast<std::size_t>(i)],
-                            token_start_events[static_cast<std::size_t>(i)],
-                            token_stop_events[static_cast<std::size_t>(i)]);
-        hipEventDestroy(token_start_events[static_cast<std::size_t>(i)]);
-        hipEventDestroy(token_stop_events[static_cast<std::size_t>(i)]);
+        hip_err = hipEventElapsedTime(&token_ms[static_cast<std::size_t>(i)],
+                                      token_start_events[static_cast<std::size_t>(i)],
+                                      token_stop_events[static_cast<std::size_t>(i)]);
+        if (hip_err != hipSuccess) {
+            fprintf(stderr, "hipEventElapsedTime failed at %d: %s\n", i,
+                    hipGetErrorString(hip_err));
+            return 1;
+        }
+        shelf::gpu::discard_cleanup_result(
+            hipEventDestroy(token_start_events[static_cast<std::size_t>(i)]));
+        shelf::gpu::discard_cleanup_result(
+            hipEventDestroy(token_stop_events[static_cast<std::size_t>(i)]));
     }
     std::sort(token_ms.begin(), token_ms.end());
     const double gpu_us_per_token_p50 = token_ms[token_ms.size() / 2u] * 1000.0;

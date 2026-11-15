@@ -1,3 +1,4 @@
+#include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/status.h>
 #include <shelf/models/qwen35/runtime/prefix_cache.h>
@@ -988,16 +989,16 @@ void test_spec_ring(Env& env) {
         hipMemcpy(ring_v, host_v.data(), kRingBytes, hipMemcpyHostToDevice) !=
             hipSuccess) {
         check(false, "spec ring seed memcpy");
-        hipFree(ring_k);
-        hipFree(ring_v);
+        shelf::gpu::discard_cleanup_result(hipFree(ring_k));
+        shelf::gpu::discard_cleanup_result(hipFree(ring_v));
         return;
     }
 
     auto seq = make_seq(env, *env.kv_bf16);
     check(seq.has_value(), "spec ring seq");
     if (!seq.has_value()) {
-        hipFree(ring_k);
-        hipFree(ring_v);
+        shelf::gpu::discard_cleanup_result(hipFree(ring_k));
+        shelf::gpu::discard_cleanup_result(hipFree(ring_v));
         return;
     }
     check(append_tokens(*seq, 8, env.stream), "spec ring append");
@@ -1021,8 +1022,8 @@ void test_spec_ring(Env& env) {
     if (hipMalloc(&out_k, kRingBytes) != hipSuccess ||
         hipMalloc(&out_v, kRingBytes) != hipSuccess) {
         check(false, "spec ring out hipMalloc");
-        hipFree(ring_k);
-        hipFree(ring_v);
+        shelf::gpu::discard_cleanup_result(hipFree(ring_k));
+        shelf::gpu::discard_cleanup_result(hipFree(ring_v));
         return;
     }
     shelf::qwen35::runtime::SpecRingOut ring_out;
@@ -1032,20 +1033,20 @@ void test_spec_ring(Env& env) {
     auto dst = make_seq(env, *env.kv_bf16);
     check(dst.has_value(), "spec ring dst");
     if (!dst.has_value()) {
-        hipFree(ring_k);
-        hipFree(ring_v);
-        hipFree(out_k);
-        hipFree(out_v);
+        shelf::gpu::discard_cleanup_result(hipFree(ring_k));
+        shelf::gpu::discard_cleanup_result(hipFree(ring_v));
+        shelf::gpu::discard_cleanup_result(hipFree(out_k));
+        shelf::gpu::discard_cleanup_result(hipFree(out_v));
         return;
     }
     check(cache.restore(hit.entry_id, *dst, env.stream, &ring_out).ok(),
           "spec ring restore");
     if (hipStreamSynchronize(env.stream) != hipSuccess) {
         check(false, "spec ring restore sync");
-        hipFree(ring_k);
-        hipFree(ring_v);
-        hipFree(out_k);
-        hipFree(out_v);
+        shelf::gpu::discard_cleanup_result(hipFree(ring_k));
+        shelf::gpu::discard_cleanup_result(hipFree(ring_v));
+        shelf::gpu::discard_cleanup_result(hipFree(out_k));
+        shelf::gpu::discard_cleanup_result(hipFree(out_v));
         return;
     }
     check(dst->position == 8, "spec ring restore position");
@@ -1066,10 +1067,10 @@ void test_spec_ring(Env& env) {
 
     free_seq(dst, env.stream);
     free_seq(seq, env.stream);
-    hipFree(ring_k);
-    hipFree(ring_v);
-    hipFree(out_k);
-    hipFree(out_v);
+    shelf::gpu::discard_cleanup_result(hipFree(ring_k));
+    shelf::gpu::discard_cleanup_result(hipFree(ring_v));
+    shelf::gpu::discard_cleanup_result(hipFree(out_k));
+    shelf::gpu::discard_cleanup_result(hipFree(out_v));
 }
 
 }  // namespace

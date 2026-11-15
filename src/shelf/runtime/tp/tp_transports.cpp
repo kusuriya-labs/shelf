@@ -31,13 +31,11 @@ Status HostMediatedTpTransport::ensure_staging(std::size_t bytes, std::size_t co
     staging_.assign(devices_.size(), nullptr);
     for (std::size_t r = 0; r < devices_.size(); ++r) {
         void* buffer = nullptr;
-        if (hipHostMalloc(&buffer, bytes, hipHostMallocDefault) != hipSuccess) {
-            shelf::gpu::discard_cleanup_result(hipGetLastError());
-            if (hipMallocHost(&buffer, bytes) != hipSuccess) {
-                return Status::hip_error("host transport staging alloc",
-                                         hipGetErrorString(hipGetLastError()), __FILE__,
-                                         __LINE__);
-            }
+        const hipError_t host_err =
+            hipHostMalloc(&buffer, bytes, hipHostMallocDefault);
+        if (host_err != hipSuccess) {
+            return Status::hip_error("host transport staging alloc",
+                                     hipGetErrorString(host_err), __FILE__, __LINE__);
         }
         staging_[r] = buffer;
     }

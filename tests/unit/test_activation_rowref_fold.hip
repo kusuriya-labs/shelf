@@ -1,3 +1,4 @@
+#include <shelf/core/gpu/cleanup.h>
 #include <shelf/kernels/optimized/activation_quantize.h>
 #include <shelf/quantization/codec/e4m3.h>
 #include <shelf/quantization/fp8/fp8_frag.h>
@@ -101,8 +102,8 @@ int main() {
         !hip_ok(hipMalloc((void**)&d_scales, scales_bytes), "malloc scales")) {
         return 1;
     }
-    hipMemset(d_codes, 0xCD, codes_bytes);
-    hipMemset(d_scales, 0, scales_bytes);
+    hip_ok(hipMemset(d_codes, 0xCD, codes_bytes), "memset d_codes");
+    hip_ok(hipMemset(d_scales, 0, scales_bytes), "memset d_scales");
     if (!hip_ok(hipMemcpy(d_in, h_in.data(), h_in.size() * sizeof(__hip_bfloat16),
                           hipMemcpyHostToDevice), "h2d in"))
         return 1;

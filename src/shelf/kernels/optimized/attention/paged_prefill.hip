@@ -227,7 +227,6 @@ __device__ __forceinline__ void octave_inverse_wave(
     float (&x)[8], uint32_t lane, bool compact) {
     octave_wht8(x);
     const uint32_t limit = compact ? 16u : 4u;
-    #pragma unroll
     for (uint32_t mask = 1u; mask <= 16u; mask <<= 1u) {
         if (mask > limit) break;
         #pragma unroll

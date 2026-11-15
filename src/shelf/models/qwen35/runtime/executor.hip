@@ -1346,7 +1346,6 @@ Executor::Executor(Executor&& other) noexcept
       host_sampled_staging(other.host_sampled_staging),
       host_sampled_staging_bytes(other.host_sampled_staging_bytes),
       host_status_staging(other.host_status_staging),
-      completion_signal(other.completion_signal),
       next_submission_id(other.next_submission_id),
       active_submission_id(other.active_submission_id),
       program_set(std::move(other.program_set)),
@@ -1397,7 +1396,8 @@ Executor::Executor(Executor&& other) noexcept
       layer_override_value_ids(std::move(other.layer_override_value_ids)),
       layer_override_rows(std::move(other.layer_override_rows)),
       layer_override_hidden(std::move(other.layer_override_hidden)),
-      layer_override_host(std::move(other.layer_override_host)) {
+      layer_override_host(std::move(other.layer_override_host)),
+      completion_signal(other.completion_signal) {
     if (batch_context_storage.device_struct.allocation_base() != nullptr) {
         batch_context = batch_context_storage.device_struct.data<::shelf::runtime::DeviceBatchContext>();
     } else {

@@ -1,3 +1,4 @@
+#include <shelf/core/gpu/cleanup.h>
 #include <shelf/kernels/optimized/sampling.h>
 #include <hip/hip_runtime.h>
 #include <cmath>
@@ -53,14 +54,14 @@ static bool test_row_masks() {
         const float value = result[row * vocab + token];
         if (allowed ? value != 1.0f : !(std::isinf(value) && value < 0)) ok = false;
     }
-    if (logits) hipFree(logits);
-    if (context) hipFree(context);
-    if (sampling) hipFree(sampling);
-    if (request) hipFree(request);
-    if (positions) hipFree(positions);
-    if (slots) hipFree(slots);
-    if (output_rows) hipFree(output_rows);
-    if (device_masks) hipFree(device_masks);
+    if (logits) shelf::gpu::discard_cleanup_result(hipFree(logits));
+    if (context) shelf::gpu::discard_cleanup_result(hipFree(context));
+    if (sampling) shelf::gpu::discard_cleanup_result(hipFree(sampling));
+    if (request) shelf::gpu::discard_cleanup_result(hipFree(request));
+    if (positions) shelf::gpu::discard_cleanup_result(hipFree(positions));
+    if (slots) shelf::gpu::discard_cleanup_result(hipFree(slots));
+    if (output_rows) shelf::gpu::discard_cleanup_result(hipFree(output_rows));
+    if (device_masks) shelf::gpu::discard_cleanup_result(hipFree(device_masks));
     return ok;
 }
 

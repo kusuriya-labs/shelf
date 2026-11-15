@@ -850,7 +850,6 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
         }
         case PrimitiveKind::MOE_ROUTER: {
             if (!c.open_moe_scratch()) return fail("moe plan scratch has no capacity");
-            const uint32_t cmd0 = static_cast<uint32_t>(c.plan->dispatches.size());
             const auto& n = node_as<MoeRouterNode>(node);
             DispatchBinding rb = base_binding(KernelId::MOE_ROUTER);
             rb.input_slots[0] = node.inputs[0].id;
@@ -922,9 +921,6 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
             const uint64_t act_ws_key = static_cast<uint64_t>(node.inputs[0].id) |
                                         (std::uint64_t{1} << 63);
             const uint32_t cmd_idx = static_cast<uint32_t>(c.plan->dispatches.size());
-            const auto* in_spec = c.graph->value_spec(node.inputs[0]);
-            const bool gather_rows =
-                in_spec != nullptr && in_spec->row_domain == ValueRowDomain::TOKEN_ROWS;
 
             auto it = c.activation_ws_by_input.find(act_ws_key);
             if (it == c.activation_ws_by_input.end()) {

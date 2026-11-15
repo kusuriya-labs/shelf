@@ -691,9 +691,10 @@ Status execute_program_tp_ranges(
         }
         if (std::getenv("SHELF_TP_SUM_DEBUG") != nullptr) {
             std::fprintf(stderr,
-                         "SUM rank=%d id=%u ptr=%p rows=%u stride=%u feat=%u dtype=%d "
+                         "SUM rank=%d id=%u ptr=%p rows=%llu stride=%u feat=%u dtype=%d "
                          "actual_rows=%u actual_out=%u\n",
-                         rank, segment.combine_value.id, target.ptr, target.rows,
+                         rank, segment.combine_value.id, target.ptr,
+                         static_cast<unsigned long long>(target.rows),
                          target.row_stride, target.feature_count,
                          static_cast<int>(target.dtype), ctx.actual_rows,
                          ctx.actual_outputs);

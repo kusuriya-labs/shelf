@@ -396,6 +396,7 @@ Status PrefixKVStore::prepare_save(
     uint32_t position,
     SavePlan& plan,
     hipStream_t stream) {
+    (void)stream;
     if (static_cast<std::size_t>(position) != tokens.size()) {
         return Status::invalid_argument("save position must equal token count",
                                         __FILE__, __LINE__);

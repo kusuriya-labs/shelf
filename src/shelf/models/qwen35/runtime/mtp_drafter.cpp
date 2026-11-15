@@ -464,7 +464,11 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
     drafter->wide_hidden = input.wide_hidden;
     drafter->target_pool = &target_gdn_pool;
     drafter->target_stream = stream;
-    hipGetDevice(&drafter->target_device);
+    const hipError_t device_err = hipGetDevice(&drafter->target_device);
+    if (device_err != hipSuccess) {
+        return Status::hip_error("hipGetDevice", hipGetErrorString(device_err), __FILE__,
+                                 __LINE__);
+    }
     drafter->tp_hook = tp_hook;
 
     const uint32_t pages =
@@ -1055,6 +1059,7 @@ Result<MtpDraftResult> mtp_draft(
     state::PagedSequenceState& target_sequence,
     int32_t pending_token,
     uint32_t remaining_tokens) {
+    (void)target;
     if (!drafter.initialized) {
         return Status::invalid_state("mtp_draft: drafter is not initialized", __FILE__,
                                      __LINE__);
@@ -1282,7 +1287,11 @@ Result<MtpSpecBatchContext> create_mtp_spec_batch_context(
     }
 
     int rank0_device = 0;
-    hipGetDevice(&rank0_device);
+    const hipError_t rank0_device_err = hipGetDevice(&rank0_device);
+    if (rank0_device_err != hipSuccess) {
+        return Status::hip_error("hipGetDevice", hipGetErrorString(rank0_device_err),
+                                 __FILE__, __LINE__);
+    }
     auto make_rank = [&](const state::GdnStatePool& pool, gpu::GpuArena& rank_arena,
                          hipStream_t rank_stream, int device,
                          Executor* executor) -> Result<MtpGdnRankState> {

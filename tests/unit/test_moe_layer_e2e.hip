@@ -1,3 +1,4 @@
+#include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/io/safetensors_reader.h>
 #include <shelf/kernels/optimized/activation_quantize.h>
@@ -695,29 +696,29 @@ int main() {
     check(rel_hf < 8.0e-2, "the layer total stays within 8e-2 rel_l2 of the HF f64 layer (" +
                                std::to_string(rel_hf) + ")");
 
-    hipFree(d_swiglu_row_index);
-    hipFree(d_logits);
-    hipFree(d_sel_expert);
-    hipFree(d_sel_weight);
-    hipFree(d_tile_counts);
-    hipFree(d_row_begin);
-    hipFree(d_tile_base);
-    hipFree(d_group_begin);
-    hipFree(d_group_expert);
-    hipFree(d_group_rows);
-    hipFree(d_group_count);
-    hipFree(d_row_token);
-    hipFree(d_slot_row_of);
-    hipFree(d_plane);
-    hipFree(d_hidden13);
-    hipFree(d_hidden2);
-    hipFree(d_out13);
-    hipFree(d_out2);
-    hipFree(d_shared);
-    hipFree(d_gate_bf16);
-    hipFree(d_gate);
-    hipFree(d_combined);
-    hipFree(d_routed);
+    shelf::gpu::discard_cleanup_result(hipFree(d_swiglu_row_index));
+    shelf::gpu::discard_cleanup_result(hipFree(d_logits));
+    shelf::gpu::discard_cleanup_result(hipFree(d_sel_expert));
+    shelf::gpu::discard_cleanup_result(hipFree(d_sel_weight));
+    shelf::gpu::discard_cleanup_result(hipFree(d_tile_counts));
+    shelf::gpu::discard_cleanup_result(hipFree(d_row_begin));
+    shelf::gpu::discard_cleanup_result(hipFree(d_tile_base));
+    shelf::gpu::discard_cleanup_result(hipFree(d_group_begin));
+    shelf::gpu::discard_cleanup_result(hipFree(d_group_expert));
+    shelf::gpu::discard_cleanup_result(hipFree(d_group_rows));
+    shelf::gpu::discard_cleanup_result(hipFree(d_group_count));
+    shelf::gpu::discard_cleanup_result(hipFree(d_row_token));
+    shelf::gpu::discard_cleanup_result(hipFree(d_slot_row_of));
+    shelf::gpu::discard_cleanup_result(hipFree(d_plane));
+    shelf::gpu::discard_cleanup_result(hipFree(d_hidden13));
+    shelf::gpu::discard_cleanup_result(hipFree(d_hidden2));
+    shelf::gpu::discard_cleanup_result(hipFree(d_out13));
+    shelf::gpu::discard_cleanup_result(hipFree(d_out2));
+    shelf::gpu::discard_cleanup_result(hipFree(d_shared));
+    shelf::gpu::discard_cleanup_result(hipFree(d_gate_bf16));
+    shelf::gpu::discard_cleanup_result(hipFree(d_gate));
+    shelf::gpu::discard_cleanup_result(hipFree(d_combined));
+    shelf::gpu::discard_cleanup_result(hipFree(d_routed));
     gpu_arena.shutdown();
     if (hipStreamDestroy(stream) != hipSuccess)
         check(false, "stream destroy");

@@ -1,3 +1,4 @@
+#include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/kernels/optimized/qsa.h>
 
@@ -80,10 +81,10 @@ int main() {
               "hipMalloc weight");
         check(hipMalloc(&d_pooled, want.size() * sizeof(shelf::bf16_t)) == hipSuccess,
               "hipMalloc pooled");
-        hipMemcpy(d_raw, raw.data(), raw.size() * sizeof(shelf::bf16_t),
-                  hipMemcpyHostToDevice);
-        hipMemcpy(d_weight, weight.data(), weight.size() * sizeof(shelf::bf16_t),
-                  hipMemcpyHostToDevice);
+        check(hipMemcpy(d_raw, raw.data(), raw.size() * sizeof(shelf::bf16_t),
+              hipMemcpyHostToDevice) == hipSuccess, "h2d d_raw");
+        check(hipMemcpy(d_weight, weight.data(), weight.size() * sizeof(shelf::bf16_t),
+              hipMemcpyHostToDevice) == hipSuccess, "h2d d_weight");
         shelf::kernel::QsaPoolArgs args;
         args.raw_keys = static_cast<const shelf::bf16_t*>(d_raw);
         args.norm_weight = static_cast<const shelf::bf16_t*>(d_weight);
@@ -97,8 +98,8 @@ int main() {
               "qsa pool launch");
         check(hipDeviceSynchronize() == hipSuccess, "qsa pool sync");
         std::vector<shelf::bf16_t> got(want.size());
-        hipMemcpy(got.data(), d_pooled, got.size() * sizeof(shelf::bf16_t),
-                  hipMemcpyDeviceToHost);
+        check(hipMemcpy(got.data(), d_pooled, got.size() * sizeof(shelf::bf16_t),
+              hipMemcpyDeviceToHost) == hipSuccess, "d2h got.data()");
         double max_error = 0.0;
         for (std::size_t i = 0; i < got.size(); ++i) {
             max_error = std::max<double>(
@@ -145,8 +146,11 @@ int main() {
               "hipMalloc rope x");
         check(hipMalloc(&d_positions, sizeof(positions)) == hipSuccess,
               "hipMalloc rope positions");
-        hipMemcpy(d_x, x.data(), x.size() * sizeof(shelf::bf16_t), hipMemcpyHostToDevice);
-        hipMemcpy(d_positions, positions, sizeof(positions), hipMemcpyHostToDevice);
+        check(hipMemcpy(d_x, x.data(), x.size() * sizeof(shelf::bf16_t),
+                        hipMemcpyHostToDevice) == hipSuccess, "h2d d_x");
+        check(hipMemcpy(d_positions, positions, sizeof(positions), hipMemcpyHostToDevice) ==
+                  hipSuccess,
+              "h2d d_positions");
         shelf::kernel::QsaRopeArgs args;
         args.x = static_cast<shelf::bf16_t*>(d_x);
         args.positions = static_cast<const std::uint32_t*>(d_positions);
@@ -160,8 +164,8 @@ int main() {
               "qsa rope launch");
         check(hipDeviceSynchronize() == hipSuccess, "qsa rope sync");
         std::vector<shelf::bf16_t> got(x.size());
-        hipMemcpy(got.data(), d_x, got.size() * sizeof(shelf::bf16_t),
-                  hipMemcpyDeviceToHost);
+        check(hipMemcpy(got.data(), d_x, got.size() * sizeof(shelf::bf16_t),
+              hipMemcpyDeviceToHost) == hipSuccess, "d2h got.data()");
         double max_error = 0.0;
         for (std::size_t i = 0; i < got.size(); ++i) {
             max_error = std::max<double>(
@@ -267,15 +271,19 @@ int main() {
               "hipMalloc cache pool count");
         check(hipMalloc(&d_partial_count, sizeof(std::uint32_t)) == hipSuccess,
               "hipMalloc cache partial count");
-        hipMemcpy(d_raw, raw.data(), raw.size() * sizeof(shelf::bf16_t),
-                  hipMemcpyHostToDevice);
-        hipMemcpy(d_weight, norm_weight.data(),
-                  norm_weight.size() * sizeof(shelf::bf16_t), hipMemcpyHostToDevice);
-        hipMemcpy(d_positions, positions.data(), positions.size() * sizeof(std::uint32_t),
-                  hipMemcpyHostToDevice);
+        check(hipMemcpy(d_raw, raw.data(), raw.size() * sizeof(shelf::bf16_t),
+              hipMemcpyHostToDevice) == hipSuccess, "h2d d_raw");
+        check(hipMemcpy(d_weight, norm_weight.data(),
+                        norm_weight.size() * sizeof(shelf::bf16_t),
+                        hipMemcpyHostToDevice) == hipSuccess, "h2d d_weight");
+        check(hipMemcpy(d_positions, positions.data(), positions.size() * sizeof(std::uint32_t),
+                        hipMemcpyHostToDevice) == hipSuccess, "h2d d_positions");
         std::uint32_t zero = 0;
-        hipMemcpy(d_pool_count, &zero, sizeof(zero), hipMemcpyHostToDevice);
-        hipMemcpy(d_partial_count, &zero, sizeof(zero), hipMemcpyHostToDevice);
+        check(hipMemcpy(d_pool_count, &zero, sizeof(zero), hipMemcpyHostToDevice) == hipSuccess,
+              "h2d d_pool_count");
+        check(hipMemcpy(d_partial_count, &zero, sizeof(zero), hipMemcpyHostToDevice) ==
+                  hipSuccess,
+              "h2d d_partial_count");
 
         shelf::kernel::QsaKeyCacheArgs args;
         args.raw_keys = static_cast<const shelf::bf16_t*>(d_raw);
@@ -299,14 +307,15 @@ int main() {
         std::vector<shelf::bf16_t> got_partial(want_partial.size());
         std::uint32_t got_pool_count = 0;
         std::uint32_t got_partial_count = 0;
-        hipMemcpy(got_pooled.data(), d_pooled, got_pooled.size() * sizeof(shelf::bf16_t),
-                  hipMemcpyDeviceToHost);
-        hipMemcpy(got_partial.data(), d_partial,
-                  got_partial.size() * sizeof(shelf::bf16_t), hipMemcpyDeviceToHost);
-        hipMemcpy(&got_pool_count, d_pool_count, sizeof(got_pool_count),
-                  hipMemcpyDeviceToHost);
-        hipMemcpy(&got_partial_count, d_partial_count, sizeof(got_partial_count),
-                  hipMemcpyDeviceToHost);
+        check(hipMemcpy(got_pooled.data(), d_pooled, got_pooled.size() * sizeof(shelf::bf16_t),
+              hipMemcpyDeviceToHost) == hipSuccess, "d2h got_pooled.data()");
+        check(hipMemcpy(got_partial.data(), d_partial,
+                        got_partial.size() * sizeof(shelf::bf16_t),
+                        hipMemcpyDeviceToHost) == hipSuccess, "d2h got_partial.data()");
+        check(hipMemcpy(&got_pool_count, d_pool_count, sizeof(got_pool_count),
+              hipMemcpyDeviceToHost) == hipSuccess, "d2h got_pool_count");
+        check(hipMemcpy(&got_partial_count, d_partial_count, sizeof(got_partial_count),
+              hipMemcpyDeviceToHost) == hipSuccess, "d2h got_partial_count");
         double max_pooled = 0.0;
         for (std::uint32_t b = 0; b < want_pool_count; ++b) {
             for (std::uint32_t d = 0; d < kHeadDim; ++d) {

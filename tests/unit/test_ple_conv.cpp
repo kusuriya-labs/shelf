@@ -1,3 +1,4 @@
+#include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/kernels/optimized/ple_conv.h>
 #include <shelf/runtime/batch/device_batch_context.h>
@@ -104,14 +105,14 @@ bool run_case(const Case& c) {
                                      sizeof(shelf::runtime::DeviceRequestDescriptor)) ==
               hipSuccess,
           "hipMalloc requests");
-    hipMemcpy(d_input, input.data(), input.size() * sizeof(shelf::bf16_t),
-              hipMemcpyHostToDevice);
-    hipMemcpy(d_weight, weight.data(), weight.size() * sizeof(shelf::bf16_t),
-              hipMemcpyHostToDevice);
-    hipMemcpy(d_output, want_output.data(), want_output.size() * sizeof(shelf::bf16_t),
-              hipMemcpyHostToDevice);
-    hipMemcpy(d_state, state.data(), state.size() * sizeof(shelf::bf16_t),
-              hipMemcpyHostToDevice);
+    check(hipMemcpy(d_input, input.data(), input.size() * sizeof(shelf::bf16_t),
+          hipMemcpyHostToDevice) == hipSuccess, "h2d d_input");
+    check(hipMemcpy(d_weight, weight.data(), weight.size() * sizeof(shelf::bf16_t),
+          hipMemcpyHostToDevice) == hipSuccess, "h2d d_weight");
+    check(hipMemcpy(d_output, want_output.data(), want_output.size() * sizeof(shelf::bf16_t),
+          hipMemcpyHostToDevice) == hipSuccess, "h2d d_output");
+    check(hipMemcpy(d_state, state.data(), state.size() * sizeof(shelf::bf16_t),
+          hipMemcpyHostToDevice) == hipSuccess, "h2d d_state");
 
     std::vector<shelf::runtime::DeviceRequestDescriptor> requests(c.requests.size());
     for (std::size_t i = 0; i < c.requests.size(); ++i) {
@@ -119,9 +120,9 @@ bool run_case(const Case& c) {
         requests[i].row_begin = c.requests[i].second.first;
         requests[i].row_count = c.requests[i].second.second;
     }
-    hipMemcpy(d_requests, requests.data(),
+    check(hipMemcpy(d_requests, requests.data(),
               requests.size() * sizeof(shelf::runtime::DeviceRequestDescriptor),
-              hipMemcpyHostToDevice);
+          hipMemcpyHostToDevice) == hipSuccess, "h2d d_requests");
 
     shelf::kernel::PleConvArgs args;
     args.input = static_cast<const shelf::bf16_t*>(d_input);
@@ -145,10 +146,10 @@ bool run_case(const Case& c) {
 
     std::vector<shelf::bf16_t> got_output(want_output.size());
     std::vector<shelf::bf16_t> got_state(want_state.size());
-    hipMemcpy(got_output.data(), d_output, got_output.size() * sizeof(shelf::bf16_t),
-              hipMemcpyDeviceToHost);
-    hipMemcpy(got_state.data(), d_state, got_state.size() * sizeof(shelf::bf16_t),
-              hipMemcpyDeviceToHost);
+    check(hipMemcpy(got_output.data(), d_output, got_output.size() * sizeof(shelf::bf16_t),
+          hipMemcpyDeviceToHost) == hipSuccess, "d2h got_output.data()");
+    check(hipMemcpy(got_state.data(), d_state, got_state.size() * sizeof(shelf::bf16_t),
+          hipMemcpyDeviceToHost) == hipSuccess, "d2h got_state.data()");
 
     double max_output = 0.0;
     double max_state = 0.0;

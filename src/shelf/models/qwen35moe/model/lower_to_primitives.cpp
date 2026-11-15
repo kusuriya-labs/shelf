@@ -272,7 +272,6 @@ Result<QH::HybridLoweredPrimitives> lower_qwen35_moe_to_primitives(
             __LINE__);
     }
     const uint32_t local_experts = experts / tp_size;
-    const uint32_t expert_begin = options.tp_rank * local_experts;
     const uint32_t local_shared_intermediate = shared_intermediate / tp_size;
     auto divide_heads = [&](std::size_t heads, const char* what) -> Result<uint32_t> {
         if (heads == 0u || (heads % tp_size) != 0u) {

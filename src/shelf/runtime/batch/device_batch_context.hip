@@ -1,4 +1,5 @@
 #include <shelf/runtime/batch/device_batch_context.h>
+#include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/gpu/scoped_device.h>
 #include <hip/hip_runtime.h>
 #include <vector>
@@ -108,6 +109,6 @@ void warm_prepare_batch_descriptor(DeviceBatchContext* ctx, hipStream_t stream) 
     if (ctx == nullptr) return;
     constexpr uint32_t kBlock = 256;
     hipLaunchKernelGGL(prepare_batch_descriptor_kernel, dim3(1), dim3(kBlock), 0, stream, ctx);
-    hipGetLastError();
+    shelf::gpu::discard_cleanup_result(hipGetLastError());
 }
 }
