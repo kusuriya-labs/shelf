@@ -23,6 +23,10 @@ const shelf::qwen_hybrid::QwenHybridConfig& LoadedModel::hybrid_config() const n
         return static_cast<const shelf::qwen_hybrid::QwenHybridConfig&>(
             qwen4exp_->text_config());
     }
+    if (qsa_ != nullptr) {
+        return static_cast<const shelf::qwen_hybrid::QwenHybridConfig&>(
+            qsa_->text_config());
+    }
     return moe_ != nullptr ? static_cast<const shelf::qwen_hybrid::QwenHybridConfig&>(
                                  moe_->text_config())
                            : static_cast<const shelf::qwen_hybrid::QwenHybridConfig&>(
@@ -32,12 +36,14 @@ const shelf::qwen_hybrid::QwenHybridConfig& LoadedModel::hybrid_config() const n
 const shelf::weights::MatrixWeight& LoadedModel::embed_tokens() const noexcept {
     if (plamo_ != nullptr) return plamo_->weights.embed_tokens;
     if (qwen4exp_ != nullptr) return qwen4exp_->weights().embed_tokens;
+    if (qsa_ != nullptr) return qsa_->weights().backbone.embed_tokens;
     return moe_ != nullptr ? moe_->weights().embed_tokens : dense_->weights().embed_tokens;
 }
 
 const shelf::weights::MatrixWeight& LoadedModel::lm_head() const noexcept {
     if (plamo_ != nullptr) return plamo_->weights.lm_head;
     if (qwen4exp_ != nullptr) return qwen4exp_->weights().lm_head;
+    if (qsa_ != nullptr) return qsa_->weights().backbone.lm_head;
     return moe_ != nullptr ? moe_->weights().lm_head : dense_->weights().lm_head;
 }
 
@@ -78,6 +84,18 @@ Result<LoadedModel> LoadedModel::load(
         out.owns_qwen4exp_ =
             std::make_unique<shelf::qwen4exp::Qwen4ExpModel>(loaded.release());
         out.qwen4exp_ = out.owns_qwen4exp_.get();
+        return out;
+    }
+    if (family_result.value() == ModelFamily::Qsa) {
+        shelf::qwen35qsa::Qwen35QsaLoadOptions options;
+        options.verify_quantized_payload_crc = verify_payload_crc;
+        options.load_mtp_layers = load_mtp;
+        auto loaded = shelf::qwen35qsa::Qwen35QsaModel::load_from_safetensors(
+            model_dir, arena, stream, options);
+        if (!loaded.ok()) return loaded.status();
+        out.owns_qsa_ =
+            std::make_unique<shelf::qwen35qsa::Qwen35QsaModel>(loaded.release());
+        out.qsa_ = out.owns_qsa_.get();
         return out;
     }
     if (family_result.value() == ModelFamily::Moe) {
@@ -136,6 +154,9 @@ shelf::weights::Exl3LinearShape LoadedModel::exl3_linear_shape() const {
     if (qwen4exp_ != nullptr) {
         return shelf::qwen4exp::exl3_linear_shape(qwen4exp_->weights());
     }
+    if (qsa_ != nullptr) {
+        return shelf::qwen35::exl3_linear_shape(qsa_->weights().backbone);
+    }
     if (moe_ != nullptr) {
         return shelf::qwen35moe::exl3_linear_shape(moe_->weights());
     }
@@ -149,7 +170,8 @@ std::size_t LoadedModel::executor_reserve_bytes(std::size_t max_batch_rows,
                                                 std::size_t max_scheduled_requests,
                                                 std::size_t max_scheduled_output_rows,
                                                 std::size_t target_hidden_tap_count,
-                                                std::size_t tp_size) const {
+                                                std::size_t tp_size,
+                                                std::size_t max_context_tokens) const {
     shelf::qwen35::ExecutorConfig reserve_config;
     reserve_config.max_batch_rows = static_cast<std::uint32_t>(max_batch_rows);
     reserve_config.max_scheduled_requests = static_cast<std::uint32_t>(max_scheduled_requests);
@@ -163,8 +185,15 @@ std::size_t LoadedModel::executor_reserve_bytes(std::size_t max_batch_rows,
     const std::size_t token_row_ffn =
         plamo_ != nullptr ? plamo_->config.intermediate_size
         : qwen4exp_ != nullptr ? qwen4exp_->text_config().ffn.shared_expert_intermediate_size
+        : qsa_ != nullptr ? qsa_->text_config().ffn.intermediate_size
         : moe_ != nullptr ? moe_->text_config().ffn.shared_expert_intermediate_size
                           : dense_->text_config().ffn.intermediate_size;
+    if (qsa_ != nullptr) {
+        reserve_config.max_context_tokens = static_cast<std::uint32_t>(max_context_tokens);
+        return shelf::qwen35qsa::qwen35qsa_executor_reserve_bytes(
+            qsa_->text_config(), token_row_ffn, reserve_config, tp_size,
+            reserve_config.exl3_linear_shape.present(), max_scheduled_requests);
+    }
     const bool exl3 =
         plamo_ != nullptr ? reserve_config.exl3_linear_shape.present()
         : qwen4exp_ != nullptr ? true
@@ -223,6 +252,14 @@ Result<shelf::qwen35::Executor> LoadedModel::create_executor(
             "Qwen4Exp runs through the tensor-parallel rank model, not LoadedModel",
             __FILE__, __LINE__);
     }
+    if (qsa_ != nullptr) {
+        if (config.tp != nullptr && config.tp->tp_size > 1u) {
+            return Status::unsupported(
+                "qwen35qsa: tensor parallel is not implemented", __FILE__, __LINE__);
+        }
+        return shelf::qwen35qsa::create_qwen35qsa_model_executor(
+            *qsa_, sequence_pool, gdn_state_pool, kv_pool, arena, config);
+    }
     shelf::qwen35::ExecutorConfig resolved = config;
     resolved.exl3_linear_shape = exl3_linear_shape();
     if (dense_ != nullptr) {
@@ -262,6 +299,11 @@ MtpExecutorTerms mtp_executor_terms(const LoadedModel& model, std::size_t rows) 
         terms.grouped_executor_bytes = shelf::qwen4exp::mtp_grouped_executor_bytes(
             q4.text_config(), rows, 0u);
         terms.exl3_linear_workspace = true;
+    } else if (model.qsa_model() != nullptr) {
+        terms.token_row_intermediate =
+            model.qsa_model()->text_config().ffn.intermediate_size;
+        terms.exl3_linear_workspace =
+            shelf::qwen35::uses_exl3_linear(model.qsa_model()->weights().backbone);
     } else if (model.moe_model() != nullptr) {
         const auto& moe = *model.moe_model();
         terms.token_row_intermediate = moe.text_config().ffn.shared_expert_intermediate_size;
@@ -281,6 +323,9 @@ MtpExecutorTerms mtp_executor_terms(const LoadedModel& model, std::size_t rows) 
 bool LoadedModel::has_mtp_block() const noexcept {
     if (qwen4exp_ != nullptr) return qwen4exp_->weights().mtp.present;
     if (moe_ != nullptr) return moe_->weights().mtp.present;
+    // Speculative decode is not wired for the sparse family yet: its state pool has to be
+    // rolled back with the KV cache when drafts are rejected.
+    if (qsa_ != nullptr) return false;
     return dense_ != nullptr && dense_->weights().mtp.present;
 }
 

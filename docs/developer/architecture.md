@@ -197,9 +197,13 @@ safetensors checkpoint をどの契約で読むかは、宣言と構造の別々
 
 | 決めること | キー | 実装 |
 | --- | --- | --- |
-| この build が実装するアーキテクチャか | `model_type` / `text_config.model_type` | `shelf::qwen_hybrid::check_config_identity`。受理集合は `supported_model_identities()`（ビルド時固定の allowlist） |
+| この build が実装するアーキテクチャか | root の `model_type` | `shelf::qwen_hybrid::check_config_identity`。受理集合は `supported_model_identities()`（ビルド時固定の allowlist） |
 | FFN が dense か routed expert か | `text_config.num_experts` | 各 family の config reader と `shelf::models::load_model_weights` |
 
+- gate の入力は root の `model_type` だけである。`text_config.model_type` は
+  multimodal wrapper が内包する backbone の名前なので、wrapper の identity が未実装でも
+  内側が既知というだけで通してしまう。拒否メッセージには
+  `text_config.model_type` と `architectures` を診断として添えるが、判定には使わない
 - gate は拒否専用である。集合外・宣言無しは `Status::unsupported` を返すだけで、
   identity が code path を選択しない。ここから仮想ディスパッチや registry は生まれない
 - config を読む入口（`read_qwen_hybrid_config` / `read_declared_num_experts` /
@@ -208,9 +212,11 @@ safetensors checkpoint をどの契約で読むかは、宣言と構造の別々
 - dense reader は routed-expert identity を拒否するが、これは `intermediate_size` と
   `num_experts` の検査の後の backstop である（宣言より構造が正本）
 - 受理集合の拡張は、そのアーキテクチャの実装と同時だけに限る
-- payload の dtype も load 段階で拒否する。BF16 path が F32 / F16 payload を読むと
+- payload の dtype も load 段階で拒否する。BF16 path が想定外の dtype を読むと
   要素サイズ違いで arena へ書き、実行中に意味不明な失敗になるため、
-  `shelf_weights` の loader が `Status::invalid_argument` を返す
+  `shelf_weights` の loader が `Status::invalid_argument` を返す。
+  2-D matrix は BF16 / F32（F32 は BF16 へ widen）、1-D vector は BF16 / F32
+  （`load_bf16_or_f32_tensor` を使う norm は F32 のまま保持する）。
 - speculative decode の drafter は別の識別を持つ
   （`architectures[0] == "DFlash2DraftModel"`、`qwen35/dflash2/config.cpp`）。
   target の identity gate とは独立である

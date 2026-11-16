@@ -4,11 +4,14 @@
 #include <shelf/models/qwen35/model/qwen35_config.h>
 #include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35moe/model/qwen35moe_config.h>
+#include <shelf/models/qwen35qsa/model/qwen35qsa_config.h>
 
 namespace shelf::models {
 
 ModelFamily model_family(const LoadedModelWeights& loaded) noexcept {
     if (std::holds_alternative<shelf::plamo3::ModelWeights>(loaded)) return ModelFamily::Plamo3;
+    if (std::holds_alternative<shelf::qwen35qsa::Qwen35QsaModelWeights>(loaded))
+        return ModelFamily::Qsa;
     return std::holds_alternative<shelf::qwen35moe::Qwen35MoeModelWeights>(loaded)
         ? ModelFamily::Moe
         : ModelFamily::Dense;
@@ -29,7 +32,10 @@ Result<ModelFamily> probe_model_dir(const std::string& model_dir) {
     auto hc = shelf::qwen_hybrid::has_text_config_key(model_dir, "hc_count");
     if (!hc.ok()) return hc.status();
     if (ple.value() && hc.value()) return ModelFamily::Qwen4Exp;
-    return experts.value() > 0u ? ModelFamily::Moe : ModelFamily::Dense;
+    if (experts.value() > 0u) return ModelFamily::Moe;
+    auto qsa = shelf::qwen_hybrid::has_config_key(model_dir, "qsa");
+    if (!qsa.ok()) return qsa.status();
+    return qsa.value() ? ModelFamily::Qsa : ModelFamily::Dense;
 }
 
 Result<LoadedModelWeights> load_model_weights(
@@ -73,6 +79,20 @@ Result<LoadedModelWeights> load_model_weights(
                                                                 moe_options);
         if (!weights.ok()) return weights.status();
         Status valid = shelf::qwen35moe::validate_qwen35moe_weights(weights.value(),
+                                                                    config.value());
+        if (!valid.ok()) return valid;
+        return LoadedModelWeights{weights.release()};
+    }
+
+    if (family.value() == ModelFamily::Qsa) {
+        auto config = shelf::qwen35qsa::read_qwen35qsa_text_config(model_dir);
+        if (!config.ok()) return config.status();
+        shelf::qwen35qsa::Qwen35QsaLoadOptions qsa_options;
+        static_cast<shelf::qwen35::Qwen35LoadOptions&>(qsa_options) = options;
+        auto weights = shelf::qwen35qsa::load_qwen35qsa_weights(
+            model_dir, arena, stream, qsa_options);
+        if (!weights.ok()) return weights.status();
+        Status valid = shelf::qwen35qsa::validate_qwen35qsa_weights(weights.value(),
                                                                     config.value());
         if (!valid.ok()) return valid;
         return LoadedModelWeights{weights.release()};

@@ -7,6 +7,7 @@
 #include <shelf/models/qwen35/runtime/mtp_drafter.h>
 #include <shelf/models/qwen35moe/model/qwen35moe_model.h>
 #include <shelf/models/qwen4exp/model/qwen4exp_model.h>
+#include <shelf/models/qwen35qsa/model/qwen35qsa_model.h>
 #include <shelf/weights/matrix_weight.h>
 
 #include <hip/hip_runtime.h>
@@ -47,6 +48,7 @@ public:
     ModelFamily family() const noexcept {
         if (plamo_ != nullptr) return ModelFamily::Plamo3;
         if (qwen4exp_ != nullptr) return ModelFamily::Qwen4Exp;
+        if (qsa_ != nullptr) return ModelFamily::Qsa;
         return dense_ != nullptr ? ModelFamily::Dense : ModelFamily::Moe;
     }
 
@@ -84,6 +86,12 @@ public:
         return qwen4exp_;
     }
 
+    // Null unless the model declares QSA block-sparse attention.
+    [[nodiscard]]
+    const shelf::qwen35qsa::Qwen35QsaModel* qsa_model() const noexcept {
+        return qsa_;
+    }
+
     // Largest rotated-domain linear this model runs, which sizes the EXL3 staging planes.
     [[nodiscard]]
     shelf::weights::Exl3LinearShape exl3_linear_shape() const;
@@ -95,7 +103,8 @@ public:
                                        std::size_t max_scheduled_requests,
                                        std::size_t max_scheduled_output_rows,
                                        std::size_t target_hidden_tap_count,
-                                       std::size_t tp_size) const;
+                                       std::size_t tp_size,
+                                       std::size_t max_context_tokens) const;
 
     Result<shelf::qwen35::Executor> create_executor(
         shelf::qwen35::SequenceSlotPool& sequence_pool,
@@ -141,9 +150,11 @@ private:
     std::unique_ptr<shelf::qwen35::Qwen35Model> owns_dense_;
     std::unique_ptr<shelf::qwen35moe::Qwen35MoeModel> owns_moe_;
     std::unique_ptr<shelf::qwen4exp::Qwen4ExpModel> owns_qwen4exp_;
+    std::unique_ptr<shelf::qwen35qsa::Qwen35QsaModel> owns_qsa_;
     const shelf::qwen35::Qwen35Model* dense_ = nullptr;
     const shelf::qwen35moe::Qwen35MoeModel* moe_ = nullptr;
     const shelf::qwen4exp::Qwen4ExpModel* qwen4exp_ = nullptr;
+    const shelf::qwen35qsa::Qwen35QsaModel* qsa_ = nullptr;
 };
 
 }  // namespace shelf::models

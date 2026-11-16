@@ -114,6 +114,18 @@ int main() {
               "the rope reader, which the apps read first, rejects it too");
     }
 
+    // The root declaration is the only gate input: a wrapper identity this build does not
+    // implement is rejected even when its embedded text architecture is one it does.
+    {
+        write_config("wrapper_unknown",
+                     R"json({"model_type":"qwen3_5_something","text_config":{"model_type":"qwen3_5_text",)json" +
+                         std::string(kDenseBody) + R"json(}})json");
+        auto st = shelf::qwen_hybrid::check_config_identity(
+            (g_root / "wrapper_unknown").string());
+        check(!st.ok() && holds(st, "unsupported model identity"),
+              "a known text_config.model_type does not admit an unknown root identity");
+    }
+
     // An identity has to be declared: reading a config that states nothing about what it
     // is would fall back to guessing from tensor names.
     {
@@ -139,9 +151,9 @@ int main() {
     // the tests can name what this build implements.
     {
         const auto& supported = shelf::qwen_hybrid::supported_model_identities();
-        check(supported == std::vector<std::string>{"qwen3_5", "qwen3_5_text", "qwen3_5_moe",
-                                                    "qwen3_5_moe_text", "qwen4_exp",
-                                                    "qwen4_exp_text"},
+        check(supported == std::vector<std::string>{"qwen3_5", "qwen3_5_text", "qwen3_5_qsa",
+                                                    "qwen3_5_moe", "qwen3_5_moe_text",
+                                                    "qwen4_exp", "qwen4_exp_text"},
               "the supported identity set includes the Qwen3.5 families and Qwen4Exp");
     }
 

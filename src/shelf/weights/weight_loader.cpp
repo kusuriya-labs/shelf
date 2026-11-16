@@ -159,10 +159,10 @@ Result<MatrixWeight> load_bf16_matrix_raw(
             ("matrix weight must be 2D: " + name).c_str(), __FILE__, __LINE__);
     }
 
-    if (spec.dtype != io::SType::BF16) {
+    if (spec.dtype != io::SType::BF16 && spec.dtype != io::SType::F32) {
         return Status::invalid_argument(
-            ("bf16 matrix payload must be BF16: " + name + " is " + io::stype_name(spec.dtype))
-                .c_str(),
+            ("bf16 matrix payload must be BF16 or F32: " + name + " is " +
+             io::stype_name(spec.dtype)).c_str(),
             __FILE__, __LINE__);
     }
 
@@ -183,7 +183,13 @@ Result<MatrixWeight> load_bf16_matrix_raw(
                 gpu::format_gib(arena.capacity()),
             __FILE__, __LINE__);
     }
-    if (!upload_tensor_direct(reader, name, w.bf16.data<void>(), stream).ok()) {
+    if (spec.dtype == io::SType::F32) {
+        const std::size_t elements = static_cast<std::size_t>(shape[0]) * shape[1];
+        if (!upload_tensor_f32_to_bf16(reader, name, w.bf16.data<void>(), elements, stream).ok()) {
+            return Status::invalid_state(
+                ("matrix upload failed: " + name).c_str(), __FILE__, __LINE__);
+        }
+    } else if (!upload_tensor_direct(reader, name, w.bf16.data<void>(), stream).ok()) {
         return Status::invalid_state(
             ("matrix upload failed: " + name).c_str(), __FILE__, __LINE__);
     }
