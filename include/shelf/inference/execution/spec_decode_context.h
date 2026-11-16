@@ -36,11 +36,20 @@ struct GdnCompactLogDeviceView {
 struct QsaSpecHistoryDeviceView {
     bf16_t* partial = nullptr;
     uint32_t* counts = nullptr;
+    bf16_t* key_journal = nullptr;
 
     uint32_t rows = 0u;
 
     uint64_t partial_state_stride = 0u;
     uint64_t count_state_stride = 0u;
+    uint64_t journal_state_stride = 0u;
+};
+
+struct QsaSpecReplayDeviceView {
+    const int32_t* row_map = nullptr;
+    const uint32_t* positions = nullptr;
+    uint32_t rows = 0u;
+    uint32_t slot = 0u;
 };
 
 struct PleConvSpecHistoryDeviceView {
@@ -52,6 +61,7 @@ struct PleConvSpecHistoryDeviceView {
 };
 
 struct SpecDecodeContext {
+    QsaSpecReplayDeviceView qsa_replay{};
     const uint32_t* tree_anc_offsets = nullptr;
     const uint32_t* tree_anc_positions = nullptr;
     uint32_t tree_committed_end = 0;

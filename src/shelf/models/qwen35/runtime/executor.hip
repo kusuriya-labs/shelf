@@ -3,6 +3,7 @@
 #include <shelf/kernels/kv_types.h>
 #include <shelf/inference/execution/program_executor.h>
 #include <shelf/inference/execution/paged_attention_dispatch.h>
+#include <shelf/inference/execution/qsa_dispatch.h>
 #include <shelf/kernels/optimized/attention/rope.h>
 #include <cstdlib>
 #include <shelf/models/qwen35/runtime/scheduling_types.h>
@@ -2766,6 +2767,60 @@ Result<BatchExecutionOutput> execute_batch(
     return complete_batch(executor, std::move(pending), stream);
 }
 
+
+Status replay_qsa_spec_state(Executor& executor, const QsaSpecReplayRequest& request,
+                             hipStream_t stream) {
+    if (request.rows == 0u) return Status::make_ok();
+    if (executor.qsa_state_pool == nullptr) {
+        return Status::invalid_argument("replay_qsa_spec_state: no QSA state pool",
+                                        __FILE__, __LINE__);
+    }
+    if (!executor.program_set_ready) {
+        return Status::invalid_state("replay_qsa_spec_state: program set is not ready",
+                                     __FILE__, __LINE__);
+    }
+    if (request.history == nullptr || request.history->key_journal == nullptr ||
+        request.history->journal_state_stride == 0u || request.row_map == nullptr ||
+        request.positions == nullptr) {
+        return Status::invalid_argument("replay_qsa_spec_state: incomplete request",
+                                        __FILE__, __LINE__);
+    }
+    const ::shelf::runtime::Program* program = nullptr;
+    for (const auto& candidate : executor.program_set.programs) {
+        for (const auto& binding : candidate.dispatches) {
+            if (binding.kernel_id == ::shelf::runtime::KernelId::QSA_KEY_CACHE) {
+                program = &candidate;
+                break;
+            }
+        }
+        if (program != nullptr) break;
+    }
+    if (program == nullptr) return Status::make_ok();
+
+    ::shelf::execution::HostExecutionContext ctx{};
+    ctx.model_state = executor.host_model_state;
+    ctx.host_parameters = executor.host_parameter_slots.data();
+    ctx.host_parameter_count = static_cast<uint32_t>(executor.host_parameter_slots.size());
+    ctx.rope_inv_freq = executor.rope_inv_freq.data<double>();
+    ctx.actual_rows = request.rows;
+    ctx.spec.qsa_spec_history = *request.history;
+    ctx.spec.qsa_replay.row_map = request.row_map;
+    ctx.spec.qsa_replay.positions = request.positions;
+    ctx.spec.qsa_replay.rows = request.rows;
+    ctx.spec.qsa_replay.slot = request.slot;
+    for (const auto& binding : program->dispatches) {
+        if (binding.kernel_id != ::shelf::runtime::KernelId::QSA_KEY_CACHE) continue;
+        auto result = ::shelf::execution::try_launch_qsa_key_cache(*program, binding, ctx,
+                                                                  stream);
+        if (!result.ok()) return result.status();
+        if (result.value().kind != ::shelf::execution::OptimizedLaunchKind::Launched) {
+            return Status::unsupported(
+                "replay_qsa_spec_state: QSA key cache did not launch", __FILE__,
+                __LINE__);
+        }
+    }
+    return Status::make_ok();
+}
 
 DecodeStatus poll_decode(const Executor& executor, uint64_t generation) noexcept {
     if (generation == 0u) return DecodeStatus::Pending;

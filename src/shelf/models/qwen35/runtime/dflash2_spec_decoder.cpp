@@ -216,6 +216,11 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
         return Status::invalid_argument(
             "create_dflash2_spec_decoder: num_drafts out of range", __FILE__, __LINE__);
     }
+    if (config.tree && target.ple_conv_state_pool != nullptr) {
+        return Status::unsupported(
+            "create_dflash2_spec_decoder: tree verify with PLE state is not supported",
+            __FILE__, __LINE__);
+    }
 
     DFlash2SpecDecoder decoder;
     decoder.target = &target;
@@ -294,6 +299,11 @@ Result<DFlash2SpecWorkspace> create_spec_workspace_impl(
         g.stream = bindings[r].stream;
         g.model_state = bindings[r].model_state;
         g.device = bindings[r].device;
+        g.executor = bindings[r].executor;
+        if (g.executor != nullptr) {
+            g.spec_pools.qsa = g.executor->qsa_state_pool.get();
+            g.spec_pools.ple = g.executor->ple_conv_state_pool.get();
+        }
     }
 
     {
@@ -383,6 +393,31 @@ Result<DFlash2SpecWorkspace> create_spec_workspace_impl(
                 return history_result.status();
             }
             g.history = history_result.release();
+            if (g.executor != nullptr) {
+                const uint32_t spec_rows = std::max(
+                    std::max(history_rows, config.num_drafts + 1u), config.tree_budget);
+                auto spec_result = ::shelf::state::create_spec_state_history(
+                    rank_arena, g.spec_pools, spec_rows);
+                if (!spec_result.ok()) {
+                    (void)shutdown_dflash2_spec_workspace(workspace);
+                    return spec_result.status();
+                }
+                g.spec_state = spec_result.release();
+                auto rows_alloc = rank_arena.allocate_aligned(
+                    static_cast<std::size_t>(spec_rows) * sizeof(int32_t), 256u);
+                if (!rows_alloc.ok()) {
+                    (void)shutdown_dflash2_spec_workspace(workspace);
+                    return rows_alloc.status();
+                }
+                g.replay_rows = static_cast<int32_t*>(rows_alloc.release().data());
+                auto pos_alloc = rank_arena.allocate_aligned(
+                    static_cast<std::size_t>(spec_rows) * sizeof(uint32_t), 256u);
+                if (!pos_alloc.ok()) {
+                    (void)shutdown_dflash2_spec_workspace(workspace);
+                    return pos_alloc.status();
+                }
+                g.replay_positions = static_cast<uint32_t*>(pos_alloc.release().data());
+            }
             if (config.tree) {
                 const size_t rows = history_rows;
                 auto metadata = rank_arena.allocate_aligned(
@@ -553,6 +588,11 @@ Status shutdown_dflash2_spec_workspace(DFlash2SpecWorkspace& workspace) noexcept
         g.compact_k = nullptr;
         g.compact_a = nullptr;
         g.commit_request = nullptr;
+        g.spec_pools = ::shelf::state::SpecStatePools{};
+        g.spec_state = ::shelf::state::SpecStateHistory{};
+        g.replay_rows = nullptr;
+        g.replay_positions = nullptr;
+        g.executor = nullptr;
     }
     workspace.gdn_ranks.clear();
     workspace.verify_token_ids_device = nullptr;
@@ -637,6 +677,8 @@ std::vector<ExecuteBatchOptions> build_gdn_options(DFlash2SpecDecoder& decoder,
         options[r].gdn_compact.delta_layer_stride = g.compact_delta_layer_stride;
         options[r].gdn_compact.k_layer_stride = g.compact_k_layer_stride;
         options[r].gdn_compact.a_layer_stride = g.compact_a_layer_stride;
+        options[r].qsa_spec_history = g.spec_state.qsa;
+        options[r].ple_conv_history = g.spec_state.ple;
     }
     return options;
 }
@@ -1557,6 +1599,49 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
                 }
             }
         }
+        for (DFlash2GdnRankState& g : decoder.gdn_ranks) {
+            if (g.spec_state.qsa.partial == nullptr || g.replay_rows == nullptr ||
+                g.executor == nullptr)
+                continue;
+            if (accepted + 1u > g.spec_state.qsa.rows) {
+                return Status::invalid_state("dflash2 tree replay exceeds the QSA history",
+                                             __FILE__, __LINE__);
+            }
+            auto scope = shelf::gpu::ScopedDevice::create(g.device);
+            if (!scope.ok()) return scope.status();
+            Status st = ::shelf::state::restore_spec_state(
+                g.spec_pools, decoder.sequence->slot, g.spec_state, 0u, g.stream);
+            if (!st.ok()) return st;
+            std::vector<int32_t> replay_rows;
+            std::vector<uint32_t> replay_positions;
+            replay_rows.reserve(accepted + 1u);
+            replay_positions.reserve(accepted + 1u);
+            for (uint32_t i = 0u; i <= accepted; ++i) {
+                const uint32_t source = walk.rows[i];
+                if (source >= tree.rope_positions.size()) {
+                    return Status::invalid_state("dflash2 tree replay position missing",
+                                                 __FILE__, __LINE__);
+                }
+                replay_rows.push_back(static_cast<int32_t>(source));
+                replay_positions.push_back(tree.rope_positions[source]);
+            }
+            const hipError_t rows_err = hipMemcpyAsync(
+                g.replay_rows, replay_rows.data(),
+                replay_rows.size() * sizeof(int32_t), hipMemcpyHostToDevice, g.stream);
+            const hipError_t pos_err = hipMemcpyAsync(
+                g.replay_positions, replay_positions.data(),
+                replay_positions.size() * sizeof(uint32_t), hipMemcpyHostToDevice, g.stream);
+            if (rows_err != hipSuccess || pos_err != hipSuccess) {
+                return Status::hip_error("dflash2 tree replay rows upload",
+                                         hipGetErrorString(hipGetLastError()), __FILE__,
+                                         __LINE__);
+            }
+            QsaSpecReplayRequest request{&g.spec_state.qsa, g.replay_rows,
+                                         g.replay_positions, accepted + 1u,
+                                         decoder.sequence->slot};
+            st = replay_qsa_spec_state(*g.executor, request, g.stream);
+            if (!st.ok()) return st;
+        }
         if (profile_commit && hipEventRecord(decoder.draft_stop_event, decoder.stream) != hipSuccess)
             return Status::hip_error("dflash2 restore event", hipGetErrorString(hipGetLastError()), __FILE__, __LINE__);
         if (decoder.config.tree_extra != 0u || decoder.config.tree_budget != 0u) {
@@ -1624,6 +1709,12 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
                 st = restore_gdn_spec_conv(*g.pool, decoder.sequence->slot, g.history,
                                            accepted, g.stream);
                 if (!st.ok()) return st;
+                if (accepted + 1u <= g.spec_state.qsa.rows) {
+                    st = ::shelf::state::restore_spec_state(
+                        g.spec_pools, decoder.sequence->slot, g.spec_state,
+                        accepted + 1u, g.stream);
+                    if (!st.ok()) return st;
+                }
             }
         }
         {
@@ -1710,6 +1801,8 @@ std::vector<ExecuteBatchOptions> build_batch_gdn_options(
         options[r].gdn_compact.delta_layer_stride = ctx.compact[r].delta_layer_stride;
         options[r].gdn_compact.k_layer_stride = ctx.compact[r].k_layer_stride;
         options[r].gdn_compact.a_layer_stride = ctx.compact[r].a_layer_stride;
+        options[r].qsa_spec_history = ctx.spec_state[r].qsa;
+        options[r].ple_conv_history = ctx.spec_state[r].ple;
         // Verify keeps the live recurrent state at the base; the batch commit below
         // replays the accepted prefix from the compact log.
         options[r].gdn_compact.defer_state_store = 1u;
@@ -2344,6 +2437,59 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
                     *state.pool, decoder.sequence->slot, context.history[r],
                     plan.row_begin + (tree_mode ? walk.rows[accepted] : accepted), state.stream);
                 if (!st.ok()) return st;
+            }
+            if (state.executor != nullptr && context.spec_state[r].qsa.partial != nullptr) {
+                if (tree_mode) {
+                    if (accepted + 1u > context.spec_state[r].qsa.rows ||
+                        context.replay_rows[r] == nullptr) {
+                        return Status::invalid_state(
+                            "batch tree replay exceeds the QSA history", __FILE__, __LINE__);
+                    }
+                    st = ::shelf::state::restore_spec_state(
+                        state.spec_pools, decoder.sequence->slot, context.spec_state[r],
+                        plan.row_begin, state.stream);
+                    if (!st.ok()) return st;
+                    std::vector<int32_t> replay_rows;
+                    std::vector<uint32_t> replay_positions;
+                    replay_rows.reserve(accepted + 1u);
+                    replay_positions.reserve(accepted + 1u);
+                    for (uint32_t j = 0u; j <= accepted; ++j) {
+                        const uint32_t source = plan.row_begin + walk.rows[j];
+                        const uint32_t position_row = walk.rows[j];
+                        if (position_row >= plan.tree.rope_positions.size()) {
+                            return Status::invalid_state(
+                                "batch tree replay position missing", __FILE__, __LINE__);
+                        }
+                        replay_rows.push_back(static_cast<int32_t>(source));
+                        replay_positions.push_back(plan.tree.rope_positions[position_row]);
+                    }
+                    const hipError_t rows_err = hipMemcpyAsync(
+                        context.replay_rows[r], replay_rows.data(),
+                        replay_rows.size() * sizeof(int32_t), hipMemcpyHostToDevice,
+                        state.stream);
+                    const hipError_t pos_err = hipMemcpyAsync(
+                        context.replay_positions[r], replay_positions.data(),
+                        replay_positions.size() * sizeof(uint32_t), hipMemcpyHostToDevice,
+                        state.stream);
+                    if (rows_err != hipSuccess || pos_err != hipSuccess) {
+                        return Status::hip_error("batch tree replay rows upload",
+                                                 hipGetErrorString(hipGetLastError()),
+                                                 __FILE__, __LINE__);
+                    }
+                    QsaSpecReplayRequest request{
+                        &context.spec_state[r].qsa, context.replay_rows[r],
+                        context.replay_positions[r], accepted + 1u,
+                        decoder.sequence->slot};
+                    st = replay_qsa_spec_state(*state.executor, request, state.stream);
+                    if (!st.ok()) return st;
+                } else if (accepted != plan.drafts &&
+                           plan.row_begin + accepted + 1u <=
+                               context.spec_state[r].qsa.rows) {
+                    st = ::shelf::state::restore_spec_state(
+                        state.spec_pools, decoder.sequence->slot, context.spec_state[r],
+                        plan.row_begin + accepted + 1u, state.stream);
+                    if (!st.ok()) return st;
+                }
             }
             GdnCompactLogDeviceView compact{};
             compact.delta = context.compact[r].delta;

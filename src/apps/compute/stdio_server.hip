@@ -1362,6 +1362,8 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
                 binding.arena = &runtime.arena();
                 binding.stream = runtime.stream();
                 binding.device = runtime.config().devices[0];
+                binding.model_state = &runtime.executor().host_model_state;
+                binding.executor = &runtime.executor();
                 bindings.push_back(binding);
             }
             auto batch_result =

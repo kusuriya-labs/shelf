@@ -206,6 +206,7 @@ add_library(shelf_inference_state STATIC
     src/shelf/inference/state/sequence_slot_pool.cpp
     src/shelf/inference/state/gdn_state_pool.cpp
     src/shelf/inference/state/qsa_state_pool.cpp
+    src/shelf/inference/state/spec_state_history.cpp
     src/shelf/inference/state/ple_conv_state_pool.cpp
     src/shelf/inference/state/paged_kv_pool.cpp
 )

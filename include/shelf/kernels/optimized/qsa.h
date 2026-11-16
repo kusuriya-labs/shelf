@@ -173,9 +173,14 @@ struct QsaKeyCacheBatchArgs {
     uint32_t* partial_count_base = nullptr;
     bf16_t* partial_history = nullptr;
     uint32_t* count_history = nullptr;
+    bf16_t* key_journal = nullptr;
+    const int32_t* raw_row_map = nullptr;
     uint32_t history_rows = 0;
+    uint32_t journal_rows = 0;
     uint64_t history_partial_state_stride = 0;
     uint64_t history_count_state_stride = 0;
+    uint32_t replay_slot = 0;
+    uint32_t replay_rows = 0;
     uint32_t num_requests = 0;
     uint32_t actual_rows = 0;
     uint32_t max_sequences = 0;

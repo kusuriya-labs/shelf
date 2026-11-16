@@ -320,6 +320,17 @@ struct ExecuteBatchOptions {
     const int32_t* tree_row_parent = nullptr;
 };
 
+struct QsaSpecReplayRequest {
+    const ::shelf::execution::QsaSpecHistoryDeviceView* history = nullptr;
+    const int32_t* row_map = nullptr;
+    const uint32_t* positions = nullptr;
+    uint32_t rows = 0u;
+    ::shelf::state::SequenceSlotId slot = 0u;
+};
+
+Status replay_qsa_spec_state(Executor& executor, const QsaSpecReplayRequest& request,
+                             hipStream_t stream);
+
 Result<PendingBatch> submit_batch(
     Executor& executor,
     const ScheduledBatch& batch,
