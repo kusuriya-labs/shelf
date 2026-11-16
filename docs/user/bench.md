@@ -202,11 +202,19 @@ model-dispatch correctness path の codes / scales も一致することを確�
 ## gemm
 
 ```text
---dtype bf16|fp8                    (default bf16)
---variant correctness|gemv|gemm|auto  (default auto)
+--dtype bf16|fp8|mxfp4            (default bf16)
+--variant correctness|gemm|auto   (default auto)
 --rows 1,16,32,64,128             (comma list, default 1,16,32,64,128)
 --n N                            (default 5120)
 --k N                            (default 5120)
+--shapes N:K,N:K,...             (explicit shape list)
+--impl auto|...                  (dtype ごとの variant 強制)
+--fp8-split N                    (fp8 split-K ways, default 8)
+--fp8-split-mb N                 (fp8 split-K row tile 1|2, default auto)
+--mxfp4-split N                  (mxfp4 split-K ways, default 8)
+--mxfp4-split-mb N               (mxfp4 split-K row tile 1|2, default auto)
+--mxfp4-fold 0|1                 (mxfp4 の row E8M0 fold)
+--mxfp4-spread N                 (mxfp4 の合成 E8M0 指数幅)
 --model-dir PATH                 (with --actual-qwen-shapes: read Qwen config)
 --actual-qwen-shapes             (benchmark all deduped Qwen linear shapes)
 --warmup N                       (default 100)
@@ -214,21 +222,21 @@ model-dispatch correctness path の codes / scales も一致することを確�
 --launches N                     (default 20)
 --seed N                         (default 1234)
 --device N                       (default 0)
+--verify-small-m                 (speculative verify rows 1,2,4,8)
+--split N                        (rows を N launch に分割)
 --check                          (verify selected path vs the correctness path)
 --out PATH                       (append CSV rows)
 ```
 
-`--variant`:
+`--impl` は dtype ごとに次を強制する。`auto` は production selector を使う。
 
 ```text
-correctness   production correctness path
-gemv          force Small-M GEMV compute kind (selector bypass)
-gemm          force Big-M GEMM compute kind (selector bypass)
-auto          production linear selector (default)
+bf16   auto|wmma|wide|splitk|exact
+fp8    auto|splitk|rowblock1|rowblock2|rowblock4|prefill2d
+mxfp4  auto|splitk|rowblock1|rowblock2|rowblock4|prefill2d
 ```
 
-`auto` の場合、選択された compute kind (correctness/gemv/gemm) を
-`requested_variant` と `selected_variant` として stdout/CSV に出力する。
+`auto` の場合、選択された variant を `selected_variant` として stdout/CSV に出力する。
 
 CSV 列:
 

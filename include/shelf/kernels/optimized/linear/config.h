@@ -47,7 +47,17 @@ enum class Fp8FinegrainedGemmConfigId : uint8_t {
     RowBlock2,
     RowBlock4,
     Prefill2D,
+    SplitK,
 };
+
+// Small-M split-K: the wave count of one 16-output column tile is below the
+// device's fill point, so K is divided across the warps of one block and the
+// partial sums are reduced through LDS in split order. The kernel uses a
+// 16-row tile and grid.y covers the remaining row tiles.
+inline constexpr uint32_t kFp8FinegrainedGemmSplitKMaxRows = 64u;
+inline constexpr uint32_t kFp8FinegrainedGemmSplitKMaxWays = 16u;
+inline constexpr uint32_t kFp8FinegrainedGemmWaveSlots = 768u;
+inline constexpr uint32_t kFp8FinegrainedGemmSplitKMinGroups = 4u;
 
 // MXFP4 W4A8 decode / verify row counts run on the WMMA row-block family:
 // SplitK (small out_features, K split across waves) or RowBlock (16 outputs per
@@ -55,10 +65,14 @@ enum class Fp8FinegrainedGemmConfigId : uint8_t {
 // linear path removed its decode1 kernel and MXFP4 follows the same contract.
 inline constexpr uint32_t kMxfp4GemmRowTile = 16u;
 // Measured on R9700 with shelf-bench gemm --dtype mxfp4 (docs/research).
-inline constexpr uint32_t kMxfp4GemmSplitKMaxRows = 32u;
-inline constexpr uint32_t kMxfp4GemmSplitKMaxOutFeatures = 2560u;
+inline constexpr uint32_t kMxfp4GemmSplitKMaxRows = 64u;
+// The split is only a win while the output width is narrow and each split still
+// owns enough 128-K activation groups; below 2048 K the 8-way reduction costs
+// more than the extra parallelism it buys.
+inline constexpr uint32_t kMxfp4GemmSplitKMinKPadded = 2048u;
 inline constexpr uint32_t kMxfp4GemmSplitKWays = 8u;
 inline constexpr uint32_t kMxfp4GemmRowBlock1MaxRows = 16u;
+inline constexpr uint32_t kMxfp4GemmRowBlock1MaxOutFeatures = 8192u;
 inline constexpr uint32_t kMxfp4GemmRowBlock2MaxRows = 192u;
 
 enum class Mxfp4GemmConfigId : uint8_t {
@@ -72,6 +86,9 @@ enum class Mxfp4GemmConfigId : uint8_t {
 struct Mxfp4GemmConfig {
     Mxfp4GemmConfigId id = Mxfp4GemmConfigId::RowBlock1;
     uint8_t split_k = 8u;
+    // 0 selects the launcher's row-count rule, 1 or 2 forces the activation
+    // row tile count for split-K.
+    uint8_t split_mb = 0u;
 };
 
 inline constexpr uint32_t kMxfp4GemmPrefill2dKChunk = 128u;
@@ -94,6 +111,10 @@ inline constexpr bool mxfp4_gemm_folds_row_ref(Mxfp4GemmConfigId id) {
 
 struct Fp8FinegrainedGemmConfig {
     Fp8FinegrainedGemmConfigId id = Fp8FinegrainedGemmConfigId::RowBlock1;
+    uint8_t split_k = 8u;
+    // 0 selects the launcher's row-count rule, 1 or 2 forces the activation
+    // row tile count for split-K.
+    uint8_t split_mb = 0u;
 };
 
 }  // namespace shelf::kernel

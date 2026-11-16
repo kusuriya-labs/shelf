@@ -21,10 +21,14 @@ using shelf::kernel::Bf16GemmConfig;
 using shelf::kernel::Bf16GemmConfigId;
 using shelf::kernel::Fp8FinegrainedGemmConfig;
 using shelf::kernel::Fp8FinegrainedGemmConfigId;
+using shelf::kernel::Mxfp4GemmConfig;
+using shelf::kernel::Mxfp4GemmConfigId;
 using shelf::execution::Bf16GemmSelectorInput;
 using shelf::execution::Fp8FinegrainedGemmSelectorInput;
+using shelf::execution::Mxfp4GemmSelectorInput;
 using shelf::execution::select_bf16_gemm_config;
 using shelf::execution::select_fp8_finegrained_gemm_config;
+using shelf::execution::select_mxfp4_gemm_config;
 
 std::optional<Bf16GemmConfig> sel_bf16(uint32_t rows, uint32_t out_features, uint32_t k,
                                        uint32_t stride, bool weight_aligned, bool input_aligned,
@@ -49,6 +53,26 @@ std::optional<Fp8FinegrainedGemmConfig> sel_fp8(uint32_t rows, uint32_t out_feat
 
 bool is_fp8(const std::optional<Fp8FinegrainedGemmConfig>& c, Fp8FinegrainedGemmConfigId id) {
     return c.has_value() && c->id == id;
+}
+
+bool is_fp8_mb(const std::optional<Fp8FinegrainedGemmConfig>& c, uint8_t split_mb) {
+    return c.has_value() && c->id == Fp8FinegrainedGemmConfigId::SplitK &&
+           c->split_mb == split_mb;
+}
+
+std::optional<Mxfp4GemmConfig> sel_mxfp4(uint32_t rows, uint32_t out_features, uint32_t k,
+                                        uint32_t k_padded) {
+    return select_mxfp4_gemm_config(
+        Mxfp4GemmSelectorInput{rows, out_features, k, k_padded});
+}
+
+bool is_mxfp4(const std::optional<Mxfp4GemmConfig>& c, Mxfp4GemmConfigId id) {
+    return c.has_value() && c->id == id;
+}
+
+bool is_mxfp4_mb(const std::optional<Mxfp4GemmConfig>& c, uint8_t split_mb) {
+    return c.has_value() && c->id == Mxfp4GemmConfigId::SplitK &&
+           c->split_mb == split_mb;
 }
 
 bool is_bf16(const std::optional<Bf16GemmConfig>& c, Bf16GemmConfigId id,
@@ -127,14 +151,20 @@ void test_fp8() {
     check(!sel_fp8(1, 1024, 2560, 2561).has_value(),
           "fp8 k_padded not a multiple of 128 -> no config");
 
-    check(is_fp8(sel_fp8(1, 1024, 2560, 2560), Fp8FinegrainedGemmConfigId::RowBlock1),
-          "fp8 rows=1 -> RowBlock1");
-    check(is_fp8(sel_fp8(16, 1024, 2560, 2560), Fp8FinegrainedGemmConfigId::RowBlock1),
-          "fp8 rows=16 -> RowBlock1");
-    check(is_fp8(sel_fp8(17, 1024, 2560, 2560), Fp8FinegrainedGemmConfigId::RowBlock2),
-          "fp8 rows=17 -> RowBlock2");
-    check(is_fp8(sel_fp8(64, 1024, 2560, 2560), Fp8FinegrainedGemmConfigId::RowBlock4),
-          "fp8 rows=64 -> RowBlock4");
+    check(is_fp8(sel_fp8(1, 1024, 2560, 2560), Fp8FinegrainedGemmConfigId::SplitK),
+          "fp8 rows=1 small out -> SplitK");
+    check(is_fp8(sel_fp8(16, 1024, 2560, 2560), Fp8FinegrainedGemmConfigId::SplitK),
+          "fp8 rows=16 small out -> SplitK");
+    check(is_fp8(sel_fp8(17, 1024, 2560, 2560), Fp8FinegrainedGemmConfigId::SplitK),
+          "fp8 rows=17 small out -> SplitK");
+    check(is_fp8(sel_fp8(64, 1024, 2560, 2560), Fp8FinegrainedGemmConfigId::SplitK),
+          "fp8 rows=64 small out -> SplitK");
+    check(is_fp8_mb(sel_fp8(64, 1024, 2560, 2560), 2u),
+          "fp8 rows=64 out=1024 -> split MB2");
+    check(is_fp8_mb(sel_fp8(64, 48, 5120, 5120), 1u),
+          "fp8 rows=64 narrow out -> split MB1");
+    check(is_fp8_mb(sel_fp8(32, 1024, 2560, 2560), 1u),
+          "fp8 rows=32 -> split MB1");
     check(is_fp8(sel_fp8(128, 1024, 2560, 2560), Fp8FinegrainedGemmConfigId::RowBlock4),
           "fp8 rows=128 -> RowBlock4");
     check(is_fp8(sel_fp8(256, 1024, 2560, 2560), Fp8FinegrainedGemmConfigId::RowBlock4),
@@ -145,6 +175,18 @@ void test_fp8() {
           "fp8 rows=511 < 2d threshold -> RowBlock4");
     check(is_fp8(sel_fp8(512, 32, 2560, 2560), Fp8FinegrainedGemmConfigId::RowBlock1),
           "fp8 small out_features -> RowBlock1");
+    check(is_fp8(sel_fp8(1, 17408, 5120, 5120), Fp8FinegrainedGemmConfigId::RowBlock1),
+          "fp8 wide out has enough waves -> RowBlock1");
+    check(is_fp8(sel_fp8(65, 1024, 2560, 2560), Fp8FinegrainedGemmConfigId::RowBlock4),
+          "fp8 rows past the split limit -> RowBlock4");
+    check(is_fp8(sel_fp8(32, 5120, 5120, 5120), Fp8FinegrainedGemmConfigId::RowBlock1),
+          "fp8 32 rows medium out -> RowBlock1");
+    check(is_fp8(sel_fp8(64, 6144, 5120, 5120), Fp8FinegrainedGemmConfigId::RowBlock1),
+          "fp8 64 rows medium out -> RowBlock1");
+    check(is_fp8(sel_fp8(32, 10240, 5120, 5120), Fp8FinegrainedGemmConfigId::RowBlock2),
+          "fp8 32 rows wide out -> RowBlock2");
+    check(is_fp8(sel_fp8(64, 8704, 5120, 5120), Fp8FinegrainedGemmConfigId::RowBlock4),
+          "fp8 64 rows wide out -> RowBlock4");
 }
 
 void test_9b_shapes() {
@@ -251,11 +293,43 @@ void test_moe_tp2_shapes() {
           "moe tp2 bf16 2048x1024 stays unmeasured");
 }
 
+void test_mxfp4() {
+    check(!sel_mxfp4(1, 123, 456, 512).has_value(),
+          "mxfp4 unknown geometry -> no config");
+    check(is_mxfp4(sel_mxfp4(1, 48, 5120, 5120), Mxfp4GemmConfigId::SplitK),
+          "mxfp4 rows=1 narrow out -> SplitK");
+    check(is_mxfp4(sel_mxfp4(64, 48, 5120, 5120), Mxfp4GemmConfigId::SplitK),
+          "mxfp4 rows=64 narrow out -> SplitK");
+    check(is_mxfp4(sel_mxfp4(64, 640, 2560, 2560), Mxfp4GemmConfigId::SplitK),
+          "mxfp4 rows=64 640x2560 -> SplitK");
+    check(is_mxfp4_mb(sel_mxfp4(64, 1024, 5120, 5120), 2u),
+          "mxfp4 rows=64 out=1024 -> split MB2");
+    check(is_mxfp4_mb(sel_mxfp4(64, 48, 5120, 5120), 1u),
+          "mxfp4 rows=64 narrow out -> split MB1");
+    check(is_mxfp4_mb(sel_mxfp4(32, 1024, 5120, 5120), 1u),
+          "mxfp4 rows=32 -> split MB1");
+    check(is_mxfp4_mb(sel_mxfp4(64, 640, 2560, 2560), 1u),
+          "mxfp4 rows=64 640x2560 -> split MB1");
+    check(is_mxfp4(sel_mxfp4(1, 1024, 5120, 5120), Mxfp4GemmConfigId::SplitK),
+          "mxfp4 rows=1 1024x5120 -> SplitK");
+    check(is_mxfp4(sel_mxfp4(1, 2560, 640, 640), Mxfp4GemmConfigId::RowBlock1),
+          "mxfp4 short K is not split -> RowBlock1");
+    check(is_mxfp4(sel_mxfp4(32, 6144, 5120, 5120), Mxfp4GemmConfigId::RowBlock1),
+          "mxfp4 32 rows medium out -> RowBlock1");
+    check(is_mxfp4(sel_mxfp4(32, 10240, 5120, 5120), Mxfp4GemmConfigId::RowBlock2),
+          "mxfp4 32 rows wide out -> RowBlock2");
+    check(is_mxfp4(sel_mxfp4(64, 10240, 5120, 5120), Mxfp4GemmConfigId::RowBlock2),
+          "mxfp4 64 rows wide out -> RowBlock2");
+    check(is_mxfp4(sel_mxfp4(193, 10240, 5120, 5120), Mxfp4GemmConfigId::RowBlock4),
+          "mxfp4 rows past 192 -> RowBlock4");
+}
+
 }  // namespace
 
 int main() {
     test_bf16();
     test_fp8();
+    test_mxfp4();
     test_9b_shapes();
     test_tp2_shapes();
     test_qsa_indexer_shapes();

@@ -121,10 +121,14 @@ compute 出力が oracle（`3793, 248046` = `OK`）と一致せず `91`（`|`）
 * qwen35moe対応・最適化
 * expert-parallelの実装
 * Small-M GEMMの最適化
-  * 2026-11-06 実測: `shelf-bench gemm --dtype bf16 --shapes 2560:2560` の rows=2 が
-    40.3 µs で、rows=4 の 36.4 µs より遅い（rows=2 だけ損をする）。
-  * `shelf-bench gemm --dtype fp8` の rows=1..16 は 9.4〜10.1 µs で flat。
-    BF16 は rows=2..32 が 36〜40 µs で flat（帯域限界は約 10.3 µs）。
+  * FP8 / MXFP4 の in-block split-K、row tile 選択、split-K の MB 選択は実装済み
+    （docs/research/20261116/fp8_mxfp4_small_m_splitk.md）。
+    FP8 は narrow out の rows 1〜64 で最大 6 倍、MXFP4 は rows 33〜64 で 1.4〜2.1 倍。
+  * BF16 は M=8〜16 に崖が残る。`5120:5120` は M=16 が 125 µs で M=32 の 88 µs より遅い。
+    block-per-output-row と WMMA の比較は
+    docs/research/20261116/bf16_small_m_reference.md に整理した。
+  * 次の候補は BF16 の row-count-independent small-M、FP8 の rows=64 の MB 選択、
+    narrow out の grid.z split + scratch。
 
 ## マルチリクエスト + 投機推論
 

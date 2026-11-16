@@ -34,7 +34,10 @@ draft GPU 時間は request 数に比例して増える。
 
 優先順は次のとおり。
 
-1. **small-M split-K decode GEMM（M≤64）** と **kernel trace 内訳に基づく launch 削減**。
+1. **BF16 small-M（M≤64）** と **kernel trace 内訳に基づく launch 削減**。
+   FP8 / MXFP4 の in-block split-K は実装済みである。BF16 は
+   block-per-output-row と WMMA の比較から始める
+   （[../research/20261116/bf16_small_m_reference.md](../research/20261116/bf16_small_m_reference.md)）。
    内訳は rocprofv3 kernel-trace から取り直す（[../perf/methodology.md](../perf/methodology.md) §1）。
 2. **dynamic verify width**（round ごとの draft 数可変）。
 3. 自前計測のうえで採否: fp8 residual stream、KV 容量の決め方、

@@ -81,7 +81,8 @@ hipError_t launch_gemm_mxfp4_w4a8_splitk(
     uint32_t activation_code_stride_bytes,
     uint32_t activation_scale_stride_bytes,
     uint32_t output_row_stride,
-    hipStream_t stream);
+    hipStream_t stream,
+    uint32_t split_mb = 0u);
 
 // Applies the config selected by the linear selector. A config whose geometry
 // is not supported falls back to the generic row-block path.

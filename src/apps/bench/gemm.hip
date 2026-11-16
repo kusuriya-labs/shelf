@@ -29,8 +29,11 @@ namespace {
 
 struct Options {
     std::string dtype = "bf16";
-    uint32_t mxfp4_split = 4u;
+    uint32_t mxfp4_split = 8u;
+    uint32_t mxfp4_split_mb = 0u;
     uint32_t mxfp4_unroll = 0u;
+    uint32_t fp8_split = 8u;
+    uint32_t fp8_split_mb = 0u;
     uint32_t mxfp4_fold = 1u;
 
     uint32_t mxfp4_spread = 24u;
@@ -67,8 +70,11 @@ void usage(FILE* f) {
         "  --k N                          (default 5120)\n"
         "  --shapes N:K,N:K,...           (explicit shape list)\n"
         "  --impl auto|wmma|wide|splitk|exact   (bf16 forced implementation)\n"
-        "  --impl auto|splitk|rowblock1|2|4      (mxfp4 forced implementation)\n"
+        "  --impl auto|splitk|rowblock1|2|4|prefill2d  (mxfp4 / fp8 forced implementation)\n"
+        "  --fp8-split N                    fp8 split-K ways (default 8)\n"
+        "  --fp8-split-mb N                 fp8 split-K row tile 1|2 (default auto)\n"
         "  --mxfp4-split N                  mxfp4 split-K ways (default 8)\n"
+        "  --mxfp4-split-mb N               mxfp4 split-K row tile 1|2 (default auto)\n"
         "  --mxfp4-fold 0|1                fold the row E8M0 reference into the operand\n"
         "  --mxfp4-spread N                mxfp4 synthetic E8M0 exponent spread (default 24)\n"
 
@@ -693,6 +699,18 @@ shelf::kernel::Mxfp4GemmConfig mxfp4_config_for(const std::string& impl, uint32_
     return shelf::kernel::Mxfp4GemmConfig{id, static_cast<uint8_t>(split)};
 }
 
+const char* fp8_config_name(shelf::kernel::Fp8FinegrainedGemmConfigId id) {
+    using Id = shelf::kernel::Fp8FinegrainedGemmConfigId;
+    switch (id) {
+    case Id::SplitK: return "splitk";
+    case Id::Prefill2D: return "prefill2d";
+    case Id::RowBlock4: return "rowblock4";
+    case Id::RowBlock2: return "rowblock2";
+    case Id::RowBlock1:
+    default: return "rowblock1";
+    }
+}
+
 const char* mxfp4_config_name(const shelf::kernel::Mxfp4GemmConfig& cfg) {
     switch (cfg.id) {
     case shelf::kernel::Mxfp4GemmConfigId::SplitK: return "splitk";
@@ -867,6 +885,9 @@ int run_gemm_mxfp4(Options& o) {
                 cfg = mxfp4_config_for(o.impl, o.mxfp4_split, o.mxfp4_unroll);
                 selected = mxfp4_config_name(cfg);
             }
+            if (o.mxfp4_split_mb != 0u &&
+                cfg.id == shelf::kernel::Mxfp4GemmConfigId::SplitK)
+                cfg.split_mb = static_cast<uint8_t>(o.mxfp4_split_mb);
 
             auto launch_one = [&]() -> hipError_t {
                 if (selected == "correctness") {
@@ -1078,8 +1099,33 @@ int run_gemm_fp8(Options& o) {
             const int8_t* a8 = reinterpret_cast<const int8_t*>(d_acodes);
             const auto fp8_sel = shelf::execution::select_fp8_finegrained_gemm_config(
                 shelf::execution::Fp8FinegrainedGemmSelectorInput{rows, n, shape.k, kp});
-            const shelf::kernel::Fp8FinegrainedGemmConfig fp8_cfg =
+            shelf::kernel::Fp8FinegrainedGemmConfig fp8_cfg =
                 fp8_sel ? *fp8_sel : fp8_gemm_config_for(rows, n);
+            const char* fp8_selected = fp8_sel ? fp8_config_name(fp8_cfg.id) : "gemm";
+            if (o.impl != "auto") {
+                using Id = shelf::kernel::Fp8FinegrainedGemmConfigId;
+                if (o.impl == "splitk")
+                    fp8_cfg = shelf::kernel::Fp8FinegrainedGemmConfig{
+                        Id::SplitK, static_cast<uint8_t>(o.fp8_split),
+                        static_cast<uint8_t>(o.fp8_split_mb)};
+                else if (o.impl == "rowblock1")
+                    fp8_cfg = shelf::kernel::Fp8FinegrainedGemmConfig{Id::RowBlock1};
+                else if (o.impl == "rowblock2")
+                    fp8_cfg = shelf::kernel::Fp8FinegrainedGemmConfig{Id::RowBlock2};
+                else if (o.impl == "rowblock4")
+                    fp8_cfg = shelf::kernel::Fp8FinegrainedGemmConfig{Id::RowBlock4};
+                else if (o.impl == "prefill2d")
+                    fp8_cfg = shelf::kernel::Fp8FinegrainedGemmConfig{Id::Prefill2D};
+                else {
+                    std::fprintf(stderr, "fp8 --impl must be auto|splitk|rowblock1|2|4|prefill2d\n");
+                    rc = 2;
+                    break;
+                }
+                fp8_selected = fp8_config_name(fp8_cfg.id);
+            }
+            if (o.fp8_split_mb != 0u &&
+                fp8_cfg.id == shelf::kernel::Fp8FinegrainedGemmConfigId::SplitK)
+                fp8_cfg.split_mb = static_cast<uint8_t>(o.fp8_split_mb);
             const uint32_t split_parts = (o.split > 1u) ? o.split : 1u;
             const uint32_t split_sub = rows / split_parts;
             auto launch_one = [&]() -> hipError_t {
@@ -1178,14 +1224,14 @@ int run_gemm_fp8(Options& o) {
                 double mean = 0.0;
                 for (double v : per_launch_us) mean += v;
                 mean /= (double)per_launch_us.size();
-                std::printf("fp8 %-12s rows=%-4u n=%-6u k=%-6u requested=%s selected=gemm min=%.3f p50=%.3f p95=%.3f mean=%.3f us\n",
+                std::printf("fp8 %-12s rows=%-4u n=%-6u k=%-6u requested=%s selected=%-8s min=%.3f p50=%.3f p95=%.3f mean=%.3f us\n",
                             shape.name.c_str(), rows, shape.n, shape.k,
-                            o.variant.c_str(), mn, p50, p95, mean);
+                            o.variant.c_str(), fp8_selected, mn, p50, p95, mean);
                 if (!o.out.empty()) {
                     FILE* f = std::fopen(o.out.c_str(), "a");
                     if (f) {
-                        std::fprintf(f, "fp8,%s,gemm,%s,%u,%u,%u,%d,%d,%d,%.3f,%.3f,%.3f,%.3f\n",
-                                     o.variant.c_str(), shape.name.c_str(),
+                        std::fprintf(f, "fp8,%s,%s,%s,%u,%u,%u,%d,%d,%d,%.3f,%.3f,%.3f,%.3f\n",
+                                     o.variant.c_str(), fp8_selected, shape.name.c_str(),
                                      rows, shape.n, shape.k,
                                      o.warmup, o.samples, o.launches, mn, p50, p95, mean);
                         std::fclose(f);
@@ -1226,6 +1272,9 @@ int run_gemm(int argc, char** argv) {
         else if (a == "--verify-small-m") o.verify_small_m = true;
         else if (a == "--split") o.split = static_cast<uint32_t>(std::stoi(next()));
         else if (a == "--mxfp4-split") o.mxfp4_split = static_cast<uint32_t>(std::stoi(next()));
+        else if (a == "--fp8-split") o.fp8_split = static_cast<uint32_t>(std::stoi(next()));
+        else if (a == "--fp8-split-mb") o.fp8_split_mb = static_cast<uint32_t>(std::stoi(next()));
+        else if (a == "--mxfp4-split-mb") o.mxfp4_split_mb = static_cast<uint32_t>(std::stoi(next()));
         else if (a == "--mxfp4-unroll") o.mxfp4_unroll = static_cast<uint32_t>(std::stoi(next()));
         else if (a == "--mxfp4-fold") o.mxfp4_fold = static_cast<uint32_t>(std::stoi(next()));
         else if (a == "--mxfp4-spread") o.mxfp4_spread = static_cast<uint32_t>(std::stoi(next()));

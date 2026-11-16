@@ -504,6 +504,152 @@ __global__ void __launch_bounds__(k2dThreads)
     }
 }
 
+template <int MB, int kSplit>
+__global__ void __launch_bounds__(kThreadsPerBlock * kSplit)
+gemm_fp8_finegrained_w8a8_splitk_kernel(
+    const uint8_t* __restrict__ weight_codes,
+    const float* __restrict__ weight_scales,
+    const uint8_t* __restrict__ activation_codes,
+    const float* __restrict__ activation_scales,
+    void* __restrict__ output,
+    const uint32_t output_dtype,
+    const uint32_t rows,
+    const uint32_t out_features,
+    const uint32_t k_padded,
+    const uint32_t weight_scale_stride,
+    const uint32_t activation_code_stride,
+    const uint32_t activation_scale_stride,
+    const uint32_t output_row_stride,
+    const uint32_t w_scale_shift) {
+    const uint32_t tid = threadIdx.x;
+    const uint32_t warp = tid >> 5u;
+    const uint32_t lane = tid & 31u;
+    const uint32_t m_lane = lane & 15u;
+    const uint32_t k_group = lane >> 4u;
+
+    const uint32_t out_start = blockIdx.x * kTileOut;
+    const uint32_t row_start = blockIdx.y * (MB * kTileRow);
+    if (out_start >= out_features || row_start >= rows)
+        return;
+
+    const bool out_valid = out_start + m_lane < out_features;
+    const uint32_t o_self = out_start + m_lane;
+
+    const uint8_t* wrow = weight_codes +
+        static_cast<size_t>(out_start >> 4) * (static_cast<size_t>(k_padded) * 16u) +
+        lane * kFragLaneBytes;
+    const float* wsrow = weight_scales +
+        static_cast<size_t>(o_self >> 7) * (weight_scale_stride / 4u);
+
+    const uint8_t* arow[MB];
+    #pragma unroll
+    for (int t = 0; t < MB; ++t) {
+        arow[t] = activation_codes +
+            (static_cast<size_t>(row_start >> 4) + static_cast<size_t>(t)) *
+                (static_cast<size_t>(activation_code_stride) * 16u) +
+            lane * kFragLaneBytes;
+    }
+
+    __shared__ float as_smem[kSplit][2u * MB * 8u];
+    __shared__ float red[kSplit][MB][8][32];
+
+    float8_t acc[MB];
+    #pragma unroll
+    for (int t = 0; t < MB; ++t)
+        acc[t] = float8_t FP8_ZERO8;
+
+    const uint32_t groups = k_padded >> 7;
+    const uint32_t ag_start = (groups * warp) / static_cast<uint32_t>(kSplit);
+    const uint32_t ag_stop = (groups * (warp + 1u)) / static_cast<uint32_t>(kSplit);
+    const uint32_t as_row_floats = activation_scale_stride >> 2u;
+    const uint32_t scale_col_shift = w_scale_shift - 1u;
+
+    for (uint32_t ag = ag_start; ag < ag_stop; ++ag) {
+        for (uint32_t s = lane; s < 2u * MB * 8u; s += 32u) {
+            const uint32_t kg = s / (MB * 8u);
+            const uint32_t t = (s >> 3u) % MB;
+            const uint32_t j = s & 7u;
+            const uint32_t rr = row_start + t * kTileRow + 8u * kg + j;
+            as_smem[warp][s] = (rr < rows)
+                ? activation_scales[static_cast<size_t>(rr) * as_row_floats + ag]
+                : 0.0f;
+        }
+        __syncwarp();
+        const uint32_t blk0 = ag * 2u;
+        #pragma unroll
+        for (uint32_t bj = 0; bj < 2u; ++bj) {
+            const uint32_t blk = blk0 + bj;
+            const uint8_t* wp = wrow + static_cast<size_t>(blk) * kFragBlockBytes;
+            int32x4_t wl = {0, 0, 0, 0};
+            int32x4_t wh = {0, 0, 0, 0};
+            float ws = 0.0f;
+            if (out_valid) {
+                FP8_LOAD4(wp, wl, wh);
+                ws = wsrow[(blk >> scale_col_shift)];
+            }
+            #pragma unroll
+            for (int t = 0; t < MB; ++t) {
+                int32x4_t al = {0, 0, 0, 0};
+                int32x4_t ah = {0, 0, 0, 0};
+                const uint8_t* ap = arow[t] + static_cast<size_t>(blk) * kFragBlockBytes;
+                if ((row_start + static_cast<uint32_t>(t) * kTileRow + m_lane) < rows) {
+                    FP8_LOAD4(ap, al, ah);
+                }
+                float8_t c = float8_t FP8_ZERO8;
+                FP8_WMM4(c, al, ah, wl, wh);
+                const uint32_t as_slot = (k_group * MB + static_cast<uint32_t>(t)) * 8u;
+                #pragma unroll
+                for (int j = 0; j < 8; ++j)
+                    acc[t][j] = __builtin_fmaf(
+                        c[j], ws * as_smem[warp][as_slot + static_cast<uint32_t>(j)], acc[t][j]);
+            }
+        }
+        __syncwarp();
+    }
+
+    #pragma unroll
+    for (int t = 0; t < MB; ++t) {
+        #pragma unroll
+        for (int j = 0; j < 8; ++j)
+            red[warp][t][j][lane] = acc[t][j];
+    }
+    detail::lds_barrier();
+
+    if (warp != 0u)
+        return;
+
+    #pragma unroll
+    for (int t = 0; t < MB; ++t) {
+        float s[8];
+        #pragma unroll
+        for (int j = 0; j < 8; ++j)
+            s[j] = 0.0f;
+        #pragma unroll
+        for (int w = 0; w < kSplit; ++w) {
+            #pragma unroll
+            for (int j = 0; j < 8; ++j)
+                s[j] += red[w][t][j][lane];
+        }
+        if (!out_valid)
+            continue;
+        const uint32_t r_base = row_start + static_cast<uint32_t>(t) * kTileRow + 8u * k_group;
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            const uint32_t r = r_base + static_cast<uint32_t>(j);
+            if (r >= rows)
+                continue;
+            const float v = s[j];
+            const size_t out_idx = static_cast<size_t>(r) * output_row_stride + o_self;
+            if (output_dtype == static_cast<uint32_t>(Fp8FinegrainedGemmOutputDType::BF16)) {
+                static_cast<::shelf::bf16_t*>(output)[out_idx] =
+                    ::shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(v))};
+            } else {
+                static_cast<float*>(output)[out_idx] = v;
+            }
+        }
+    }
+}
+
 #define FP8_MB_LAUNCH(MB)                                                      \
     do {                                                                        \
         const dim3 grid((out_features + kTileOut - 1u) / kTileOut,              \
@@ -519,6 +665,98 @@ __global__ void __launch_bounds__(k2dThreads)
                 output_row_stride, w_scale_shift);                              \
         return hipGetLastError();                                               \
     } while (0)
+
+template <int MB, int SPLIT>
+hipError_t launch_splitk_impl(
+    const uint8_t* weight_codes,
+    const float* weight_scales,
+    const uint8_t* activation_codes,
+    const float* activation_scales,
+    void* output,
+    Fp8FinegrainedGemmOutputDType output_dtype,
+    uint32_t rows,
+    uint32_t out_features,
+    uint32_t k_padded,
+    uint32_t weight_scale_stride_bytes,
+    uint32_t activation_code_stride_bytes,
+    uint32_t activation_scale_stride_bytes,
+    uint32_t output_row_stride,
+    hipStream_t stream,
+    uint32_t w_scale_shift) {
+    const dim3 grid((out_features + kTileOut - 1u) / kTileOut,
+                    (rows + MB * kTileRow - 1u) / (MB * kTileRow), 1);
+    gemm_fp8_finegrained_w8a8_splitk_kernel<MB, SPLIT>
+        <<<grid, kThreadsPerBlock * SPLIT, 0, stream>>>(
+            weight_codes, weight_scales, activation_codes, activation_scales, output,
+            static_cast<uint32_t>(output_dtype), rows, out_features, k_padded,
+            weight_scale_stride_bytes, activation_code_stride_bytes,
+            activation_scale_stride_bytes, output_row_stride, w_scale_shift);
+    return hipGetLastError();
+}
+
+}  // namespace
+
+bool fp8_splitk_supported(uint32_t rows, uint32_t out_features, uint32_t k_padded) {
+    return rows >= 1u && rows <= kFp8FinegrainedGemmSplitKMaxRows && out_features != 0u &&
+           (k_padded & 127u) == 0u;
+}
+
+hipError_t launch_gemm_fp8_finegrained_w8a8_splitk(
+    uint32_t split_k,
+    const uint8_t* weight_codes,
+    const float* weight_scales,
+    const int8_t* activation_codes,
+    const float* activation_scales,
+    void* output,
+    Fp8FinegrainedGemmOutputDType output_dtype,
+    uint32_t rows,
+    uint32_t out_features,
+    uint32_t k_padded,
+    uint32_t weight_scale_stride_bytes,
+    uint32_t activation_code_stride_bytes,
+    uint32_t activation_scale_stride_bytes,
+    uint32_t output_row_stride,
+    hipStream_t stream,
+    uint32_t weight_scale_group,
+    uint32_t split_mb) {
+    if (rows == 0u || out_features == 0u || k_padded == 0u)
+        return hipSuccess;
+    if (!fp8_splitk_supported(rows, out_features, k_padded))
+        return hipErrorNotSupported;
+    uint32_t w_scale_shift = 2u;
+    if (weight_scale_group == 128u) w_scale_shift = 2u;
+    else if (weight_scale_group == 64u) w_scale_shift = 1u;
+    else return hipErrorNotSupported;
+
+    const auto* acodes = reinterpret_cast<const uint8_t*>(activation_codes);
+    const bool mb2 = split_mb == 2u ||
+        (split_mb == 0u && rows > 32u && out_features >= 1024u);
+#define FP8_SPLIT_RETURN(MB, SPLIT)                                             \
+    return launch_splitk_impl<MB, SPLIT>(                                       \
+        weight_codes, weight_scales, acodes, activation_scales, output,         \
+        output_dtype, rows, out_features, k_padded, weight_scale_stride_bytes,  \
+        activation_code_stride_bytes, activation_scale_stride_bytes,            \
+        output_row_stride, stream, w_scale_shift)
+    if (mb2) {
+        switch (split_k) {
+        case 2u: FP8_SPLIT_RETURN(2, 2);
+        case 4u: FP8_SPLIT_RETURN(2, 4);
+        case 8u: FP8_SPLIT_RETURN(2, 8);
+        default: return hipErrorInvalidValue;
+        }
+    }
+    switch (split_k) {
+    case 2u: FP8_SPLIT_RETURN(1, 2);
+    case 4u: FP8_SPLIT_RETURN(1, 4);
+    case 8u: FP8_SPLIT_RETURN(1, 8);
+    case 16u: FP8_SPLIT_RETURN(1, 16);
+    default: return hipErrorInvalidValue;
+    }
+#undef FP8_SPLIT_RETURN
+    return hipErrorInvalidValue;
+}
+
+namespace {
 
 hipError_t launch_gemm_fp8_finegrained_w8a8_wmma_impl(
     const Fp8FinegrainedGemmConfig& config,
@@ -546,6 +784,15 @@ hipError_t launch_gemm_fp8_finegrained_w8a8_wmma_impl(
     else if (weight_scale_group == 64u) w_scale_shift = 1u;
     else return hipErrorNotSupported;
     const auto* acodes = reinterpret_cast<const uint8_t*>(activation_codes);
+    if (config.id == Fp8FinegrainedGemmConfigId::SplitK) {
+        const hipError_t split_error = launch_gemm_fp8_finegrained_w8a8_splitk(
+            config.split_k, weight_codes, weight_scales, activation_codes, activation_scales,
+            output, output_dtype, rows, out_features, k_padded, weight_scale_stride_bytes,
+            activation_code_stride_bytes, activation_scale_stride_bytes, output_row_stride,
+            stream, weight_scale_group, config.split_mb);
+        if (split_error != hipErrorNotSupported)
+            return split_error;
+    }
     if (config.id == Fp8FinegrainedGemmConfigId::Prefill2D) {
         if ((rows % (16u * kTileRow)) != 0u ||
             (out_features % k2dOutBlock) != 0u ||

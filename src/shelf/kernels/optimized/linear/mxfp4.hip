@@ -885,7 +885,8 @@ hipError_t launch_gemm_mxfp4_w4a8_splitk(
     uint32_t activation_code_stride_bytes,
     uint32_t activation_scale_stride_bytes,
     uint32_t output_row_stride,
-    hipStream_t stream) {
+    hipStream_t stream,
+    uint32_t split_mb) {
     if (rows == 0u || out_features == 0u || k_padded == 0u)
         return hipSuccess;
     if ((k_padded & 127u) != 0u || (out_features & 15u) != 0u)
@@ -895,7 +896,9 @@ hipError_t launch_gemm_mxfp4_w4a8_splitk(
                        output, static_cast<uint32_t>(output_dtype), rows, out_features, k_padded,
                        weight_scale_stride_bytes, activation_code_stride_bytes,
                        activation_scale_stride_bytes, output_row_stride};
-    const uint32_t mb = rows <= 16u ? 1u : 2u;
+    const uint32_t mb = (split_mb == 1u || split_mb == 2u)
+        ? split_mb
+        : ((rows > 32u && out_features >= 1024u) ? 2u : 1u);
     if (mb == 1u) {
         if (split_k == 2u)
             return launch_splitk<1, 2>(a, stream);
@@ -932,7 +935,7 @@ hipError_t launch_gemm_mxfp4_w4a8_auto(
             config.split_k, weight_codes, weight_scales, weight_ref, activation_codes,
             activation_scales, output, output_dtype, rows, out_features,
             k_padded, weight_scale_stride_bytes, activation_code_stride_bytes,
-            activation_scale_stride_bytes, output_row_stride, stream);
+            activation_scale_stride_bytes, output_row_stride, stream, config.split_mb);
     }
     return launch_gemm_mxfp4_w4a8_wmma(
         config, weight_codes, weight_scales, weight_ref, activation_codes, activation_scales,

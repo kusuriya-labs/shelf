@@ -550,6 +550,7 @@ int main() {
     run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::SplitK, 2u}, kTokens, "splitk2", kRows, false);
     run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::SplitK, 4u}, kTokens, "splitk4", kRows, false);
     run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::SplitK, 8u}, 1u, "splitk8", kRows, false);
+    run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::SplitK, 8u, 2u}, kTokens, "splitk8-mb2", kRows, false);
     run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::Prefill2D, 0u}, 256u, "prefill2d", kRows, false);
     run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::Prefill2D, 0u}, 256u, "2d-fold", kRows, true);
     run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::Prefill2D, 0u}, 256u, "2d-guard", 100u, false);

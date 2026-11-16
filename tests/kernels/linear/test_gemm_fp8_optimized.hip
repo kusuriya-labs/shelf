@@ -62,6 +62,7 @@ const char* config_name(Fp8FinegrainedGemmConfigId id) {
         case Fp8FinegrainedGemmConfigId::RowBlock2: return "MB2";
         case Fp8FinegrainedGemmConfigId::RowBlock4: return "MB4";
         case Fp8FinegrainedGemmConfigId::Prefill2D: return "2D";
+        case Fp8FinegrainedGemmConfigId::SplitK: return "SplitK";
     }
     return "?";
 }
@@ -273,6 +274,25 @@ int main() {
             std::snprintf(label, sizeof(label), "fp8b128-force-%s", config_name(id));
             if (run_case(arena, Fp8FinegrainedGemmConfig{id}, rows, 130u, 256u, label)) ++g_pass; else ++g_fail;
         }
+    }
+
+    for (uint32_t rows : {1u, 8u, 16u, 32u, 64u}) {
+        for (uint32_t n : {24u, 48u, 256u}) {
+            std::snprintf(label, sizeof(label), "fp8b128-splitk4");
+            Fp8FinegrainedGemmConfig split{Fp8FinegrainedGemmConfigId::SplitK, 4u};
+            if (run_case(arena, split, rows, n, 2560u, label)) ++g_pass; else ++g_fail;
+        }
+    }
+    for (uint32_t split_ways : {2u, 4u, 8u, 16u}) {
+        std::snprintf(label, sizeof(label), "fp8b128-splitk%u", split_ways);
+        Fp8FinegrainedGemmConfig split{Fp8FinegrainedGemmConfigId::SplitK,
+                                       static_cast<uint8_t>(split_ways)};
+        if (run_case(arena, split, 64u, 48u, 5120u, label)) ++g_pass; else ++g_fail;
+    }
+    {
+        Fp8FinegrainedGemmConfig split{Fp8FinegrainedGemmConfigId::SplitK, 8u, 2u};
+        if (run_case(arena, split, 64u, 256u, 2560u, "fp8b128-splitk8-mb2")) ++g_pass;
+        else ++g_fail;
     }
 
     for (uint32_t rows : {512u, 2048u}) {

@@ -97,6 +97,32 @@ optimized variantは `src/shelf/kernels/optimized/` に実装する。
 - small-M（M=1..16）のbatch-invariant順序は `linear/bf16.hip` のexact-rows
   経路が担う。MTP verifyはこの順序に依存する。
 
+### linear / FP8 W8A8
+
+`src/shelf/kernels/optimized/linear/fp8.hip` は gfx1201 の FP8 WMMA で
+E4M3 weight / activation を計算する。weight と activation は
+`quantization/fp8/fp8_frag.h` の 16 出力 x 64 K fragment 順で常駐し、
+weight scale は 128 x 128（`weight_scale_group` が 64 のときは 128 x 64）タイル、
+activation scale は 128 K ごとの行 scale である。
+
+- variant は `RowBlock1 / 2 / 4`（activation 行 tile の数）、`Prefill2D`、
+  `SplitK`。
+- `SplitK` は 1 block の warps が K の 128 K グループを連続に分担し、
+  F32 accumulator を LDS に書いて warp 0 が split 昇順で足す。split は
+  2 / 4 / 8 / 16 で、`config.split_k` が選ぶ。行 tile は
+  rows > 32 かつ out_features >= 1024 のとき 32 行（MB2）、それ以外は
+  16 行（MB1）で、`config.split_mb` が選ぶ。
+- selector は `kFp8FinegrainedGemmWaveSlots`(=768) を埋めるように split を選ぶ。
+  `base_waves = ceil(out_features/16) * ceil(rows/16)` が 768 未満のときだけで、
+  K の 128 K グループが split あたり 4 個以上残ることを条件にする。
+- split を使うのは rows <= 16 の全形状と、rows <= 64 かつ out_features <= 1024 の
+  形状である。rows > 16 で out_features > 1024 の形状は、実測で RowBlock1 の方が
+  速いため split しない。rows 17〜64 で split を使わない形状は、
+  out_features <= 8192 なら RowBlock1、それ以外は rows <= 32 で RowBlock2、
+  rows > 32 で RowBlock4 を選ぶ。
+- split は 128 K グループの区間和を最後に足すため、RowBlock 系と bit 一致しない。
+  correctness path との比較は tolerance で行う（`test_gemm_fp8_optimized`）。
+
 ### linear / MXFP4 W4A8
 
 `src/shelf/kernels/optimized/linear/mxfp4.hip` は gfx1201 の FP8 WMMA
@@ -112,12 +138,17 @@ optimized variantは `src/shelf/kernels/optimized/` に実装する。
 - weight scale を E4M3 operand 側へ fold すると 32 K block の rescale も消え、WMMA
   fragment が K 全体を 1 本の accumulator へ chain する。fold しないときは 32 K block
   ごとに `acc = fma(c, weight_scale, acc)` を適用する。
-- variant は `SplitK`（rows <= 32 かつ out_features <= 2560、wave で K を分割し LDS で
-  reduce）、`RowBlock1 / 2 / 4`（activation 行 tile の数）、
+- variant は `SplitK`（rows <= 64 かつ out_features <= 1024 かつ
+  k_padded >= 2048、wave で K を分割し LDS で reduce。行 tile は
+  rows > 32 かつ out_features >= 1024 のとき MB2、それ以外は MB1）、
+  `RowBlock1 / 2 / 4`（activation 行 tile の数）、
   `Prefill2D`（rows >= 512 の prefill。1 block が 256 行 x 64 output、8 wave。
   128 K chunk ごとに weight fragment を展開して LDS へ stage し、4 行 tile で再利用する）。
   `rows == 1` の専用 variant は持たない（FP8 linear で decode1 経路を削除した方針に従う。
   rows == 1 は SplitK または RowBlock1 が担当し、DRAM 律速 shape では 590 GB/s 出る）。
+- selector は rows <= 16 で RowBlock1、rows 17〜32 で out_features <= 8192 なら
+  RowBlock1、それ以外は RowBlock2、rows > 192 は RowBlock4 を選ぶ。
+  1 warp/block の RowBlock1 が、狭い N では MB2/4 の重み再利用より速い。
   variant 選択と geometry allowlist は `selectors/linear_selector.cpp` が hold する。
 - activation codes / scales は FP8 W8A8 と同一の `Int8ActivationWorkspaceLayout`
   （64 K fragment block、scale row stride `align16(ceil(k_padded/128)*4)`）を読むが、

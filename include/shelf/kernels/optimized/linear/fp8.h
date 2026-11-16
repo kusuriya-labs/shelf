@@ -36,6 +36,31 @@ hipError_t launch_gemm_fp8_finegrained_w8a8_wmma(
     hipStream_t stream,
     uint32_t weight_scale_group = 128);
 
+// Small-M split-K with an in-block LDS reduction. K is divided across the
+// warps of one block (2, 4, 8 or 16 ways); each warp accumulates whole 128-K
+// activation groups and the partial sums are added in split order. The kernel
+// uses a 16-row tile and grid.y covers the remaining row tiles.
+bool fp8_splitk_supported(uint32_t rows, uint32_t out_features, uint32_t k_padded);
+
+hipError_t launch_gemm_fp8_finegrained_w8a8_splitk(
+    uint32_t split_k,
+    const uint8_t* weight_codes,
+    const float* weight_scales,
+    const int8_t* activation_codes,
+    const float* activation_scales,
+    void* output,
+    Fp8FinegrainedGemmOutputDType output_dtype,
+    uint32_t rows,
+    uint32_t out_features,
+    uint32_t k_padded,
+    uint32_t weight_scale_stride_bytes,
+    uint32_t activation_code_stride_bytes,
+    uint32_t activation_scale_stride_bytes,
+    uint32_t output_row_stride,
+    hipStream_t stream,
+    uint32_t weight_scale_group = 128,
+    uint32_t split_mb = 0u);
+
 hipError_t launch_gemm_fp8_finegrained_w8a8_wmma_auto(
     const Fp8FinegrainedGemmConfig& config,
     const uint8_t* weight_codes,

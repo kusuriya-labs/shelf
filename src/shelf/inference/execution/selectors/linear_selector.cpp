@@ -1,5 +1,6 @@
 #include <shelf/inference/execution/selectors/linear_selector.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -148,6 +149,37 @@ void linear_debug_miss(LinearComputeFamily family, uint32_t out_features, uint32
     }
 }
 
+std::optional<shelf::kernel::Fp8FinegrainedGemmConfig> fp8_finegrained_splitk_config(
+    uint32_t rows, uint32_t out_features, uint32_t k_padded) {
+    using Id = shelf::kernel::Fp8FinegrainedGemmConfigId;
+    if (rows == 0u || rows > shelf::kernel::kFp8FinegrainedGemmSplitKMaxRows ||
+        out_features == 0u || (k_padded & 127u) != 0u)
+        return std::nullopt;
+    const uint8_t split_mb = (rows > 32u && out_features >= 1024u) ? 2u : 1u;
+    const uint32_t tiles = (out_features + 15u) / 16u;
+    const uint32_t row_tile = shelf::kernel::kFp8FinegrainedGemmRowTile * split_mb;
+    const uint32_t row_blocks = (rows + row_tile - 1u) / row_tile;
+    const uint32_t base_waves = tiles * row_blocks;
+    if (base_waves >= shelf::kernel::kFp8FinegrainedGemmWaveSlots)
+        return std::nullopt;
+    const uint32_t groups = k_padded / 128u;
+    const uint32_t max_split = std::min(
+        shelf::kernel::kFp8FinegrainedGemmSplitKMaxWays,
+        groups / shelf::kernel::kFp8FinegrainedGemmSplitKMinGroups);
+    uint32_t split =
+        (shelf::kernel::kFp8FinegrainedGemmWaveSlots + base_waves - 1u) / base_waves;
+    split = std::min(split, max_split);
+    if (split < 2u) return std::nullopt;
+    uint32_t chosen = 2u;
+    while (chosen < split && chosen < max_split) chosen <<= 1u;
+    if (chosen > max_split) {
+        chosen = 2u;
+        while (chosen * 2u <= max_split) chosen <<= 1u;
+    }
+    return shelf::kernel::Fp8FinegrainedGemmConfig{
+        Id::SplitK, static_cast<uint8_t>(chosen), split_mb};
+}
+
 shelf::kernel::Fp8FinegrainedGemmConfig fp8_finegrained_row_block_config(uint32_t rows, uint32_t out_features) {
     using Id = shelf::kernel::Fp8FinegrainedGemmConfigId;
     if (rows >= 4u * shelf::kernel::kFp8FinegrainedGemmRowTile &&
@@ -229,6 +261,32 @@ select_fp8_finegrained_gemm_config(const Fp8FinegrainedGemmSelectorInput& input)
         input.out_features >= shelf::kernel::kBlockScaledGemmPrefill2dMinOutFeatures;
     if (use_2d)
         return shelf::kernel::Fp8FinegrainedGemmConfig{shelf::kernel::Fp8FinegrainedGemmConfigId::Prefill2D};
+    // Split-K pays while the 16-output column tiles cannot fill the device. Above
+    // 16 rows the activation row tiles already add blocks, so only the narrow
+    // output shapes keep the extra K parallelism; the measured crossover is
+    // 1024 output features (docs/research/20261116).
+    const bool split_allowed =
+        input.rows <= shelf::kernel::kFp8FinegrainedGemmRowTile ||
+        input.out_features <= 1024u;
+    if (split_allowed) {
+        if (const auto split =
+                fp8_finegrained_splitk_config(input.rows, input.out_features, input.k_padded))
+            return split;
+    }
+    if (input.rows > shelf::kernel::kFp8FinegrainedGemmRowTile &&
+        input.rows <= shelf::kernel::kFp8FinegrainedGemmSplitKMaxRows) {
+        // The one-warp block family re-reads a 16-output x K weight tile once per
+        // 16-row tile. Re-reading wins over the larger MB while the grid is not
+        // yet large: measured 8192..8704 output features at 32/64 rows, see the
+        // same record.
+        constexpr uint32_t row_block1_limit = 8192u;
+        if (input.out_features <= row_block1_limit)
+            return shelf::kernel::Fp8FinegrainedGemmConfig{
+                shelf::kernel::Fp8FinegrainedGemmConfigId::RowBlock1};
+        return shelf::kernel::Fp8FinegrainedGemmConfig{
+            input.rows <= 32u ? shelf::kernel::Fp8FinegrainedGemmConfigId::RowBlock2
+                              : shelf::kernel::Fp8FinegrainedGemmConfigId::RowBlock4};
+    }
     return fp8_finegrained_row_block_config(input.rows, input.out_features);
 }
 
@@ -258,12 +316,21 @@ select_mxfp4_gemm_config(const Mxfp4GemmSelectorInput& input) {
                           shelf::kernel::kMxfp4GemmPrefill2dMinWeights)) {
         return shelf::kernel::Mxfp4GemmConfig{Id::Prefill2D, 0u};
     }
-    if (input.rows <= shelf::kernel::kMxfp4GemmSplitKMaxRows && tile_aligned &&
-        input.out_features <= shelf::kernel::kMxfp4GemmSplitKMaxOutFeatures) {
+    const bool splitk_narrow =
+        input.rows <= shelf::kernel::kMxfp4GemmSplitKMaxRows &&
+        input.out_features <= 1024u &&
+        input.k_padded >= shelf::kernel::kMxfp4GemmSplitKMinKPadded;
+    if (tile_aligned && splitk_narrow) {
+        const uint8_t split_mb =
+            (input.rows > 32u && input.out_features >= 1024u) ? 2u : 1u;
         return shelf::kernel::Mxfp4GemmConfig{
-            Id::SplitK, static_cast<uint8_t>(shelf::kernel::kMxfp4GemmSplitKWays)};
+            Id::SplitK, static_cast<uint8_t>(shelf::kernel::kMxfp4GemmSplitKWays),
+            split_mb};
     }
     if (input.rows <= shelf::kernel::kMxfp4GemmRowBlock1MaxRows)
+        return shelf::kernel::Mxfp4GemmConfig{Id::RowBlock1, 0u};
+    if (input.rows <= 32u &&
+        input.out_features <= shelf::kernel::kMxfp4GemmRowBlock1MaxOutFeatures)
         return shelf::kernel::Mxfp4GemmConfig{Id::RowBlock1, 0u};
     if (input.rows <= shelf::kernel::kMxfp4GemmRowBlock2MaxRows)
         return shelf::kernel::Mxfp4GemmConfig{Id::RowBlock2, 0u};
