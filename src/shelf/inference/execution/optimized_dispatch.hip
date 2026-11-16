@@ -1260,6 +1260,79 @@ Result<OptimizedLaunchResult> try_launch_attn_q(
 Result<OptimizedLaunchResult> try_launch_attn_kv(
     const ::shelf::runtime::Program&, size_t, size_t, HostExecutionContext&, hipStream_t);
 
+Result<OptimizedLaunchResult> try_launch_fp8_norm_quantize(
+    const ::shelf::runtime::Program& program, size_t i, size_t end,
+    HostExecutionContext& ctx, hipStream_t stream) {
+    const OptimizedLaunchResult miss{OptimizedLaunchKind::NotApplicable};
+    static const bool enabled = std::getenv("SHELF_DISABLE_FP8_BOUNDARY") == nullptr &&
+        std::getenv("SHELF_OP_DUMP") == nullptr && std::getenv("SHELF_OP_SYNC") == nullptr &&
+        std::getenv("SHELF_LINEAR_INPUT_DUMP") == nullptr;
+    if (!enabled || ctx.value_trace || ctx.layer_override_count ||
+        i + 2u >= end || ctx.workspace == nullptr || ctx.weights == nullptr) return miss;
+    const auto& norm = program.dispatches[i];
+    const auto& quant = program.dispatches[i + 1u];
+    const auto& linear = program.dispatches[i + 2u];
+    if (norm.kernel_id != KernelId::RMS_NORM ||
+        quant.kernel_id != KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED ||
+        linear.kernel_id != KernelId::LINEAR_FP8_FINEGRAINED) return miss;
+    if (norm.input_count != 1u || norm.output_count != 1u ||
+        quant.input_count != 1u || linear.input_count != 0u ||
+        linear.output_count != 1u ||
+        norm.output_slots[0] != quant.input_slots[0] ||
+        quant.workspace_slot == ::shelf::runtime::kNoWorkspace ||
+        quant.workspace_slot != linear.workspace_slot) return miss;
+    if (linear.weight_index >= ctx.weight_count) return miss;
+    const auto& w = ctx.weights[linear.weight_index];
+    if (w.encoding != 1u || w.cols != 5120u || w.k_padded != 5120u) return miss;
+    const auto* norm_binding =
+        program.find_value(::shelf::runtime::ValueId{norm.output_slots[0]});
+    if (norm_binding == nullptr ||
+        (norm_binding->storage != ::shelf::runtime::ValueStorage::WORKSPACE &&
+         norm_binding->storage != ::shelf::runtime::ValueStorage::WORKSPACE_VIEW))
+        return miss;
+    for (size_t j = i + 2u; j < program.dispatches.size(); ++j)
+        for (uint32_t k = 0; k < program.dispatches[j].input_count; ++k)
+            if (program.dispatches[j].input_slots[k] == norm.output_slots[0]) return miss;
+    PhysicalRmsNormLaunch n{};
+    auto resolved_norm = resolve_rmsnorm_physical(program, norm, ctx, n);
+    if (!resolved_norm.ok()) return resolved_norm.status();
+    if (resolved_norm.value() != PhysicalResolveStatus::Applicable ||
+        n.variant != PhysicalRmsNormVariant::Bf16PfOnePlus ||
+        n.features != 5120u || n.group_size != 5120u || n.rows == 0u || !n.weight)
+        return miss;
+    PhysicalActivationQuantizeLaunch q{};
+    auto resolved_quant = resolve_activation_quantize_physical(program, quant, ctx, q);
+    if (!resolved_quant.ok()) return resolved_quant.status();
+    if (resolved_quant.value() != PhysicalResolveStatus::Applicable ||
+        q.k != 5120u || q.k_padded != 5120u || q.rows != n.rows ||
+        q.code_row_stride == 0u || q.scale_row_stride == 0u ||
+        q.codes == 0u || q.scales == 0u) return miss;
+    auto input = resolve_host_value(program, ::shelf::runtime::ValueId{norm.input_slots[0]}, ctx);
+    if (!input.ok()) return input.status();
+    if (input.value().dtype != ValueDType::BF16 ||
+        input.value().feature_count != 5120u || input.value().ptr == nullptr)
+        return miss;
+    ::shelf::execution::Fp8NormArgs args{};
+    args.input = static_cast<const ::shelf::bf16_t*>(input.value().ptr);
+    args.weight = reinterpret_cast<const ::shelf::bf16_t*>(n.weight);
+    args.codes = reinterpret_cast<uint8_t*>(q.codes);
+    args.scales = reinterpret_cast<float*>(q.scales);
+    args.rows = q.rows;
+    args.k = q.k;
+    args.k_padded = q.k_padded;
+    args.input_stride = input.value().row_stride;
+    args.code_stride = q.code_row_stride;
+    args.scale_stride = q.scale_row_stride;
+    args.eps = n.eps;
+    const hipError_t herr = ::shelf::execution::launch_fp8_norm_quantize(args, stream);
+    if (herr != hipSuccess)
+        return Status::hip_error("fp8 norm quantize launch", hipGetErrorString(herr),
+                                 __FILE__, __LINE__);
+    record_physical_launch(1);
+    record_optimized_op();
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 2u};
+}
+
 Result<OptimizedLaunchResult> try_launch_fp8_residual_norm_quantize(
     const ::shelf::runtime::Program& program, size_t i, size_t end,
     HostExecutionContext& ctx, hipStream_t stream) {
@@ -1267,7 +1340,7 @@ Result<OptimizedLaunchResult> try_launch_fp8_residual_norm_quantize(
     static const bool enabled = std::getenv("SHELF_DISABLE_FP8_BOUNDARY") == nullptr &&
         std::getenv("SHELF_OP_DUMP") == nullptr && std::getenv("SHELF_OP_SYNC") == nullptr &&
         std::getenv("SHELF_LINEAR_INPUT_DUMP") == nullptr;
-    if (!enabled || ctx.value_trace || ctx.layer_override_count || ctx.tp_active ||
+    if (!enabled || ctx.value_trace || ctx.layer_override_count ||
         i + 3u >= end || ctx.workspace == nullptr || ctx.weights == nullptr) return miss;
     const auto& add = program.dispatches[i];
     const auto& norm = program.dispatches[i + 1u];
@@ -1355,7 +1428,7 @@ Result<OptimizedLaunchResult> try_launch_fp8_final_gather(
     static const bool enabled = std::getenv("SHELF_DISABLE_FP8_FINAL") == nullptr &&
         std::getenv("SHELF_OP_DUMP") == nullptr && std::getenv("SHELF_OP_SYNC") == nullptr &&
         std::getenv("SHELF_LINEAR_INPUT_DUMP") == nullptr;
-    if (!enabled || ctx.value_trace || ctx.layer_override_count || ctx.tp_active ||
+    if (!enabled || ctx.value_trace || ctx.layer_override_count ||
         ctx.num_prefill_requests || ctx.num_requests > 1u || ctx.batch_context == nullptr ||
         ctx.actual_rows == 0u || ctx.actual_outputs == 0u || ctx.actual_outputs > 16u ||
         i + 3u >= end || ctx.workspace == nullptr || ctx.weights == nullptr) return miss;
@@ -1599,6 +1672,8 @@ Result<OptimizedLaunchResult> try_launch_optimized(
         case KernelId::LINEAR_BF16:
             return try_launch_linear_bf16(program, b, ctx, stream);
         case KernelId::RMS_NORM: {
+            auto fp8 = try_launch_fp8_norm_quantize(program, dispatch_index, dispatch_end, ctx, stream);
+            if (!fp8.ok() || fp8.value().kind == OptimizedLaunchKind::Launched) return fp8;
             static const bool enabled = [] {
                 const char* env = std::getenv("SHELF_PLAMO_EXL3_NORM_ROTATE");
                 return (env == nullptr || std::strcmp(env, "0") != 0) &&

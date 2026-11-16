@@ -266,24 +266,27 @@ production の Program Builder は linear の activation 量子化方針を
 
 ### FP8 activation producer fusion
 
-FP8 の activation quantize は、次の 2 つの producer 連鎖では producer と同一 launch で
-実行する。どちらも hidden 5120、BF16、RMS norm の `PER_FEATURE` / `ONE_PLUS`、
+FP8 の activation quantize は、次の producer 連鎖では producer と同一 launch で
+実行する。どれも hidden 5120、BF16、RMS norm の `PER_FEATURE` / `ONE_PLUS`、
 activation K 5120 のときだけ成立する。
 
 - `RESIDUAL_ADD` + `RMS_NORM` + `ACTIVATION_QUANTIZE_FP8_FINEGRAINED`
+- `RMS_NORM` + `ACTIVATION_QUANTIZE_FP8_FINEGRAINED`
 - `OUTPUT_GATHER` + `RMS_NORM` + `ACTIVATION_QUANTIZE_FP8_FINEGRAINED`
 
-`OUTPUT_GATHER` 側は decode の rows / outputs が 16 以下で、batch context と
-output row mapping が使えるときに限る。どちらも RMS norm の出力を global に
-materialize せず、residual 出力と gather 出力は従来どおり書く。生成する codes / scales は
-単独の `ACTIVATION_QUANTIZE_FP8_FINEGRAINED` と bit 一致する。
+`RMS_NORM` 起点の形は、TP combine が residual add を吸収した後に使われる。
+TP実行中も segment 内で完結する限り適用する。`OUTPUT_GATHER` 側は decode の
+rows / outputs が 16 以下で、batch context と output row mapping が使えるときに限る。
+いずれも RMS norm の出力を global に materialize せず、residual 出力と gather 出力は
+従来どおり書く。生成する codes / scales は単独の
+`ACTIVATION_QUANTIZE_FP8_FINEGRAINED` と bit 一致する。
 
 dispatch の無効化は `SHELF_DISABLE_FP8_BOUNDARY` / `SHELF_DISABLE_FP8_FINAL` で行う。
-`SHELF_OP_DUMP`、`SHELF_OP_SYNC`、`SHELF_LINEAR_INPUT_DUMP`、value trace、layer override、
-TP 実行中は融合しない。実装は
+`SHELF_OP_DUMP`、`SHELF_OP_SYNC`、`SHELF_LINEAR_INPUT_DUMP`、value trace、layer override
+では融合しない。実装は
 `src/shelf/inference/execution/launch_fp8_activation_producer.hip` と
-`try_launch_fp8_residual_norm_quantize` / `try_launch_fp8_final_gather`
-（`optimized_dispatch.hip`）にある。
+`try_launch_fp8_residual_norm_quantize` / `try_launch_fp8_norm_quantize` /
+`try_launch_fp8_final_gather`（`optimized_dispatch.hip`）にある。
 
 ### EXL3 W16A16
 

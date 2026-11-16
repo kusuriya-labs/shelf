@@ -141,6 +141,26 @@ __global__ void fp8_residual_norm_quantize_kernel(Fp8ResidualNormArgs args) {
                         args.code_stride, args.scale_stride);
 }
 
+__global__ void fp8_norm_quantize_kernel(Fp8NormArgs args) {
+    __shared__ __align__(16) bf16 x[kFeatures];
+    __shared__ float sums[kWaves];
+    const uint32_t row = blockIdx.x;
+    const bf16* input = reinterpret_cast<const bf16*>(args.input) +
+        static_cast<size_t>(row) * args.input_stride;
+    for (uint32_t base = threadIdx.x * 4u; base < kFeatures; base += kThreads * 4u) {
+        #pragma unroll
+        for (uint32_t j = 0u; j < 4u; ++j) {
+            const uint32_t i = base + j;
+            x[i] = input[i];
+        }
+    }
+    const float inv = rms_inverse(x, args.eps, sums);
+    normalize_shared(x, reinterpret_cast<const bf16*>(args.weight), inv);
+    __syncthreads();
+    fp8_quantize_shared(x, args.codes, args.scales, row, args.k, args.k_padded,
+                        args.code_stride, args.scale_stride);
+}
+
 __global__ void fp8_final_gather_norm_quantize_kernel(Fp8FinalProducer args) {
     __shared__ __align__(16) bf16 x[kFeatures];
     __shared__ float sums[kWaves];
@@ -177,6 +197,16 @@ hipError_t launch_fp8_residual_norm_quantize(const Fp8ResidualNormArgs& args,
         args.scale_stride == 0u)
         return hipErrorInvalidValue;
     fp8_residual_norm_quantize_kernel<<<args.rows, kThreads, 0, stream>>>(args);
+    return hipGetLastError();
+}
+
+hipError_t launch_fp8_norm_quantize(const Fp8NormArgs& args, hipStream_t stream) {
+    if (args.input == nullptr || args.weight == nullptr || args.codes == nullptr ||
+        args.scales == nullptr || args.rows == 0u || args.k != kFeatures ||
+        args.k_padded < args.k || args.input_stride < args.k ||
+        args.code_stride == 0u || args.scale_stride == 0u)
+        return hipErrorInvalidValue;
+    fp8_norm_quantize_kernel<<<args.rows, kThreads, 0, stream>>>(args);
     return hipGetLastError();
 }
 
