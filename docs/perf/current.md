@@ -49,6 +49,42 @@ date・build・GPU 割り当て・生成結果の一致アンカーとともに�
 | カテゴリ別 serving | `vendor/BetterBench`（methodology §9） | decode t/s、TTFT p50 |
 | fp8 KV の数値品質 | `tools/quality_gate.py` / `shelf-bench quality` | ppl 差、mean KL、top-1 一致率 |
 
+## 2026-11-16 Qwen3.8-27B-FP8 TP=2 FP8 activation producer fusion reference
+
+`RESIDUAL_ADD` / `RMS_NORM` / `OUTPUT_GATHER` の producer と FP8 activation quantize を
+1 launch に融合した構成の reference run。TP=2 では residual add が TP combine に
+吸収されるため、`RMS_NORM + ACTIVATION_QUANTIZE_FP8_FINEGRAINED` の 2 dispatch 融合も
+併用する。qualified baseline ではない。
+
+- measurement revision: `5bdf992`
+- GPU: Radeon AI PRO R9700 2 枚（`--device 0,1`）
+- decode: context 128、8 token、greedy、bf16 KV。融合 on / off を交互に 3 ペア。
+  `GREEDY_TOKEN_SUM` は全ペアで **254505** に一致した。
+- decode（512 context、32 token）でも `GREEDY_TOKEN_SUM` は **142119** で一致した。
+
+| 条件 | 融合 off | 融合 on | 差 |
+| --- | ---: | ---: | ---: |
+| tg ctx128 8 token、p50 tok/s（3 ペア中央値） | 29.86 | **30.11** | +0.84% |
+| tg ctx512 32 token、p50 tok/s | 29.58 | **29.84** | +0.88% |
+| pp 2048、fp8 KV、tok/s | 3898.97 | **3913.07** | +0.36% |
+
+- prefill は 1 ペア（`--runs 3 --warmup 1`）のみで、有意差としては扱わない。
+- 効果が小さいのは decode が weight traffic の DRAM 律速で、融合が削減するのは
+  launch と norm 出力の materialize だからである。
+
+```text
+./build/shelf-bench tg --mode greedy --model-dir models/Qwen3.8-27B-FP8 \
+  --tensor-parallel 2 --device 0,1 --context 128 --tokens 8 \
+  --kv-cache-dtype bf16 --warmup 1
+SHELF_DISABLE_FP8_BOUNDARY=1 SHELF_DISABLE_FP8_FINAL=1 \
+  ./build/shelf-bench tg --mode greedy --model-dir models/Qwen3.8-27B-FP8 \
+  --tensor-parallel 2 --device 0,1 --context 128 --tokens 8 \
+  --kv-cache-dtype bf16 --warmup 1
+./build/shelf-bench pp --model-dir models/Qwen3.8-27B-FP8 \
+  --tensor-parallel 2 --device 0,1 --prompt-tokens 2048 \
+  --kv-cache-dtype fp8 --runs 3 --warmup 1
+```
+
 ## 2026-11-11 Qwen3.8-Flash-Next EXL3 long-context decode reference
 
 QSA の複数タイル top-k をタイルごとの radix select と 1 回の merge に変更し、
