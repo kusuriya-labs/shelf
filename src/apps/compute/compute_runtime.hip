@@ -47,14 +47,14 @@ struct MemoryPlan {
     bool prefix_enabled = false;
 };
 
-void print_memory_plan(const MemoryPlan& plan) {
+void print_memory_plan(const MemoryPlan& plan, const char* scope = "") {
     const std::size_t required = plan.target_weights + plan.draft_weights +
         plan.drafter_runtime + plan.workspace + plan.kv + plan.prefix;
     const std::size_t left = plan.arena_capacity > required
         ? plan.arena_capacity - required
         : 0;
     fprintf(stderr,
-            "MEMORY_PLAN mode=%s\n"
+            "MEMORY_PLAN mode=%s%s\n"
             "  target weights    %s\n"
             "  draft weights     %s\n"
             "  drafter runtime   %s\n"
@@ -67,6 +67,7 @@ void print_memory_plan(const MemoryPlan& plan) {
             "  arena capacity    %s\n"
             "  left              %s\n",
             plan.auto_mode ? "auto" : "fixed",
+            scope,
             gpu::format_gib(plan.target_weights).c_str(),
             gpu::format_gib(plan.draft_weights).c_str(),
             gpu::format_gib(plan.drafter_runtime).c_str(),
@@ -730,13 +731,26 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
     tp_arena_ = &rank0.arena();
     tp_stream_ = rank0.stream();
 
-    fprintf(stderr,
-            "MEMORY_PLAN mode=%s tp=2 arena=%s used=%s available=%s\n",
-            auto_arena_ ? "auto" : "fixed",
-            gpu::format_gib(tp_arena_->capacity()).c_str(),
-            gpu::format_gib(tp_arena_->used()).c_str(),
-            gpu::format_gib(startup_available_bytes_).c_str());
-    fflush(stderr);
+    for (int r = 0; r < tp_coordinator_->tp_size(); ++r) {
+        qwen35::runtime::TpRankRuntime& rank =
+            tp_coordinator_->rank(static_cast<std::size_t>(r));
+        const qwen35::runtime::TpRankMemoryPlan& rank_plan = rank.memory_plan();
+        MemoryPlan plan;
+        plan.auto_mode = auto_arena_;
+        plan.available_bytes = startup_available_bytes_;
+        plan.arena_capacity = rank.arena().capacity();
+        plan.target_weights = rank_plan.target_weights;
+        plan.draft_weights = rank_plan.draft_weights;
+        plan.drafter_runtime = rank_plan.drafter_runtime;
+        plan.workspace = rank_plan.workspace;
+        plan.kv = rank_plan.kv;
+        plan.kv_tokens = rank_plan.kv_tokens;
+        plan.prefix = rank_plan.prefix;
+        plan.prefix_enabled = config_.prefix_cache;
+        char scope[32];
+        std::snprintf(scope, sizeof(scope), " tp=%d rank=%d", config_.tp, r);
+        print_memory_plan(plan, scope);
+    }
 
     qwen35::runtime::ContinuousBatcherConfig batcher_config;
     batcher_config.max_num_batched_tokens = exec_max_tokens_;

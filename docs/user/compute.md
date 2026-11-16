@@ -102,6 +102,9 @@ scratch と session pool の領域（DFlash2 は `--max-concurrent-requests` 分
 physical KV capacity、`prefix cache` は capture slot の実サイズである
 （checkpoint 本体は pinned host memory に置くため arena を使わない）。
 `left` は arena の未使用容量であり、workspace はこの後に executor が実際に確保する。
+テンソル並列では rank ごとに同じ表を `MEMORY_PLAN mode=auto tp=N rank=R` の見出しで
+出す。`target weights` はその rank が private weight（target の embed / lm_head など）を
+load した場合はそれを含むため、`KV budget` が rank 間で異なることがある。
 
 `--arena-gib N` を明示した場合は arena 容量を N GiB に固定する（measurement の
 再現用）。

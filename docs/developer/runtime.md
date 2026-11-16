@@ -106,8 +106,8 @@ allocationのlifetimeを追跡しないため）。
 ### arena budget
 
 `Qwen35RuntimeConfig::arena_bytes == 0` は auto である。compute は `hipMemGetInfo`
-を model load 前に 1 回呼び、空き VRAM から 1 GiB を引いた値を arena の容量に
-する。TP=2 は rank ごとに自分の device の空き VRAM から同じ式で capacity を決める。
+を model load 前に 1 回呼び、空き VRAM から 0.5 GiB を引いた値を arena の容量に
+する。TP でも rank ごとに別の値を問い合わせず、この容量を全 rank が使う。
 
 起動時 plan は stderr にだけ出す（`--serve-stdio` の stdout を汚さない）。
 
@@ -138,7 +138,7 @@ MEMORY_PLAN tp drafter: weights xx.xx GiB scratch xx.xx GiB session slot xx.xx G
 DFLASH2_WEIGHT_ARENA_BYTES=<bytes>
 ```
 
-`MEMORY_PLAN` の `used` は executor が workspace を確保する前の値である。
+`MEMORY_PLAN` の `left` は executor が workspace を確保する前の値である。
 plan 後に必要になる作業領域は `--working-set-reserve-gib` が受け持つため、
 drafter 分を織り込んでも reserve を 1 GiB まで下げると executor 確保で不足する。
 reserve は plan 時点の約束であり、実際の作業領域を超えた場合は plan ではなく
@@ -213,12 +213,30 @@ KV と drafter を引いた残りへ縮小する。128 MiB を下回る場合は
 page を共有するため、縮小・無効化の対象にしない。
 
 縮小は stderr に 1 行ずつ出す。`--arena-gib N` は measurement の再現用であり、
-N GiB を固定値として使う（auto の縮小はしない）。TP=2 では上の内訳ではなく、
-rank0 の arena について次の 1 行を出す。
+N GiB を固定値として使う（auto の縮小はしない）。TP では rank ごとに同じ表を
+`MEMORY_PLAN mode=auto tp=N rank=R` の見出しで出す。
 
 ```text
-MEMORY_PLAN mode=auto tp=2 arena=xx.xx GiB used=xx.xx GiB available=xx.xx GiB
+MEMORY_PLAN mode=auto tp=2 rank=0
+  target weights    19.64 GiB
+  draft weights     1.97 GiB
+  drafter runtime   0.52 GiB
+  runtime workspace 0.12 GiB
+  KV budget         8.73 GiB (563520 tokens)
+  prefix cache      0.15 GiB
+  ------------------------------
+  required          31.13 GiB
+  available         31.78 GiB
+  arena capacity    31.28 GiB
+  left              0.15 GiB
 ```
+
+`target weights` はその rank が private weight を load した場合はそれを含む。
+`draft weights` は `--dflash2-model-dir` の safetensors 合計、`drafter runtime` は
+drafter の scratch・session pool・MTP batch の予約、`runtime workspace` は
+`--working-set-reserve-gib`（auto は slack を含む）、`prefix cache` は capture slot と
+family shadow である。rank 間で private weight が異なるため、`KV budget` も
+rank ごとに違ってよい。
 
 ## Scheduler
 

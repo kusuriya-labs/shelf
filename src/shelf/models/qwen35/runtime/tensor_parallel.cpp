@@ -139,6 +139,10 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
             rank->private_embed_tokens_);
         if (!private_status.ok()) return private_status;
     }
+    const std::size_t used_after_weights = rank->arena_->used();
+    TpRankMemoryPlan plan;
+    plan.target_weights = used_after_weights;
+    plan.draft_weights = config.drafter_weights_bytes;
 
     auto seq_result = SequenceSlotPool::create(
         rank->arena_.value(), config.max_scheduled_requests, max_blocks_per_sequence);
@@ -194,6 +198,7 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
                      static_cast<unsigned>(config.max_batch_rows),
                      gpu::format_gib(slack).c_str());
     }
+    plan.workspace = reserved;
     if (config.prefix_cache) {
         PrefixCacheConfig prefix_config;
         prefix_config.checkpoints = config.prefix_checkpoints;
@@ -213,6 +218,7 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
             rank->model_->executor_state_reserve_bytes(
                 2u * static_cast<std::size_t>(prefix_config.checkpoints));
         reserved += family_shadow;
+        plan.prefix = prefix_bytes.total() + family_shadow;
         std::fprintf(stderr, "MEMORY_PLAN tp prefix cache: %s (family shadow %s)\n",
                      gpu::format_gib(prefix_bytes.total()).c_str(),
                      gpu::format_gib(family_shadow).c_str());
@@ -238,6 +244,7 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
                                           : config.drafter_sessions,
             0u, exl3_mul24_head);
         reserved += footprint.total();
+        plan.drafter_runtime = footprint.total() - footprint.draft_weights;
         std::fprintf(stderr,
                      "MEMORY_PLAN tp drafter: weights %s scratch %s spec batch %s "
                      "session slot %s x %u\n",
@@ -274,6 +281,7 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
                 config.mtp_batch.max_requests);
         const std::size_t batch_bytes = drafter_bytes + state_bytes;
         reserved += batch_bytes;
+        plan.drafter_runtime += batch_bytes;
         std::fprintf(stderr,
                      "MEMORY_PLAN tp mtp batch reserve: %s (%u slots, drafter %s)\n",
                      gpu::format_gib(batch_bytes).c_str(),
@@ -314,6 +322,9 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
             __FILE__, __LINE__);
     }
     const std::uint32_t kv_pool_pages = fit_pages + 1u;
+    plan.kv = static_cast<std::size_t>(kv_pool_pages) * kv_page_bytes;
+    plan.kv_tokens = fit_pages * config.page_tokens;
+    rank->plan_ = plan;
 
     auto kv_result = PagedKVPool::create(
         rank->arena_.value(), kv_pool_pages, config.page_tokens, attention_layers,

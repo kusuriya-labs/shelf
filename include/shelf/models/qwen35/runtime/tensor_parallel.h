@@ -96,6 +96,18 @@ struct TpRankRuntimeConfig {
     MtpBatchReserveConfig mtp_batch;
 };
 
+// What one rank's arena held when the rank sized its KV pool. The single-device runtime
+// reports the same breakdown, so a tensor-parallel launch can account for every rank.
+struct TpRankMemoryPlan {
+    std::size_t target_weights = 0;
+    std::size_t draft_weights = 0;
+    std::size_t drafter_runtime = 0;
+    std::size_t workspace = 0;
+    std::size_t kv = 0;
+    std::uint32_t kv_tokens = 0;
+    std::size_t prefix = 0;
+};
+
 class TpRankRuntime {
 public:
     static Result<std::unique_ptr<TpRankRuntime>> create(
@@ -127,6 +139,7 @@ public:
     std::uint64_t weight_bytes() const;
     std::uint64_t kv_bytes() const;
     std::uint64_t gdn_state_bytes() const;
+    const TpRankMemoryPlan& memory_plan() const noexcept { return plan_; }
 
 private:
     TpRankRuntime() = default;
@@ -139,6 +152,7 @@ private:
     std::optional<GdnStatePool> gdn_pool_;
     std::optional<PagedKVPool> kv_pool_;
     Executor executor_;
+    TpRankMemoryPlan plan_;
     bool executor_ready_ = false;
     weights::MatrixWeight private_lm_head_;
     weights::MatrixWeight private_embed_tokens_;
