@@ -116,6 +116,8 @@ void compute_usage(const char* prog) {
     printf("  --prefix-cache-concurrency N   max concurrent prefix captures and stored\n");
     printf("                                 prefix entries (default 4)\n");
     printf("  --prefix-cache-strategy MODE   radix | slot (default radix)\n");
+    printf("  --prefix-cache-save-interval N  periodic checkpoint spacing in tokens;\n");
+    printf("                                 0 = disable periodic checkpoints (default 1024)\n");
     printf("  --serve-stdio          serve JSON Lines generation requests on stdin/stdout\n");
     printf("  --help                 show this help\n");
 }
@@ -207,6 +209,7 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
     auto& prefix_cache_enabled = opt.prefix_cache_enabled;
     auto& prefix_cache_concurrency = opt.prefix_cache_concurrency;
     auto& prefix_cache_strategy = opt.prefix_cache_strategy;
+    auto& prefix_cache_save_interval = opt.prefix_cache_save_interval;
     auto& working_set_reserve_gib = opt.working_set_reserve_gib;
     auto& rope_factor = opt.rope_factor;
     unsigned long top_k = 0;
@@ -397,6 +400,13 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
                 prefix_cache_strategy = 1;
             } else {
                 fprintf(stderr, "bad --prefix-cache-strategy (expected radix or slot)\n");
+                return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--prefix-cache-save-interval") == 0 &&
+                   i + 1 < argc) {
+            if (!parse_uint(argv[++i], prefix_cache_save_interval) ||
+                prefix_cache_save_interval > 65536u) {
+                fprintf(stderr, "bad --prefix-cache-save-interval (expected 0..65536)\n");
                 return kComputeParseError;
             }
         } else if (std::strcmp(argv[i], "--serve-stdio") == 0) {

@@ -301,8 +301,24 @@ void ContinuousBatcher::prefix_save_prefill(RuntimeRequest& request) {
     if (position > request.input_tokens.size()) {
         return;
     }
-    if (slot_mode && position != request.prefix_save_position) {
-        return;
+    if (slot_mode) {
+        if (position != request.prefix_save_position) return;
+    } else {
+        const bool split_point = position == request.prefix_save_position;
+        const bool junction = position == request.prefix_junction_position;
+        const bool input_end = position == request.input_tokens.size();
+        const uint32_t interval = prefix_cache_->save_interval();
+        const bool periodic =
+            interval != 0u && position % interval == 0u;
+        if (!split_point && !junction && !input_end && !periodic) return;
+        if (split_point) {
+            const uint32_t input_len =
+                static_cast<uint32_t>(request.input_tokens.size());
+            const uint32_t tail = input_len > config_.page_tokens
+                ? ((input_len - 1u) / config_.page_tokens) * config_.page_tokens
+                : 0u;
+            request.prefix_save_position = tail > position ? tail : 0u;
+        }
     }
     const std::vector<uint32_t> tokens(
         request.input_tokens.begin(),
@@ -548,7 +564,9 @@ Result<StepResult> ContinuousBatcher::step() {
         if (prefix_cache_ != nullptr) {
             const std::vector<uint32_t> prefix_tokens(request.input_tokens.begin(),
                                                       request.input_tokens.end());
-            const PrefixHit hit = prefix_cache_->lookup(prefix_tokens);
+            const PrefixHit hit = prefix_cache_->lookup(
+                prefix_tokens,
+                static_cast<uint32_t>(prefix_tokens.size()) - 1u);
             if (getenv("SHELF_PFXDBG") != nullptr) {
                 std::fprintf(stderr,
                              "PFXDBG lookup hit=%d state=%u ring_len=%u ring_next=%u "
@@ -628,6 +646,20 @@ Result<StepResult> ContinuousBatcher::step() {
                             input_len > config_.page_tokens
                         ? ((input_len - 1u) / config_.page_tokens) * config_.page_tokens
                         : 0u;
+            } else {
+                const uint32_t input_len =
+                    static_cast<uint32_t>(request.input_tokens.size());
+                const uint32_t tail = input_len > config_.page_tokens
+                    ? ((input_len - 1u) / config_.page_tokens) * config_.page_tokens
+                    : 0u;
+                const uint32_t matched = hit.match_tokens;
+                const uint32_t junction =
+                    matched > request.restored_tokens && matched < input_len
+                        ? matched
+                        : 0u;
+                request.prefix_junction_position = junction;
+                request.prefix_save_position =
+                    junction != 0u ? junction : tail;
             }
         }
         auto claim_st = capacity_.register_claim(request.id, request.max_kv_pages);
@@ -1026,8 +1058,6 @@ Status ContinuousBatcher::open_dflash2_session(RuntimeRequest& request) {
     const uint32_t prompt_count =
         static_cast<uint32_t>(request.input_tokens.size());
     const uint32_t page_tokens = config_.page_tokens;
-    const uint32_t last_boundary =
-        page_tokens == 0u ? prompt_count : (prompt_count / page_tokens) * page_tokens;
     const auto prefill_started = std::chrono::steady_clock::now();
     auto last_prefill_log = prefill_started;
     uint32_t last_prefill_offset = request.restored_tokens;
@@ -1054,45 +1084,16 @@ Status ContinuousBatcher::open_dflash2_session(RuntimeRequest& request) {
         }
         prefix_save_prefill(request);
     };
-    // A prompt that fits in one chunk has no chunk end to save at, so a separate pass over its page-aligned head
-    // captures one (the prefill proper keeps the greedy chunking). Longer prompts are saved by the callback above.
-    constexpr uint32_t kMaxShadowPrefixTokens = 1024u;
-    if (prefix_cache_ != nullptr &&
-        prefix_cache_->strategy() == PrefixCacheStrategy::Radix &&
-        tp_batch_hook_ == nullptr &&
-        request.restored_tokens == 0u && last_boundary > 0u && last_boundary < prompt_count &&
-        last_boundary <= kMaxShadowPrefixTokens) {
-        for (DFlash2GdnRankState& rank : session.decoder->gdn_ranks) {
-            auto scope = shelf::gpu::ScopedDevice::create(rank.device);
-            if (!scope.ok()) return scope.status();
-            Status st = spec_gdn_snapshot(*rank.pool, request.sequence.slot, rank.conv_snapshot,
-                                          rank.rec_snapshot, rank.conv_bytes, rank.rec_bytes,
-                                          rank.stream);
-            if (!st.ok()) return st;
-        }
-        auto boundary = dflash2_spec_prefill(*session.decoder, request.input_tokens.data(),
-                                             last_boundary, 0u, 0u, save_input_boundary);
-        if (!boundary.ok()) return boundary.status();
-        for (DFlash2GdnRankState& rank : session.decoder->gdn_ranks) {
-            auto scope = shelf::gpu::ScopedDevice::create(rank.device);
-            if (!scope.ok()) return scope.status();
-            Status st = spec_gdn_restore(*rank.pool, request.sequence.slot, rank.conv_snapshot,
-                                         rank.rec_snapshot, rank.conv_bytes, rank.rec_bytes,
-                                         rank.stream);
-            if (!st.ok()) return st;
-        }
-        request.sequence.position = 0u;
-        Status rollback = rollback_sequence_append(request.sequence, 0u, stream_);
-        if (!rollback.ok()) return rollback;
-        Status reset = dflash2::dflash2_context_reset(*session.context, 0u);
-        if (!reset.ok()) return reset;
-        session.decoder->token_history.clear();
-        session.decoder->sample_index = 0u;
-    }
+    const uint32_t tail_position = prompt_count > page_tokens
+        ? ((prompt_count - 1u) / page_tokens) * page_tokens
+        : 0u;
+    const uint32_t first_checkpoint = request.prefix_save_position;
+    const uint32_t second_checkpoint =
+        tail_position != first_checkpoint ? tail_position : 0u;
     auto prefill_result = dflash2_spec_prefill(
         *session.decoder, request.input_tokens.data(), prompt_count,
         request.restored_tokens, 0u, save_input_boundary,
-        request.prefix_save_position);
+        first_checkpoint, second_checkpoint);
     request.prefill_ms += std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - prefill_started)
                               .count();

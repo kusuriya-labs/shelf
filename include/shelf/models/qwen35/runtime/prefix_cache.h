@@ -30,6 +30,7 @@ enum class PrefixCacheStrategy : uint8_t {
 struct PrefixCacheConfig {
     uint32_t max_concurrent = 4;
     uint32_t min_prefix_tokens = 64;
+    uint32_t save_interval = 1024;
     uint32_t spec_ring_bytes = 0;
     PrefixCacheStrategy strategy = PrefixCacheStrategy::Radix;
     uint32_t slot_count = 0;
@@ -40,10 +41,10 @@ inline constexpr uint32_t kInvalidReuseSlot = 0xFFFFFFFFu;
 struct PrefixCacheBytes {
     std::size_t state = 0;
     std::size_t extra_state = 0;
-    std::size_t ring = 0;
     std::size_t state_slot = 0;
+    std::size_t host = 0;
 
-    std::size_t total() const noexcept { return state + extra_state + ring; }
+    std::size_t total() const noexcept { return state + extra_state; }
 };
 
 PrefixCacheBytes prefix_cache_bytes(
@@ -151,9 +152,12 @@ class PrefixCache {
 
     Status shutdown() noexcept;
 
-    PrefixHit lookup(const std::vector<uint32_t>& tokens);
+    PrefixHit lookup(const std::vector<uint32_t>& tokens,
+                     uint32_t max_position = 0xFFFFFFFFu);
 
     PrefixCacheStrategy strategy() const noexcept { return config_.strategy; }
+
+    uint32_t save_interval() const noexcept { return config_.save_interval; }
 
     uint32_t reuse_slot_count() const noexcept {
         return slots_ ? static_cast<uint32_t>(slots_->slots.size()) : 0u;
@@ -221,11 +225,8 @@ class PrefixCache {
 
     Result<uint32_t> acquire_state_slot(hipStream_t stream);
 
-    Result<uint32_t> acquire_ring_slot(hipStream_t stream);
-
     struct AuxSlot {
-        uint32_t hot_slot = 0;
-        uint32_t ring_slot = 0xFFFFFFFFu;
+        uint32_t check_slot = 0;
         uint32_t reuse_slot = kInvalidReuseSlot;
     };
 

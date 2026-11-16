@@ -275,7 +275,8 @@ workspace / prefix state / drafter の予約を先に差し引いた残りが 4 
   family 固有の分（grouped expert activation、QSA の block bitmap、
   executor が plan 後に作る `QsaKeyStatePool` / `PleConvStatePool`）を加える
 - prefix state 分: `prefix_cache_bytes()` を rank の GDN layout と
-  `--prefix-cache-concurrency` で計算し、GDN state shadow slot と ring の分だけを予約する
+  `--prefix-cache-concurrency` で計算し、rolling capture 用の shadow slot 分だけを予約する
+  （checkpoint 本体は pinned host memory に置く）
 - drafter 分: drafter 重み・draft executor の scratch・spec batch context・session pool の
   slot × `--max-concurrent-requests`（`dflash2_footprint.h`）
 

@@ -81,6 +81,7 @@ struct RuntimeRequest {
     uint32_t prefix_boundary_pos = 0;
     uint32_t prefix_slot = 0xFFFFFFFFu;
     uint32_t prefix_save_position = 0;
+    uint32_t prefix_junction_position = 0;
     double prefill_ms = 0.0;
     double prefill_log_ms = 0.0;
     uint32_t prefill_log_tokens = 0;

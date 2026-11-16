@@ -98,6 +98,7 @@ def build_compute_argv(opts) -> list[str]:
         "--prefix-cache", str(opts.prefix_cache),
         "--prefix-cache-concurrency", str(opts.prefix_cache_concurrency),
         "--prefix-cache-strategy", opts.prefix_cache_strategy,
+        "--prefix-cache-save-interval", str(opts.prefix_cache_save_interval),
     ]
     if opts.dflash2_model_dir:
         argv += [
@@ -529,6 +530,9 @@ def parse_args(argv=None):
     parser.add_argument("--prefix-cache-strategy", default="radix",
                         choices=("radix", "slot"),
                         help="prefix cache entry strategy (default radix)")
+    parser.add_argument("--prefix-cache-save-interval", type=int, default=1024,
+                        help="periodic prefix checkpoint spacing in tokens; "
+                             "0 disables periodic checkpoints (default 1024)")
 
     parser.add_argument("--dflash2-model-dir", default=None,
                         help="DFlash2 draft model directory (enables speculative decoding)")
@@ -595,6 +599,8 @@ def parse_args(argv=None):
         parser.error("--dflash2-tree-budget requires --dflash2-model-dir")
     if not 1 <= opts.prefix_cache_concurrency <= 65535:
         parser.error("--prefix-cache-concurrency must be between 1 and 65535")
+    if not 0 <= opts.prefix_cache_save_interval <= 65536:
+        parser.error("--prefix-cache-save-interval must be between 0 and 65536")
     if opts.dflash2_drafts < 1:
         parser.error("--dflash2-drafts must be >= 1")
     if opts.dflash2_model_dir and opts.dflash2_tree_budget == "auto" and opts.dflash2_drafts != 7:
@@ -730,6 +736,7 @@ async def _serve(opts) -> int:
         "working_set_reserve_gib": opts.working_set_reserve_gib,
         "prefix_cache_strategy": opts.prefix_cache_strategy,
         "prefix_cache_concurrency": opts.prefix_cache_concurrency,
+        "prefix_cache_save_interval": opts.prefix_cache_save_interval,
         "speculative": speculative,
         "reasoning": {
             "enabled": bool(reasoning_capability["thinking"]),
@@ -762,6 +769,7 @@ async def _serve(opts) -> int:
                  f"{'enabled' if compute.capabilities.prefix_cache else 'disabled'} "
                  f"(strategy={opts.prefix_cache_strategy}, "
                  f"concurrency={opts.prefix_cache_concurrency}, "
+                 f"save_interval={opts.prefix_cache_save_interval}, "
                  f"capabilities.prefix_cache="
                  f"{str(compute.capabilities.prefix_cache).lower()}"))
     if opts.dflash2_model_dir:

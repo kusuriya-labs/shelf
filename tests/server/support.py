@@ -233,11 +233,15 @@ class ComputeHarness:
                  devices: str | None = None,
                  auto_arena: bool = False,
                  prefix_cache_enabled: bool = True,
+                 prefix_cache_concurrency: int | None = None,
+                 max_num_batched_tokens: int | None = None,
                  mtp: bool = False):
         self.log_path = log_path
         self.arena_gib = arena_gib
         self.auto_arena = auto_arena
         self.prefix_cache_enabled = prefix_cache_enabled
+        self.prefix_cache_concurrency = prefix_cache_concurrency
+        self.max_num_batched_tokens = max_num_batched_tokens
         self.mtp = mtp
         self.max_seq_len = max_seq_len
         self.device = device
@@ -277,6 +281,16 @@ class ComputeHarness:
             argv += ["--arena-gib", str(arena_gib)]
         if not self.prefix_cache_enabled:
             argv += ["--prefix-cache", "0"]
+        concurrency = self.prefix_cache_concurrency
+        if concurrency is None:
+            concurrency = _env_int("SHELF_TEST_PREFIX_CACHE_CONCURRENCY")
+        if concurrency is not None:
+            argv += ["--prefix-cache-concurrency", str(concurrency)]
+        batch_tokens = self.max_num_batched_tokens
+        if batch_tokens is None:
+            batch_tokens = _env_int("SHELF_TEST_MAX_NUM_BATCHED_TOKENS")
+        if batch_tokens is not None:
+            argv += ["--max-num-batched-tokens", str(batch_tokens)]
         if self.tp > 1:
             argv += ["--tensor-parallel", str(self.tp)]
         reserve = _test_working_set_reserve_gib(self.working_set_reserve_gib)

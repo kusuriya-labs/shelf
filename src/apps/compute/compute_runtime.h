@@ -86,6 +86,7 @@ struct Qwen35RuntimeConfig {
     qwen35::runtime::PrefixCacheStrategy prefix_cache_strategy =
         qwen35::runtime::PrefixCacheStrategy::Radix;
     uint32_t prefix_cache_slot_count = 0;
+    uint32_t prefix_cache_save_interval = 1024;
     std::size_t working_set_reserve_bytes = 4ull * 1024ull * 1024ull * 1024ull;
     std::optional<qwen35::EffectiveRopeProfile> rope_profile;
 };

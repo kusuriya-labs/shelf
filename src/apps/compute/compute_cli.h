@@ -50,6 +50,7 @@ struct ComputeOptions {
     int prefix_cache_enabled = 1;
     unsigned long prefix_cache_concurrency = 4;
     int prefix_cache_strategy = 0;
+    unsigned long prefix_cache_save_interval = 1024;
     unsigned long working_set_reserve_gib = 0;
     std::string rope_factor = "auto";
 };

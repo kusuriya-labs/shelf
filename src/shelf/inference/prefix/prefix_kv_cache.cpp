@@ -61,6 +61,7 @@ PrefixKVStore::PrefixKVStore(PrefixKVStore&& other) noexcept
       page_free_(std::move(other.page_free_)),
       next_entry_id_(other.next_entry_id_),
       clock_(other.clock_),
+      pinned_entry_id_(other.pinned_entry_id_),
       pools_bound_(other.pools_bound_),
       evict_callback_(std::move(other.evict_callback_)),
       stats_(other.stats_) {}
@@ -82,6 +83,7 @@ PrefixKVStore& PrefixKVStore::operator=(PrefixKVStore&& other) noexcept {
     page_free_ = std::move(other.page_free_);
     next_entry_id_ = other.next_entry_id_;
     clock_ = other.clock_;
+    pinned_entry_id_ = other.pinned_entry_id_;
     pools_bound_ = other.pools_bound_;
     evict_callback_ = std::move(other.evict_callback_);
     stats_ = other.stats_;
@@ -128,6 +130,7 @@ Status PrefixKVStore::shutdown() noexcept {
     page_index_.clear();
     page_refcount_.clear();
     page_free_.clear();
+    pinned_entry_id_ = 0;
     return Status::make_ok();
 }
 
@@ -164,7 +167,8 @@ bool PrefixKVStore::find_child(
     return false;
 }
 
-PrefixKVStore::WalkResult PrefixKVStore::walk(std::span<const uint32_t> tokens) {
+PrefixKVStore::WalkResult PrefixKVStore::walk(std::span<const uint32_t> tokens,
+                                            uint32_t max_position) {
     WalkResult result;
     const uint32_t query_pages = static_cast<uint32_t>(tokens.size() / page_tokens_);
     nodes_[0].last_used = ++clock_;
@@ -187,8 +191,12 @@ PrefixKVStore::WalkResult PrefixKVStore::walk(std::span<const uint32_t> tokens) 
         if (matched_edge_pages < edge_pages) break;
         node = child;
         if (nodes_[child].entry_id != 0) {
-            result.entry_id = nodes_[child].entry_id;
+            const Entry* entry = find_entry(nodes_[child].entry_id);
+            if (entry != nullptr && entry->position <= max_position) {
+                result.entry_id = entry->id;
+            }
         }
+        if (static_cast<uint64_t>(consumed) * page_tokens_ > max_position) break;
     }
     result.matched_pages = consumed;
     return result;
@@ -298,12 +306,33 @@ PrefixKVStore::Entry* PrefixKVStore::find_entry(uint64_t id) {
     return nullptr;
 }
 
-PrefixKVStore::Entry* PrefixKVStore::find_lru_entry() {
+PrefixKVStore::Entry* PrefixKVStore::find_lru_entry(bool skip_pinned) {
     Entry* best = nullptr;
     for (Entry& entry : entries_) {
+        if (skip_pinned && is_pinned(entry.id)) continue;
         if (best == nullptr || entry.last_used < best->last_used) best = &entry;
     }
     return best;
+}
+
+void PrefixKVStore::update_pin() {
+    if (config_.entry_capacity < 3u) {
+        pinned_entry_id_ = 0;
+        return;
+    }
+    uint64_t best = 0;
+    uint64_t best_hits = 0;
+    uint32_t best_position = 0;
+    for (const Entry& entry : entries_) {
+        if (entry.hits == 0) continue;
+        const bool better = best == 0 || entry.hits > best_hits ||
+            (entry.hits == best_hits && entry.position < best_position);
+        if (!better) continue;
+        best = entry.id;
+        best_hits = entry.hits;
+        best_position = entry.position;
+    }
+    pinned_entry_id_ = best;
 }
 
 void PrefixKVStore::remove_entry(uint64_t id) {
@@ -312,6 +341,7 @@ void PrefixKVStore::remove_entry(uint64_t id) {
         Entry removed = std::move(entries_[i]);
         if (i + 1 != entries_.size()) entries_[i] = std::move(entries_.back());
         entries_.pop_back();
+        if (pinned_entry_id_ == id) pinned_entry_id_ = 0;
         if (removed.node < nodes_.size() && nodes_[removed.node].entry_id == id) {
             nodes_[removed.node].entry_id = 0;
         }
@@ -411,7 +441,7 @@ Status PrefixKVStore::prepare_save(
         plan.too_short = true;
         return Status::make_ok();
     }
-    plan.walk = walk(tokens);
+    plan.walk = walk(tokens, 0xFFFFFFFFu);
     plan.shared_pages = std::min(plan.walk.matched_pages, plan.page_count);
     plan.pages.assign(plan.walk.path.begin(),
                       plan.walk.path.begin() + plan.shared_pages);
@@ -490,10 +520,11 @@ Result<uint64_t> PrefixKVStore::save(
     return entries_.back().id;
 }
 
-PrefixKVHit PrefixKVStore::lookup(std::span<const uint32_t> tokens) {
+PrefixKVHit PrefixKVStore::lookup(std::span<const uint32_t> tokens,
+                                uint32_t max_position) {
     bind_pools();
     ++stats_.lookups;
-    const WalkResult result = walk(tokens);
+    const WalkResult result = walk(tokens, max_position);
     PrefixKVHit hit;
     hit.match_tokens = result.matched_pages * page_tokens_;
     if (result.entry_id != 0) {
@@ -503,6 +534,8 @@ PrefixKVHit PrefixKVStore::lookup(std::span<const uint32_t> tokens) {
             hit.position = entry->position;
             hit.payload = entry->payload;
             entry->last_used = ++clock_;
+            ++entry->hits;
+            update_pin();
             ++stats_.hits;
             return hit;
         }
@@ -584,7 +617,8 @@ Result<uint32_t> PrefixKVStore::position_for(uint64_t entry_id) const {
 }
 
 Result<uint64_t> PrefixKVStore::evict_lru() {
-    Entry* lru = find_lru_entry();
+    Entry* lru = find_lru_entry(true);
+    if (lru == nullptr) lru = find_lru_entry(false);
     if (lru == nullptr) {
         return Status::insufficient_memory("prefix cache has no entries to evict",
                                            __FILE__, __LINE__);
@@ -661,7 +695,8 @@ Status PrefixKVStore::reclaim_pages(uint32_t rank, uint32_t needed) {
     for (uint32_t guard = 0;
          guard < limit && pool->num_truly_free_pages() < needed; ++guard) {
         if (evict_one_leaf({})) continue;
-        Entry* lru = find_lru_entry();
+        Entry* lru = find_lru_entry(true);
+        if (lru == nullptr) lru = find_lru_entry(false);
         if (lru == nullptr) break;
         const uint64_t id = lru->id;
         remove_entry(id);

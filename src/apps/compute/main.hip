@@ -121,6 +121,8 @@ int main(int argc, char** argv) {
             shelf::qwen35::runtime::PrefixCacheStrategy::Slot
         ? config.max_concurrent_requests
         : 0u;
+    config.prefix_cache_save_interval =
+        static_cast<uint32_t>(opt.prefix_cache_save_interval);
     config.working_set_reserve_bytes =
         static_cast<std::size_t>(opt.working_set_reserve_gib) * 1024ull * 1024ull * 1024ull;
     if (!is_plamo) config.rope_profile = rope_profile;

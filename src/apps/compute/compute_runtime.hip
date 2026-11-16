@@ -297,6 +297,7 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     prefix_config.spec_ring_bytes = config_.prefix_cache_spec_ring_bytes;
     prefix_config.strategy = config_.prefix_cache_strategy;
     prefix_config.slot_count = config_.prefix_cache_slot_count;
+    prefix_config.save_interval = config_.prefix_cache_save_interval;
     if (prefix_config.strategy == qwen35::runtime::PrefixCacheStrategy::Slot) {
         prefix_config.max_concurrent = prefix_config.slot_count + 1u;
     }
@@ -463,6 +464,8 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
             *arena_, *kv_pool_, *gdn_pool_, prefix_config);
         if (prefix_result.ok()) {
             prefix_cache_.emplace(prefix_result.release());
+            std::fprintf(stderr, "MEMORY_PLAN prefix cache host checkpoint: %s\n",
+                         gpu::format_gib(prefix_cache_->reserved_bytes()).c_str());
             batcher_->set_prefix_cache(&prefix_cache_.value());
         } else {
             prefix_cache_error_ = prefix_result.status().message();
@@ -651,6 +654,7 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
     tp_config.prefix_spec_ring_bytes = config_.prefix_cache_spec_ring_bytes;
     tp_config.prefix_strategy = config_.prefix_cache_strategy;
     tp_config.prefix_slot_count = config_.prefix_cache_slot_count;
+    tp_config.prefix_save_interval = config_.prefix_cache_save_interval;
     if (config_.draft_config_ready) {
         tp_config.drafter_config = &config_.draft_config;
         tp_config.drafter_weights_bytes = config_.draft_bytes;
@@ -743,6 +747,7 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
             prefix_config.spec_ring_bytes = config_.prefix_cache_spec_ring_bytes;
             prefix_config.strategy = config_.prefix_cache_strategy;
             prefix_config.slot_count = config_.prefix_cache_slot_count;
+            prefix_config.save_interval = config_.prefix_cache_save_interval;
             if (prefix_config.strategy ==
                 qwen35::runtime::PrefixCacheStrategy::Slot) {
                 prefix_config.max_concurrent = prefix_config.slot_count + 1u;
@@ -763,6 +768,9 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
                 tp_executor_->ple_conv_state_pool.get(), prefix_config, extra_ranks);
             if (prefix_result.ok()) {
                 prefix_cache_.emplace(prefix_result.release());
+                std::fprintf(stderr,
+                             "MEMORY_PLAN prefix cache host checkpoint: %s\n",
+                             gpu::format_gib(prefix_cache_->reserved_bytes()).c_str());
                 (void)prefix_cache_->set_tp_hook(tp_coordinator_);
                 batcher_->set_prefix_cache(&prefix_cache_.value());
             } else {

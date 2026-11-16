@@ -88,6 +88,7 @@ Ready.
 | `--prefix-cache {0,1}` | enable prefix cache (default 1) |
 | `--prefix-cache-concurrency PREFIX_CACHE_CONCURRENCY` | max concurrent prefix captures and stored prefix entries (default 4; radix strategy) |
 | `--prefix-cache-strategy {radix,slot}` | prefix cache entry strategy (default radix) |
+| `--prefix-cache-save-interval PREFIX_CACHE_SAVE_INTERVAL` | 定期 prefix checkpoint の間隔 token（default 1024、`0` = 入力末尾系のみ） |
 | `--dflash2-model-dir DFLASH2_MODEL_DIR` | DFlash2 draft model directory (enables speculative decoding) |
 | `--dflash2-drafts DFLASH2_DRAFTS` | speculative draft tokens per round (default 7) |
 | `--dflash2-tree-budget N\|auto` | 木検証の request あたり行数。既定の `auto` はその round の生成中 request が 1 本だけで投機中なら 10 行、それ以外は chain の 8 行。`0` は木検証を無効化。auto は TP=1・draft 数 7 用 |
@@ -616,16 +617,19 @@ page を refcount 付きで共有し、GDN state だけを page 単位で保持�
 - `capabilities.prefix_cache` は prefix cache の作成成功時 `true`
 - `done` の `restored_tokens` に復元 token 数が入り、`prefill_tokens` は
   `input - restored_tokens` になる
-- 同一プロンプトの再実行は restore しない（最長一致が input 全長に達するため）。
+- 同一プロンプトの再実行は、入力末尾の 1 page 手前の checkpoint から restore する
+  （残した 1 page は最初のサンプル forward に使う）。
   DFlash2 経路でも prefix cache を使い、drafter ring を持つ entry だけを restore する
 - `--prefix-cache-strategy slot` では、request ごとに固定 slot を予約し、入力末尾直前の
   page 境界 1 点だけを保存する。同じ会話を延長し続ける agent に向く。
-  既定の `radix` は chunk 終端ごとに entry を作り、先頭 prefix の共有に向く
+  既定の `radix` は入力末尾 2 点と `--prefix-cache-save-interval` 間隔の checkpoint を作り、
+  先頭 prefix の共有に向く。共有 prefix が分岐した位置も checkpoint になる
   （[../developer/prefix_cache.md](../developer/prefix_cache.md)）
 
-`--prefix-cache` / `--prefix-cache-concurrency` / `--prefix-cache-strategy` は
-`shelf-compute` へそのまま転送される。`GET /v1/meta` の
-`prefix_cache_strategy` / `prefix_cache_concurrency` が起動時の設定を示す。
+`--prefix-cache` / `--prefix-cache-concurrency` / `--prefix-cache-strategy` /
+`--prefix-cache-save-interval` は `shelf-compute` へそのまま転送される。
+`GET /v1/meta` の `prefix_cache_strategy` / `prefix_cache_concurrency` /
+`prefix_cache_save_interval` が起動時の設定を示す。
 
 詳細は [../developer/prefix_cache.md](../developer/prefix_cache.md) を参照。
 

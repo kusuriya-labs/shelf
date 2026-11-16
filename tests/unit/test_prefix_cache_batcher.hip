@@ -142,7 +142,7 @@ int main() {
 
     const uint32_t page_tokens = 16;
     const uint32_t max_seq_len = 128;
-    const uint32_t max_batch_rows = 96;
+    const uint32_t max_batch_rows = 128;
     const uint32_t max_scheduled_requests = 4;
 
     auto arena_result = gpu::GpuArena::create(0, 1024ull * 1024ull * 1024ull);

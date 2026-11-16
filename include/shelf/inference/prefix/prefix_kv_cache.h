@@ -44,6 +44,7 @@ class PrefixSequenceSet {
 
 struct PrefixKVConfig {
     uint32_t min_prefix_tokens = 64;
+    uint32_t entry_capacity = 0;
 };
 
 struct PrefixKVStats {
@@ -85,7 +86,8 @@ class PrefixKVStore {
     PrefixKVStore& operator=(const PrefixKVStore&) = delete;
     ~PrefixKVStore();
 
-    PrefixKVHit lookup(std::span<const uint32_t> tokens);
+    PrefixKVHit lookup(std::span<const uint32_t> tokens,
+                       uint32_t max_position = 0xFFFFFFFFu);
 
     Result<uint64_t> save(
         PrefixSequenceSet& seqs,
@@ -134,6 +136,7 @@ class PrefixKVStore {
         uint32_t node = 0;
         uint64_t payload = 0;
         uint64_t last_used = 0;
+        uint64_t hits = 0;
         std::vector<PageId> pages;
     };
 
@@ -160,15 +163,19 @@ class PrefixKVStore {
     bool find_child(uint32_t node, std::span<const uint32_t> tokens,
                     uint32_t query_pages, uint32_t consumed,
                     uint32_t& child, uint32_t& matched_edge_pages) const;
-    WalkResult walk(std::span<const uint32_t> tokens);
+    WalkResult walk(std::span<const uint32_t> tokens, uint32_t max_position);
     uint32_t insert_path(std::span<const uint32_t> tokens, uint32_t page_count,
                          const std::vector<PageId>& pages);
     void split_node(uint32_t child, uint32_t split_pages);
     uint32_t alloc_node();
     void remove_node(uint32_t node);
     Entry* find_entry(uint64_t id);
-    Entry* find_lru_entry();
+    Entry* find_lru_entry(bool skip_pinned);
     void remove_entry(uint64_t id);
+    void update_pin();
+    bool is_pinned(uint64_t id) const noexcept {
+        return id != 0 && id == pinned_entry_id_;
+    }
 
     Result<PageId> alloc_hot_page(PageId pool_page,
                                   const std::vector<PageId>& shard_pages);
@@ -200,6 +207,7 @@ class PrefixKVStore {
 
     uint64_t next_entry_id_ = 1;
     uint64_t clock_ = 1;
+    uint64_t pinned_entry_id_ = 0;
     bool pools_bound_ = false;
 
     EvictCallback evict_callback_;

@@ -55,6 +55,7 @@ TP、pipeline parallel、MTP、DFlash2、2048 token 超の長文は未対応。
 | `--working-set-reserve-gib N` | arena headroom kept free for the working set (executor workspace allocated after the memory plan; 0 = size it from the row bucket, default 0) |
 | `--prefix-cache-concurrency N` | max concurrent prefix captures and stored prefix entries (default 4) |
 | `--prefix-cache-strategy MODE` | radix \| slot (default radix) |
+| `--prefix-cache-save-interval N` | 定期 prefix checkpoint の間隔 token（default 1024、`0` = 定期 checkpoint を無効化） |
 | `--serve-stdio` | serve JSON Lines generation requests on stdin/stdout |
 | `--help` | show this help |
 <!-- /cli:compute -->
@@ -63,7 +64,7 @@ TP、pipeline parallel、MTP、DFlash2、2048 token 超の長文は未対応。
 `--arena-gib -0.3` は VRAM の総容量から 0.3 GiB を引いた容量を使う。
 KV の物理容量は個別に指定できない。model weight、`--working-set-reserve-gib`、
 DFlash2 の drafter（weight と session pool 等の runtime 領域）、または MTP の drafter
-（専用 KV pool、executor、GDN snapshot）、prefix cache の GDN state / ring を確保した後に
+（専用 KV pool、executor、GDN snapshot）、prefix cache の capture slot を確保した後に
 残る arena の領域をすべて KV に割り当てる。
 KV を増やすには `--arena-gib` を増やすか、`--working-set-reserve-gib` を減らす。
 prefix cache は KV を予約しない（active KV pool の page を共有する）。
@@ -94,7 +95,8 @@ MEMORY_PLAN mode=auto
 scratch と session pool の領域（DFlash2 は `--max-concurrent-requests` 分、MTP は
 専用 KV pool・executor・GDN snapshot）、`runtime workspace` は
 `--working-set-reserve-gib` の予約量である。`KV budget` は arena 残量から導出した
-physical KV capacity、`prefix cache` は GDN state と ring の実サイズである。
+physical KV capacity、`prefix cache` は capture slot の実サイズである
+（checkpoint 本体は pinned host memory に置くため arena を使わない）。
 `left` は arena の未使用容量であり、workspace はこの後に executor が実際に確保する。
 
 `--arena-gib N` を明示した場合は arena 容量を N GiB に固定する（measurement の
@@ -228,9 +230,12 @@ stdio serving の prefill 行数、環境変数、追加メモリは
 prefix cache は page（`--page-tokens` の既定 16 token）単位の radix tree で、共有 prefix の
 paged KV は active KV pool の page を refcount 付きで共有する。save は page を登録するだけで、
 restore は block table に page を map するだけで、KV のコピーも別の shadow pool も作らない。
-GDN state と DFlash2 ring だけを VRAM の shadow slot に保持する。
+GDN state（と DFlash2 ring）だけを checkpoint として pinned host memory に保持する。
 共有 prefix への extension や multi-turn の output tail で prefill を省略する。
-entry が増えたときは LRU で evict する。同一プロンプトの再実行は restore せず、
+checkpoint は入力末尾の直前の page 境界、page 境界に一致する入力末尾、および
+`--prefix-cache-save-interval` 間隔の prefill chunk 末端で作る。
+entry が増えたときは LRU で evict するが、再利用された entry 1 個は pin する。
+同一プロンプトの再実行も page 1 個手前の checkpoint から restore する。
 DFlash2 経路でも prefix cache を使う。
 詳細は [../developer/prefix_cache.md](../developer/prefix_cache.md) を参照。
 

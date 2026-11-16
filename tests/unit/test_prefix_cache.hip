@@ -309,6 +309,170 @@ bool verify_state(
     return true;
 }
 
+uint8_t extra_byte(uint32_t tag, uint32_t part, std::size_t i) {
+    return static_cast<uint8_t>(
+        (tag * 197u + part * 29u + static_cast<uint32_t>(i * 3u)) & 0xFFu);
+}
+
+bool seed_extra(const shelf::state::QsaKeyStatePool* qsa,
+                const shelf::state::PleConvStatePool* ple,
+                shelf::state::SequenceSlotId slot, uint32_t tag,
+                hipStream_t stream) {
+    if (qsa != nullptr) {
+        const auto view = qsa->device_view();
+        const std::size_t pooled_bytes =
+            static_cast<std::size_t>(view.pooled_slot_stride) * sizeof(bf16_t);
+        std::vector<uint8_t> pooled(pooled_bytes);
+        for (std::size_t i = 0; i < pooled.size(); ++i) pooled[i] = extra_byte(tag, 0, i);
+        if (hipMemcpy(view.pooled_base + static_cast<std::size_t>(slot) *
+                          view.pooled_slot_stride,
+                      pooled.data(), pooled.size(), hipMemcpyHostToDevice) != hipSuccess) {
+            return false;
+        }
+        const std::size_t partial_bytes =
+            static_cast<std::size_t>(view.partial_slot_stride) * sizeof(bf16_t);
+        std::vector<uint8_t> partial(partial_bytes);
+        for (std::size_t i = 0; i < partial.size(); ++i) {
+            partial[i] = extra_byte(tag, 1, i);
+        }
+        if (hipMemcpy(view.partial_base + static_cast<std::size_t>(slot) *
+                          view.partial_slot_stride,
+                      partial.data(), partial.size(), hipMemcpyHostToDevice) != hipSuccess) {
+            return false;
+        }
+        std::vector<uint32_t> counts(static_cast<std::size_t>(view.count_slot_stride));
+        for (std::size_t i = 0; i < counts.size(); ++i) {
+            counts[i] = tag * 1000u + static_cast<uint32_t>(i);
+        }
+        if (hipMemcpy(view.pool_count_base + static_cast<std::size_t>(slot) *
+                          view.count_slot_stride,
+                      counts.data(), counts.size() * sizeof(uint32_t),
+                      hipMemcpyHostToDevice) != hipSuccess) {
+            return false;
+        }
+    }
+    if (ple != nullptr) {
+        const auto view = ple->device_view();
+        const std::size_t bytes =
+            static_cast<std::size_t>(view.slot_stride) * sizeof(bf16_t);
+        std::vector<uint8_t> data(bytes);
+        for (std::size_t i = 0; i < data.size(); ++i) data[i] = extra_byte(tag, 2, i);
+        if (hipMemcpy(view.base + static_cast<std::size_t>(slot) * view.slot_stride,
+                      data.data(), data.size(), hipMemcpyHostToDevice) != hipSuccess) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool verify_extra(const shelf::state::QsaKeyStatePool* qsa,
+                  const shelf::state::PleConvStatePool* ple,
+                  shelf::state::SequenceSlotId slot, uint32_t tag,
+                  hipStream_t stream) {
+    if (hipStreamSynchronize(stream) != hipSuccess) return false;
+    if (qsa != nullptr) {
+        const auto view = qsa->device_view();
+        const std::size_t pooled_bytes =
+            static_cast<std::size_t>(view.pooled_slot_stride) * sizeof(bf16_t);
+        std::vector<uint8_t> pooled(pooled_bytes);
+        if (hipMemcpy(pooled.data(),
+                      view.pooled_base + static_cast<std::size_t>(slot) *
+                          view.pooled_slot_stride,
+                      pooled.size(), hipMemcpyDeviceToHost) != hipSuccess) {
+            return false;
+        }
+        for (std::size_t i = 0; i < pooled.size(); ++i) {
+            if (pooled[i] != extra_byte(tag, 0, i)) return false;
+        }
+        const std::size_t partial_bytes =
+            static_cast<std::size_t>(view.partial_slot_stride) * sizeof(bf16_t);
+        std::vector<uint8_t> partial(partial_bytes);
+        if (hipMemcpy(partial.data(),
+                      view.partial_base + static_cast<std::size_t>(slot) *
+                          view.partial_slot_stride,
+                      partial.size(), hipMemcpyDeviceToHost) != hipSuccess) {
+            return false;
+        }
+        for (std::size_t i = 0; i < partial.size(); ++i) {
+            if (partial[i] != extra_byte(tag, 1, i)) return false;
+        }
+        std::vector<uint32_t> counts(static_cast<std::size_t>(view.count_slot_stride));
+        if (hipMemcpy(counts.data(),
+                      view.pool_count_base + static_cast<std::size_t>(slot) *
+                          view.count_slot_stride,
+                      counts.size() * sizeof(uint32_t),
+                      hipMemcpyDeviceToHost) != hipSuccess) {
+            return false;
+        }
+        for (std::size_t i = 0; i < counts.size(); ++i) {
+            if (counts[i] != tag * 1000u + static_cast<uint32_t>(i)) return false;
+        }
+    }
+    if (ple != nullptr) {
+        const auto view = ple->device_view();
+        const std::size_t bytes =
+            static_cast<std::size_t>(view.slot_stride) * sizeof(bf16_t);
+        std::vector<uint8_t> data(bytes);
+        if (hipMemcpy(data.data(),
+                      view.base + static_cast<std::size_t>(slot) * view.slot_stride,
+                      data.size(), hipMemcpyDeviceToHost) != hipSuccess) {
+            return false;
+        }
+        for (std::size_t i = 0; i < data.size(); ++i) {
+            if (data[i] != extra_byte(tag, 2, i)) return false;
+        }
+    }
+    return true;
+}
+
+void test_qsa_ple(Env& env) {
+    PrefixCacheConfig config;
+    config.max_concurrent = 2;
+    config.min_prefix_tokens = 4;
+    auto qsa_result = shelf::state::QsaKeyStatePool::create(
+        *env.arena, 12, shelf::state::QsaKeyStatePoolLayout::make(2, 8, 4, 4));
+    auto ple_result = shelf::state::PleConvStatePool::create(
+        *env.arena, 12, shelf::state::PleConvStatePoolLayout::make(2, 16));
+    check(qsa_result.ok() && ple_result.ok(), "extra pools create");
+    if (!qsa_result.ok() || !ple_result.ok()) return;
+    shelf::state::QsaKeyStatePool qsa = qsa_result.release();
+    shelf::state::PleConvStatePool ple = ple_result.release();
+
+    auto cache_result = PrefixCache::create(*env.arena, *env.kv_bf16, *env.gdn, &qsa, &ple,
+                                            config);
+    check(cache_result.ok(), "extra cache create");
+    if (!cache_result.ok()) return;
+    PrefixCache cache = cache_result.release();
+
+    auto seq = make_seq(env, *env.kv_bf16);
+    check(seq.has_value(), "extra seq");
+    if (!seq.has_value()) return;
+    check(append_tokens(*seq, 8, env.stream), "extra append");
+    const std::vector<uint32_t> tokens = make_tokens(8, 50000);
+    check(seed_kv(*env.kv_bf16, *seq, 61, env.stream), "extra seed kv");
+    check(seed_state(*env.gdn, seq->slot, 61, env.stream), "extra seed gdn");
+    check(seed_extra(&qsa, &ple, seq->slot, 61, env.stream), "extra seed qsa ple");
+    check(cache.save_input_boundary(*seq, tokens, 8, env.stream).ok(), "extra save");
+
+    const PrefixHit hit = cache.lookup(tokens);
+    check(hit.hit() && hit.state_position == 8, "extra hit");
+
+    auto dst = make_seq(env, *env.kv_bf16);
+    check(dst.has_value(), "extra dst");
+    if (!dst.has_value()) return;
+    check(seed_extra(&qsa, &ple, dst->slot, 62, env.stream), "extra seed dst");
+    check(cache.restore(hit.entry_id, *dst, env.stream).ok(), "extra restore");
+    check(verify_kv(*env.kv_bf16, *dst, 61, env.stream), "extra restore kv");
+    check(verify_state(*env.gdn, dst->slot, 61, env.stream), "extra restore gdn");
+    check(verify_extra(&qsa, &ple, dst->slot, 61, env.stream),
+          "extra restore qsa ple");
+
+    check(release_paged_sequence_state(*dst, env.stream).ok(), "extra release dst");
+    check(release_paged_sequence_state(*seq, env.stream).ok(), "extra release seq");
+    dst.reset();
+    seq.reset();
+}
+
 void free_seq(std::optional<PagedSequenceState>& seq, hipStream_t stream) {
     if (seq.has_value()) {
         const shelf::Status st = release_paged_sequence_state(*seq, stream);
@@ -851,6 +1015,65 @@ void test_eviction(Env& env) {
     free_seq(seq_a, env.stream);
 }
 
+void test_pin(Env& env) {
+    PrefixCacheConfig config;
+    config.max_concurrent = 3;
+    config.min_prefix_tokens = 4;
+    auto cache_opt = make_cache(env, *env.kv_bf16, config);
+    check(cache_opt.has_value(), "pin cache create");
+    if (!cache_opt.has_value()) return;
+    PrefixCache& cache = *cache_opt;
+
+    auto seq_a = make_seq(env, *env.kv_bf16);
+    auto seq_b = make_seq(env, *env.kv_bf16);
+    auto seq_c = make_seq(env, *env.kv_bf16);
+    auto seq_d = make_seq(env, *env.kv_bf16);
+    check(seq_a.has_value() && seq_b.has_value() && seq_c.has_value() &&
+              seq_d.has_value(),
+          "pin seqs");
+    if (!seq_a.has_value() || !seq_b.has_value() || !seq_c.has_value() ||
+        !seq_d.has_value()) {
+        return;
+    }
+
+    check(append_tokens(*seq_a, 8, env.stream), "pin append a");
+    const std::vector<uint32_t> tokens_a = make_tokens(8, 20000);
+    check(seed_kv(*env.kv_bf16, *seq_a, 41, env.stream), "pin seed kv a");
+    check(seed_state(*env.gdn, seq_a->slot, 41, env.stream), "pin seed state a");
+    check(cache.save_input_boundary(*seq_a, tokens_a, 8, env.stream).ok(), "pin save a");
+    check(cache.lookup(tokens_a).hit(), "pin a hits");
+
+    check(append_tokens(*seq_b, 8, env.stream), "pin append b");
+    const std::vector<uint32_t> tokens_b = make_tokens(8, 21000);
+    check(seed_kv(*env.kv_bf16, *seq_b, 42, env.stream), "pin seed kv b");
+    check(seed_state(*env.gdn, seq_b->slot, 42, env.stream), "pin seed state b");
+    check(cache.save_input_boundary(*seq_b, tokens_b, 8, env.stream).ok(), "pin save b");
+
+    check(append_tokens(*seq_c, 8, env.stream), "pin append c");
+    const std::vector<uint32_t> tokens_c = make_tokens(8, 22000);
+    check(seed_kv(*env.kv_bf16, *seq_c, 43, env.stream), "pin seed kv c");
+    check(seed_state(*env.gdn, seq_c->slot, 43, env.stream), "pin seed state c");
+    check(cache.save_input_boundary(*seq_c, tokens_c, 8, env.stream).ok(), "pin save c");
+    check(cache.stats().entries == 3, "pin keeps three entries");
+
+    check(append_tokens(*seq_d, 8, env.stream), "pin append d");
+    const std::vector<uint32_t> tokens_d = make_tokens(8, 23000);
+    check(seed_kv(*env.kv_bf16, *seq_d, 44, env.stream), "pin seed kv d");
+    check(seed_state(*env.gdn, seq_d->slot, 44, env.stream), "pin seed state d");
+    check(cache.save_input_boundary(*seq_d, tokens_d, 8, env.stream).ok(), "pin save d");
+    check(cache.stats().entries == 3, "pin keeps three entries after eviction");
+    check(cache.stats().entries_evicted == 1, "pin evicts one entry");
+    check(cache.lookup(tokens_a).hit(), "pin reused entry survives");
+    check(!cache.lookup(tokens_b).hit(), "pin drops the least recent entry");
+    check(cache.lookup(tokens_c).hit(), "pin keeps the newer entry");
+    check(cache.lookup(tokens_d).hit(), "pin new entry hits");
+
+    free_seq(seq_d, env.stream);
+    free_seq(seq_c, env.stream);
+    free_seq(seq_b, env.stream);
+    free_seq(seq_a, env.stream);
+}
+
 uint32_t save_slot(PrefixCache& cache, PagedSequenceState& seq,
                    const std::vector<uint32_t>& tokens, uint64_t owner,
                    hipStream_t stream) {
@@ -1158,6 +1381,8 @@ int main() {
     run("roundtrip-octave", +[](Env& e) { test_roundtrip(e, *e.kv_octave, 79); });
     run("capture", test_capture);
     run("eviction", test_eviction);
+    run("pin", test_pin);
+    run("qsa-ple", test_qsa_ple);
     run("slot", test_slot);
     run("ring", test_spec_ring);
 
