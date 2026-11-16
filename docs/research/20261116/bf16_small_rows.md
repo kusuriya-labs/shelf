@@ -3,7 +3,8 @@
 実験 ID: `SMALLM-BF16-1`
 
 [bf16_small_m_reference.md](bf16_small_m_reference.md) の案 A（block-per-output-row）と
-案 B（M=9..16 の WMMA）を BF16 に接続し、既存の `ExactRows` と比較した記録である。
+案 B（M=9..16 の WMMA）を実装し、既存の `ExactRows` と比較した記録である。
+最終的に production selector には接続していない。理由は第 5 節の E2E 計測にある。
 
 ## 1. 変更
 
@@ -21,16 +22,13 @@
 
 ### 1.2 Selector
 
-`src/shelf/inference/execution/selectors/linear_selector.cpp` の選択は次のとおり。
+`SmallRows` と M=9..16 の WMMA 切替は実装したが、production selector には
+接続していない。`select_bf16_gemm_config` は従来どおり exact-rows を返す。
 
-- `rows <= 16`、`out_features <= 192`、`allow_exact_rows`、
-  `k % 8 == 0`、weight / input が 16 byte 整列、input row stride が 8 要素整列:
-  `SmallRows`。
-- `out_features > 192` の rows 1..8: `ExactRows` / `ExactRowsDot2`。
-- `out_features > 192` の rows 9..16:
-  - `out_features <= 2560`: `WmmaKPartition`
-  - `out_features > 2560` かつ rows 9..10: `ExactRows`
-  - `out_features > 2560` かつ rows 11..16: `Wmma`
+- `SmallRows` は `shelf-bench gemm --impl smallrows` と
+  `test_gemm_bf16_verify_exact` から明示的に起動できる。
+- M=9..16 の `WmmaKPartition` / `Wmma` 選択も測定用に残したが、
+  `select_bf16_gemm_config` は選ばない。
 
 ### 1.3 その他
 
@@ -78,7 +76,7 @@ p50 µs。`--impl exact` と `--impl smallrows` を交互に近い順で測っ�
 4.2〜4.7 µs だった。N=256 の grid と 4 KiB の weight row stride の組合せによる
 再現性のある異常なので、selector の上限は 192 に置いた。
 
-### 2.3 auto の結果
+### 2.3 SmallRows を強制したときの結果（参考）
 
 | shape | rows | 変更前（ExactRows） | auto | 比 |
 | --- | ---: | ---: | ---: | ---: |
@@ -87,9 +85,9 @@ p50 µs。`--impl exact` と `--impl smallrows` を交互に近い順で測っ�
 | 48:5120 | 16 | 14.8 | 9.0 | 1.64x |
 | 64:2048 | 8 | 6.7 | 5.0 | 1.34x |
 
-M=9..16 の auto は 3 節に記す。
+M=9..16 の測定は 3 節に記す。
 
-## 3. M=9..16 の接続
+## 3. M=9..16 の測定
 
 既存の `WmmaKPartition`（8-way K split）と `Wmma`（1 row tile）を
 `--impl splitk` / `--impl wmma` で測った。p50 µs。
@@ -106,10 +104,10 @@ M=9..16 の auto は 3 節に記す。
 - out_features > 2560 は rows>=11 で `Wmma` が速い。rows=9〜10 は ExactRows が速い。
 この切替は、M=1..8 の ExactRows と M=9..16 の split/Wmma で縮約木が変わる。
 行ごとの縮約順は各 kernel の内部では row 数に依存しないが、8/9 の境界を
-またぐ出力は bit 一致しない。MTP verify は selector が選んだ同じ帯の kernel を
-使うため、同じ帯の中では再現性がある。この契約変更を明示したうえで接続した。
+またぐ出力は bit 一致しない。E2E で既定化の根拠が得られなかったため、
+selector には接続していない。
 
-auto の実測（p50 µs、変更前は ExactRows）:
+selector に接続した場合の参考値（p50 µs、変更前は ExactRows）:
 
 | shape | rows | 変更前 | auto | 比 |
 | --- | ---: | ---: | ---: | ---: |
@@ -123,16 +121,35 @@ auto の実測（p50 µs、変更前は ExactRows）:
 
 ## 4. 採否
 
-- ACCEPT: `SmallRows` を rows<=16、out_features<=192 の narrow output に接続。
-  GDN a|b（16/32）、48 幅の GDN 出力、64/128/192 の中間帯で 1.1〜2.2 倍。
-- REJECT: out_features>=256 への `SmallRows`。N=256 の異常と、広い出力では
-  ExactRows の warp-per-row が勝つ。
-- ACCEPT: M=9..16 の `WmmaKPartition`（out_features <= 2560）と
-  `Wmma`（out_features > 2560、rows >= 11）。M=1..8 との bit 一致は捨てる。
-- 契約: 行ごとの縮約順は各 kernel の内部で row 数に依存しない。
-  rows 1..8 と 9..16 は別 kernel なので、境界をまたぐ出力は一致しない。
+- ACCEPT: `SmallRows` kernel と M=9..16 の variant を実験用に残す。
+- REJECT: production selector への既定接続。理由は第 5 節の E2E 計測。
+- 非投機 decode は EXL3 target で横ばい、FP8 は改善、MXFP4 は横ばいだった。
+- DFlash2 の accept は target logits が変わるためプロンプト依存で、
+  `run.sh` の en_db では悪化した。
 
-## 5. 検証
+## 5. E2E 計測（非投機）
+
+変更前 `b9a925a` と変更後 `1f23e61` を、同じ prompt（`en_db` 12 token）、
+128 token、greedy、prefix cache off で 3 run ずつ測った。
+数値は `DECODE_TOKENS_PER_SEC` の平均。
+
+| 構成 | 変更前 | 変更後 | 差 |
+| --- | ---: | ---: | ---: |
+| EXL3 target（BF16 GDN a/b） | 28.39 | 28.40 | +0.06% |
+| FP8 27B | 30.64 | 31.21 | +1.85% |
+| MXFP4 QSA（max-seq 512） | 27.27 | 27.27 | 0.00% |
+
+- EXL3 target の非投機は横ばいで、`SmallRows` の GDN a/b 短縮は
+  E2E では確認できなかった。
+- FP8 は split-K の効果で明確に改善した。
+- MXFP4 は QSA の dense fallback で横ばい、生成 ID も完全一致した。
+  QSA を有効にした max-seq 4096 の decode は `qsa_topk_kernel` の
+  メモリフォルトで、変更前・変更後とも測定できなかった。
+- 非投機の logits は EXL3 と FP8 で変化した。生成 ID の最初の不一致は
+  EXL3 が 12 token 目、FP8 が 27 token 目である。MXFP4 は一致した。
+  したがって DFlash2 の accept 変化は target logits の変化と整合する。
+
+## 6. 検証
 
 - `test_qwen35_linear_selector`: SmallRows / ExactRows の選択を固定。
 - `test_gemm_bf16_verify_exact`: N=16/48/192、rows=2/4/8/16 で
@@ -140,7 +157,7 @@ auto の実測（p50 µs、変更前は ExactRows）:
 - `test_dflash2_bf16_geometry`: 既存の geometry が pass。
 - `ctest -R "bf16|linear_selector"` が pass（2026-11-16）。
 
-## 6. 再現
+## 7. 再現
 
 ```sh
 HIP_VISIBLE_DEVICES=1 ./build/shelf-bench gemm --dtype bf16 \

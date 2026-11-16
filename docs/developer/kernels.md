@@ -94,22 +94,16 @@ optimized variantは `src/shelf/kernels/optimized/` に実装する。
 - public launcher は semantic operator / optimization family ごとに置き、
   shape / dtype / algorithm variant の選択は launcher 内部に閉じ込め、runtime側へ漏らさない。
 - WMMA kernelはgfx12 builtin（`_gfx12`）を使う。
-- small-M（M=1..16）のbatch-invariant順序は `linear/bf16.hip` の exact-rows と
-  SmallRows が担う。MTP verify はこの順序に依存する。
-  - `SmallRows` は 1 block = 1 出力行、256 thread、`kRows=1..16` の accumulator を持つ。
-    K を 8 BF16 ずつ読み、warp shuffle と LDS で 8 warp をまとめる。
-    行ごとの縮約順は `kRows` に依存しない。
-  - selector は rows <= 16、out_features <= 192、k が 8 要素整列、
-    weight / input が 16 byte 整列、input row stride が 8 要素整列のとき
-    `SmallRows` を選ぶ。
-  - out_features > 192 の rows 1..8 は `ExactRows` / `ExactRowsDot2`。
-    rows 9..16 は out_features <= 2560 なら `WmmaKPartition`、それより広い
-    出力は rows 9..10 が `ExactRows`、rows 11..16 が `Wmma` である。
-  - 行ごとの縮約順は各 kernel の内部では row 数に依存しない。ただし
-    rows 1..8 と 9..16 は別 kernel なので、その境界をまたぐ出力は
-    bit 一致しない。MTP verify は selector が選んだ同じ帯の kernel を使う。
-  - `SmallRows` の実測と out_features 192 の上限、M=9..16 の比較は
-    [../research/20261116/bf16_small_rows.md](../research/20261116/bf16_small_rows.md)。
+- small-M（M=1..16）のbatch-invariant順序は `linear/bf16.hip` の exact-rows
+  経路が担う。MTP verify はこの順序に依存する。
+- `SmallRows` は 1 block = 1 出力行、256 thread、`kRows=1..16` の accumulator を持つ
+  実験用 variant である。K を 8 BF16 ずつ読み、warp shuffle と LDS で 8 warp を
+  まとめる。`shelf-bench gemm --impl smallrows` と `test_gemm_bf16_verify_exact` から
+  強制できるが、production selector は選ばない。
+  - 非投機 decode は EXL3 target で横ばい、FP8 は改善、MXFP4 は横ばいだった。
+    DFlash2 の accept は target logits が変わるためプロンプト依存で、
+    `run.sh` の en_db では悪化した。既定化の条件を満たさないため selector から外した。
+  - 実測と判断は [../research/20261116/bf16_small_rows.md](../research/20261116/bf16_small_rows.md)。
 
 ### linear / FP8 W8A8
 

@@ -10,14 +10,6 @@ inline constexpr uint32_t kBf16GemmExactRowsKernelMax = 16u;
 // Used for the narrow-output small-M shapes where one warp per row leaves too
 // few blocks on the device.
 inline constexpr uint32_t kBf16GemmSmallRowsMax = 16u;
-// Narrow projections whose block count is the bottleneck on the 8-output-row
-// exact kernel (GDN a|b at 16/32, the 48-wide GDN output and the 64/128/192
-// mid-band). Above this width the exact kernel already has enough blocks.
-inline constexpr uint32_t kBf16GemmSmallRowsMaxOutFeatures = 192u;
-// Above this width the 8-way K split loses to the plain WMMA row block.
-inline constexpr uint32_t kBf16GemmSmallMRowsSplitKMaxOut = 2560u;
-// In the 9..16-row band, the plain WMMA block beats exact-rows from 11 rows on.
-inline constexpr uint32_t kBf16GemmWmmaMinRows = 11u;
 inline constexpr uint32_t kBf16GemmSplitKMaxOutFeatures = 256u;
 inline constexpr uint32_t kBf16GemmWideMinRows = 65u;
 inline constexpr uint32_t kBf16GemmExactKAlignment = 8u;

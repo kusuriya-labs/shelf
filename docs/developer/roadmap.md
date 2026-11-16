@@ -35,13 +35,14 @@ draft GPU 時間は request 数に比例して増える。
 優先順は次のとおり。
 
 1. **BF16 small-M（M≤64）** と **kernel trace 内訳に基づく launch 削減**。
-   FP8 / MXFP4 の in-block split-K、BF16 の block-per-output-row
-   （out_features <= 192、rows <= 16）、BF16 の M=9..16 の
-   WmmaKPartition / Wmma は実装済みである。
-   残りは、M=1..8 と M=9..16 の縮約木が変わることによる MTP verify の
-   生成結果の確認と、必要なら性能側の再調整である
-   （[../research/20261116/bf16_small_rows.md](../research/20261116/bf16_small_rows.md)）。
-   内訳は rocprofv3 kernel-trace から取り直す（[../perf/methodology.md](../perf/methodology.md) §1）。
+   FP8 / MXFP4 の in-block split-K は実装済みである。BF16 の
+   block-per-output-row `SmallRows` と M=9..16 の Wmma 切替は実装したが、
+   非投機 decode が横ばい（EXL3 28.39 → 28.40、MXFP4 27.27 → 27.27）で、
+   DFlash2 の accept もプロンプト依存だったため production selector には
+   接続していない（[../research/20261116/bf16_small_rows.md](../research/20261116/bf16_small_rows.md)）。
+   次は、非投機で明確な利得が出る形状に限定した再評価と、
+   内訳の rocprofv3 kernel-trace 取り直しである
+   （[../perf/methodology.md](../perf/methodology.md) §1）。
 2. **dynamic verify width**（round ごとの draft 数可変）。
 3. 自前計測のうえで採否: fp8 residual stream、KV 容量の決め方、
    GDN conv+recurrent 統合。

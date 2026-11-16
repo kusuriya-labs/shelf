@@ -124,14 +124,14 @@ compute 出力が oracle（`3793, 248046` = `OK`）と一致せず `91`（`|`）
   * FP8 / MXFP4 の in-block split-K、row tile 選択、split-K の MB 選択は実装済み
     （docs/research/20261116/fp8_mxfp4_small_m_splitk.md）。
     FP8 は narrow out の rows 1〜64 で最大 6 倍、MXFP4 は rows 33〜64 で 1.4〜2.1 倍。
-  * BF16 は block-per-output-row の `SmallRows` を実装し、out_features <= 192 の
-    rows 1..16 に接続した（docs/research/20261116/bf16_small_rows.md）。
-    16:2048 rows=16 は 9.8 → 5.6 µs、48:5120 rows=16 は 14.8 → 9.0 µs。
-  * BF16 の M=9..16 は、out_features <= 2560 で WmmaKPartition、
-    wide out で Wmma を選ぶようにした。1024:5120 rows=16 は 29.1 → 14.7 µs、
-    5120:5120 rows=16 は 130.8 → 70.5 µs。M=1..8 と 9..16 は別 kernel なので、
-    その境界をまたぐ出力は bit 一致しない。
-  * 次の候補は FP8 の grid.z split + scratch。
+  * BF16 の block-per-output-row `SmallRows` と M=9..16 の Wmma 切替は実装したが、
+    production selector には接続していない（docs/research/20261116/bf16_small_rows.md）。
+    非投機 decode は EXL3 target 28.39 → 28.40 tok/s（横ばい）、FP8 30.64 → 31.21
+    （+1.85%）、MXFP4 27.27 → 27.27（横ばい）。DFlash2 の accept は
+    target logits の変化に伴いプロンプト依存で、run.sh の en_db では悪化した。
+    非投機 logits も EXL3 で 12 token 目、FP8 で 27 token 目から変化する。
+  * 次の候補は BF16 の再評価（非投機で明確な利得が出る形状に限定）、
+    FP8 の grid.z split + scratch。
 
 ## マルチリクエスト + 投機推論
 

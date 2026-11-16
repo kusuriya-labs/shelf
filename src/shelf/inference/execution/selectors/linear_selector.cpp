@@ -219,24 +219,6 @@ select_bf16_gemm_config(const Bf16GemmSelectorInput& input) {
     }
 
     const bool k_aligned = (input.k & (shelf::kernel::kBf16GemmExactKAlignment - 1u)) == 0u;
-    const bool exact_eligible =
-        k_aligned && input.weight_aligned16 && input.input_aligned16 &&
-        (input.input_row_stride &
-         (shelf::kernel::kBf16GemmExactRowStrideAlignment - 1u)) == 0u;
-    if (input.allow_exact_rows && exact_eligible) {
-        if (input.rows <= shelf::kernel::kBf16GemmSmallRowsMax &&
-            input.out_features <= shelf::kernel::kBf16GemmSmallRowsMaxOutFeatures) {
-            return shelf::kernel::Bf16GemmConfig{
-                Id::SmallRows, static_cast<uint8_t>(input.rows)};
-        }
-        if (input.rows > 8u && input.rows <= shelf::kernel::kBf16GemmExactRowsKernelMax) {
-            if (input.out_features <= shelf::kernel::kBf16GemmSmallMRowsSplitKMaxOut)
-                return shelf::kernel::Bf16GemmConfig{Id::WmmaKPartition, 0u};
-            if (input.rows >= shelf::kernel::kBf16GemmWmmaMinRows)
-                return shelf::kernel::Bf16GemmConfig{Id::Wmma, 0u};
-            // rows 9..10 and a wide output: exact-rows still wins.
-        }
-    }
     if (input.allow_exact_rows && input.rows == 1u && k_aligned && input.weight_aligned16 &&
         input.input_aligned16)
         return shelf::kernel::Bf16GemmConfig{Id::ExactRows, 1u};
@@ -335,9 +317,11 @@ select_mxfp4_gemm_config(const Mxfp4GemmSelectorInput& input) {
         return shelf::kernel::Mxfp4GemmConfig{Id::Prefill2D, 0u};
     }
     const bool splitk_narrow =
-        input.rows <= shelf::kernel::kMxfp4GemmSplitKMaxRows &&
-        input.out_features <= 1024u &&
-        input.k_padded >= shelf::kernel::kMxfp4GemmSplitKMinKPadded;
+        (input.rows <= shelf::kernel::kMxfp4GemmSplitKMaxRows &&
+         input.out_features <= 1024u &&
+         input.k_padded >= shelf::kernel::kMxfp4GemmSplitKMinKPadded) ||
+        (input.rows <= 32u && input.out_features <= 2560u &&
+         input.k_padded < shelf::kernel::kMxfp4GemmSplitKMinKPadded);
     if (tile_aligned && splitk_narrow) {
         const uint8_t split_mb =
             (input.rows > 32u && input.out_features >= 1024u) ? 2u : 1u;
