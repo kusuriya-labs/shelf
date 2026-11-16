@@ -399,6 +399,7 @@ int run_tg(int argc, char** argv) {
     exec_config.max_batch_rows =
         std::max(opts.prefill_chunk, opts.tokens + opts.warmup + 16);
     exec_config.max_scheduled_requests = 1;
+    exec_config.max_context_tokens = required_seq_len;
     exec_config.backend = opts.decode_backend;
 
     hipStream_t stream = nullptr;

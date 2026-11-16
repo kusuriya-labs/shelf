@@ -217,6 +217,21 @@ void test_tp2_shapes() {
           "unknown bf16 shape still rejected");
 }
 
+void test_qsa_indexer_shapes() {
+    check(sel_bf16(1, 512, 5120, 5120, true, true, true).has_value(),
+          "qsa indexer q_proj bf16 512x5120 rows=1 -> config");
+    check(sel_bf16(2048, 512, 5120, 5120, true, true, true).has_value(),
+          "qsa indexer q_proj bf16 512x5120 rows=2048 -> config");
+    check(sel_bf16(1, 128, 5120, 5120, true, true, true).has_value(),
+          "qsa indexer k_proj bf16 128x5120 rows=1 -> config");
+    check(sel_bf16(2048, 128, 5120, 5120, true, true, true).has_value(),
+          "qsa indexer k_proj bf16 128x5120 rows=2048 -> config");
+    check(sel_fp8(1, 512, 5120, 5120).has_value(),
+          "qsa indexer q_proj fp8 512x5120 still enabled");
+    check(!sel_fp8(1, 128, 5120, 5120).has_value(),
+          "qsa indexer k_proj fp8 128x5120 not enabled");
+}
+
 void test_moe_tp2_shapes() {
     // Qwen3.6-35B-A3B MoE at tp_size 2: the rank-local backbone widths. The routed expert
     // plane splits along the expert axis, so its grouped widths are unchanged.
@@ -243,6 +258,7 @@ int main() {
     test_fp8();
     test_9b_shapes();
     test_tp2_shapes();
+    test_qsa_indexer_shapes();
     test_moe_tp2_shapes();
 
     std::printf("\nResults: %d passed, %d failed\n", passed, failed);

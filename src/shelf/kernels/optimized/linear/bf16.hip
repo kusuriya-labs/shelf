@@ -344,7 +344,31 @@ __device__ __forceinline__ void gemm_bf16_exact_rows_body(
     for (uint32_t m = 0; m < kRows; ++m)
         acc[m] = 0.0f;
     const uint32_t iters = k >> 8u;
-    for (uint32_t i = 0; i < iters; ++i) {
+    uint32_t i = 0;
+    if constexpr (!kDot2 && kRows == 1) {
+        for (; i + 4u <= iters; i += 4u) {
+            const uint32_t off = (i << 8) + (lane << 3);
+            float wf[4][8];
+            #pragma unroll
+            for (uint32_t u = 0; u < 4u; ++u) {
+                const short8_t w = *reinterpret_cast<const short8_t*>(
+                    wrow + off + (u << 8));
+                #pragma unroll
+                for (uint32_t j = 0; j < 8u; ++j) wf[u][j] = bf16_f32(w[j]);
+            }
+            short8_t x[4];
+            #pragma unroll
+            for (uint32_t u = 0; u < 4u; ++u)
+                x[u] = *reinterpret_cast<const short8_t*>(input + off + (u << 8));
+            #pragma unroll
+            for (uint32_t u = 0; u < 4u; ++u) {
+                #pragma unroll
+                for (uint32_t j = 0; j < 8u; ++j)
+                    acc[0] += wf[u][j] * bf16_f32(x[u][j]);
+            }
+        }
+    }
+    for (; i < iters; ++i) {
         const uint32_t off = (i << 8) + (lane << 3);
         const short8_t w = *reinterpret_cast<const short8_t*>(wrow + off);
         if constexpr (kDot2) {

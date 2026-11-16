@@ -340,6 +340,17 @@ int main() {
                  "tp2 rows=1 N=24 K=5120");
     }
 
+    // Qwen3.8 QSA indexer projections (bf16, per layer).
+    {
+        for (uint32_t rows : {1u, 8u, 64u}) {
+            char label[128];
+            std::snprintf(label, sizeof(label), "qsa indexer q rows=%u N=512 K=5120", rows);
+            run_case(rows, 512, 5120, 5120, 512, 0x7B300001u + rows, arena, stream, label);
+            std::snprintf(label, sizeof(label), "qsa indexer k rows=%u N=128 K=5120", rows);
+            run_case(rows, 128, 5120, 5120, 128, 0x7B300002u + rows, arena, stream, label);
+        }
+    }
+
     shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     std::printf("\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;

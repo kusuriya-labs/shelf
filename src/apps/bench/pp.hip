@@ -451,6 +451,7 @@ int run_pp(int argc, char** argv) {
         shelf::qwen35::ExecutorConfig exec_config;
         exec_config.max_batch_rows = exec_max_tokens;
         exec_config.max_scheduled_requests = 1;
+        exec_config.max_context_tokens = required_seq_len;
         exec_config.backend = opts.decode_backend;
 
         auto exec_result = tp1_loaded->create_executor(

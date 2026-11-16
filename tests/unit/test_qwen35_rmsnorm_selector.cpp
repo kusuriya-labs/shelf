@@ -137,6 +137,15 @@ int main() {
               0, 2048, 2048, 1) == RmsNormImplementation::Correctness,
           "moe hidden norm f32 output not measured -> Correctness");
     check(sel(DT::BF16, DT::BF16, DT::BF16, RmsNormSelectorWeightLayout::PerFeature,
+              0, 128, 128, 1) == RmsNormImplementation::Optimized,
+          "qsa indexer k_norm BF16->BF16 PF ONE_PLUS F=128 rows=1 -> Optimized");
+    check(sel(DT::BF16, DT::BF16, DT::BF16, RmsNormSelectorWeightLayout::PerFeature,
+              0, 128, 128, 2048) == RmsNormImplementation::Optimized,
+          "qsa indexer k_norm F=128 rows=2048 -> Optimized");
+    check(sel(DT::BF16, DT::BF16, DT::BF16, RmsNormSelectorWeightLayout::PerFeature,
+              0, 128, 128, 8193) == RmsNormImplementation::Correctness,
+          "qsa indexer k_norm rows=8193 above measured -> Correctness");
+    check(sel(DT::BF16, DT::BF16, DT::BF16, RmsNormSelectorWeightLayout::PerFeature,
               0, 1536, 1536, 1) == RmsNormImplementation::Correctness,
           "unmeasured F=1536 -> Correctness");
 

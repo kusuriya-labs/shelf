@@ -16,6 +16,7 @@
 #include <shelf/inference/execution/selectors/rope_selector.h>
 #include <shelf/inference/execution/selectors/sampling_selector.h>
 #include <shelf/inference/execution/selectors/selector_limits.h>
+#include <shelf/kernels/optimized/attention/qsa_sparse.h>
 #include <hip/hip_runtime.h>
 #include <algorithm>
 #include <atomic>
@@ -43,6 +44,20 @@ const ::shelf::runtime::StateBinding* find_state_binding_for_descriptor(
 
 constexpr uint32_t kPrefillKernelMinRows = kPagedAttentionPrefillMinRows;
 constexpr uint32_t kMaskedPrefillMinRows = 256u;
+constexpr uint32_t kQsaSparsePrefillMinTokens = 12288u;
+
+bool qsa_sparse_supported(const PagedAttentionResolvedArgs& args,
+                          const HostExecutionContext& ctx) {
+    const auto& c = args.common;
+    return args.kv_dtype == ::shelf::kernel::KVCacheDType::BF16 &&
+           args.output_dtype == ::shelf::runtime::ValueDType::F32 && c.block_mask != nullptr &&
+           c.tree_anc_offsets == nullptr &&
+           c.head_dim == ::shelf::kernel::kQsaSparseHeadDim &&
+           c.q_heads == c.kv_heads * ::shelf::kernel::kQsaSparseQPerKv &&
+           c.mask_block_shift == 2u && c.page_tokens != 0u &&
+           (c.page_tokens % ::shelf::kernel::kQsaSparseBlockTokens) == 0u &&
+           ctx.decode_attn_partials != nullptr;
+}
 
 bool should_use_paged_attention_prefill(uint32_t rows, const HostExecutionContext& ctx) {
     if (rows < kPrefillKernelMinRows) return false;
@@ -276,6 +291,14 @@ PagedAttentionPlan plan_paged_attention(
     // The tiled prefill implementation is specialized for head_dim 256.
     // Use the optimized per-row decode kernel for shorter heads as well.
     plan.use_prefill = use_prefill && args.common.head_dim == 256u;
+    if (qsa_sparse_supported(args, ctx) &&
+        (!plan.use_prefill ||
+         ctx.spec.max_visible_tokens >= kQsaSparsePrefillMinTokens)) {
+        plan.qsa_sparse = true;
+        plan.splits = ::shelf::kernel::qsa_sparse_splits(
+            args.common.rows, args.common.kv_heads, ctx.decode_attn_partial_bytes);
+        return plan;
+    }
     if (plan.use_prefill &&
         args.kv_dtype == ::shelf::kernel::KVCacheDType::OCTAVE) {
         const uint64_t capacity = static_cast<uint64_t>(
@@ -538,6 +561,34 @@ PhysicalResolveStatus append_decode_region(
     return PhysicalResolveStatus::Applicable;
 }
 
+PhysicalResolveStatus append_qsa_region(const PagedAttentionResolvedArgs& a,
+                                        const ::shelf::kernel::PagedAttentionCommonArgs& region,
+                                        const HostExecutionContext& ctx,
+                                        PhysicalPagedAttentionPlan& out, uint32_t splits) {
+    const uint32_t needed = splits > 1u ? 2u : 1u;
+    if (out.physical_count + needed > kPhysicalPagedAttentionMaxKernels)
+        return PhysicalResolveStatus::NotApplicable;
+    PhysicalPagedAttentionKernel& k = out.kernels[out.physical_count++];
+    k.common = region;
+    k.variant = PhysicalPagedAttentionVariant::QsaSparse;
+    k.k_pool = reinterpret_cast<uint64_t>(a.k_bf16_pool);
+    k.v_pool = reinterpret_cast<uint64_t>(a.v_bf16_pool);
+    k.splits = splits;
+    k.grid = region.rows * region.kv_heads * splits;
+    k.workgroup = 64u;
+    if (splits <= 1u) return PhysicalResolveStatus::Applicable;
+
+    k.partials = reinterpret_cast<uint64_t>(ctx.decode_attn_partials);
+    PhysicalPagedAttentionKernel& reduce = out.kernels[out.physical_count++];
+    reduce.common = region;
+    reduce.variant = PhysicalPagedAttentionVariant::QsaReduce;
+    reduce.partials = reinterpret_cast<uint64_t>(ctx.decode_attn_partials);
+    reduce.splits = splits;
+    reduce.grid = region.rows * region.q_heads;
+    reduce.workgroup = ::shelf::kernel::kQsaSparseHeadDim;
+    return PhysicalResolveStatus::Applicable;
+}
+
 PhysicalResolveStatus append_prefill_region(
     const PagedAttentionResolvedArgs& a,
     const ::shelf::kernel::PagedAttentionCommonArgs& region,
@@ -608,6 +659,12 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
         out.use_prefill = plan.use_prefill;
         out.kv_dtype = a.kv_dtype;
         out.splits = plan.splits;
+        if (plan.qsa_sparse) {
+            if (append_qsa_region(a, a.common, ctx, out, plan.splits) !=
+                PhysicalResolveStatus::Applicable)
+                return PhysicalResolveStatus::NotApplicable;
+            return PhysicalResolveStatus::Applicable;
+        }
         if (plan.use_prefill) {
             if (append_prefill_region(a, a.common, ctx, out) !=
                 PhysicalResolveStatus::Applicable)
@@ -644,9 +701,14 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
     if (decode_rows > 0u) {
         const auto region = offset_paged_attention_rows(a.common, 0u, decode_rows);
         const uint32_t before = out.physical_count;
-        if (append_decode_region(a, region, ctx, out, plan.splits) !=
-            PhysicalResolveStatus::Applicable)
+        if (plan.qsa_sparse) {
+            if (append_qsa_region(a, region, ctx, out, plan.splits) !=
+                PhysicalResolveStatus::Applicable)
+                return PhysicalResolveStatus::NotApplicable;
+        } else if (append_decode_region(a, region, ctx, out, plan.splits) !=
+                   PhysicalResolveStatus::Applicable) {
             return PhysicalResolveStatus::NotApplicable;
+        }
         stamp_row_begin(before, 0u);
     }
 
@@ -664,7 +726,12 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
         const uint32_t prefill_min_rows =
             a.common.block_mask != nullptr ? kMaskedPrefillMinRows
                                            : kPagedAttentionPrefillMinRows;
-        if (a.common.head_dim == 256u && d.row_count >= prefill_min_rows) {
+        if (plan.qsa_sparse) {
+            if (append_qsa_region(a, region, ctx, out, plan.splits) !=
+                PhysicalResolveStatus::Applicable)
+                return PhysicalResolveStatus::NotApplicable;
+            out.use_prefill = true;
+        } else if (a.common.head_dim == 256u && d.row_count >= prefill_min_rows) {
             if (append_prefill_region(a, region, ctx, out) !=
                 PhysicalResolveStatus::Applicable)
                 return PhysicalResolveStatus::NotApplicable;
@@ -794,6 +861,17 @@ hipError_t launch_paged_attention_physical(const PhysicalPagedAttentionPlan& pla
                         k.octave_format, stream);
                 }
                 break;
+            case PhysicalPagedAttentionVariant::QsaSparse:
+                herr = ::shelf::kernel::launch_qsa_sparse_attention(
+                    k.common, reinterpret_cast<const ::shelf::bf16_t*>(k.k_pool),
+                    reinterpret_cast<const ::shelf::bf16_t*>(k.v_pool),
+                    reinterpret_cast<float*>(k.partials), k.splits, stream);
+                break;
+            case PhysicalPagedAttentionVariant::QsaReduce:
+                herr = ::shelf::kernel::launch_qsa_sparse_reduce(
+                    k.common, reinterpret_cast<const float*>(k.partials), k.splits,
+                    stream);
+                break;
             default:
                 return hipErrorNotSupported;
         }
@@ -805,7 +883,8 @@ hipError_t launch_paged_attention_physical(const PhysicalPagedAttentionPlan& pla
 uint32_t make_paged_attention_plan_key(const PagedAttentionPlan& plan) {
     uint32_t key = plan.optimized ? 1u : 0u;
     key |= plan.use_prefill ? 2u : 0u;
-    key |= (plan.splits & 0xFFFFu) << 2;
+    key |= plan.qsa_sparse ? 4u : 0u;
+    key |= (plan.splits & 0x7FFFu) << 3;
     key |= (plan.prefill_kv_blocks & 0x3FFFu) << 18;
     return key;
 }

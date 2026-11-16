@@ -1,0 +1,341 @@
+#include <shelf/kernels/optimized/attention/qsa_sparse.h>
+#include <shelf/kernels/optimized/detail/lds_barrier_device.h>
+
+#include <hip/hip_bf16.h>
+#include <hip/hip_runtime.h>
+
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+
+namespace shelf::kernel {
+namespace {
+
+using bf16 = __hip_bfloat16;
+
+constexpr uint32_t kD = kQsaSparseHeadDim;
+constexpr uint32_t kR = kQsaSparseBlockTokens;
+constexpr uint32_t kHeadsPerWarp = 3u;
+constexpr uint32_t kWarps = 2u;
+constexpr uint32_t kThreads = kWarps * 32u;
+constexpr uint32_t kDimsPerLane = kD / 32u;
+constexpr uint32_t kScorerLanes = kHeadsPerWarp * kR;
+constexpr uint32_t kPartialStride = kQsaSparseQPerKv * (2u + kD);
+
+struct RawBlock {
+    uint4 cell[kR];
+};
+
+__device__ __forceinline__ void load_block(const bf16* base, uint32_t stride, uint32_t lane,
+                                           RawBlock& raw) {
+#pragma unroll
+    for (uint32_t c = 0; c < kR; ++c) {
+        raw.cell[c] = *reinterpret_cast<const uint4*>(
+            base + static_cast<std::size_t>(c) * stride + lane * kDimsPerLane);
+    }
+}
+
+__device__ __forceinline__ void cell_values(const RawBlock& raw, uint32_t c,
+                                            float (&x)[kDimsPerLane]) {
+    const bf16* values = reinterpret_cast<const bf16*>(&raw.cell[c]);
+#pragma unroll
+    for (uint32_t d = 0; d < kDimsPerLane; ++d) x[d] = __bfloat162float(values[d]);
+}
+
+__device__ __forceinline__ void load_q(const bf16* src, uint32_t lane,
+                                       float (&q)[kDimsPerLane], float scale) {
+    const uint4 w = *reinterpret_cast<const uint4*>(src + lane * kDimsPerLane);
+    const bf16* values = reinterpret_cast<const bf16*>(&w);
+#pragma unroll
+    for (uint32_t d = 0; d < kDimsPerLane; ++d)
+        q[d] = __bfloat162float(values[d]) * scale;
+}
+
+template <bool kSplit>
+__global__ __launch_bounds__(kThreads) void qsa_sparse_attention_kernel(
+    const PagedAttentionCommonArgs a, const bf16* __restrict__ k_pool,
+    const bf16* __restrict__ v_pool, float* __restrict__ partials, uint32_t splits) {
+    const uint32_t lane = threadIdx.x;
+    const uint32_t warp = threadIdx.y;
+    const uint32_t split = kSplit ? blockIdx.x : 0u;
+    const uint32_t h_kv = blockIdx.y;
+    const uint32_t row = blockIdx.z;
+    const uint32_t h0 = h_kv * kQsaSparseQPerKv + warp * kHeadsPerWarp;
+
+    __shared__ float red[kWarps][32][kScorerLanes + 1u];
+
+    if (row >= a.rows) return;
+    const uint32_t slot = a.row_sequence_slots[row];
+    const uint32_t visible = a.row_positions[row] + 1u;
+
+    float q[kHeadsPerWarp][kDimsPerLane];
+#pragma unroll
+    for (uint32_t h = 0; h < kHeadsPerWarp; ++h) {
+        const bf16* q_head = reinterpret_cast<const bf16*>(a.q) +
+                             static_cast<std::size_t>(row) * a.q_row_stride +
+                             static_cast<std::size_t>(h0 + h) * kD;
+        load_q(q_head, lane, q[h], a.scale);
+    }
+
+    float acc[kHeadsPerWarp][kDimsPerLane];
+#pragma unroll
+    for (uint32_t h = 0; h < kHeadsPerWarp; ++h) {
+#pragma unroll
+        for (uint32_t d = 0; d < kDimsPerLane; ++d) acc[h][d] = 0.0f;
+    }
+    float m_run = -INFINITY;
+    float l_run = 0.0f;
+
+    const uint32_t my_c = lane % kR;
+    const bool scorer = lane < kScorerLanes;
+
+    const uint32_t visible_blocks = (visible + kR - 1u) / kR;
+    const uint32_t nblk =
+        visible_blocks < a.mask_blocks ? visible_blocks : a.mask_blocks;
+    uint32_t j0 = 0u;
+    uint32_t j1 = nblk;
+    if (kSplit) {
+        const uint32_t per = (nblk + splits - 1u) / splits;
+        j0 = split * per;
+        j1 = j0 + per < nblk ? j0 + per : nblk;
+    }
+
+    if (slot < a.max_sequences && j0 < j1) {
+        const uint32_t* block_table =
+            a.block_tables + static_cast<std::size_t>(slot) * a.block_table_stride;
+        const uint32_t* words = reinterpret_cast<const uint32_t*>(
+            a.block_mask + static_cast<std::size_t>(row) * a.mask_stride);
+        const bf16* k_layer = k_pool + static_cast<std::size_t>(a.layer) * a.elems_per_layer;
+        const bf16* v_layer = v_pool + static_cast<std::size_t>(a.layer) * a.elems_per_layer;
+        const uint32_t blocks_per_page = a.page_tokens / kR;
+        const uint32_t last_word = (j1 - 1u) >> 5u;
+
+        for (uint32_t wi = j0 >> 5u; wi <= last_word; ++wi) {
+            uint32_t bits = words[wi];
+            if (wi == (j0 >> 5u)) bits &= 0xFFFFFFFFu << (j0 & 31u);
+            if (wi == last_word) {
+                const uint32_t high = (j1 - 1u) & 31u;
+                if (high != 31u) bits &= (1u << (high + 1u)) - 1u;
+            }
+            while (bits != 0u) {
+                const uint32_t block = wi * 32u + static_cast<uint32_t>(__ffs(static_cast<int>(bits)) - 1);
+                bits &= bits - 1u;
+                const uint32_t token0 = block * kR;
+                const uint32_t cells = visible - token0 < kR ? visible - token0 : kR;
+                const uint32_t page = block / blocks_per_page;
+                const uint32_t off = token0 - page * a.page_tokens;
+                const uint32_t phys = block_table[page];
+                if (phys >= a.num_pages) continue;
+                const std::size_t elem = static_cast<std::size_t>(phys) * a.elems_per_page +
+                                         static_cast<std::size_t>(off) * a.elems_per_token +
+                                         static_cast<std::size_t>(h_kv) * kD;
+                RawBlock kr;
+                RawBlock vr;
+                load_block(k_layer + elem, a.elems_per_token, lane, kr);
+                load_block(v_layer + elem, a.elems_per_token, lane, vr);
+
+                float part[kHeadsPerWarp][kR];
+#pragma unroll
+                for (uint32_t c = 0; c < kR; ++c) {
+                    float kx[kDimsPerLane];
+                    cell_values(kr, c, kx);
+#pragma unroll
+                    for (uint32_t h = 0; h < kHeadsPerWarp; ++h) {
+                        float sum = 0.0f;
+#pragma unroll
+                        for (uint32_t d = 0; d < kDimsPerLane; ++d) sum += q[h][d] * kx[d];
+                        part[h][c] = sum;
+                    }
+                }
+#pragma unroll
+                for (uint32_t h = 0; h < kHeadsPerWarp; ++h) {
+#pragma unroll
+                    for (uint32_t c = 0; c < kR; ++c) red[warp][lane][h * kR + c] = part[h][c];
+                }
+                detail::lds_barrier();
+                float s = -INFINITY;
+                if (scorer) {
+                    float sum = 0.0f;
+#pragma unroll
+                    for (uint32_t i = 0; i < 32u; ++i) sum += red[warp][i][lane];
+                    s = my_c < cells ? sum : -INFINITY;
+                }
+                detail::lds_barrier();
+
+                float bmax = s;
+#pragma unroll
+                for (uint32_t offset = 1u; offset < kR; offset <<= 1u)
+                    bmax = fmaxf(bmax, __shfl_xor(bmax, offset, 32));
+                const float m_new = fmaxf(m_run, bmax);
+                const float alpha = m_new == -INFINITY ? 1.0f : __expf(m_run - m_new);
+                const float p = s == -INFINITY ? 0.0f : __expf(s - m_new);
+                float psum = p;
+#pragma unroll
+                for (uint32_t offset = 1u; offset < kR; offset <<= 1u)
+                    psum += __shfl_xor(psum, offset, 32);
+                m_run = m_new;
+                l_run = l_run * alpha + psum;
+
+#pragma unroll
+                for (uint32_t h = 0; h < kHeadsPerWarp; ++h) {
+                    const float al = __shfl_sync(0xFFFFFFFFULL, alpha, h * kR);
+#pragma unroll
+                    for (uint32_t d = 0; d < kDimsPerLane; ++d) acc[h][d] *= al;
+                }
+#pragma unroll
+                for (uint32_t c = 0; c < kR; ++c) {
+                    float vx[kDimsPerLane];
+                    cell_values(vr, c, vx);
+#pragma unroll
+                    for (uint32_t h = 0; h < kHeadsPerWarp; ++h) {
+                        const float pc = __shfl_sync(0xFFFFFFFFULL, p, h * kR + c);
+#pragma unroll
+                        for (uint32_t d = 0; d < kDimsPerLane; ++d) acc[h][d] += pc * vx[d];
+                    }
+                }
+            }
+        }
+    }
+
+    float mh[kHeadsPerWarp];
+    float lh[kHeadsPerWarp];
+#pragma unroll
+    for (uint32_t h = 0; h < kHeadsPerWarp; ++h) {
+        mh[h] = __shfl_sync(0xFFFFFFFFULL, m_run, h * kR);
+        lh[h] = __shfl_sync(0xFFFFFFFFULL, l_run, h * kR);
+    }
+
+    if (!kSplit) {
+        float* out = static_cast<float*>(a.output) +
+                     static_cast<std::size_t>(row) * a.output_row_stride +
+                     static_cast<std::size_t>(h0) * kD + lane * kDimsPerLane;
+#pragma unroll
+        for (uint32_t h = 0; h < kHeadsPerWarp; ++h) {
+            const float inv = lh[h] > 0.0f ? 1.0f / lh[h] : 0.0f;
+            float* o = out + static_cast<std::size_t>(h) * kD;
+#pragma unroll
+            for (uint32_t d = 0; d < kDimsPerLane; ++d) o[d] = acc[h][d] * inv;
+        }
+        return;
+    }
+
+    float* base = partials +
+                  (static_cast<std::size_t>(row) * a.kv_heads + h_kv) * splits *
+                      kPartialStride +
+                  static_cast<std::size_t>(split) * kPartialStride;
+#pragma unroll
+    for (uint32_t h = 0; h < kHeadsPerWarp; ++h) {
+        const uint32_t local = warp * kHeadsPerWarp + h;
+        float* o = base + 2u * kQsaSparseQPerKv + local * kD + lane * kDimsPerLane;
+#pragma unroll
+        for (uint32_t d = 0; d < kDimsPerLane; ++d) o[d] = acc[h][d];
+    }
+    if (lane == 0u) {
+#pragma unroll
+        for (uint32_t h = 0; h < kHeadsPerWarp; ++h) {
+            const uint32_t local = warp * kHeadsPerWarp + h;
+            base[local] = mh[h];
+            base[kQsaSparseQPerKv + local] = lh[h];
+        }
+    }
+}
+
+__global__ __launch_bounds__(kD) void qsa_sparse_reduce_kernel(
+    const PagedAttentionCommonArgs a, const float* __restrict__ partials, uint32_t splits) {
+    const uint32_t task = blockIdx.x;
+    const uint32_t row = task / a.q_heads;
+    const uint32_t q_head = task % a.q_heads;
+    const uint32_t kv_head = q_head / kQsaSparseQPerKv;
+    const uint32_t local = q_head % kQsaSparseQPerKv;
+    const uint32_t d = threadIdx.x;
+    if (row >= a.rows) return;
+
+    const float* base = partials +
+                       (static_cast<std::size_t>(row) * a.kv_heads + kv_head) * splits *
+                           kPartialStride;
+    float m = -INFINITY;
+    for (uint32_t s = 0; s < splits; ++s)
+        m = fmaxf(m, base[static_cast<std::size_t>(s) * kPartialStride + local]);
+
+    float l = 0.0f;
+    float value = 0.0f;
+    if (m != -INFINITY) {
+        for (uint32_t s = 0; s < splits; ++s) {
+            const std::size_t offset = static_cast<std::size_t>(s) * kPartialStride;
+            const float w = __expf(base[offset + local] - m);
+            l += w * base[offset + kQsaSparseQPerKv + local];
+            value += w * base[offset + 2u * kQsaSparseQPerKv + local * kD + d];
+        }
+    }
+    float* out = static_cast<float*>(a.output) +
+                 static_cast<std::size_t>(row) * a.output_row_stride +
+                 static_cast<std::size_t>(q_head) * kD + d;
+    *out = l > 0.0f ? value / l : 0.0f;
+}
+
+}  // namespace
+
+uint64_t qsa_sparse_partial_bytes(uint32_t rows, uint32_t kv_heads, uint32_t splits) {
+    return static_cast<uint64_t>(rows) * kv_heads * splits * kPartialStride * sizeof(float);
+}
+
+uint32_t qsa_sparse_splits(uint32_t rows, uint32_t kv_heads, uint64_t workspace_bytes) {
+    if (rows == 0u || kv_heads == 0u) return 1u;
+    constexpr uint32_t kTargetCtas = 128u;
+    constexpr uint32_t kMaxSplits = 32u;
+    uint32_t splits = 1u;
+    while (splits < kMaxSplits &&
+           static_cast<uint64_t>(rows) * kv_heads * (splits << 1u) <= kTargetCtas)
+        splits <<= 1u;
+    while (splits > 1u && qsa_sparse_partial_bytes(rows, kv_heads, splits) > workspace_bytes)
+        splits >>= 1u;
+    return splits;
+}
+
+hipError_t launch_qsa_sparse_attention(const PagedAttentionCommonArgs& common,
+                                       const bf16_t* k_pool, const bf16_t* v_pool,
+                                       float* partials, uint32_t splits,
+                                       hipStream_t stream) {
+    if (common.q == nullptr || common.output == nullptr || common.block_mask == nullptr ||
+        common.row_positions == nullptr || common.row_sequence_slots == nullptr ||
+        common.block_tables == nullptr || k_pool == nullptr || v_pool == nullptr)
+        return hipErrorInvalidValue;
+    if (common.rows == 0u || common.kv_heads == 0u || splits == 0u) return hipErrorInvalidValue;
+    if (common.head_dim != kD || common.q_heads != common.kv_heads * kQsaSparseQPerKv ||
+        common.output_dtype != PagedAttentionOutputDType::F32 ||
+        common.mask_block_shift != 2u || common.page_tokens == 0u ||
+        (common.page_tokens % kR) != 0u ||
+        (common.elems_per_token % kDimsPerLane) != 0u ||
+        (common.q_row_stride % kDimsPerLane) != 0u ||
+        (common.output_row_stride % kDimsPerLane) != 0u)
+        return hipErrorInvalidValue;
+    if (splits > 1u && partials == nullptr) return hipErrorInvalidValue;
+    if (common.tree_anc_offsets != nullptr) return hipErrorInvalidValue;
+
+    const dim3 grid(splits > 1u ? splits : 1u, common.kv_heads, common.rows);
+    const dim3 block(32u, kWarps);
+    if (splits > 1u) {
+        qsa_sparse_attention_kernel<true><<<grid, block, 0, stream>>>(
+            common, reinterpret_cast<const bf16*>(k_pool),
+            reinterpret_cast<const bf16*>(v_pool), partials, splits);
+    } else {
+        qsa_sparse_attention_kernel<false><<<grid, block, 0, stream>>>(
+            common, reinterpret_cast<const bf16*>(k_pool),
+            reinterpret_cast<const bf16*>(v_pool), partials, splits);
+    }
+    return hipGetLastError();
+}
+
+hipError_t launch_qsa_sparse_reduce(const PagedAttentionCommonArgs& common,
+                                    const float* partials, uint32_t splits,
+                                    hipStream_t stream) {
+    if (common.output == nullptr || partials == nullptr || common.rows == 0u ||
+        common.q_heads == 0u || splits <= 1u)
+        return hipErrorInvalidValue;
+    const uint32_t grid = common.rows * common.q_heads;
+    if (grid == 0u) return hipErrorInvalidValue;
+    qsa_sparse_reduce_kernel<<<grid, kD, 0, stream>>>(common, partials, splits);
+    return hipGetLastError();
+}
+
+}  // namespace shelf::kernel
