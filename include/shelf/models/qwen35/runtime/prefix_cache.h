@@ -42,7 +42,6 @@ struct PrefixCacheBytes {
     std::size_t state = 0;
     std::size_t extra_state = 0;
     std::size_t state_slot = 0;
-    std::size_t host = 0;
 
     std::size_t total() const noexcept { return state + extra_state; }
 };

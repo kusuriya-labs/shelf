@@ -211,11 +211,8 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
             rank->model_->executor_state_reserve_bytes(
                 2u * static_cast<std::size_t>(prefix_config.max_concurrent));
         reserved += family_shadow;
-        std::fprintf(stderr,
-                     "MEMORY_PLAN tp prefix cache: vram %s host %s "
-                     "(family shadow %s)\n",
+        std::fprintf(stderr, "MEMORY_PLAN tp prefix cache: %s (family shadow %s)\n",
                      gpu::format_gib(prefix_bytes.total()).c_str(),
-                     gpu::format_gib(prefix_bytes.host).c_str(),
                      gpu::format_gib(family_shadow).c_str());
     }
     if (config.drafter_config != nullptr) {

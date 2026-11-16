@@ -754,22 +754,16 @@ PrefixCacheBytes prefix_cache_bytes(
             layout.head_k * layout.head_v * sizeof(fp16_t);
     bytes.state =
         bytes.state_slot * static_cast<std::size_t>(config.max_concurrent);
-    std::size_t host_slot = bytes.state_slot;
     if (qsa != nullptr) {
         bytes.extra_state +=
             ::shelf::state::qsa_key_state_pool_bytes(config.max_concurrent, *qsa)
                 .total();
-        host_slot += ::shelf::state::qsa_key_state_pool_bytes(1u, *qsa).total();
     }
     if (ple_conv != nullptr) {
         bytes.extra_state +=
             ::shelf::state::ple_conv_state_pool_bytes(config.max_concurrent,
                                                       *ple_conv);
-        host_slot +=
-            ::shelf::state::ple_conv_state_pool_bytes(1u, *ple_conv);
     }
-    host_slot += static_cast<std::size_t>(config.spec_ring_bytes);
-    bytes.host = host_slot * static_cast<std::size_t>(config.max_concurrent);
     return bytes;
 }
 
