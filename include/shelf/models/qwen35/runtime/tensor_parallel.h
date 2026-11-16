@@ -81,7 +81,7 @@ struct TpRankRuntimeConfig {
     std::uint32_t drafter_sessions = 0;
     std::size_t drafter_lm_head_k = 0;
     bool prefix_cache = false;
-    std::uint32_t prefix_concurrency = 4;
+    std::uint32_t prefix_checkpoints = 4;
     std::uint32_t prefix_spec_ring_bytes = 0;
     PrefixCacheStrategy prefix_strategy = PrefixCacheStrategy::Radix;
     std::uint32_t prefix_slot_count = 0;
@@ -173,7 +173,7 @@ struct TpCoordinatorConfig {
     std::uint32_t drafter_sessions = 0;
     std::size_t drafter_lm_head_k = 0;
     bool prefix_cache = false;
-    std::uint32_t prefix_concurrency = 4;
+    std::uint32_t prefix_checkpoints = 4;
     std::uint32_t prefix_spec_ring_bytes = 0;
     PrefixCacheStrategy prefix_strategy = PrefixCacheStrategy::Radix;
     std::uint32_t prefix_slot_count = 0;

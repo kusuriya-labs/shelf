@@ -293,13 +293,15 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     const std::size_t used_after_pools = arena_->used();
 
     qwen35::runtime::PrefixCacheConfig prefix_config;
-    prefix_config.max_concurrent = config_.prefix_cache_concurrency;
+    prefix_config.checkpoints = config_.prefix_cache_checkpoints;
+    prefix_config.capture_slots = config_.max_concurrent_requests;
     prefix_config.spec_ring_bytes = config_.prefix_cache_spec_ring_bytes;
     prefix_config.strategy = config_.prefix_cache_strategy;
     prefix_config.slot_count = config_.prefix_cache_slot_count;
     prefix_config.save_interval = config_.prefix_cache_save_interval;
     if (prefix_config.strategy == qwen35::runtime::PrefixCacheStrategy::Slot) {
-        prefix_config.max_concurrent = prefix_config.slot_count + 1u;
+        prefix_config.checkpoints = prefix_config.slot_count + 1u;
+        prefix_config.capture_slots = 0u;
     }
 
     auto prefix_bytes_for = [&]() {
@@ -650,7 +652,7 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
     tp_config.arena_bytes = config_.arena_bytes;
     tp_config.working_set_reserve_bytes = config_.working_set_reserve_bytes;
     tp_config.prefix_cache = config_.prefix_cache;
-    tp_config.prefix_concurrency = config_.prefix_cache_concurrency;
+    tp_config.prefix_checkpoints = config_.prefix_cache_checkpoints;
     tp_config.prefix_spec_ring_bytes = config_.prefix_cache_spec_ring_bytes;
     tp_config.prefix_strategy = config_.prefix_cache_strategy;
     tp_config.prefix_slot_count = config_.prefix_cache_slot_count;
@@ -743,14 +745,16 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
 
     if (config_.prefix_cache) {
         qwen35::runtime::PrefixCacheConfig prefix_config;
-            prefix_config.max_concurrent = config_.prefix_cache_concurrency;
+            prefix_config.checkpoints = config_.prefix_cache_checkpoints;
+            prefix_config.capture_slots = config_.max_concurrent_requests;
             prefix_config.spec_ring_bytes = config_.prefix_cache_spec_ring_bytes;
             prefix_config.strategy = config_.prefix_cache_strategy;
             prefix_config.slot_count = config_.prefix_cache_slot_count;
             prefix_config.save_interval = config_.prefix_cache_save_interval;
             if (prefix_config.strategy ==
                 qwen35::runtime::PrefixCacheStrategy::Slot) {
-                prefix_config.max_concurrent = prefix_config.slot_count + 1u;
+                prefix_config.checkpoints = prefix_config.slot_count + 1u;
+                prefix_config.capture_slots = 0u;
             }
 
         std::vector<qwen35::runtime::PrefixCacheRankContext> extra_ranks;

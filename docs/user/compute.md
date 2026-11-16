@@ -53,7 +53,7 @@ TP、pipeline parallel、MTP、DFlash2、2048 token 超の長文は未対応。
 | `--mtp-stats 0\|1` | print MTP speculative decode statistics (default 1) |
 | `--prefix-cache 0\|1` | enable prefix cache (default 1) |
 | `--working-set-reserve-gib N` | arena headroom kept free for the working set (executor workspace allocated after the memory plan; 0 = size it from the row bucket, default 0) |
-| `--prefix-cache-concurrency N` | max concurrent prefix captures and stored prefix entries (default 4) |
+| `--prefix-cache-checkpoints N` | 保持する prefix checkpoint 数。pinned host memory を使う（default 4） |
 | `--prefix-cache-strategy MODE` | radix \| slot (default radix) |
 | `--prefix-cache-save-interval N` | 定期 prefix checkpoint の間隔 token（default 1024、`0` = 定期 checkpoint を無効化） |
 | `--serve-stdio` | serve JSON Lines generation requests on stdin/stdout |
@@ -66,6 +66,10 @@ KV の物理容量は個別に指定できない。model weight、`--working-set
 DFlash2 の drafter（weight と session pool 等の runtime 領域）、または MTP の drafter
 （専用 KV pool、executor、GDN snapshot）、prefix cache の capture slot を確保した後に
 残る arena の領域をすべて KV に割り当てる。
+
+prefix cache の VRAM は rolling capture 用の slot だけで、その数は
+`--max-concurrent-requests`（slot 方式は 0）で決まる。checkpoint 本体は
+`--prefix-cache-checkpoints` 個を pinned host memory に置くため arena を使わない。
 KV を増やすには `--arena-gib` を増やすか、`--working-set-reserve-gib` を減らす。
 prefix cache は KV を予約しない（active KV pool の page を共有する）。
 既定は `0`（auto）で、executor が plan 後に確保する量を row bucket から推定して予約する。

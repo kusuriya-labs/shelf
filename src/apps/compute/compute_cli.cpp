@@ -113,8 +113,8 @@ void compute_usage(const char* prog) {
     printf("                                 (executor workspace allocated after the\n");
     printf("                                 memory plan; 0 = size it from the row\n");
     printf("                                 bucket, default 0)\n");
-    printf("  --prefix-cache-concurrency N   max concurrent prefix captures and stored\n");
-    printf("                                 prefix entries (default 4)\n");
+    printf("  --prefix-cache-checkpoints N   stored prefix checkpoints in host memory\n");
+    printf("                                 (default 4)\n");
     printf("  --prefix-cache-strategy MODE   radix | slot (default radix)\n");
     printf("  --prefix-cache-save-interval N  periodic checkpoint spacing in tokens;\n");
     printf("                                 0 = disable periodic checkpoints (default 1024)\n");
@@ -207,7 +207,7 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
     auto& mtp_drafts = opt.mtp_drafts;
     auto& mtp_stats = opt.mtp_stats;
     auto& prefix_cache_enabled = opt.prefix_cache_enabled;
-    auto& prefix_cache_concurrency = opt.prefix_cache_concurrency;
+    auto& prefix_cache_checkpoints = opt.prefix_cache_checkpoints;
     auto& prefix_cache_strategy = opt.prefix_cache_strategy;
     auto& prefix_cache_save_interval = opt.prefix_cache_save_interval;
     auto& working_set_reserve_gib = opt.working_set_reserve_gib;
@@ -385,10 +385,11 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
                 fprintf(stderr, "bad --working-set-reserve-gib\n");
                 return kComputeParseError;
             }
-        } else if (std::strcmp(argv[i], "--prefix-cache-concurrency") == 0 && i + 1 < argc) {
-            if (!parse_uint(argv[++i], prefix_cache_concurrency) ||
-                prefix_cache_concurrency == 0 || prefix_cache_concurrency > 65535) {
-                fprintf(stderr, "bad --prefix-cache-concurrency (expected 1..65535)\n");
+        } else if (std::strcmp(argv[i], "--prefix-cache-checkpoints") == 0 &&
+                   i + 1 < argc) {
+            if (!parse_uint(argv[++i], prefix_cache_checkpoints) ||
+                prefix_cache_checkpoints == 0 || prefix_cache_checkpoints > 65535) {
+                fprintf(stderr, "bad --prefix-cache-checkpoints (expected 1..65535)\n");
                 return kComputeParseError;
             }
         } else if (std::strcmp(argv[i], "--prefix-cache-strategy") == 0 &&
@@ -452,7 +453,7 @@ int validate_compute_options(const ComputeOptions& opt) {
     const auto& mtp_drafts = opt.mtp_drafts;
     const auto& mtp_stats = opt.mtp_stats;
     const auto& prefix_cache_enabled = opt.prefix_cache_enabled;
-    const auto& prefix_cache_concurrency = opt.prefix_cache_concurrency;
+    const auto& prefix_cache_checkpoints = opt.prefix_cache_checkpoints;
     const auto& working_set_reserve_gib = opt.working_set_reserve_gib;
     if (opt.dflash2_adaptive && (dflash2_model_dir.empty() || tp != 1)) {
         fprintf(stderr, "--dflash2-adaptive requires --dflash2-model-dir and one device\n");

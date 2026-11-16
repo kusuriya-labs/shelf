@@ -29,15 +29,15 @@ def main() -> int:
         "--model-dir", "models/unused",
         "--device", "0",
         "--prefix-cache", "0",
-        "--prefix-cache-concurrency", "6",
+        "--prefix-cache-checkpoints", "6",
         "--prefix-cache-strategy", "slot",
     ])
     argv = shelf_server.build_compute_argv(opts)
     checker.check("enabled-forwarded", value_of(argv, "--prefix-cache") == "0",
                   repr(value_of(argv, "--prefix-cache")))
-    checker.check("concurrency-forwarded",
-                  value_of(argv, "--prefix-cache-concurrency") == "6",
-                  repr(value_of(argv, "--prefix-cache-concurrency")))
+    checker.check("checkpoints-forwarded",
+                  value_of(argv, "--prefix-cache-checkpoints") == "6",
+                  repr(value_of(argv, "--prefix-cache-checkpoints")))
     checker.check("strategy-forwarded",
                   value_of(argv, "--prefix-cache-strategy") == "slot",
                   repr(value_of(argv, "--prefix-cache-strategy")))
@@ -53,9 +53,9 @@ def main() -> int:
     checker.check("default-strategy-radix",
                   value_of(default_argv, "--prefix-cache-strategy") == "radix",
                   repr(value_of(default_argv, "--prefix-cache-strategy")))
-    checker.check("default-concurrency",
-                  value_of(default_argv, "--prefix-cache-concurrency") == "4",
-                  repr(value_of(default_argv, "--prefix-cache-concurrency")))
+    checker.check("default-checkpoints",
+                  value_of(default_argv, "--prefix-cache-checkpoints") == "4",
+                  repr(value_of(default_argv, "--prefix-cache-checkpoints")))
     return checker.done()
 
 

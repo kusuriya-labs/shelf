@@ -18,7 +18,7 @@
    server 既定は `--max-num-batched-tokens 2048` なので、2048 token 以下の prompt は
    1 chunk で処理され、chunk 末端が偶然 page 揃え（1/16 の確率）のときしか
    entry が作られない。非 DFlash2 経路には救済も無かった。
-2. entry の state は VRAM の hot slot（`--prefix-cache-concurrency` 個）に 1 個ずつ
+2. entry の state は VRAM の hot slot（`--prefix-cache-checkpoints` 個）に 1 個ずつ
    対応し、枯渇すると entry ごと LRU evict された。長い prompt の prefill は
    chunk ごとに entry を作るため、浅い境界（共有 system prompt 付近）から消えた。
 3. chunk 末端にしか checkpoint が無いので、共有 prefix の境界（例: 700 token）が
@@ -37,11 +37,11 @@ DFlash2 用の「先に page 境界まで別 prefill して巻き戻す」経路
 
 ### 2.2 checkpoint を pinned host memory へ
 
-- checkpoint slot は `hipHostMalloc` の連続 buffer（`--prefix-cache-concurrency` 個）に置き、
+- checkpoint slot は `hipHostMalloc` の連続 buffer（`--prefix-cache-checkpoints` 個）に置き、
   GDN conv / recurrent（全 rank）、QSA pooled / partial / counts、PLE conv、
   DFlash2 ring を 1 slot にまとめる。
 - VRAM に残るのは rolling capture 用の shadow state だけで、slot 数は
-  `--prefix-cache-concurrency`。
+  `--prefix-cache-checkpoints`。
 - save は active → checkpoint の D2H、restore は H2D。entry 数が VRAM を消費しない。
 
 ### 2.3 checkpoint の位置
@@ -60,7 +60,29 @@ page 揃えされた input end の entry は同一 prompt では使えない（�
 `lookup(tokens, max_position = input_len - 1)` として、walk をその位置で打ち切り、
 より浅い entry にフォールバックする。
 
-### 2.5 pin
+### 2.5 capture slot と checkpoint 数の分離（同日追記）
+
+当初は `--prefix-cache-concurrency` が VRAM の capture slot 数と host の
+checkpoint 数の両方を決めていた。capture は「同時に decode 中の request が
+page 境界の state を保留する」ための作業領域なので必要数は
+`--max-concurrent-requests` で決まり、ユーザーが選ぶ値ではない。
+
+そこで option を `--prefix-cache-checkpoints`（host の checkpoint 数）へ改名し、
+capture slot は `--max-concurrent-requests` から導出、slot strategy では 0 にした。
+既定値（checkpoints 4 / requests 4）では確保量は変わらない。
+
+TP2 / 27B FP8 の起動 log（実測）:
+
+| requests | checkpoints | VRAM capture（rank あたり） | host checkpoint（全 rank 合計） |
+| ---: | ---: | ---: | ---: |
+| 4 | 4 | 0.15 GiB | 0.29 GiB |
+| 4 | 16 | 0.15 GiB | 1.17 GiB |
+| 1 | 4 | 0.04 GiB | 0.29 GiB |
+| 1 | 16 | 0.04 GiB | 1.17 GiB |
+
+slot strategy（requests 4）は VRAM 0.00 GiB、host 0.37 GiB（slot 5 個）だった。
+
+### 2.6 pin
 
 lookup で hit した回数が最も多い entry を pin し、LRU の victim にしない
 （同数なら position が小さい方）。capacity が 2 以下では pin しない。
@@ -92,7 +114,7 @@ lookup で hit した回数が最も多い entry を pin し、LRU の victim �
 ### 3.3 DFlash2（`tests/server/test_compute_dflash2.py`、99 checks）
 
 `--max-num-batched-tokens 1024`（このホストの VRAM に合わせる）。
-`--prefix-cache-concurrency 2` と 4 の両方で 99/99 PASS。
+checkpoint 数 2 と 4 の両方で 99/99 PASS。
 入力 80 token の extension が `restored_tokens=80`、同 prompt の再実行が 64 に
 フォールバックすることを含む。
 

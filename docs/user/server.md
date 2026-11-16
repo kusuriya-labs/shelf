@@ -86,7 +86,7 @@ Ready.
 | `--working-set-reserve-gib WORKING_SET_RESERVE_GIB` | arena headroom kept free for the working set (0 = size it from the row bucket, default 0) |
 | `--rope-factor {auto,1,2,4}` | static YaRN rope factor forwarded to compute (default auto) |
 | `--prefix-cache {0,1}` | enable prefix cache (default 1) |
-| `--prefix-cache-concurrency PREFIX_CACHE_CONCURRENCY` | max concurrent prefix captures and stored prefix entries (default 4; radix strategy) |
+| `--prefix-cache-checkpoints PREFIX_CACHE_CHECKPOINTS` | 保持する prefix checkpoint 数。pinned host memory を使う（default 4） |
 | `--prefix-cache-strategy {radix,slot}` | prefix cache entry strategy (default radix) |
 | `--prefix-cache-save-interval PREFIX_CACHE_SAVE_INTERVAL` | 定期 prefix checkpoint の間隔 token（default 1024、`0` = 入力末尾系のみ） |
 | `--dflash2-model-dir DFLASH2_MODEL_DIR` | DFlash2 draft model directory (enables speculative decoding) |
@@ -626,10 +626,12 @@ page を refcount 付きで共有し、GDN state だけを page 単位で保持�
   先頭 prefix の共有に向く。共有 prefix が分岐した位置も checkpoint になる
   （[../developer/prefix_cache.md](../developer/prefix_cache.md)）
 
-`--prefix-cache` / `--prefix-cache-concurrency` / `--prefix-cache-strategy` /
+`--prefix-cache` / `--prefix-cache-checkpoints` / `--prefix-cache-strategy` /
 `--prefix-cache-save-interval` は `shelf-compute` へそのまま転送される。
-`GET /v1/meta` の `prefix_cache_strategy` / `prefix_cache_concurrency` /
+`GET /v1/meta` の `prefix_cache_strategy` / `prefix_cache_checkpoints` /
 `prefix_cache_save_interval` が起動時の設定を示す。
+prefix cache の VRAM は `--max-concurrent-requests` で決まり、
+`--prefix-cache-checkpoints` は host memory だけを増やす。
 
 詳細は [../developer/prefix_cache.md](../developer/prefix_cache.md) を参照。
 

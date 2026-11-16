@@ -126,6 +126,36 @@ HostLayout make_host_layout(const std::vector<PrefixRank>& ranks,
     return layout;
 }
 
+Result<PrefixRank> make_rank(gpu::GpuArena& arena, GdnStatePool& active,
+                             ::shelf::state::QsaKeyStatePool* qsa,
+                             ::shelf::state::PleConvStatePool* ple,
+                             uint32_t capture_slots, hipStream_t stream,
+                             int device) {
+    PrefixRank rank;
+    rank.active = &active;
+    rank.active_qsa = qsa;
+    rank.active_ple_conv = ple;
+    rank.stream = stream;
+    rank.device = device;
+    if (capture_slots == 0u) return rank;
+    auto capture = GdnStatePool::create(arena, capture_slots, active.layout());
+    if (!capture.ok()) return capture.status();
+    rank.capture.emplace(capture.release());
+    if (qsa != nullptr) {
+        auto pool = ::shelf::state::QsaKeyStatePool::create(arena, capture_slots,
+                                                            qsa->layout());
+        if (!pool.ok()) return pool.status();
+        rank.capture_qsa.emplace(pool.release());
+    }
+    if (ple != nullptr) {
+        auto pool = ::shelf::state::PleConvStatePool::create(arena, capture_slots,
+                                                             ple->layout());
+        if (!pool.ok()) return pool.status();
+        rank.capture_ple_conv.emplace(pool.release());
+    }
+    return rank;
+}
+
 class HostCheckpointBlock {
  public:
     HostCheckpointBlock() = default;
@@ -388,29 +418,13 @@ class Qwen35PrefixState {
         const std::vector<PrefixCacheRankContext>& extra_ranks,
         const PrefixCacheConfig& config) {
         auto state = std::unique_ptr<Qwen35PrefixState>(new Qwen35PrefixState());
-        state->max_concurrent_ = config.max_concurrent;
+        state->checkpoints_ = config.checkpoints;
+        state->capture_slots_ = config.capture_slots;
         {
-            PrefixRank rank;
-            rank.active = &active_state;
-            auto capture = GdnStatePool::create(arena, config.max_concurrent,
-                                                active_state.layout());
-            if (!capture.ok()) return capture.status();
-            rank.capture.emplace(capture.release());
-            rank.active_qsa = active_qsa;
-            if (active_qsa != nullptr) {
-                auto qsa = ::shelf::state::QsaKeyStatePool::create(
-                    arena, config.max_concurrent, active_qsa->layout());
-                if (!qsa.ok()) return qsa.status();
-                rank.capture_qsa.emplace(qsa.release());
-            }
-            rank.active_ple_conv = active_ple_conv;
-            if (active_ple_conv != nullptr) {
-                auto ple = ::shelf::state::PleConvStatePool::create(
-                    arena, config.max_concurrent, active_ple_conv->layout());
-                if (!ple.ok()) return ple.status();
-                rank.capture_ple_conv.emplace(ple.release());
-            }
-            state->ranks_.push_back(std::move(rank));
+            auto rank = make_rank(arena, active_state, active_qsa, active_ple_conv,
+                                  config.capture_slots, nullptr, -1);
+            if (!rank.ok()) return rank.status();
+            state->ranks_.push_back(rank.release());
         }
         for (const PrefixCacheRankContext& ctx : extra_ranks) {
             if (ctx.active_state == nullptr || ctx.arena == nullptr ||
@@ -420,39 +434,23 @@ class Qwen35PrefixState {
             }
             auto scope = shelf::gpu::ScopedDevice::create(ctx.device);
             if (!scope.ok()) return scope.status();
-            PrefixRank rank;
-            rank.active = ctx.active_state;
-            rank.stream = ctx.stream;
-            rank.device = ctx.device;
-            auto capture = GdnStatePool::create(
-                *ctx.arena, config.max_concurrent, ctx.active_state->layout());
-            if (!capture.ok()) return capture.status();
-            rank.capture.emplace(capture.release());
-            rank.active_qsa = ctx.active_qsa;
-            if (ctx.active_qsa != nullptr) {
-                auto qsa = ::shelf::state::QsaKeyStatePool::create(
-                    *ctx.arena, config.max_concurrent, ctx.active_qsa->layout());
-                if (!qsa.ok()) return qsa.status();
-                rank.capture_qsa.emplace(qsa.release());
-            }
-            rank.active_ple_conv = ctx.active_ple_conv;
-            if (ctx.active_ple_conv != nullptr) {
-                auto ple = ::shelf::state::PleConvStatePool::create(
-                    *ctx.arena, config.max_concurrent, ctx.active_ple_conv->layout());
-                if (!ple.ok()) return ple.status();
-                rank.capture_ple_conv.emplace(ple.release());
-            }
-            state->ranks_.push_back(std::move(rank));
+            auto rank = make_rank(*ctx.arena, *ctx.active_state, ctx.active_qsa,
+                                  ctx.active_ple_conv, config.capture_slots,
+                                  ctx.stream, ctx.device);
+            if (!rank.ok()) return rank.status();
+            state->ranks_.push_back(rank.release());
         }
         state->layout_ = make_host_layout(state->ranks_, config.spec_ring_bytes);
         const Status allocate_st =
-            state->host_.allocate(state->layout_.slot_bytes * config.max_concurrent);
+            state->host_.allocate(state->layout_.slot_bytes * config.checkpoints);
         if (!allocate_st.ok()) return allocate_st;
-        state->ring_length_.assign(config.max_concurrent, 0u);
-        state->ring_next_.assign(config.max_concurrent, 0u);
-        state->ring_saved_.assign(config.max_concurrent, 0u);
-        for (uint32_t i = config.max_concurrent; i-- > 0;) {
+        state->ring_length_.assign(config.checkpoints, 0u);
+        state->ring_next_.assign(config.checkpoints, 0u);
+        state->ring_saved_.assign(config.checkpoints, 0u);
+        for (uint32_t i = config.capture_slots; i-- > 0;) {
             state->capture_free_.push_back(i);
+        }
+        for (uint32_t i = config.checkpoints; i-- > 0;) {
             state->check_free_.push_back(i);
         }
         return state;
@@ -476,7 +474,7 @@ class Qwen35PrefixState {
     }
 
     void release_capture_slot(uint32_t slot) {
-        if (slot < max_concurrent_) capture_free_.push_back(slot);
+        if (slot < capture_slots_) capture_free_.push_back(slot);
     }
 
     Result<uint32_t> acquire_checkpoint_slot() {
@@ -490,7 +488,7 @@ class Qwen35PrefixState {
     }
 
     void release_checkpoint_slot(uint32_t slot) {
-        if (slot >= max_concurrent_) return;
+        if (slot >= checkpoints_) return;
         ring_length_[slot] = 0u;
         ring_next_[slot] = 0u;
         ring_saved_[slot] = 0u;
@@ -712,7 +710,7 @@ class Qwen35PrefixState {
         return Status::make_ok();
     }
 
-    uint32_t capture_slots() const noexcept { return max_concurrent_; }
+    uint32_t capture_slots() const noexcept { return capture_slots_; }
 
     std::size_t host_bytes() const noexcept { return host_.bytes(); }
 
@@ -720,19 +718,20 @@ class Qwen35PrefixState {
     Qwen35PrefixState() = default;
 
     std::byte* host_slot(uint32_t slot) noexcept {
-        if (slot >= max_concurrent_ || layout_.slot_bytes == 0u) return nullptr;
+        if (slot >= checkpoints_ || layout_.slot_bytes == 0u) return nullptr;
         return host_.data() + static_cast<std::size_t>(slot) * layout_.slot_bytes;
     }
 
     const std::byte* host_slot(uint32_t slot) const noexcept {
-        if (slot >= max_concurrent_ || layout_.slot_bytes == 0u) return nullptr;
+        if (slot >= checkpoints_ || layout_.slot_bytes == 0u) return nullptr;
         return host_.data() + static_cast<std::size_t>(slot) * layout_.slot_bytes;
     }
 
     std::vector<PrefixRank> ranks_;
     HostLayout layout_;
     HostCheckpointBlock host_;
-    uint32_t max_concurrent_ = 0;
+    uint32_t checkpoints_ = 0;
+    uint32_t capture_slots_ = 0;
     std::vector<uint32_t> capture_free_;
     std::vector<uint32_t> check_free_;
     std::vector<uint32_t> ring_length_;
@@ -746,22 +745,22 @@ PrefixCacheBytes prefix_cache_bytes(
     const ::shelf::state::QsaKeyStatePoolLayout* qsa,
     const ::shelf::state::PleConvStatePoolLayout* ple_conv) noexcept {
     PrefixCacheBytes bytes;
-    if (config.max_concurrent == 0u) return bytes;
+    if (config.capture_slots == 0u) return bytes;
     bytes.state_slot =
         static_cast<std::size_t>(layout.num_gdn_states) * layout.conv_history *
             layout.conv_history_stride * sizeof(bf16_t) +
         static_cast<std::size_t>(layout.num_gdn_states) * layout.num_v_heads *
             layout.head_k * layout.head_v * sizeof(fp16_t);
     bytes.state =
-        bytes.state_slot * static_cast<std::size_t>(config.max_concurrent);
-    if (qsa != nullptr) {
+        bytes.state_slot * static_cast<std::size_t>(config.capture_slots);
+    if (config.capture_slots != 0u && qsa != nullptr) {
         bytes.extra_state +=
-            ::shelf::state::qsa_key_state_pool_bytes(config.max_concurrent, *qsa)
+            ::shelf::state::qsa_key_state_pool_bytes(config.capture_slots, *qsa)
                 .total();
     }
-    if (ple_conv != nullptr) {
+    if (config.capture_slots != 0u && ple_conv != nullptr) {
         bytes.extra_state +=
-            ::shelf::state::ple_conv_state_pool_bytes(config.max_concurrent,
+            ::shelf::state::ple_conv_state_pool_bytes(config.capture_slots,
                                                       *ple_conv);
     }
     return bytes;
@@ -794,18 +793,18 @@ Result<PrefixCache> PrefixCache::create(
     ::shelf::state::PleConvStatePool* active_ple_conv_pool,
     const PrefixCacheConfig& config,
     const std::vector<PrefixCacheRankContext>& extra_ranks) {
-    if (config.max_concurrent == 0u) {
-        return Status::invalid_argument("max_concurrent must be > 0", __FILE__,
+    if (config.checkpoints == 0u) {
+        return Status::invalid_argument("prefix checkpoints must be > 0", __FILE__,
                                         __LINE__);
     }
     uint32_t reuse_slots = 0u;
     if (config.strategy == PrefixCacheStrategy::Slot) {
         reuse_slots = config.slot_count != 0u
             ? config.slot_count
-            : (config.max_concurrent > 0u ? config.max_concurrent - 1u : 0u);
-        if (reuse_slots == 0u || reuse_slots + 1u > config.max_concurrent) {
+            : config.checkpoints - 1u;
+        if (reuse_slots == 0u || reuse_slots + 1u > config.checkpoints) {
             return Status::invalid_argument(
-                "slot strategy needs slot_count + 1 state slots", __FILE__,
+                "slot strategy needs slot_count + 1 checkpoints", __FILE__,
                 __LINE__);
         }
     }
@@ -824,7 +823,7 @@ Result<PrefixCache> PrefixCache::create(
     }
     PrefixKVConfig kv_config;
     kv_config.min_prefix_tokens = config.min_prefix_tokens;
-    kv_config.entry_capacity = config.max_concurrent;
+    kv_config.entry_capacity = config.checkpoints;
     auto kv = PrefixKVStore::create(arena, active_kv_pool, extra_kv, kv_config);
     if (!kv.ok()) return kv.status();
 
@@ -834,7 +833,7 @@ Result<PrefixCache> PrefixCache::create(
     cache.state_ = state.release();
     cache.kv_ = std::make_unique<PrefixKVStore>(kv.release());
     cache.aux_ = std::make_shared<AuxTable>();
-    cache.captures_.resize(config.max_concurrent);
+    cache.captures_.resize(config.capture_slots);
     std::shared_ptr<SlotTable> slots;
     if (reuse_slots != 0u) {
         slots = std::make_shared<SlotTable>();

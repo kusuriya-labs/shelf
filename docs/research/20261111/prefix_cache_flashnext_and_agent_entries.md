@@ -1,5 +1,9 @@
 # Prefix cache: Qwen4Exp 対応と、エージェント共有 prefix が当たらない原因
 
+> 本記録の `--prefix-cache-concurrency` は現在 `--prefix-cache-checkpoints` である。
+> capture slot は `--max-concurrent-requests` から導出するよう変更した
+> （[20261116/prefix_cache_radix_checkpoints.md](../20261116/prefix_cache_radix_checkpoints.md)）。
+
 ## 1. Qwen4Exp（Qwen3.8 Flash Next）の prefix cache
 
 ### 1.1 変更前

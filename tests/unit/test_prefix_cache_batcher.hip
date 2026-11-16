@@ -222,7 +222,9 @@ int main() {
     batcher_config.page_tokens = page_tokens;
     batcher_config.eos_token_ids = model.text_config().stop_tokens;
 
-    auto cache_result = PrefixCache::create(arena, kv_pool, gdn_pool, PrefixCacheConfig{});
+    PrefixCacheConfig prefix_config;
+    prefix_config.capture_slots = max_scheduled_requests;
+    auto cache_result = PrefixCache::create(arena, kv_pool, gdn_pool, prefix_config);
     check(cache_result.ok(), "prefix cache create");
     if (!cache_result.ok()) {
         std::printf("cache create: %s\n", cache_result.status().message().c_str());

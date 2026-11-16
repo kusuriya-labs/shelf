@@ -28,7 +28,8 @@ enum class PrefixCacheStrategy : uint8_t {
 };
 
 struct PrefixCacheConfig {
-    uint32_t max_concurrent = 4;
+    uint32_t checkpoints = 4;
+    uint32_t capture_slots = 0;
     uint32_t min_prefix_tokens = 64;
     uint32_t save_interval = 1024;
     uint32_t spec_ring_bytes = 0;

@@ -60,18 +60,19 @@ KV 以外の running state は family 固有の adapter（`Qwen35PrefixState`）
   復元 prefix の token を family adapter へ渡し、history を再 seed する（TP では
   `TpBatchHook::on_prefix_restored` が全 rank へ配る）。
 - checkpoint slot は pinned host memory に確保する（`hipHostMalloc`）。
-  slot 数は `--prefix-cache-concurrency`、1 slot は全 rank 分の
+  slot 数は `--prefix-cache-checkpoints`、1 slot は全 rank 分の
   GDN conv history / recurrent state + QSA state + PLE conv state + ring である。
   TP でも各 rank の shard をまとめて 1 slot に入る。
 - save は active slot から checkpoint slot への D2H copy、restore は H2D copy である。
 - VRAM に残るのは rolling capture 用の shadow state だけである。slot 数は
-  `--prefix-cache-concurrency` で、decode 中に page 境界を通過した時点の state を
-  D2D copy で保持する。出力末尾の save はこの shadow から checkpoint slot へ copy する。
+  `--max-concurrent-requests`（slot strategy では 0）で、decode 中に page 境界を
+  通過した時点の state を D2D copy で保持する。出力末尾の save はこの shadow から
+  checkpoint slot へ copy する。1 request が decode 中に 1 slot を占有する。
 - entry 用 checkpoint slot が不足すると、LRU entry を evict して slot を回収する。
 
 arena の予約に入るのは capture slot 分だけであり、checkpoint 本体は host memory を
-使う。したがって `--prefix-cache-concurrency` を増やしても VRAM は
-capture slot 分しか増えない。
+使う。したがって `--prefix-cache-checkpoints` を増やしても VRAM は増えず、
+`--max-concurrent-requests` を増やしたときだけ capture slot が増える。
 
 ## eviction
 
@@ -87,7 +88,7 @@ capture slot 分しか増えない。
 
 entry は lookup で hit した回数を数え、最も hit された entry を pin する
 （同数なら position が小さい方）。pin した entry は LRU の victim にしない。
-`--prefix-cache-concurrency` が 2 以下のときは pin しない（pin が slot を
+`--prefix-cache-checkpoints` が 2 以下のときは pin しない（pin が slot を
 1 個占有すると entry が 1 個しか残らないため）。pin 以外が無い場合は
 pin した entry も evict する。
 
@@ -141,7 +142,9 @@ save の失敗で entry を作らない場合も、既存 entry は残す。`min
 
 option の一覧と既定値は [../user/compute.md](../user/compute.md) の options を正本とする。
 `--prefix-cache` は ON/OFF のみで、KV 容量は指定しない。
-`--prefix-cache-concurrency` は同時に保持する capture / checkpoint 数を決める。
+`--prefix-cache-checkpoints` は host memory に保持する checkpoint 数を決める。
+capture slot 数は `--max-concurrent-requests` から決まり、CLI では指定しない
+（slot strategy は 0）。
 `--prefix-cache-save-interval` は定期 checkpoint の間隔を決める。
 
 作成に失敗したときは prefix cache を無効化して続行し、警告を 1 行 stderr に出す。
@@ -191,8 +194,9 @@ Qwen runtime や GPU へこの値は渡さない。
 
 - KV page sharing は Tensor Parallel の rank shards に対応する。
 - 物理 page が枯渇したときは LRU entry を evict する。
-- checkpoint は pinned host memory を `--prefix-cache-concurrency × 1 slot` 分だけ
+- checkpoint は pinned host memory を `--prefix-cache-checkpoints × 1 slot` 分だけ
   起動時に確保する。slot 1 個は GDN 48 layer の 27B で約 75 MiB である。
+- slot strategy は reuse slot 数 + 1 個の checkpoint を確保し、capture slot を持たない。
 
 ## DFlash2 経路
 

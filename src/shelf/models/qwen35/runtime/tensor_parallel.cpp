@@ -196,20 +196,22 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
     }
     if (config.prefix_cache) {
         PrefixCacheConfig prefix_config;
-        prefix_config.max_concurrent = config.prefix_concurrency;
+        prefix_config.checkpoints = config.prefix_checkpoints;
+        prefix_config.capture_slots = config.max_scheduled_requests;
         prefix_config.spec_ring_bytes = config.prefix_spec_ring_bytes;
         prefix_config.strategy = config.prefix_strategy;
         prefix_config.slot_count = config.prefix_slot_count;
         prefix_config.save_interval = config.prefix_save_interval;
         if (prefix_config.strategy == PrefixCacheStrategy::Slot) {
-            prefix_config.max_concurrent = prefix_config.slot_count + 1u;
+            prefix_config.checkpoints = prefix_config.slot_count + 1u;
+            prefix_config.capture_slots = 0u;
         }
         const PrefixCacheBytes prefix_bytes =
             prefix_cache_bytes(prefix_config, gdn_layout_result);
         reserved += prefix_bytes.total();
         const std::size_t family_shadow =
             rank->model_->executor_state_reserve_bytes(
-                2u * static_cast<std::size_t>(prefix_config.max_concurrent));
+                2u * static_cast<std::size_t>(prefix_config.checkpoints));
         reserved += family_shadow;
         std::fprintf(stderr, "MEMORY_PLAN tp prefix cache: %s (family shadow %s)\n",
                      gpu::format_gib(prefix_bytes.total()).c_str(),
@@ -551,7 +553,7 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
         rank_config.drafter_sessions = config.drafter_sessions;
         rank_config.drafter_lm_head_k = config.drafter_lm_head_k;
         rank_config.prefix_cache = config.prefix_cache;
-        rank_config.prefix_concurrency = config.prefix_concurrency;
+        rank_config.prefix_checkpoints = config.prefix_checkpoints;
         rank_config.prefix_spec_ring_bytes = config.prefix_spec_ring_bytes;
         rank_config.prefix_strategy = config.prefix_strategy;
         rank_config.prefix_slot_count = config.prefix_slot_count;

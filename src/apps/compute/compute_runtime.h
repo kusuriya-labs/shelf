@@ -81,7 +81,7 @@ struct Qwen35RuntimeConfig {
     qwen35::runtime::DecodeBackend decode_backend =
         qwen35::runtime::DecodeBackend::Hip;
     bool prefix_cache = true;
-    uint32_t prefix_cache_concurrency = 4;
+    uint32_t prefix_cache_checkpoints = 4;
     uint32_t prefix_cache_spec_ring_bytes = 0;
     qwen35::runtime::PrefixCacheStrategy prefix_cache_strategy =
         qwen35::runtime::PrefixCacheStrategy::Radix;

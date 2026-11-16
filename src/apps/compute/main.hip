@@ -113,7 +113,8 @@ int main(int argc, char** argv) {
     if (opt.pipeline_parallel > 1 && opt.prefix_cache_enabled != 0) {
         fprintf(stderr, "WARN: --pipeline-parallel disables prefix cache\n");
     }
-    config.prefix_cache_concurrency = static_cast<uint32_t>(opt.prefix_cache_concurrency);
+    config.prefix_cache_checkpoints =
+        static_cast<uint32_t>(opt.prefix_cache_checkpoints);
     config.prefix_cache_strategy = opt.prefix_cache_strategy == 1
         ? shelf::qwen35::runtime::PrefixCacheStrategy::Slot
         : shelf::qwen35::runtime::PrefixCacheStrategy::Radix;

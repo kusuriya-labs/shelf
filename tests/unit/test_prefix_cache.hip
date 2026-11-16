@@ -427,7 +427,7 @@ bool verify_extra(const shelf::state::QsaKeyStatePool* qsa,
 
 void test_qsa_ple(Env& env) {
     PrefixCacheConfig config;
-    config.max_concurrent = 2;
+    config.checkpoints = 2;
     config.min_prefix_tokens = 4;
     auto qsa_result = shelf::state::QsaKeyStatePool::create(
         *env.arena, 12, shelf::state::QsaKeyStatePoolLayout::make(2, 8, 4, 4));
@@ -487,7 +487,7 @@ void free_seq(std::optional<PagedSequenceState>& seq, hipStream_t stream) {
 
 void test_radix(Env& env) {
     PrefixCacheConfig config;
-    config.max_concurrent = 3;
+    config.checkpoints = 3;
     config.min_prefix_tokens = 4;
     auto cache_opt = make_cache(env, *env.kv_bf16, config);
     check(cache_opt.has_value(), "radix cache create");
@@ -558,7 +558,7 @@ void test_radix(Env& env) {
 
 void test_refcount_share(Env& env) {
     PrefixCacheConfig config;
-    config.max_concurrent = 3;
+    config.checkpoints = 3;
     config.min_prefix_tokens = 4;
     auto cache_opt = make_cache(env, *env.kv_bf16, config);
     check(cache_opt.has_value(), "share cache create");
@@ -634,7 +634,7 @@ void test_refcount_share(Env& env) {
 
 void test_hit_rule(Env& env) {
     PrefixCacheConfig config;
-    config.max_concurrent = 2;
+    config.checkpoints = 2;
     config.min_prefix_tokens = 4;
     auto cache_opt = make_cache(env, *env.kv_bf16, config);
     check(cache_opt.has_value(), "rule cache create");
@@ -687,7 +687,7 @@ void test_hit_rule(Env& env) {
           "rule state position beyond match misses");
 
     PrefixCacheConfig small_config;
-    small_config.max_concurrent = 1;
+    small_config.checkpoints = 1;
     small_config.min_prefix_tokens = 4;
     auto small_cache_opt = make_cache(env, *env.kv_bf16, small_config);
     check(small_cache_opt.has_value(), "rule small cache create");
@@ -738,7 +738,7 @@ void test_hit_rule(Env& env) {
 
 void test_roundtrip(Env& env, PagedKVPool& kv, uint32_t tag) {
     PrefixCacheConfig config;
-    config.max_concurrent = 2;
+    config.checkpoints = 2;
     config.min_prefix_tokens = 4;
     auto cache_opt = make_cache(env, kv, config);
     check(cache_opt.has_value(), "roundtrip cache create");
@@ -784,7 +784,8 @@ void test_roundtrip(Env& env, PagedKVPool& kv, uint32_t tag) {
 
 void test_capture(Env& env) {
     PrefixCacheConfig config;
-    config.max_concurrent = 2;
+    config.checkpoints = 2;
+    config.capture_slots = 2;
     config.min_prefix_tokens = 4;
     auto cache_opt = make_cache(env, *env.kv_bf16, config);
     check(cache_opt.has_value(), "capture cache create");
@@ -934,7 +935,8 @@ void test_capture(Env& env) {
     }
 
     PrefixCacheConfig strict_config;
-    strict_config.max_concurrent = 1;
+    strict_config.checkpoints = 1;
+    strict_config.capture_slots = 1;
     strict_config.min_prefix_tokens = 64;
     auto strict_cache_opt = make_cache(env, *env.kv_bf16, strict_config);
     check(strict_cache_opt.has_value(), "capture strict cache create");
@@ -964,7 +966,7 @@ void test_capture(Env& env) {
 
 void test_eviction(Env& env) {
     PrefixCacheConfig config;
-    config.max_concurrent = 1;
+    config.checkpoints = 1;
     config.min_prefix_tokens = 4;
     auto cache_opt = make_cache(env, *env.kv_bf16, config);
     check(cache_opt.has_value(), "eviction cache create");
@@ -1017,7 +1019,7 @@ void test_eviction(Env& env) {
 
 void test_pin(Env& env) {
     PrefixCacheConfig config;
-    config.max_concurrent = 3;
+    config.checkpoints = 3;
     config.min_prefix_tokens = 4;
     auto cache_opt = make_cache(env, *env.kv_bf16, config);
     check(cache_opt.has_value(), "pin cache create");
@@ -1093,7 +1095,7 @@ uint32_t save_slot(PrefixCache& cache, PagedSequenceState& seq,
 
 void test_slot(Env& env) {
     PrefixCacheConfig config;
-    config.max_concurrent = 3;
+    config.checkpoints = 3;
     config.min_prefix_tokens = 4;
     config.strategy = PrefixCacheStrategy::Slot;
     config.slot_count = 2;
@@ -1186,7 +1188,7 @@ void test_slot(Env& env) {
 void test_spec_ring(Env& env) {
     constexpr uint32_t kRingBytes = 64;
     PrefixCacheConfig config;
-    config.max_concurrent = 1;
+    config.checkpoints = 1;
     config.min_prefix_tokens = 4;
     config.spec_ring_bytes = 2 * kRingBytes;
     auto cache_opt = make_cache(env, *env.kv_bf16, config);

@@ -96,7 +96,7 @@ def build_compute_argv(opts) -> list[str]:
         "--working-set-reserve-gib", str(opts.working_set_reserve_gib),
         "--rope-factor", opts.rope_factor,
         "--prefix-cache", str(opts.prefix_cache),
-        "--prefix-cache-concurrency", str(opts.prefix_cache_concurrency),
+        "--prefix-cache-checkpoints", str(opts.prefix_cache_checkpoints),
         "--prefix-cache-strategy", opts.prefix_cache_strategy,
         "--prefix-cache-save-interval", str(opts.prefix_cache_save_interval),
     ]
@@ -524,9 +524,8 @@ def parse_args(argv=None):
                         help="static YaRN rope factor forwarded to compute (default auto)")
     parser.add_argument("--prefix-cache", type=int, default=1, choices=(0, 1),
                         help="enable prefix cache (default 1)")
-    parser.add_argument("--prefix-cache-concurrency", type=int, default=4,
-                        help="max concurrent prefix captures and stored prefix entries "
-                             "(default 4; radix strategy)")
+    parser.add_argument("--prefix-cache-checkpoints", type=int, default=4,
+                        help="stored prefix checkpoints in host memory (default 4)")
     parser.add_argument("--prefix-cache-strategy", default="radix",
                         choices=("radix", "slot"),
                         help="prefix cache entry strategy (default radix)")
@@ -597,8 +596,8 @@ def parse_args(argv=None):
         parser.error("--dflash2-tree-budget must be between 0 and 512")
     if opts.dflash2_tree_budget not in (0, "auto") and not opts.dflash2_model_dir:
         parser.error("--dflash2-tree-budget requires --dflash2-model-dir")
-    if not 1 <= opts.prefix_cache_concurrency <= 65535:
-        parser.error("--prefix-cache-concurrency must be between 1 and 65535")
+    if not 1 <= opts.prefix_cache_checkpoints <= 65535:
+        parser.error("--prefix-cache-checkpoints must be between 1 and 65535")
     if not 0 <= opts.prefix_cache_save_interval <= 65536:
         parser.error("--prefix-cache-save-interval must be between 0 and 65536")
     if opts.dflash2_drafts < 1:
@@ -735,7 +734,7 @@ async def _serve(opts) -> int:
         "kv_cache_dtype": opts.kv_cache_dtype,
         "working_set_reserve_gib": opts.working_set_reserve_gib,
         "prefix_cache_strategy": opts.prefix_cache_strategy,
-        "prefix_cache_concurrency": opts.prefix_cache_concurrency,
+        "prefix_cache_checkpoints": opts.prefix_cache_checkpoints,
         "prefix_cache_save_interval": opts.prefix_cache_save_interval,
         "speculative": speculative,
         "reasoning": {
@@ -768,7 +767,7 @@ async def _serve(opts) -> int:
     _log(_banner("Prefix cache:",
                  f"{'enabled' if compute.capabilities.prefix_cache else 'disabled'} "
                  f"(strategy={opts.prefix_cache_strategy}, "
-                 f"concurrency={opts.prefix_cache_concurrency}, "
+                 f"checkpoints={opts.prefix_cache_checkpoints}, "
                  f"save_interval={opts.prefix_cache_save_interval}, "
                  f"capabilities.prefix_cache="
                  f"{str(compute.capabilities.prefix_cache).lower()}"))
