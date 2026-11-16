@@ -4,6 +4,7 @@
 #include <shelf/models/plamo3/weights/model_weights.h>
 #include <shelf/models/qwen35/weights/model_weights.h>
 #include <shelf/models/qwen35moe/weights/qwen35moe_model_load.h>
+#include <shelf/models/qwen35qsa/weights/model_weights.h>
 
 #include <hip/hip_runtime.h>
 
@@ -17,6 +18,7 @@ namespace shelf::models {
 enum class ModelFamily : std::uint8_t {
     Dense,
     Moe,
+    Qsa,
     Qwen4Exp,
     Plamo3,
 };
@@ -28,6 +30,7 @@ enum class ModelFamily : std::uint8_t {
 using LoadedModelWeights = std::variant<
     shelf::qwen35::Qwen35ModelWeights,
     shelf::qwen35moe::Qwen35MoeModelWeights,
+    shelf::qwen35qsa::Qwen35QsaModelWeights,
     shelf::plamo3::ModelWeights>;
 
 ModelFamily model_family(const LoadedModelWeights& loaded) noexcept;

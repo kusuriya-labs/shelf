@@ -551,7 +551,8 @@ void Qwen35ComputeRuntime::apply_auto_working_set_reserve() {
     }
     config_.working_set_reserve_bytes = model_->executor_reserve_bytes(
         exec_max_tokens_, config_.max_concurrent_requests, config_.max_scheduled_output_rows,
-        config_.target_hidden_tap_count, config_.tp);
+        config_.target_hidden_tap_count, config_.tp,
+        static_cast<std::size_t>(config_.max_seq_len) + 1u);
     fprintf(stderr, "MEMORY_PLAN auto: working set reserve %s (row bucket %u)\n",
             gpu::format_gib(config_.working_set_reserve_bytes).c_str(),
             static_cast<unsigned>(exec_max_tokens_));
@@ -565,6 +566,11 @@ Status Qwen35ComputeRuntime::initialize_pipeline_parallel() {
         return Status::unsupported(
             "Qwen4Exp is loaded by the qwen4exp load path; pipeline execution is not "
             "wired yet",
+            __FILE__, __LINE__);
+    }
+    if (family.value() == shelf::models::ModelFamily::Qsa) {
+        return Status::unsupported(
+            "Qwen35Qsa runs single-stage; pipeline execution is not implemented",
             __FILE__, __LINE__);
     }
     auto config_result = qwen_hybrid::read_qwen_hybrid_config(config_.model_dir);

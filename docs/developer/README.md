@@ -14,6 +14,7 @@
 - [runtime.md](runtime.md) — execution path と state ownership
 - [qwen35.md](qwen35.md) — Qwen3.5 runtime family の配線（source path / KernelId / execution order）
 - [qwen35moe.md](qwen35moe.md) — Qwen3.5 MoE の config と routed expert weight 集約 contract
+- [qwen35qsa.md](qwen35qsa.md) — Qwen3.5 QSA（`qwen3_5_qsa`）の indexer / block mask contract
 - [sampling.md](sampling.md) — target LM sampling（temperature / top-k / top-p / seed）
 - [prefix_cache.md](prefix_cache.md) — prefix cache の radix tree / KV page sharing / state store と JSONL protocol contract
 

@@ -176,7 +176,20 @@ Result<OptimizedLaunchResult> try_launch_qsa_select(
     args.pooled_slot_stride = view.pooled_slot_stride;
     args.pooled_layer_stride = view.pooled_layer_stride;
     args.scale = b.scalar_a;
-    if (ctx.qsa_scores != nullptr && ctx.qsa_topk_scores != nullptr &&
+    // The tiled path scores and selects per staged request slice, so it needs the staged
+    // descriptors to cover every actual row. A padded tail has no slice, and its stale
+    // positions would select blocks that were never scored.
+    uint64_t staged_rows = 0u;
+    if (ctx.staged_requests != nullptr) {
+        for (uint32_t i = 0u; i < ctx.staged_request_count; ++i) {
+            staged_rows += ctx.staged_requests[i].row_count;
+        }
+    }
+    const bool staged_covers_rows =
+        ctx.staged_requests != nullptr && ctx.staged_request_count != 0u &&
+        staged_rows == args.rows;
+    if (staged_covers_rows &&
+        ctx.qsa_scores != nullptr && ctx.qsa_topk_scores != nullptr &&
         ctx.qsa_topk_indices != nullptr && ctx.staged_requests != nullptr &&
         ctx.staged_request_count != 0u && args.rows >= 1u &&
         args.n_heads == 4u && args.head_dim == ::shelf::kernel::kQsaHeadDim) {

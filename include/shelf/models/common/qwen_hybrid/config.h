@@ -80,6 +80,9 @@ Result<std::vector<std::size_t>> read_text_config_sizes(
 
 Result<bool> has_text_config_key(const std::string& model_dir, const char* key);
 
+// Root-level config key, for a family marker that lives next to text_config.
+Result<bool> has_config_key(const std::string& model_dir, const char* key);
+
 // Layer topology rule: layer_types when it covers every layer, otherwise derived
 // from full_attention_interval.
 bool layer_is_gdn(const QwenHybridConfig& config, std::size_t layer);

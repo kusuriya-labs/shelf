@@ -337,6 +337,23 @@ target_include_directories(shelf_qwen35 SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vend
 target_link_libraries(shelf_qwen35 PUBLIC shelf_qwen_hybrid shelf_weights shelf_io shelf_inference_state shelf_quant_reference shelf_quant_format shelf_quant_bundle shelf_runtime)
 target_compile_options(shelf_qwen35 PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
+# Qwen3.5 QSA (model_type qwen3_5_qsa): the dense backbone plus the block-sparse indexer.
+set(
+    SHELF_QWEN35QSA_SOURCES
+    src/shelf/models/qwen35qsa/model/qwen35qsa_config.cpp
+    src/shelf/models/qwen35qsa/model/lower_to_primitives.cpp
+    src/shelf/models/qwen35qsa/model/qwen35qsa_model.cpp
+    src/shelf/models/qwen35qsa/weights/qwen35qsa_model_load.cpp
+)
+
+add_library(shelf_qwen35qsa STATIC ${SHELF_QWEN35QSA_SOURCES})
+target_compile_features(shelf_qwen35qsa PRIVATE cxx_std_20)
+target_include_directories(shelf_qwen35qsa PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(shelf_qwen35qsa PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_include_directories(shelf_qwen35qsa SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
+target_link_libraries(shelf_qwen35qsa PUBLIC shelf_qwen35 shelf_qwen_hybrid shelf_weights shelf_io shelf_inference_state shelf_quant_bundle shelf_runtime)
+target_compile_options(shelf_qwen35qsa PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
+
 # Qwen3.5 MoE (model_type qwen3_5_moe): routed expert weights and config.
 set(
     SHELF_QWEN35MOE_SOURCES
@@ -401,7 +418,7 @@ target_compile_features(shelf_models PRIVATE cxx_std_20)
 target_include_directories(shelf_models PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(shelf_models PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_include_directories(shelf_models SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
-target_link_libraries(shelf_models PUBLIC shelf_qwen35 shelf_qwen35_runtime shelf_qwen35moe shelf_qwen4exp shelf_gpu)
+target_link_libraries(shelf_models PUBLIC shelf_qwen35 shelf_qwen35_runtime shelf_qwen35moe shelf_qwen35qsa shelf_qwen4exp shelf_gpu)
 target_compile_options(shelf_models PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
 add_library(shelf_qwen35_runtime STATIC

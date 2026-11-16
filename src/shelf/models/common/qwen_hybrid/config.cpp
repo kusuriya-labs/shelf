@@ -31,6 +31,7 @@ struct ModelIdentity {
 constexpr ModelIdentity kModelIdentities[] = {
     {"qwen3_5", false},
     {"qwen3_5_text", false},
+    {"qwen3_5_qsa", false},
     {"qwen3_5_moe", true},
     {"qwen3_5_moe_text", true},
     {"qwen4_exp", true},
@@ -76,17 +77,17 @@ DeclaredIdentity identity_from_root(const nlohmann::json& root) {
 
 // The gate. An identity is a declaration, so it can only reject: what a model is read as
 // stays decided by the loaded structure (num_experts, tensor names, shapes).
+//
+// Only the root `model_type` is authoritative. `text_config.model_type` names the backbone
+// a multimodal wrapper embeds, so accepting it would let a new wrapper identity pass the
+// gate solely because its inner text architecture is one this build implements.
 Status gate_declared_identity(const DeclaredIdentity& id, const char* who) {
-    const bool declared = !id.model_type.empty() || !id.text_model_type.empty();
-    if (!declared) {
+    if (id.model_type.empty()) {
         return Status::unsupported(
             (std::string(who) + ": config.json declares no model identity (model_type)").c_str(),
             __FILE__, __LINE__);
     }
-    for (const std::string& candidate : {id.model_type, id.text_model_type}) {
-        if (find_model_identity(candidate) != nullptr)
-            return Status::make_ok();
-    }
+    if (find_model_identity(id.model_type) != nullptr) return Status::make_ok();
     std::string msg = std::string(who) + ": unsupported model identity model_type='" +
                       id.model_type + "'";
     if (!id.text_model_type.empty())
@@ -199,6 +200,23 @@ Result<std::vector<std::size_t>> read_text_config_sizes(
         out.push_back(value);
     }
     return out;
+}
+
+Result<bool> has_config_key(const std::string& model_dir, const char* key) {
+    std::ifstream f(model_dir + "/config.json");
+    if (!f.is_open()) {
+        return Status::invalid_argument(
+            "has_config_key: cannot open config.json", __FILE__, __LINE__);
+    }
+    nlohmann::json root;
+    try {
+        f >> root;
+    } catch (const nlohmann::json::exception& e) {
+        return Status::invalid_argument(
+            ("has_config_key: bad config.json: " + std::string(e.what())).c_str(),
+            __FILE__, __LINE__);
+    }
+    return root.is_object() && root.contains(key);
 }
 
 Result<bool> has_text_config_key(const std::string& model_dir, const char* key) {
