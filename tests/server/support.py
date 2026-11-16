@@ -235,6 +235,7 @@ class ComputeHarness:
                  prefix_cache_enabled: bool = True,
                  prefix_cache_checkpoints: int | None = None,
                  prefix_cache_strategy: str | None = None,
+                 prefix_cache_save_interval: int | None = None,
                  max_num_batched_tokens: int | None = None,
                  mtp: bool = False):
         self.log_path = log_path
@@ -243,6 +244,7 @@ class ComputeHarness:
         self.prefix_cache_enabled = prefix_cache_enabled
         self.prefix_cache_checkpoints = prefix_cache_checkpoints
         self.prefix_cache_strategy = prefix_cache_strategy
+        self.prefix_cache_save_interval = prefix_cache_save_interval
         self.max_num_batched_tokens = max_num_batched_tokens
         self.mtp = mtp
         self.max_seq_len = max_seq_len
@@ -293,6 +295,11 @@ class ComputeHarness:
             strategy = os.environ.get("SHELF_TEST_PREFIX_CACHE_STRATEGY")
         if strategy:
             argv += ["--prefix-cache-strategy", strategy]
+        save_interval = self.prefix_cache_save_interval
+        if save_interval is None:
+            save_interval = _env_int("SHELF_TEST_PREFIX_CACHE_SAVE_INTERVAL")
+        if save_interval is not None:
+            argv += ["--prefix-cache-save-interval", str(save_interval)]
         batch_tokens = self.max_num_batched_tokens
         if batch_tokens is None:
             batch_tokens = _env_int("SHELF_TEST_MAX_NUM_BATCHED_TOKENS")

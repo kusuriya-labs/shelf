@@ -114,10 +114,10 @@ void compute_usage(const char* prog) {
     printf("                                 memory plan; 0 = size it from the row\n");
     printf("                                 bucket, default 0)\n");
     printf("  --prefix-cache-checkpoints N   stored prefix checkpoints in host memory\n");
-    printf("                                 (default 4)\n");
+    printf("                                 (default 16)\n");
     printf("  --prefix-cache-strategy MODE   radix | slot (default radix)\n");
     printf("  --prefix-cache-save-interval N  periodic checkpoint spacing in tokens;\n");
-    printf("                                 0 = disable periodic checkpoints (default 1024)\n");
+    printf("                                 0 = disable periodic checkpoints (default 16384)\n");
     printf("  --serve-stdio          serve JSON Lines generation requests on stdin/stdout\n");
     printf("  --help                 show this help\n");
 }

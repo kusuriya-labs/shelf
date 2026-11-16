@@ -48,9 +48,9 @@ struct ComputeOptions {
     unsigned long mtp_drafts = 7;
     int mtp_stats = 1;
     int prefix_cache_enabled = 1;
-    unsigned long prefix_cache_checkpoints = 4;
+    unsigned long prefix_cache_checkpoints = 16;
     int prefix_cache_strategy = 0;
-    unsigned long prefix_cache_save_interval = 1024;
+    unsigned long prefix_cache_save_interval = 16384;
     unsigned long working_set_reserve_gib = 0;
     std::string rope_factor = "auto";
 };

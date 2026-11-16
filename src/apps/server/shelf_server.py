@@ -524,14 +524,14 @@ def parse_args(argv=None):
                         help="static YaRN rope factor forwarded to compute (default auto)")
     parser.add_argument("--prefix-cache", type=int, default=1, choices=(0, 1),
                         help="enable prefix cache (default 1)")
-    parser.add_argument("--prefix-cache-checkpoints", type=int, default=4,
+    parser.add_argument("--prefix-cache-checkpoints", type=int, default=16,
                         help="stored prefix checkpoints in host memory (default 4)")
     parser.add_argument("--prefix-cache-strategy", default="radix",
                         choices=("radix", "slot"),
                         help="prefix cache entry strategy (default radix)")
-    parser.add_argument("--prefix-cache-save-interval", type=int, default=1024,
+    parser.add_argument("--prefix-cache-save-interval", type=int, default=16384,
                         help="periodic prefix checkpoint spacing in tokens; "
-                             "0 disables periodic checkpoints (default 1024)")
+                             "0 disables periodic checkpoints (default 16384)")
 
     parser.add_argument("--dflash2-model-dir", default=None,
                         help="DFlash2 draft model directory (enables speculative decoding)")

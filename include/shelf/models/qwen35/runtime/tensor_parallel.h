@@ -81,11 +81,11 @@ struct TpRankRuntimeConfig {
     std::uint32_t drafter_sessions = 0;
     std::size_t drafter_lm_head_k = 0;
     bool prefix_cache = false;
-    std::uint32_t prefix_checkpoints = 4;
+    std::uint32_t prefix_checkpoints = 16;
     std::uint32_t prefix_spec_ring_bytes = 0;
     PrefixCacheStrategy prefix_strategy = PrefixCacheStrategy::Radix;
     std::uint32_t prefix_slot_count = 0;
-    std::uint32_t prefix_save_interval = 1024;
+    std::uint32_t prefix_save_interval = 16384;
     PrivateWeightLoader load_private_weights;
     std::array<std::uint32_t, kMaxTargetHiddenTaps> target_hidden_taps{};
     std::uint32_t target_hidden_tap_count = 0;
@@ -173,11 +173,11 @@ struct TpCoordinatorConfig {
     std::uint32_t drafter_sessions = 0;
     std::size_t drafter_lm_head_k = 0;
     bool prefix_cache = false;
-    std::uint32_t prefix_checkpoints = 4;
+    std::uint32_t prefix_checkpoints = 16;
     std::uint32_t prefix_spec_ring_bytes = 0;
     PrefixCacheStrategy prefix_strategy = PrefixCacheStrategy::Radix;
     std::uint32_t prefix_slot_count = 0;
-    std::uint32_t prefix_save_interval = 1024;
+    std::uint32_t prefix_save_interval = 16384;
     PrivateWeightLoader load_private_weights;
     std::array<std::uint32_t, kMaxTargetHiddenTaps> target_hidden_taps{};
     std::uint32_t target_hidden_tap_count = 0;

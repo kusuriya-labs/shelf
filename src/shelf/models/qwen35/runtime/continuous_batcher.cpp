@@ -308,8 +308,8 @@ void ContinuousBatcher::prefix_save_prefill(RuntimeRequest& request) {
         const bool junction = position == request.prefix_junction_position;
         const bool input_end = position == request.input_tokens.size();
         const uint32_t interval = prefix_cache_->save_interval();
-        const bool periodic =
-            interval != 0u && position % interval == 0u;
+        const bool periodic = interval != 0u &&
+            position >= request.prefix_last_save_position + interval;
         if (!split_point && !junction && !input_end && !periodic) return;
         if (split_point) {
             const uint32_t input_len =
@@ -339,6 +339,7 @@ void ContinuousBatcher::prefix_save_prefill(RuntimeRequest& request) {
                                             position, stream_, ring_ptr)
         : prefix_cache_->save_input_boundary(request.sequence, tokens, position,
                                              stream_, ring_ptr);
+    if (save_st.ok()) request.prefix_last_save_position = position;
     if (getenv("SHELF_PFXDBG") != nullptr) {
         if (!save_st.ok()) {
             std::fprintf(stderr, "PFXSAVE_FAIL pos=%u %s\n", position,

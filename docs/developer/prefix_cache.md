@@ -124,10 +124,10 @@ save は page 揃え位置でのみ発生する。radix では次の 3 種類で
   slot ではこの点だけを保存する。
 - 入力末尾（input end）: sequence position が入力長と一致し、page 揃えである場合。
   同じ prompt を延長する request の restore 点になる。
-- 定期 checkpoint: sequence position が `--prefix-cache-save-interval`（既定 1024）の
-  倍数であり、page 揃えである場合。分岐位置が入力末尾から遠い会話の再読みを短くする。
-  この点は prefill chunk 末端でしか作らないため、間隔より粗くなることはあっても
-  細かくはならない。`0` を指定すると入力末尾系の 2 種類だけになる。
+- 定期 checkpoint: 直前の save から `--prefix-cache-save-interval`（既定 16384）以上
+  進んだ chunk 末端。分岐位置が入力末尾から遠い会話の再読みを短くする。
+  prefill chunk 末端でしか作らないため、間隔は下限として働く。restore 位置が
+  間隔の倍数でなくても発火する。`0` を指定すると定期 checkpoint を作らない。
 
 decode では最終 prefill の完了時に capture を開始し、各 step 後に position が
 page 境界を新しく通過するたびに family state を capture slot へ copy する。
@@ -142,10 +142,13 @@ save の失敗で entry を作らない場合も、既存 entry は残す。`min
 
 option の一覧と既定値は [../user/compute.md](../user/compute.md) の options を正本とする。
 `--prefix-cache` は ON/OFF のみで、KV 容量は指定しない。
-`--prefix-cache-checkpoints` は host memory に保持する checkpoint 数を決める。
+`--prefix-cache-checkpoints` は host memory に保持する checkpoint 数を決める
+（既定 16。1 会話あたり「前 turn の tail + 今回の tail + 分岐点 + 定期」で 4〜6 個、
+256k まで使う場合は 32）。
 capture slot 数は `--max-concurrent-requests` から決まり、CLI では指定しない
 （slot strategy は 0）。
-`--prefix-cache-save-interval` は定期 checkpoint の間隔を決める。
+`--prefix-cache-save-interval` は定期 checkpoint の間隔を決める（既定 16384）。
+短くすると分岐からの再 prefill は減るが、checkpoint の生成数と copy が増える。
 
 作成に失敗したときは prefix cache を無効化して続行し、警告を 1 行 stderr に出す。
 `--serve-stdio` の stdout（JSONL protocol）には混ぜない。
@@ -195,7 +198,8 @@ Qwen runtime や GPU へこの値は渡さない。
 - KV page sharing は Tensor Parallel の rank shards に対応する。
 - 物理 page が枯渇したときは LRU entry を evict する。
 - checkpoint は pinned host memory を `--prefix-cache-checkpoints × 1 slot` 分だけ
-  起動時に確保する。slot 1 個は GDN 48 layer の 27B で約 75 MiB である。
+  起動時に確保する。slot 1 個は GDN 48 layer の 27B で約 75 MiB（DFlash2 の ring を
+  含めると約 115 MiB）。16 個で 1.2 GiB / 1.8 GiB、32 個で 2.3 GiB / 3.6 GiB。
 - slot strategy は reuse slot 数 + 1 個の checkpoint を確保し、capture slot を持たない。
 
 ## DFlash2 経路

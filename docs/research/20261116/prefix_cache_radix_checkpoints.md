@@ -169,7 +169,30 @@ DFlash2 + TP2（`test_compute_dflash2_prefix_long.py` と同じ 4300 / 4180 toke
 LRU で落ち、各 request が本文 3300 / 7300 token を毎回 prefill し直す。
 4 並列・全長 4〜8k では 1 ラウンドの save 数が 14〜16 で、それが閾値だった。
 
-### 3.7 unit
+### 3.7 interval の決め方（同日追記）
+
+当初の定期 checkpoint は `position % interval == 0` で判定していたため、restore 位置が
+interval の倍数でないと以降の定期 checkpoint が一切作られなかった。直前の save からの
+経過 token で判定するよう変更した。
+
+既定値を `--prefix-cache-save-interval 16384`、`--prefix-cache-checkpoints 16` にした。
+この組み合わせで 4 並列の 4k / 8k 会話を再測したところ、1 ラウンドの save は 13 個、
+entries は 9、evictions は 0 で、2 ラウンド目は全 4 本が 3984 / 7984 から復元した
+（interval 1024 では save 14〜16、entries 10〜12 だった）。
+
+1 会話 32k、interval 16384、checkpoints 16 では 1 ラウンドの save が 4 個
+（16384, 31984, 32000 と出力末尾）、entries 3 だった。先頭 24000 token を共有する
+分岐 request は 16384 から復元し、同じ prompt の再実行は 25984 から復元した。
+つまり 32k の会話は checkpoint 4 個で保持できる。
+
+262144 まで伸ばす場合の checkpoint 数は、定期 16 個 + tail + 入力末尾 + 出力末尾で
+約 17〜18 個である。32 個あれば 1 会話は eviction 0 で保持でき、2 会話でも足りる。
+制約になるのは checkpoint 数ではなく KV 容量で、27B の BF16 KV は 64 KiB/token
+（262144 token で 16 GiB）である。TP2 では head 分割で 8 GiB/rank、weight 13.7 GiB/rank
+なので `--max-seq-len 262144` の起動は DFlash2 有無どちらでも通った
+（このホストでは 256k の prefill 実行までは未計測）。
+
+### 3.8 unit
 
 `tests/unit/test_prefix_cache.hip` 320 checks PASS（pin、QSA/PLE の host roundtrip を追加）。
 `tests/unit/test_prefix_cache_batcher.hip` は `max_batch_rows` を prompt 長より大きくして

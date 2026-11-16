@@ -86,9 +86,9 @@ Ready.
 | `--working-set-reserve-gib WORKING_SET_RESERVE_GIB` | arena headroom kept free for the working set (0 = size it from the row bucket, default 0) |
 | `--rope-factor {auto,1,2,4}` | static YaRN rope factor forwarded to compute (default auto) |
 | `--prefix-cache {0,1}` | enable prefix cache (default 1) |
-| `--prefix-cache-checkpoints PREFIX_CACHE_CHECKPOINTS` | 保持する prefix checkpoint 数。pinned host memory を使う（default 4） |
+| `--prefix-cache-checkpoints PREFIX_CACHE_CHECKPOINTS` | 保持する prefix checkpoint 数。pinned host memory を使う（default 16） |
 | `--prefix-cache-strategy {radix,slot}` | prefix cache entry strategy (default radix) |
-| `--prefix-cache-save-interval PREFIX_CACHE_SAVE_INTERVAL` | 定期 prefix checkpoint の間隔 token（default 1024、`0` = 入力末尾系のみ） |
+| `--prefix-cache-save-interval PREFIX_CACHE_SAVE_INTERVAL` | 定期 prefix checkpoint の間隔 token（default 16384、`0` = 定期 checkpoint を無効化） |
 | `--dflash2-model-dir DFLASH2_MODEL_DIR` | DFlash2 draft model directory (enables speculative decoding) |
 | `--dflash2-drafts DFLASH2_DRAFTS` | speculative draft tokens per round (default 7) |
 | `--dflash2-tree-budget N\|auto` | 木検証の request あたり行数。既定の `auto` はその round の生成中 request が 1 本だけで投機中なら 10 行、それ以外は chain の 8 行。`0` は木検証を無効化。auto は TP=1・draft 数 7 用 |

@@ -30,6 +30,7 @@ def main() -> int:
         "--device", "0",
         "--prefix-cache", "0",
         "--prefix-cache-checkpoints", "6",
+        "--prefix-cache-save-interval", "4096",
         "--prefix-cache-strategy", "slot",
     ])
     argv = shelf_server.build_compute_argv(opts)
@@ -38,6 +39,9 @@ def main() -> int:
     checker.check("checkpoints-forwarded",
                   value_of(argv, "--prefix-cache-checkpoints") == "6",
                   repr(value_of(argv, "--prefix-cache-checkpoints")))
+    checker.check("save-interval-forwarded",
+                  value_of(argv, "--prefix-cache-save-interval") == "4096",
+                  repr(value_of(argv, "--prefix-cache-save-interval")))
     checker.check("strategy-forwarded",
                   value_of(argv, "--prefix-cache-strategy") == "slot",
                   repr(value_of(argv, "--prefix-cache-strategy")))
@@ -54,8 +58,11 @@ def main() -> int:
                   value_of(default_argv, "--prefix-cache-strategy") == "radix",
                   repr(value_of(default_argv, "--prefix-cache-strategy")))
     checker.check("default-checkpoints",
-                  value_of(default_argv, "--prefix-cache-checkpoints") == "4",
+                  value_of(default_argv, "--prefix-cache-checkpoints") == "16",
                   repr(value_of(default_argv, "--prefix-cache-checkpoints")))
+    checker.check("default-save-interval",
+                  value_of(default_argv, "--prefix-cache-save-interval") == "16384",
+                  repr(value_of(default_argv, "--prefix-cache-save-interval")))
     return checker.done()
 
 
