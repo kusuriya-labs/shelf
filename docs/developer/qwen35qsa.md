@@ -47,6 +47,25 @@ full-attention 層だけが indexer を持つ（GDN 層は持たない）。
 - 重みは backbone（`qwen35` の loader をそのまま使う）と並ぶ別配列に置く。
   backbone の weight struct に indexer の語彙を足さない。
 
+## tensor parallel
+
+`load_qwen35qsa_weights_tensor_parallel_rank` は backbone を
+`load_qwen35_weights_tensor_parallel_rank` の rank-local plan で読み、
+indexer は **replicated** のまま全 rank に置く。
+
+- indexer が replicated なのは、各 rank が同じ block mask を作る必要があるため。
+  backbone の hidden は TP combine 後に rank 間で一致するので、同じ indexer weight と
+  同じ入力から同じ mask が決まる。mask を all-gather / all-reduce しない。
+- indexer の `q_proj` / `k_proj` は TP plan に入れない。head 数
+  （`indexer_heads`）は attention の `num_attention_heads` と独立で、
+  QSA select kernel も global の indexer head 数で動く。
+- lowering は backbone の attention / GDN / dense FFN を
+  `Qwen35TensorParallelContext` の local geometry（local heads / local intermediate）で
+  emit する。`o_proj` / `out_proj` / `mlp.down_proj` は `tp_combine` を持つ。
+- vocab-parallel `lm_head` は dense family と同じ条件（BF16 かつ plan に axis 0 の
+  entry がある）で使う。
+- MTP block は TP rank では load しない（`unsupported`）。
+
 ## lowering
 
 `lower_qwen35qsa_to_primitives` は層ごとに
@@ -101,13 +120,19 @@ prefill は `max_visible_tokens < 12288` の間 masked tiled kernel を使い、
 - 1 系列あたり `attention_layers * max_blocks * indexer_head_dim * 2 B` の pooled key と、
   `attention_layers * block_size * indexer_head_dim * 2 B` の partial block
 - `executor_reserve_bytes` は dense の reserve に select workspace と pool を加える
+- TP では rank ごとに indexer が replicated なので pool も rank ごとに持つ。
+  `TpRankModel::executor_state_reserve_bytes` が rank の
+  `max_scheduled_requests` 分（prefix cache の shadow を含む）を予約する。
 
 ## 制約
 
-- pipeline stage と tensor parallel は未実装（明示的に `Status::unsupported`）。
+- pipeline stage は未実装（明示的に `Status::unsupported`）。
+- tensor parallel は **TP=2** まで。1 rank あたりの attention は local head
+  （Qwen3.8-27B では q 12 / kv 2）で、QSA の block-sparse kernel 条件
+  `q_heads == 6 * kv_heads` を満たす。`tp_size > 2` は `TpCoordinator` が拒否する。
 - YaRN などの非 default rope profile は未実装。
 - MTP drafter は未配線。`LoadedModel::has_mtp_block()` は QSA family では false を返す
-  （QSA checkpoint の MTP block を load する経路がまだ無い）。
+  （QSA checkpoint の MTP block を load する経路がまだ無い）。TP rank も MTP を load しない。
 - DFlash2 の chain / tree verify は `shelf::state::SpecStateHistory` で QSA state を
   巻き戻す（[dflash2.md](dflash2.md) の rolling state の rollback）。PLE を持つ target の
   tree verify は未対応。

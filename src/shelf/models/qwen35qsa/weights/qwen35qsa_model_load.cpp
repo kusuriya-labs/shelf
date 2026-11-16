@@ -49,6 +49,26 @@ Status load_indexer(
     return Status::make_ok();
 }
 
+Result<std::vector<QsaIndexerLayerWeights>> load_indexer_layers(
+    const std::string& model_dir,
+    const shelf::qwen35::Qwen35ModelWeights& backbone,
+    gpu::GpuArena& arena,
+    hipStream_t stream) {
+    auto collection_result = shelf::weights::SafetensorsCollection::open(model_dir);
+    if (!collection_result.ok()) return collection_result.status();
+    shelf::weights::SafetensorsCollection collection = collection_result.release();
+
+    const shelf::weights::WeightLoadOptions replicated{};
+    std::vector<QsaIndexerLayerWeights> indexer(backbone.layers.size());
+    for (std::size_t layer = 0; layer < backbone.layers.size(); ++layer) {
+        if (backbone.layers[layer].is_gdn) continue;
+        Status st = load_indexer(collection, arena, stream, replicated, layer,
+                                 indexer[layer]);
+        if (!st.ok()) return st;
+    }
+    return indexer;
+}
+
 }  // namespace
 
 Result<Qwen35QsaModelWeights> load_qwen35qsa_weights(
@@ -66,17 +86,33 @@ Result<Qwen35QsaModelWeights> load_qwen35qsa_weights(
     if (!backbone.ok()) return backbone.status();
     weights.backbone = backbone.release();
 
-    auto collection_result = shelf::weights::SafetensorsCollection::open(model_dir);
-    if (!collection_result.ok()) return collection_result.status();
-    shelf::weights::SafetensorsCollection collection = collection_result.release();
+    auto indexer = load_indexer_layers(model_dir, weights.backbone, arena, stream);
+    if (!indexer.ok()) return indexer.status();
+    weights.indexer = indexer.release();
+    return weights;
+}
 
-    weights.indexer.resize(weights.backbone.layers.size());
-    for (std::size_t layer = 0; layer < weights.backbone.layers.size(); ++layer) {
-        if (weights.backbone.layers[layer].is_gdn) continue;
-        Status st = load_indexer(collection, arena, stream, options.weights, layer,
-                                 weights.indexer[layer]);
-        if (!st.ok()) return st;
+Result<Qwen35QsaModelWeights> load_qwen35qsa_weights_tensor_parallel_rank(
+    const std::string& model_dir,
+    std::uint32_t tp_size,
+    std::uint32_t tp_rank,
+    gpu::GpuArena& arena,
+    hipStream_t stream,
+    const Qwen35QsaLoadOptions& options) {
+    if (options.load_mtp_layers) {
+        return Status::unsupported(
+            "qwen35qsa: the MTP block is not partitioned across tensor parallel ranks",
+            __FILE__, __LINE__);
     }
+    auto backbone = shelf::qwen35::load_qwen35_weights_tensor_parallel_rank(
+        model_dir, tp_size, tp_rank, arena, stream, options);
+    if (!backbone.ok()) return backbone.status();
+
+    Qwen35QsaModelWeights weights;
+    weights.backbone = backbone.release();
+    auto indexer = load_indexer_layers(model_dir, weights.backbone, arena, stream);
+    if (!indexer.ok()) return indexer.status();
+    weights.indexer = indexer.release();
     return weights;
 }
 

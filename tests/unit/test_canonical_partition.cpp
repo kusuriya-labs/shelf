@@ -361,6 +361,81 @@ static void test_fp8_partition() {
           "fp8 block128 partition outside 2D rejected as unsupported");
 }
 
+static void test_mxfp4_partition() {
+    const uint64_t rows = 48, k = 64;
+    const uint64_t blocks = k / 32u;
+    const uint64_t packed_k = k / 2u;
+    std::vector<uint8_t> codes(rows * packed_k);
+    for (std::size_t i = 0; i < codes.size(); ++i) {
+        codes[i] = static_cast<uint8_t>(i * 7u + 1u);
+    }
+    std::vector<uint8_t> scales(rows * blocks);
+    for (std::size_t i = 0; i < scales.size(); ++i) {
+        scales[i] = static_cast<uint8_t>(120u + (i % 8u));
+    }
+
+    QuantizedTensorView g;
+    g.name = "w";
+    g.encoding = QuantizedEncoding::Mxfp4;
+    g.logical_shape = {static_cast<int64_t>(rows), static_cast<int64_t>(k)};
+    g.k_padded = static_cast<int64_t>(k);
+    g.scale_block_n = 1;
+    g.scale_block_k = 32;
+    g.codes = ByteSpan{codes.data(), codes.size()};
+    g.metadata1 = ByteSpan{scales.data(), scales.size()};
+
+    OwnedCanonicalTensor r0, r1;
+    QuantizedTensorView v0, v1;
+
+    Status n0 = materialize_rank_local_canonical(
+        desc_of(0, {48, 64}, 0, 2, {rng(0, 24)}), g, r0, v0);
+    Status n1 = materialize_rank_local_canonical(
+        desc_of(0, {48, 64}, 1, 2, {rng(24, 24)}), g, r1, v1);
+    check(n0.ok() && n1.ok(), "mxfp4 N partition materializes");
+    if (n0.ok() && n1.ok()) {
+        check(v0.logical_shape == std::vector<int64_t>({24, 64}), "mxfp4 N rank0 shape");
+        check(v1.logical_shape == std::vector<int64_t>({24, 64}), "mxfp4 N rank1 shape");
+        check(v0.k_padded == 64 && v1.k_padded == 64, "mxfp4 N local k_padded");
+        std::vector<uint8_t> joined = r0.codes;
+        joined.insert(joined.end(), r1.codes.begin(), r1.codes.end());
+        check_bytes("mxfp4 N codes round trip", joined, codes);
+        std::vector<uint8_t> joined_scales = r0.metadata1;
+        joined_scales.insert(joined_scales.end(), r1.metadata1.begin(), r1.metadata1.end());
+        check_bytes("mxfp4 N scales round trip", joined_scales, scales);
+    }
+
+    Status k0 = materialize_rank_local_canonical(
+        desc_of(1, {48, 64}, 0, 2, {rng(0, 32)}), g, r0, v0);
+    Status k1 = materialize_rank_local_canonical(
+        desc_of(1, {48, 64}, 1, 2, {rng(32, 32)}), g, r1, v1);
+    check(k0.ok() && k1.ok(), "mxfp4 K partition materializes");
+    if (k0.ok() && k1.ok()) {
+        check(v0.logical_shape == std::vector<int64_t>({48, 32}), "mxfp4 K rank0 shape");
+        check(v1.logical_shape == std::vector<int64_t>({48, 32}), "mxfp4 K rank1 shape");
+        check(v0.k_padded == 32 && v1.k_padded == 32, "mxfp4 K local k_padded");
+        std::vector<uint8_t> joined(rows * packed_k);
+        for (uint64_t r = 0; r < rows; ++r) {
+            std::memcpy(joined.data() + r * packed_k, r0.codes.data() + r * 16u, 16u);
+            std::memcpy(joined.data() + r * packed_k + 16u, r1.codes.data() + r * 16u, 16u);
+        }
+        check_bytes("mxfp4 K codes round trip", joined, codes);
+        std::vector<uint8_t> joined_scales(rows * blocks);
+        for (uint64_t r = 0; r < rows; ++r) {
+            joined_scales[r * blocks] = r0.metadata1[r];
+            joined_scales[r * blocks + 1u] = r1.metadata1[r];
+        }
+        check_bytes("mxfp4 K scales round trip", joined_scales, scales);
+    }
+
+    OwnedCanonicalTensor bad;
+    QuantizedTensorView bad_local;
+    Status k_misaligned = materialize_rank_local_canonical(
+        desc_of(1, {48, 64}, 0, 2, {rng(0, 16)}), g, bad, bad_local);
+    check(!k_misaligned.ok() &&
+              k_misaligned.code() == Status::Code::invalid_argument,
+          "mxfp4 K range off the 32-element block rejected");
+}
+
 static void test_reject_cases() {
     const uint64_t rows = 256, k = 128;
     std::vector<uint8_t> codes(rows * k, 0u);
@@ -518,6 +593,7 @@ int main() {
     test_segmented_gdn();
     test_expert_3d_partition();
     test_fp8_partition();
+    test_mxfp4_partition();
     test_exl3_partition();
     test_reject_cases();
 

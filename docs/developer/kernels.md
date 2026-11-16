@@ -158,6 +158,12 @@ activation scale は 128 K ごとの行 scale である。
   RowBlock1、それ以外は RowBlock2、rows > 192 は RowBlock4 を選ぶ。
   1 warp/block の RowBlock1 が、狭い N では MB2/4 の重み再利用より速い。
   variant 選択と geometry allowlist は `selectors/linear_selector.cpp` が hold する。
+- out_features が 16 の倍数でないとき、RowBlock 系は最後の partial tile を
+  column guard で処理する。guard が止めてよいのは out_features を超える
+  weight fragment の load だけで、activation fragment は全 lane で読む。
+  activation まで止めると valid な column が 0 になる
+  （`test_mxfp4_linear` の `out=17/24/100` case）。SplitK と Prefill2D は
+  元から activation load を column guard から分離している。
 - activation codes / scales は FP8 W8A8 と同一の `Int8ActivationWorkspaceLayout`
   （64 K fragment block、scale row stride `align16(ceil(k_padded/128)*4)`）を読むが、
   scale 平面は column 0 の行基準だけを使う。

@@ -8,6 +8,7 @@
 #include <shelf/models/qwen35/runtime/tensor_parallel.h>
 #include <shelf/models/qwen35/state/state_types.h>
 #include <shelf/models/qwen35moe/model/qwen35moe_model.h>
+#include <shelf/models/qwen35qsa/model/qwen35qsa_model.h>
 #include <shelf/models/qwen4exp/model/qwen4exp_model.h>
 #include <shelf/models/qwen4exp/weights/ple_table.h>
 #include <shelf/weights/matrix_weight.h>
@@ -66,6 +67,9 @@ public:
     virtual std::size_t executor_state_reserve_bytes(std::size_t) const {
         return 0u;
     }
+    // True when this rank's program runs QSA key selection and needs the select workspace
+    // and the pooled-key state pool. The dense QSA family and Qwen4Exp set it.
+    virtual bool uses_qsa_state() const { return false; }
     // Group-row workspace the family's MTP block needs on top of the shared executor
     // estimate. Zero for a family whose draft block has no grouped experts.
     virtual std::size_t mtp_grouped_reserve_bytes(std::size_t, std::uint32_t) const {
@@ -91,6 +95,8 @@ public:
     virtual const shelf::qwen35moe::Qwen35MoeModel* grouped_model() const { return nullptr; }
     // The Qwen4Exp model behind this rank. Null for the other families.
     virtual const shelf::qwen4exp::Qwen4ExpModel* qwen4exp_model() const { return nullptr; }
+    // The dense QSA model behind this rank. Null for the other families.
+    virtual const shelf::qwen35qsa::Qwen35QsaModel* qsa_model() const { return nullptr; }
 
 protected:
     TpRankModel() = default;

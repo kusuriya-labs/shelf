@@ -129,8 +129,8 @@ ranges の順序は保持する（validation は sort しない）
 
 2D weight `W[N][K]` の axis=0 partition は canonical payload の row range を
 切り出す。BF16 の canonical payload は row-major なので、行をそのまま
-ranges に沿って切り出す。codes / metadata を持つ format（FP8）は scale tile の
-境界制約を伴うため、下記「FP8」節の boundary 制約に従う。
+ranges に沿って切り出す。codes / metadata を持つ format（FP8 / MXFP4）は
+scale tile の境界制約を伴うため、下記「FP8」「MXFP4」節の boundary 制約に従う。
 
 - local N が 16 の倍数である必要はない。
   native preshuffle が `rows_padded = ceil(local_N / 16) * 16` で padding する。
@@ -174,6 +174,19 @@ K 以外の axis にはこの制約を課さない。
 `MetaCountMode::MatrixBlock` の format はさらに scale tile
 （`meta.block_n` / `meta.block_k`）へ partition axis を整列させる
 （FP8 節）。
+
+### MXFP4
+
+MXFP4 の codes は K 方向に 2 weight を 1 byte へ詰め、scale は
+`PerBlock`（1 output row × 32 K ごとに E8M0 1 byte）である。
+
+- N partition は output row 単位で codes と scale row を切り出す。
+  local N は 16 の倍数である必要はない（native preshuffle が
+  `ceil(local_N / 16) * 16` へ padding する）。
+- K partition は 32 K block（16 byte）単位で codes を切り出し、
+  各 row の scale も同じ block 範囲を切り出す。
+- partition 後の `k_padded` は local K block の合計であり、
+  native preshuffle と GEMM はその値だけを見る。
 
 ### FP8
 
@@ -287,11 +300,10 @@ local_shape = [256, 1280, 2560]
 
 descriptor と N-D slicing は 3D tensor を扱える
 （`tests/unit/test_canonical_partition.cpp` の 3D case）。
-ただし **routed expert 平面の分割はここを通さない**。MXFP4 の N-D canonical partition は
-今も `Status::unsupported` で、Qwen3.5 MoE は expert 軸を `MoeExpertGroupPlan` の
-`expert_begin` / `experts` で切る。matrix axis の partition descriptor は backbone と
-shared expert、そして dense FFN が使う（正本は
-[qwen35moe.md](qwen35moe.md) §3「expert 軸の分割」）。
+ただし **routed expert 平面の分割はここを通さない**。Qwen3.5 MoE は expert 軸を
+`MoeExpertGroupPlan` の `expert_begin` / `experts` で切る。matrix axis の
+partition descriptor は backbone と shared expert、そして dense FFN が使う
+（正本は [qwen35moe.md](qwen35moe.md) §3「expert 軸の分割」）。
 
 ## 11. 現在の runtime で未対応のもの
 
@@ -304,7 +316,6 @@ plan から来る。現在も未対応なものは以下。
   `WeightLoadOptions.partition_plan` が非 nullptr なら
   `Status::unsupported` で停止する。partition を受け付けるのは tensor parallel の rank load
   （`load_qwen35_weights_tensor_parallel_rank`）と MoE の rank load のみ
-- MXFP4 の N-D canonical partition（`materialize_rank_local_canonical`）は `unsupported`
 - `QuantizedModelReader` 側の rank-3 payload（fused expert 平面）は partition descriptor を
   作らない。expert 範囲で絞るのは plan の責任
 - MTP block は partition しない（plan に entry を作らない）
@@ -326,6 +337,6 @@ host mediated / topology-specific transport）は将来の Gate で選ぶ。
 | test | 内容 |
 | --- | --- |
 | `test_tensor_partition` | descriptor validation / local shape / block alignment / plan（pure CPU） |
-| `test_canonical_partition` | BF16 1D/2D/3D・segmented、segmented GDN / 3D unit / N-K partition、FP8、reject（pure CPU） |
+| `test_canonical_partition` | BF16 1D/2D/3D・segmented、segmented GDN / 3D unit / N-K partition、FP8、MXFP4、reject（pure CPU） |
 | `test_qwen35_tensor_parallel_plan` | Qwen35 Dense plan builder（mini + Qwen3.8-27B geometry、q_proj head pair、GDN qkv coverage、replicated tensor）（pure CPU） |
-| `test_weight_load` | BF16 / FP8 の quantized GPU load、preshuffle on/off、Qwen35 guard（GPU） |
+| `test_weight_load` | BF16 / FP8 / MXFP4 の quantized GPU load、preshuffle on/off、Qwen35 guard（GPU） |

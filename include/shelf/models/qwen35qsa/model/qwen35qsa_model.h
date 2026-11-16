@@ -8,6 +8,7 @@
 #include <hip/hip_runtime.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 namespace shelf {
@@ -23,6 +24,14 @@ public:
 
     static Result<Qwen35QsaModel> load_from_safetensors(
         const std::string& model_dir,
+        gpu::GpuArena& arena,
+        hipStream_t stream,
+        const Qwen35QsaLoadOptions& options = {});
+
+    static Result<Qwen35QsaModel> load_tensor_parallel_from_safetensors(
+        const std::string& model_dir,
+        std::uint32_t tp_size,
+        std::uint32_t tp_rank,
         gpu::GpuArena& arena,
         hipStream_t stream,
         const Qwen35QsaLoadOptions& options = {});

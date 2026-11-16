@@ -419,11 +419,6 @@ Result<MatrixWeight> load_quantized_view(
                 ("mxfp4 matrix weight k_padded must be a multiple of 64: " + name).c_str(),
                 __FILE__, __LINE__);
         }
-        if ((m % 16u) != 0u) {
-            return Status::unsupported(
-                ("mxfp4 matrix weight rows must be a multiple of 16: " + name).c_str(),
-                __FILE__, __LINE__);
-        }
         const uint64_t packed_k = kp / quantization::kMxfp4WeightsPerCode;
         const uint64_t scale_k = kp / quantization::kMxfp4ScaleBlockK;
         auto st = expect_bytes(name + " codes", v.codes, m * packed_k);

@@ -261,6 +261,10 @@ public:
         return total;
     }
 
+    bool uses_qsa_state() const override {
+        return qwen4exp_state_pool_layouts(model_.text_config(), max_context_tokens_).uses_qsa;
+    }
+
 private:
     std::size_t qsa_blocks(const qwen4exp::Qwen4ExpTextConfig& cfg) const {
         const std::size_t ratio = cfg.indexer.compress_ratio != 0u
@@ -551,6 +555,145 @@ Result<std::unique_ptr<TpRankModel>> build_moe_tp_rank_model(
         std::make_unique<MoeTpRankModel>(model_result.release(), context_result.release()));
 }
 
+namespace {
+
+::shelf::state::QsaKeyStatePoolLayout qwen35qsa_state_layout(
+    const qwen35qsa::Qwen35QsaTextConfig& config, std::uint32_t max_context_tokens) {
+    const auto counts = qhy::count_layer_topology(config);
+    const std::uint32_t ratio = static_cast<std::uint32_t>(config.indexer.block_size);
+    const std::uint32_t blocks = ratio == 0u
+        ? 0u
+        : (max_context_tokens + ratio - 1u) / ratio;
+    return ::shelf::state::QsaKeyStatePoolLayout::make(
+        static_cast<std::uint32_t>(counts.attention_layers),
+        static_cast<std::uint32_t>(config.indexer.head_dim), ratio, blocks);
+}
+
+class Qwen35QsaTpRankModel final : public TpRankModel {
+public:
+    Qwen35QsaTpRankModel(qwen35qsa::Qwen35QsaModel&& model,
+                         qhy::TensorParallelContext&& context,
+                         std::uint32_t max_context_tokens)
+        : model_(std::move(model)), context_(context),
+          max_context_tokens_(max_context_tokens) {}
+
+    const qhy::QwenHybridConfig& hybrid_config() const override {
+        return model_.text_config();
+    }
+    const q35::Qwen35TensorParallelContext& context() const override { return context_; }
+
+    std::uint64_t weight_bytes() const override {
+        const q35::Qwen35ModelWeights& w = model_.weights().backbone;
+        std::uint64_t total = 0;
+        add_matrix_bytes(total, w.embed_tokens);
+        if (!w.lm_head_tied) add_matrix_bytes(total, w.lm_head);
+        for (const q35::Qwen35LayerWeights& layer : w.layers) {
+            add_matrix_bytes(total, layer.ffn.gate);
+            add_matrix_bytes(total, layer.ffn.up);
+            add_matrix_bytes(total, layer.ffn.down);
+            if (layer.is_gdn) {
+                add_matrix_bytes(total, layer.attn_in_proj_qkv);
+                add_matrix_bytes(total, layer.attn_in_proj_z);
+                add_matrix_bytes(total, layer.attn_in_proj_a);
+                add_matrix_bytes(total, layer.attn_in_proj_b);
+                add_matrix_bytes(total, layer.attn_out_proj);
+            } else {
+                add_matrix_bytes(total, layer.attn_q_proj);
+                add_matrix_bytes(total, layer.attn_k_proj);
+                add_matrix_bytes(total, layer.attn_v_proj);
+                add_matrix_bytes(total, layer.attn_o_proj);
+            }
+        }
+        for (const qwen35qsa::QsaIndexerLayerWeights& indexer : model_.weights().indexer) {
+            add_matrix_bytes(total, indexer.q_proj);
+            add_matrix_bytes(total, indexer.k_proj);
+        }
+        return total;
+    }
+
+    std::size_t token_row_ffn_size() const override {
+        return model_.text_config().ffn.intermediate_size;
+    }
+
+    std::size_t ffn_workspace_reserve_bytes(std::size_t) const override { return 0u; }
+
+    bool uses_exl3_linear() const override {
+        return ::shelf::qwen35::uses_exl3_linear(model_.weights().backbone);
+    }
+
+    shelf::weights::Exl3LinearShape exl3_linear_shape() const override {
+        return ::shelf::qwen35::exl3_linear_shape(model_.weights().backbone);
+    }
+
+    bool uses_qsa_state() const override {
+        return max_context_tokens_ > model_.text_config().indexer.budget;
+    }
+
+    std::size_t executor_state_reserve_bytes(
+        std::size_t max_scheduled_requests) const override {
+        if (!uses_qsa_state()) return 0u;
+        const std::uint32_t requested = static_cast<std::uint32_t>(max_scheduled_requests);
+        const std::uint32_t slots = requested == 0u ? 1u : requested;
+        const auto layout = qwen35qsa_state_layout(model_.text_config(), max_context_tokens_);
+        return ::shelf::state::qsa_key_state_pool_bytes(slots, layout).total();
+    }
+
+    shelf::Result<q35::Executor> create_executor(
+        q35::SequenceSlotPool& sequence_pool, q35::GdnStatePool& gdn_state_pool,
+        q35::PagedKVPool& kv_pool, gpu::GpuArena& arena,
+        const q35::ExecutorConfig& config) const override {
+        return qwen35qsa::create_qwen35qsa_model_executor(
+            model_, sequence_pool, gdn_state_pool, kv_pool, arena, config);
+    }
+
+    const qwen35qsa::Qwen35QsaModel* qsa_model() const override { return &model_; }
+
+private:
+    static void add_matrix_bytes(std::uint64_t& total, const weights::MatrixWeight& w) {
+        if (w.rows == 0) return;
+        if (w.encoding == weights::MatrixEncoding::Bf16) {
+            total += static_cast<std::uint64_t>(w.rows) * w.cols * 2u;
+            return;
+        }
+        const auto add = [&total](const gpu::Tensor& t) {
+            if (t.ndim() == 0) return;
+            std::size_t bytes = 0;
+            if (!t.required_span_bytes(bytes).ok()) return;
+            total += bytes;
+        };
+        add(w.codes);
+        add(w.scales);
+        add(w.row_ref);
+        add(w.compute_codes);
+        add(w.compute_scales_bf16);
+    }
+
+    qwen35qsa::Qwen35QsaModel model_;
+    qhy::TensorParallelContext context_;
+    std::uint32_t max_context_tokens_ = 0;
+};
+
+Result<std::unique_ptr<TpRankModel>> build_qwen35qsa_tp_rank_model(
+    const q35r::TpRankRuntimeConfig& config, gpu::GpuArena& arena, hipStream_t stream) {
+    auto text_config = qwen35qsa::read_qwen35qsa_text_config(config.model_dir);
+    if (!text_config.ok()) return text_config.status();
+    auto model = qwen35qsa::Qwen35QsaModel::load_tensor_parallel_from_safetensors(
+        config.model_dir, config.tp_size, config.tp_rank, arena, stream,
+        config.load_options);
+    if (!model.ok()) return model.status();
+
+    auto context = q35::make_qwen35_tensor_parallel_context(
+        text_config.value(), config.tp_size, config.tp_rank,
+        config.load_options.vocab_parallel_lm_head);
+    if (!context.ok()) return context.status();
+
+    return std::unique_ptr<TpRankModel>(
+        std::make_unique<Qwen35QsaTpRankModel>(
+            model.release(), context.release(), config.max_seq_len + 1u));
+}
+
+}  // namespace
+
 Status select_tp_rank_model(q35r::TpCoordinatorConfig& config) {
     if (config.build_rank_model != nullptr) {
         return Status::invalid_argument("tp coordinator already has a rank model builder",
@@ -564,6 +707,10 @@ Status select_tp_rank_model(q35r::TpCoordinatorConfig& config) {
         config.build_rank_model = &build_qwen4exp_tp_rank_model;
         config.prefetch_rank_model = &prefetch_qwen4exp_ple_table;
         config.release_rank_model = &release_prefetched_qwen4exp_ple_table;
+        return Status::make_ok();
+    }
+    if (family.value() == ModelFamily::Qsa) {
+        config.build_rank_model = &build_qwen35qsa_tp_rank_model;
         return Status::make_ok();
     }
     config.build_rank_model = family.value() == ModelFamily::Moe
@@ -589,6 +736,8 @@ Result<TpGroup> TpGroup::create(const q35r::TpCoordinatorConfig& config_in) {
     }
     if (const auto* q4 = model->qwen4exp_model()) {
         group.model_.emplace(LoadedModel::borrow(*q4));
+    } else if (const auto* qsa = model->qsa_model()) {
+        group.model_.emplace(LoadedModel::borrow(*qsa));
     } else if (const auto* grouped = model->grouped_model()) {
         group.model_.emplace(LoadedModel::borrow(*grouped));
     } else if (const auto* dense = model->dense_model()) {

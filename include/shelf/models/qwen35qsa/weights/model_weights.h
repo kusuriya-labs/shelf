@@ -37,6 +37,16 @@ Result<Qwen35QsaModelWeights> load_qwen35qsa_weights(
     hipStream_t stream,
     const Qwen35QsaLoadOptions& options = {});
 
+// Loads one rank's backbone through the dense tensor-parallel plan and keeps the indexer
+// replicated: every rank scores the same pooled keys and must produce the same block mask.
+Result<Qwen35QsaModelWeights> load_qwen35qsa_weights_tensor_parallel_rank(
+    const std::string& model_dir,
+    std::uint32_t tp_size,
+    std::uint32_t tp_rank,
+    gpu::GpuArena& arena,
+    hipStream_t stream,
+    const Qwen35QsaLoadOptions& options = {});
+
 Status validate_qwen35qsa_weights(
     const Qwen35QsaModelWeights& weights,
     const Qwen35QsaTextConfig& config);

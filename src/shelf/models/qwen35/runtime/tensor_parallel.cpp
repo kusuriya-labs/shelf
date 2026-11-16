@@ -169,7 +169,7 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
         reserved = qwen35::runtime::qwen35_executor_reserve_bytes(
             tc, rank->model_->token_row_ffn_size(), reserve_config, config.tp_size,
             rank->model_->uses_exl3_linear(),
-            rank->model_->qwen4exp_model() != nullptr);
+            rank->model_->uses_qsa_state());
         reserved += rank->model_->ffn_workspace_reserve_bytes(config.max_batch_rows);
         const std::size_t state_pools =
             rank->model_->executor_state_reserve_bytes(config.max_scheduled_requests);

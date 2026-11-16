@@ -156,13 +156,11 @@ Result<shelf::qwen35::Qwen35LoweredPrimitives> lower_qwen35qsa_to_primitives(
     const Qwen35QsaModelWeights& weights,
     const Qwen35QsaLowerOptions& options) {
     const auto& backbone_options = options.backbone;
+    const bool tp_active =
+        backbone_options.tp != nullptr && backbone_options.tp->tp_size > 1u;
     if (backbone_options.stage.enabled) {
         return Status::unsupported(
             "qwen35qsa: pipeline stage lowering is not implemented", __FILE__, __LINE__);
-    }
-    if (backbone_options.tp != nullptr && backbone_options.tp->tp_size > 1u) {
-        return Status::unsupported(
-            "qwen35qsa: tensor parallel is not implemented", __FILE__, __LINE__);
     }
     if (config.indexer.declared == false) {
         return Status::invalid_argument(
@@ -199,7 +197,7 @@ Result<shelf::qwen35::Qwen35LoweredPrimitives> lower_qwen35qsa_to_primitives(
     const std::uint32_t q_heads = static_cast<std::uint32_t>(config.num_attention_heads);
     const std::uint32_t kv_heads = static_cast<std::uint32_t>(config.num_key_value_heads);
     const std::uint32_t head_dim = static_cast<std::uint32_t>(config.attention_head_dim);
-    const std::uint32_t intermediate =
+    const std::uint32_t global_intermediate =
         static_cast<std::uint32_t>(config.ffn.intermediate_size);
     const std::uint32_t key_heads = static_cast<std::uint32_t>(config.linear_num_key_heads);
     const std::uint32_t value_heads =
@@ -210,6 +208,20 @@ Result<shelf::qwen35::Qwen35LoweredPrimitives> lower_qwen35qsa_to_primitives(
         static_cast<std::uint32_t>(config.linear_value_head_dim);
     const std::uint32_t conv_kernel =
         static_cast<std::uint32_t>(config.linear_conv_kernel_dim);
+
+    std::uint32_t intermediate = global_intermediate;
+    std::uint32_t local_q_heads = q_heads;
+    std::uint32_t local_kv_heads = kv_heads;
+    std::uint32_t local_key_heads = key_heads;
+    std::uint32_t local_value_heads = value_heads;
+    if (tp_active) {
+        intermediate = backbone_options.tp->local_intermediate_size;
+        local_q_heads = backbone_options.tp->local_attention_heads;
+        local_kv_heads = backbone_options.tp->local_key_value_heads;
+        local_key_heads = backbone_options.tp->local_gdn_key_heads;
+        local_value_heads = backbone_options.tp->local_gdn_value_heads;
+    }
+
     float rope_theta = config.rope_theta;
     float eps = config.rms_norm_eps;
     float partial = config.partial_rotary_factor;
@@ -220,8 +232,8 @@ Result<shelf::qwen35::Qwen35LoweredPrimitives> lower_qwen35qsa_to_primitives(
         static_cast<std::uint32_t>((double)head_dim * (double)partial);
 
     QH::GdnGeometry gdn_geometry;
-    gdn_geometry.key_heads = key_heads;
-    gdn_geometry.value_heads = value_heads;
+    gdn_geometry.key_heads = local_key_heads;
+    gdn_geometry.value_heads = local_value_heads;
     gdn_geometry.key_head_dim = key_head_dim;
     gdn_geometry.value_head_dim = value_head_dim;
     gdn_geometry.conv_kernel = conv_kernel;
@@ -230,14 +242,16 @@ Result<shelf::qwen35::Qwen35LoweredPrimitives> lower_qwen35qsa_to_primitives(
     if (!gdn_st.ok()) return gdn_st;
 
     QH::GdnLoweringGeometry gdn_lowering_geometry;
-    gdn_lowering_geometry.key_heads = key_heads;
-    gdn_lowering_geometry.value_heads = value_heads;
+    gdn_lowering_geometry.key_heads = local_key_heads;
+    gdn_lowering_geometry.value_heads = local_value_heads;
     gdn_lowering_geometry.key_head_dim = key_head_dim;
     gdn_lowering_geometry.value_head_dim = value_head_dim;
     gdn_lowering_geometry.conv_kernel = conv_kernel;
     gdn_lowering_geometry.eps = eps;
-    gdn_lowering_geometry.out_dtype = RT::ValueDType::BF16;
-    gdn_lowering_geometry.tp_combine = false;
+    gdn_lowering_geometry.out_dtype = backbone_options.tp_combine_f32
+        ? RT::ValueDType::F32
+        : RT::ValueDType::BF16;
+    gdn_lowering_geometry.tp_combine = tp_active;
 
     if (weights.indexer.size() != weights.backbone.layers.size()) {
         return Status::invalid_argument(
@@ -252,7 +266,8 @@ Result<shelf::qwen35::Qwen35LoweredPrimitives> lower_qwen35qsa_to_primitives(
             st = validate_gdn_layer(lw, config, hidden_size, gdn_geometry,
                                     gdn_features);
         } else {
-            st = validate_attention_layer(lw, config, hidden_size, q_heads, kv_heads, head_dim);
+            st = validate_attention_layer(lw, config, hidden_size, local_q_heads,
+                                          local_kv_heads, head_dim);
             if (st.ok()) st = validate_indexer_layer(weights.indexer[li], config, hidden_size);
         }
         if (!st.ok()) return st;
@@ -411,15 +426,18 @@ Result<shelf::qwen35::Qwen35LoweredPrimitives> lower_qwen35qsa_to_primitives(
             block.gdn_indices.p_gdn_norm = lp.gdn_norm;
             block.gdn_indices.state_index = next_gdn_state_index++;
         } else {
-            block.attention_geometry.query_heads = q_heads;
-            block.attention_geometry.kv_heads = kv_heads;
+            block.attention_geometry.query_heads = local_q_heads;
+            block.attention_geometry.kv_heads = local_kv_heads;
             block.attention_geometry.head_dim = head_dim;
             block.attention_geometry.rotary_dim = rotary_dim;
             block.attention_geometry.rope_theta = rope_theta;
             block.attention_geometry.rope_attention_factor =
                 static_cast<float>(backbone_options.rope_profile.attention_factor);
             block.attention_geometry.eps = eps;
-            block.attention_geometry.out_dtype = RT::ValueDType::BF16;
+            block.attention_geometry.out_dtype = backbone_options.tp_combine_f32
+                ? RT::ValueDType::F32
+                : RT::ValueDType::BF16;
+            block.attention_geometry.tp_combine = tp_active;
             block.attention_weights.q = weight_pointers[lw_idx.attn_q];
             block.attention_weights.k = weight_pointers[lw_idx.attn_k];
             block.attention_weights.v = weight_pointers[lw_idx.attn_v];
@@ -479,8 +497,11 @@ Result<shelf::qwen35::Qwen35LoweredPrimitives> lower_qwen35qsa_to_primitives(
             name_last("mlp_swiglu");
         }
         const RT::ValueId v_down =
-            em.linear(w_down, lw_idx.mlp_down, v_swiglu, RT::ValueDType::BF16);
+            em.linear(w_down, lw_idx.mlp_down, v_swiglu,
+                      backbone_options.tp_combine_f32 ? RT::ValueDType::F32
+                                                      : RT::ValueDType::BF16);
         name_last("mlp_down");
+        if (tp_active) pg.nodes.back().tp_combine = 1;
 
         const RT::ValueId layer_output = em.value(hidden_size);
         {
@@ -498,18 +519,45 @@ Result<shelf::qwen35::Qwen35LoweredPrimitives> lower_qwen35qsa_to_primitives(
     }
 
     const MW* lmw = lm_tied ? &weights.backbone.embed_tokens : &weights.backbone.lm_head;
-    if (lmw->rows != config.vocab_size) {
-        return Status::unsupported(
-            "qwen35qsa: the lm_head must be unsharded", __FILE__, __LINE__);
+    const std::uint64_t global_vocab = config.vocab_size;
+    bool vocab_parallel = false;
+    std::uint32_t lm_head_col_offset = 0;
+    if (!lm_tied && backbone_options.tp != nullptr &&
+        backbone_options.tp->vocab_parallel_lm_head &&
+        lmw->encoding == shelf::weights::MatrixEncoding::Bf16 &&
+        lmw->partition.has_value()) {
+        const auto& part = lmw->partition.value();
+        vocab_parallel = part.axis == 0 && part.count == backbone_options.tp->tp_size &&
+            part.index == backbone_options.tp->tp_rank &&
+            lmw->rows == backbone_options.tp->local_vocab_size &&
+            static_cast<std::uint64_t>(lmw->rows) * part.count == global_vocab;
+        if (vocab_parallel) {
+            lm_head_col_offset = static_cast<std::uint32_t>(part.index) * lmw->rows;
+        }
     }
+    if (!vocab_parallel && lmw->rows != global_vocab) {
+        return Status::unsupported(
+            "qwen35qsa: vocab sharded lm_head requires vocab parallel lowering",
+            __FILE__, __LINE__);
+    }
+    const std::uint32_t out_vocab =
+        vocab_parallel ? static_cast<std::uint32_t>(global_vocab)
+                       : static_cast<std::uint32_t>(lmw->rows);
     QH::HybridHeadLowering head;
     head.hidden_features = hidden_size;
     head.eps = eps;
     head.final_norm_param = final_norm_param;
     head.lm_shape = RT::MatrixwiseShapeKey{lmw->rows, lmw->cols};
     head.lm_weight_index = lm_index;
-    head.out_vocab = lmw->rows;
-    QH::emit_hybrid_head(em, head, layer_input);
+    head.out_vocab = out_vocab;
+    const QH::HybridHeadOutput head_out =
+        QH::emit_hybrid_head(em, head, layer_input);
+    if (vocab_parallel) {
+        pg.nodes[head_out.logits_node_index].tp_combine = 1;
+        pg.nodes[head_out.logits_node_index].tp_combine_local_cols = lmw->rows;
+        lowered.weights[lm_index].output_col_offset = lm_head_col_offset;
+        lowered.weights[lm_index].output_col_total = out_vocab;
+    }
 
     for (std::size_t t = 0; t < hidden_tap_values.size(); ++t) {
         if (hidden_tap_found[t] == 0) {

@@ -48,6 +48,23 @@ Result<Qwen35QsaModel> Qwen35QsaModel::load_from_safetensors(
     return Qwen35QsaModel(weights.release(), config.release());
 }
 
+Result<Qwen35QsaModel> Qwen35QsaModel::load_tensor_parallel_from_safetensors(
+    const std::string& model_dir,
+    std::uint32_t tp_size,
+    std::uint32_t tp_rank,
+    gpu::GpuArena& arena,
+    hipStream_t stream,
+    const Qwen35QsaLoadOptions& options) {
+    auto config = read_qwen35qsa_text_config(model_dir);
+    if (!config.ok()) return config.status();
+    auto weights = load_qwen35qsa_weights_tensor_parallel_rank(
+        model_dir, tp_size, tp_rank, arena, stream, options);
+    if (!weights.ok()) return weights.status();
+    Status valid = validate_qwen35qsa_weights(weights.value(), config.value());
+    if (!valid.ok()) return valid;
+    return Qwen35QsaModel(weights.release(), config.release());
+}
+
 Result<Qwen35QsaModel> Qwen35QsaModel::adopt(Qwen35QsaModelWeights&& weights,
                                              Qwen35QsaTextConfig text_config) {
     Status valid = validate_qwen35qsa_weights(weights, text_config);

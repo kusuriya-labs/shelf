@@ -305,7 +305,7 @@ evict する。
 ## 10. numerical 互換性（TP=1 vs TP=2）
 
 partition された GEMM の出力（bf16）と barrier の SUM（bf16）で丸めが入るため、
-TP=1 と TP=2 は bit-identical ではない。Qwen3.8-27B（64層、
+TP=1 と TP=2 は bit-identical ではない。Qwen3.8-27B FP8（64層、
 prefill5 tokens / greedy16 tokens）で実測した layer ごとの相対 drift:
 
 ```text
@@ -328,6 +328,14 @@ greedy token 列は、上位2値が近い token で丸め差により分岐し�
 `tests/unit/test_qwen35_tp_e2e.cpp` の acceptance prompt は margin が確保
 できる prompt を選び、greedy16 token の一致を assert する。
 prompt は `SHELF_TP_PROMPT` で差し替えられる。
+
+MXFP4 dense の TP=2 は同じ partition / preshuffle / GEMM 経路を使う。
+W4A8 の活性 quantization は rank-local の K 範囲を入力にするため、
+TP=1 と TP=2 で活性 plane の row reference が一致しない。したがって
+MXFP4 の drift は FP8 と同じ帯に収まることを要求しない。acceptance は
+greedy token の一致と layer ごとの drift で行う
+（`Qwen3.8-27B-QSA-Quark-AWQ-MXFP4` の実測は
+[../research/20261116/mxfp4_tp2_dense.md](../research/20261116/mxfp4_tp2_dense.md)）。
 
 ## 11. 現在の対応範囲
 
@@ -354,6 +362,9 @@ prompt は `SHELF_TP_PROMPT` で差し替えられる。
   TP=2 で新たに必要になった shape は optimized kernel test で検証してから
   個別に追加し、未知 shape を自動許可しない。現在の rule は
   `kLinearShapeRules` と selector / gemm テストが正本である。
+- QSA dense checkpoint（`ModelFamily::Qsa`）も TP=2 で実行できる。backbone は
+  同じ plan で分割し、indexer は replicated にして全 rank が同じ block mask を作る。
+  MTP block は TP rank では load しない（[qwen35qsa.md](qwen35qsa.md)）。
 - DFlash2 は **drafter を非分割・target verify のみ TP2** で動作する。
   `shelf-compute --tensor-parallel 2 --dflash2-model-dir ...` から利用できる
   （drafter は compute process が local load）。

@@ -43,6 +43,7 @@ public:
     static LoadedModel borrow(const shelf::qwen35::Qwen35Model& model);
     static LoadedModel borrow(const shelf::qwen35moe::Qwen35MoeModel& model);
     static LoadedModel borrow(const shelf::qwen4exp::Qwen4ExpModel& model);
+    static LoadedModel borrow(const shelf::qwen35qsa::Qwen35QsaModel& model);
 
     [[nodiscard]]
     ModelFamily family() const noexcept {

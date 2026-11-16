@@ -201,13 +201,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_mxfp4_w4a8_wmma_kernel(
                 const uint32_t aoff = (ib >> 1) * kFragBlockBytes + (ib & 1u) * 16u;
                 #pragma unroll
                 for (int t = 0; t < MB; ++t) {
-                    int32x2_t a0 = {};
-                    int32x2_t a1 = {};
-                    if constexpr (!kGuarded) {
-                        const uint8_t* ap = arow[t] + aoff;
-                        a0 = *reinterpret_cast<const int32x2_t*>(ap);
-                        a1 = *reinterpret_cast<const int32x2_t*>(ap + 8u);
-                    }
+                    const uint8_t* ap = arow[t] + aoff;
+                    int32x2_t a0 = *reinterpret_cast<const int32x2_t*>(ap);
+                    int32x2_t a1 = *reinterpret_cast<const int32x2_t*>(ap + 8u);
                     if constexpr (kFold) {
                         float8_t c = acc[t];
                         c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a0, w0, c);

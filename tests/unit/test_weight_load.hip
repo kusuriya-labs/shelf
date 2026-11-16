@@ -1271,7 +1271,14 @@ static void test_hf_mxfp4_matrix_load(gpu::GpuArena& arena, hipStream_t stream) 
 
     auto narrow = weights::load_quantized_matrix(
         reader, "narrow.weight", arena, stream, weights::WeightLoadOptions{});
-    check(!narrow.ok(), "mxfp4 rows that are not a 16-row tile rejected at load");
+    if (!narrow.ok()) {
+        fail("load mxfp4 narrow rows: " + narrow.status().message());
+    } else {
+        const weights::MatrixWeight& nm = narrow.value();
+        check_eq_u64(nm.rows, 24, "mxfp4 narrow rows keep the logical row count");
+        check(nm.preshuffled, "mxfp4 narrow rows load as native layout");
+        check_eq_u64(nm.codes.dim(0), 2, "mxfp4 24 rows pad to two native output tiles");
+    }
 }
 
 static void test_qwen35_hf_fp8_model_load_without_mtp(

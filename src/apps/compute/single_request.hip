@@ -63,9 +63,13 @@ void print_model_geometry(const shelf::models::LoadedModel& model) {
 
     printf("MODEL_HIDDEN_SIZE=%zu\n", text_config.hidden_size);
     printf("MODEL_FAMILY=%s\n", model.family() == shelf::models::ModelFamily::Plamo3
-        ? "plamo3" : (model.runs_grouped_experts() ? "moe" : "dense"));
+        ? "plamo3" : (model.family() == shelf::models::ModelFamily::Qsa
+            ? "qsa" : (model.runs_grouped_experts() ? "moe" : "dense")));
     if (const auto* dense = model.dense_model()) {
         printf("MODEL_INTERMEDIATE_SIZE=%zu\n", dense->text_config().ffn.intermediate_size);
+    }
+    if (const auto* qsa = model.qsa_model()) {
+        printf("MODEL_INTERMEDIATE_SIZE=%zu\n", qsa->text_config().ffn.intermediate_size);
     }
     if (const auto* moe = model.moe_model()) {
         printf("MODEL_EXPERTS=%zu\n", moe->text_config().ffn.num_experts);

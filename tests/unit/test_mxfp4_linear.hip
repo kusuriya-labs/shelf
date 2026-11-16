@@ -545,6 +545,14 @@ int main() {
     };
 
     run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::RowBlock1, 0u}, 1u, "rowblock1", kRows, false);
+    run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::RowBlock1, 0u}, 1u, "rowblock1-n24", 24u, false);
+    run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::RowBlock1, 0u}, 1u, "rowblock1-n100", 100u, false);
+    run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::RowBlock1, 0u}, 1u, "rowblock1-n17", 17u, false);
+    run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::RowBlock2, 0u}, kTokens, "rowblock2-n24", 24u, false);
+    run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::RowBlock2, 0u}, kTokens, "rowblock2-n100", 100u, false);
+    run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::RowBlock4, 0u}, kTokens, "rowblock4-n24", 24u, false);
+    run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::RowBlock1, 0u}, kTokens, "rowblock1-n24", 24u, false);
+    run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::RowBlock1, 0u}, kTokens, "rowblock1-n24-fold", 24u, true);
     run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::RowBlock1, 0u}, kTokens, "rowblock1", kRows, false);
     run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::RowBlock4, 0u}, kTokens, "rowblock4", kRows, false);
     run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::SplitK, 2u}, kTokens, "splitk2", kRows, false);

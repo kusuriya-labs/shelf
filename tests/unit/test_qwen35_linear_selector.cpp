@@ -229,6 +229,22 @@ void test_tp2_shapes() {
     check(!sel_fp8(1, 124160, 5120, 5120).has_value(),
           "vocab parallel fp8 shape not enabled");
 
+    const uint32_t tp2_mxfp4_shapes[][2] = {
+        {8704u, 5120u}, {5120u, 8704u}, {3072u, 5120u}, {5120u, 5120u},
+        {6144u, 5120u}, {512u, 5120u}, {5120u, 3072u}, {24u, 5120u},
+    };
+    char mxfp4_name[96];
+    for (const auto& s : tp2_mxfp4_shapes) {
+        std::snprintf(mxfp4_name, sizeof(mxfp4_name),
+                      "tp2 mxfp4 %ux%u rows=1 -> config", s[0], s[1]);
+        check(sel_mxfp4(1, s[0], s[1], s[1]).has_value(), mxfp4_name);
+        std::snprintf(mxfp4_name, sizeof(mxfp4_name),
+                      "tp2 mxfp4 %ux%u rows=256 -> config", s[0], s[1]);
+        check(sel_mxfp4(256, s[0], s[1], s[1]).has_value(), mxfp4_name);
+    }
+    check(!sel_mxfp4(1, 999, 5120, 5120).has_value(),
+          "unknown mxfp4 shape still rejected");
+
     const uint32_t tp2_shapes[][2] = {
         {8704u, 5120u}, {5120u, 8704u}, {3072u, 5120u},
         {512u, 5120u},   {5120u, 3072u}, {5120u, 5120u}, {24u, 5120u},

@@ -140,6 +140,12 @@ LoadedModel LoadedModel::borrow(const shelf::qwen4exp::Qwen4ExpModel& model) {
     return out;
 }
 
+LoadedModel LoadedModel::borrow(const shelf::qwen35qsa::Qwen35QsaModel& model) {
+    LoadedModel out;
+    out.qsa_ = &model;
+    return out;
+}
+
 shelf::weights::Exl3LinearShape LoadedModel::exl3_linear_shape() const {
     if (plamo_ != nullptr) {
         shelf::weights::Exl3LinearShape shape;
