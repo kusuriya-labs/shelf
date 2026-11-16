@@ -120,3 +120,9 @@ prefill は `max_visible_tokens < 12288` の間 masked tiled kernel を使い、
 staged request が **全 row を覆っている**ときだけ使う。padded 行には slice が無く、
 stale な position で未 score の block を選んでしまうため。覆っていない場合は
 fused な `launch_qsa_select_batch` にフォールバックする。
+
+`QSA_SELECT` を含む program は decode の HIP graph 対象外にする。
+`QsaTopkArgs::block_count` は capture 時の position で固定されるため、replay で
+position が進むと `visible > block_count` になり、`qsa_topk_kernel` が
+未 score の index を mask に書く。graph を無効にすると dispatch ごとに
+現在の `sequence_length` から block count を作り直せる。

@@ -137,14 +137,17 @@ selector に接続した場合の参考値（p50 µs、変更前は ExactRows）
 | --- | ---: | ---: | ---: |
 | EXL3 target（BF16 GDN a/b） | 28.39 | 28.40 | +0.06% |
 | FP8 27B | 30.64 | 31.21 | +1.85% |
-| MXFP4 QSA（max-seq 512） | 27.27 | 27.27 | 0.00% |
+| MXFP4 QSA（max-seq 512、dense fallback） | 27.27 | 27.27 | 0.00% |
+| MXFP4 QSA（max-seq 4096、graph fix） | 25.86 | 25.96 | +0.4% |
 
 - EXL3 target の非投機は横ばいで、`SmallRows` の GDN a/b 短縮は
   E2E では確認できなかった。
 - FP8 は split-K の効果で明確に改善した。
 - MXFP4 は QSA の dense fallback で横ばい、生成 ID も完全一致した。
-  QSA を有効にした max-seq 4096 の decode は `qsa_topk_kernel` の
-  メモリフォルトで、変更前・変更後とも測定できなかった。
+  max-seq 4096 の QSA 有効 decode は `qsa_topk_kernel` のメモリフォルトで
+  測定できなかったが、QSA select を graph から外す修正
+  （[qsa_topk_graph_fault.md](qsa_topk_graph_fault.md)）を両方に適用すると
+  25.86 → 25.96 tok/s（+0.4%、横ばい）で、生成 ID も一致した。
 - 非投機の logits は EXL3 と FP8 で変化した。生成 ID の最初の不一致は
   EXL3 が 12 token 目、FP8 が 27 token 目である。MXFP4 は一致した。
   したがって DFlash2 の accept 変化は target logits の変化と整合する。

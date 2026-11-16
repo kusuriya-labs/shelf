@@ -1031,8 +1031,13 @@ Result<PendingBatch> submit_co_batch(
     const char* plamo_graph_env = std::getenv("SHELF_PLAMO_HIP_GRAPH");
     const bool plamo_graph_enabled = plamo_graph_env == nullptr ||
         (plamo_graph_env[0] != '\0' && std::strcmp(plamo_graph_env, "0") != 0);
+    // QSA select tiles the score/top-k work by the current visible block count, which is
+    // captured in QsaTopkArgs. A graph replay would keep the first decode step's
+    // block_count while positions grow, so qsa_topk would read indices that were never
+    // filled. Keep QSA-active programs out of the graph until the count is device-side.
     const bool graph_eligible =
         !executor.graph_failed &&
+        !program_needs_qsa_workspace(*program) &&
         (plamo ? (plamo_graph_enabled && R == 1u && N == 1u &&
                   exec_role == ::shelf::runtime::ExecutionRole::Decode)
                : ((R == 1u && N == 1u && exec_role == ::shelf::runtime::ExecutionRole::Decode) ||
