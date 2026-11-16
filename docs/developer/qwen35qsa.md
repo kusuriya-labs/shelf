@@ -68,6 +68,25 @@ input_norm -> [indexer] -> gated attention -> residual -> post_norm -> FFN
 - attention はこの bitmap を block mask として消費する（`block_size` とセット）
 - block 数 `blocks = ceil(max_context_tokens / block_size)`
 
+## attention
+
+bitmap の意味は上記のまま変わらない。実行形は 2 つある。
+
+- **block-sparse kernel**（`kernels/optimized/attention/qsa_sparse.hip`）。
+  条件は BF16 KV / F32 output / block mask あり / tree ancestor なし /
+  `head_dim == 256` / `q_heads == 6 * kv_heads` / `block_size == 4` /
+  `page_tokens % 4 == 0`。1 CTA は `(split, kv_head, row)` で、2 warp が
+  3 query head ずつを持つ。選択 block の 4 cell を page table 経由で直接読み、
+  K/V を kv head あたり 1 回だけ読む。decode region は block list を split し、
+  softmax の部分状態を reduce kernel で結合する。`block_size == 4` なので
+  1 block は必ず 1 page 内の連続 4 token に写る。
+- **masked kernel**。上記以外（FP8 / octave KV、tree 行、Qwen4Exp の
+  `q_per_kv = 12` など）は従来どおり bitmap を page 間引きと token 可視判定に
+  使う paged attention で実行する。
+
+prefill は `max_visible_tokens < 12288` の間 masked tiled kernel を使い、
+それ以上で block-sparse に切り替える。decode region は常に block-sparse を選ぶ。
+
 ## dense fallback（budget 以内）
 
 `max_context_tokens <= budget` のとき、選択は何も削らない（全 block が残る）。

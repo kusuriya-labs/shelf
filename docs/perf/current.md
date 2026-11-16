@@ -49,6 +49,53 @@ date・build・GPU 割り当て・生成結果の一致アンカーとともに�
 | カテゴリ別 serving | `vendor/BetterBench`（methodology §9） | decode t/s、TTFT p50 |
 | fp8 KV の数値品質 | `tools/quality_gate.py` / `shelf-bench quality` | ppl 差、mean KL、top-1 一致率 |
 
+## 2026-11-16 Qwen3.8-27B-QSA block-sparse attention reference
+
+QSA の block bitmap を、page 間引きの masked attention ではなく 4-token block 単位で
+読む block-sparse kernel で実行した reference run。indexer の BF16 投影と RMSNorm を
+既存 allowlist に追加したうえでの値である。qualified baseline ではない。
+
+- measurement revision: `7cbe445`
+- model: `models/Qwen3.8-27B-QSA-Quark-AWQ-MXFP4`
+- GPU: Radeon AI PRO R9700 1 枚（`--device 0`）
+- bf16 KV、page 16、greedy、`--max-num-batched-tokens 2048`、prompt は
+  `tests/data/mtp_perf/prose.txt` を model の tokenizer で encode して先頭 N token。
+  decode は 16 token 生成（計測区間 15 token）。
+- dense 参照は同じ checkpoint を hardlink し、`config.json` から `qsa` を除いて
+  `model_type` を `qwen3_5` にしたもの。
+- prefill は `max_visible_tokens >= 12288` で block-sparse、それ未満は masked tiled
+  kernel を使う。
+
+| context | dense prefill | QSA prefill | dense decode | QSA decode |
+| --- | ---: | ---: | ---: | ---: |
+| 3k | 1,302 ms | 1,963 ms | 26.18 tok/s | 25.54 tok/s |
+| 16k | 8,328 ms | 8,394 ms | 24.64 tok/s | 25.09 tok/s |
+| 32k | 20,188 ms | 17,383 ms | 22.65 tok/s | 24.70 tok/s |
+| 64k | 54,247 ms | 35,082 ms | 19.85 tok/s | 23.85 tok/s |
+
+32k / 64k の `GENERATED_IDS` は dense と一致した。
+
+prefill の切り替え閾値は同じ 8k prompt で masked 4,332 ms / sparse 4,474 ms、
+16k で masked 9,075 ms / sparse 8,568 ms だったことから 12,288 に置いた。
+
+```text
+./build/shelf-compute --model-dir models/Qwen3.8-27B-QSA-Quark-AWQ-MXFP4 \
+  --input-ids-file /tmp/opencode/qsa_16384.txt --max-new-tokens 16 \
+  --max-seq-len 16640 --device 0 --prefix-cache 0 --kv-cache-dtype bf16 \
+  --temperature 0 --max-num-batched-tokens 2048
+```
+
+QSA model は `shelf-bench` からも実行できる。
+
+```text
+./build/shelf-bench tg --mode forward --model-dir models/Qwen3.8-27B-QSA-Quark-AWQ-MXFP4 \
+  --context 3072 --tokens 8 --prefill-chunk 2048 --kv-cache-dtype bf16 \
+  --device 0 --warmup 1
+./build/shelf-bench pp --model-dir models/Qwen3.8-27B-QSA-Quark-AWQ-MXFP4 \
+  --prompt-tokens 16384 --prefill-chunk 2048 --kv-cache-dtype bf16 \
+  --device 0 --warmup 1 --runs 1
+```
+
 ## 2026-11-16 Qwen3.8-27B-FP8 TP=2 FP8 activation producer fusion reference
 
 `RESIDUAL_ADD` / `RMS_NORM` / `OUTPUT_GATHER` / `SWIGLU` の producer と FP8 activation
