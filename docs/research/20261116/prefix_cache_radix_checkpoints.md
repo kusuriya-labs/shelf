@@ -145,7 +145,31 @@ DFlash2 + TP2（`test_compute_dflash2_prefix_long.py` と同じ 4300 / 4180 toke
 起動 log は rank あたり `MEMORY_PLAN tp prefix cache: vram 0.15 GiB host 0.15 GiB`、
 実際の host checkpoint は全 rank 合計で 0.29 GiB（TP1 と同じ）である。
 
-### 3.6 unit
+### 3.6 4 並列（27B FP8、`--max-concurrent-requests 4`、chunk 2048、interval 1024）
+
+共通 root 700 token + 各会話に固有の本文を持つ 4 会話を 2 ラウンド流し、
+2 ラウンド目の `restored_tokens` と `entries` を見た。
+
+本文 3300（全長 4000）:
+
+| checkpoints | round 1 後の entries | evictions | round 2 の restored |
+| ---: | ---: | ---: | --- |
+| 4 | 3 | 9 | 全 4 本 688 |
+| 8 | 7 | 3 | 全 4 本 688 |
+| 16 | 10 | 0 | 全 4 本 **3984** |
+
+本文 7300（全長 8000）:
+
+| checkpoints | round 1 後の entries | evictions | round 2 の restored |
+| ---: | ---: | ---: | --- |
+| 16 | 12 | 0 | 全 4 本 **7984** |
+| 32 | 12 | 0 | 全 4 本 7984 |
+
+16 未満では、共有 root（688）以外の checkpoint が 1 ラウンドの prefill 中に
+LRU で落ち、各 request が本文 3300 / 7300 token を毎回 prefill し直す。
+4 並列・全長 4〜8k では 1 ラウンドの save 数が 14〜16 で、それが閾値だった。
+
+### 3.7 unit
 
 `tests/unit/test_prefix_cache.hip` 320 checks PASS（pin、QSA/PLE の host roundtrip を追加）。
 `tests/unit/test_prefix_cache_batcher.hip` は `max_batch_rows` を prompt 長より大きくして
