@@ -54,13 +54,6 @@ Result<OptimizedLaunchResult> try_launch_qsa_key_cache(
     if (!qsa_view_ready(view)) return bad("qsa key cache: state pool missing");
     if (b.group_size != view.compress_ratio || b.flags != view.max_blocks)
         return bad("qsa key cache: geometry differs from the state pool");
-    auto in = resolve_host_value(program, ValueId{b.input_slots[0]}, ctx);
-    if (!in.ok()) return in.status();
-    if (in.value().dtype != ValueDType::BF16 ||
-        in.value().row_domain != ValueRowDomain::TOKEN_ROWS ||
-        in.value().feature_count != view.head_dim || in.value().ptr == nullptr) {
-        return bad("qsa key cache: value contract mismatch");
-    }
     if (b.parameter_index0 >= ctx.host_parameter_count || ctx.host_parameters == nullptr)
         return bad("qsa key cache: norm parameter missing");
     const auto& weight = ctx.host_parameters[b.parameter_index0];
@@ -68,20 +61,9 @@ Result<OptimizedLaunchResult> try_launch_qsa_key_cache(
         weight.elements < view.head_dim) {
         return bad("qsa key cache: norm parameter invalid");
     }
-    const auto* requests =
-        ctx.staged_requests != nullptr ? ctx.staged_requests : ctx.device_requests;
-    const uint32_t num_requests = ctx.staged_request_count != 0u ? ctx.staged_request_count
-                                                                : ctx.num_requests;
-    if (requests == nullptr || num_requests == 0u || ctx.actual_rows == 0u ||
-        ctx.row_positions == nullptr) {
-        return bad("qsa key cache: requests missing");
-    }
 
     ::shelf::kernel::QsaKeyCacheBatchArgs args;
-    args.raw_keys = static_cast<const ::shelf::bf16_t*>(in.value().ptr);
     args.norm_weight = static_cast<const ::shelf::bf16_t*>(weight.device_ptr);
-    args.positions = ctx.row_positions;
-    args.requests = requests;
     args.pooled_base = view.pooled_base;
     args.partial_base = view.partial_base;
     args.pool_count_base = view.pool_count_base;
@@ -92,15 +74,12 @@ Result<OptimizedLaunchResult> try_launch_qsa_key_cache(
     args.history_partial_state_stride =
         ctx.spec.qsa_spec_history.partial_state_stride;
     args.history_count_state_stride = ctx.spec.qsa_spec_history.count_state_stride;
-    args.num_requests = num_requests;
-    args.actual_rows = ctx.actual_rows;
     args.max_sequences = view.max_sequences;
     args.state_index = state->state_index;
     args.max_blocks = view.max_blocks;
     args.head_dim = view.head_dim;
     args.compress_ratio = b.group_size;
     args.rotary_dim = b.rotary_dim;
-    args.raw_row_stride = in.value().row_stride;
     args.pooled_slot_stride = view.pooled_slot_stride;
     args.pooled_layer_stride = view.pooled_layer_stride;
     args.partial_slot_stride = view.partial_slot_stride;
@@ -110,6 +89,64 @@ Result<OptimizedLaunchResult> try_launch_qsa_key_cache(
     args.theta = b.scalar_a;
     args.position_scale = b.scalar_b;
     args.inv_freq = ctx.rope_inv_freq;
+
+    const auto& replay = ctx.spec.qsa_replay;
+    if (replay.rows != 0u) {
+        const auto& history = ctx.spec.qsa_spec_history;
+        if (history.key_journal == nullptr || history.journal_state_stride == 0u)
+            return bad("qsa key cache: replay journal missing");
+        if (replay.row_map == nullptr || replay.positions == nullptr)
+            return bad("qsa key cache: replay inputs missing");
+        if (state->state_index >= view.num_qsa_states)
+            return bad("qsa key cache: state index out of range");
+        args.raw_keys = history.key_journal +
+            static_cast<std::uint64_t>(state->state_index) *
+                history.journal_state_stride;
+        args.positions = replay.positions;
+        args.requests = nullptr;
+        args.raw_row_map = replay.row_map;
+        args.raw_row_stride = view.head_dim;
+        args.num_requests = 1u;
+        args.actual_rows = replay.rows;
+        args.replay_slot = replay.slot;
+        args.replay_rows = replay.rows;
+        const hipError_t error = ::shelf::kernel::launch_qsa_key_cache_batch(args, stream);
+        if (error != hipSuccess)
+            return Status::hip_error("qsa key cache replay launch",
+                                     hipGetErrorString(error), __FILE__, __LINE__);
+        record_physical_launch(1u);
+        record_optimized_op();
+        return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
+    }
+
+    auto in = resolve_host_value(program, ValueId{b.input_slots[0]}, ctx);
+    if (!in.ok()) return in.status();
+    if (in.value().dtype != ValueDType::BF16 ||
+        in.value().row_domain != ValueRowDomain::TOKEN_ROWS ||
+        in.value().feature_count != view.head_dim || in.value().ptr == nullptr) {
+        return bad("qsa key cache: value contract mismatch");
+    }
+    const auto* requests =
+        ctx.staged_requests != nullptr ? ctx.staged_requests : ctx.device_requests;
+    const uint32_t num_requests = ctx.staged_request_count != 0u ? ctx.staged_request_count
+                                                                : ctx.num_requests;
+    if (requests == nullptr || num_requests == 0u || ctx.actual_rows == 0u ||
+        ctx.row_positions == nullptr) {
+        return bad("qsa key cache: requests missing");
+    }
+    args.raw_keys = static_cast<const ::shelf::bf16_t*>(in.value().ptr);
+    args.positions = ctx.row_positions;
+    args.requests = requests;
+    args.num_requests = num_requests;
+    args.actual_rows = ctx.actual_rows;
+    args.raw_row_stride = in.value().row_stride;
+    if (ctx.spec.qsa_spec_history.key_journal != nullptr &&
+        ctx.spec.qsa_spec_history.journal_state_stride != 0u) {
+        args.key_journal = ctx.spec.qsa_spec_history.key_journal +
+            static_cast<std::uint64_t>(state->state_index) *
+                ctx.spec.qsa_spec_history.journal_state_stride;
+        args.journal_rows = ctx.spec.qsa_spec_history.rows;
+    }
     // Prefill blocks are independent: one CTA per compressed block removes the serial
     // per-token loop. Speculative snapshots still need the ordered path.
     const bool parallel_blocks = args.partial_history == nullptr &&

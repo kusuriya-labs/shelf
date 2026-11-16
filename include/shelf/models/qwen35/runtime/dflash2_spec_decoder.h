@@ -5,6 +5,7 @@
 #include <shelf/models/qwen35/dflash2/context_state.h>
 #include <shelf/models/qwen35/dflash2/executor.h>
 #include <shelf/models/qwen35/runtime/executor.h>
+#include <shelf/inference/state/spec_state_history.h>
 #include <shelf/models/qwen35/runtime/gdn_spec_history.h>
 #include <shelf/models/qwen35/runtime/tp_batch_hook.h>
 #include <shelf/models/qwen35/state/state_types.h>
@@ -59,6 +60,11 @@ struct DFlash2GdnRankState {
     GdnStatePool* pool = nullptr;
     hipStream_t stream = nullptr;
     int device = -1;
+    Executor* executor = nullptr;
+    ::shelf::state::SpecStatePools spec_pools;
+    ::shelf::state::SpecStateHistory spec_state;
+    int32_t* replay_rows = nullptr;
+    uint32_t* replay_positions = nullptr;
     void* conv_snapshot = nullptr;
     void* rec_snapshot = nullptr;
     std::size_t conv_bytes = 0u;
@@ -274,6 +280,10 @@ struct DFlash2BatchTreeMetadata {
 
 struct DFlash2SpecBatchContext {
     std::vector<GdnSpecHistory> history;
+    std::vector<::shelf::state::SpecStatePools> spec_pools;
+    std::vector<::shelf::state::SpecStateHistory> spec_state;
+    std::vector<int32_t*> replay_rows;
+    std::vector<uint32_t*> replay_positions;
     std::vector<DFlash2SpecBatchCompact> compact;
     std::vector<DFlash2BatchTreeMetadata> tree;
     std::vector<int32_t> tree_parent_host;

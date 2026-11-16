@@ -20,8 +20,15 @@ __global__ __launch_bounds__(kQsaHeadDim) void qsa_key_cache_batch_kernel(
     const uint32_t d = threadIdx.x;
     __shared__ float scratch[kQsaHeadDim];
     __shared__ float normed[kQsaHeadDim];
-    const ::shelf::runtime::DeviceRequestDescriptor request = args.requests[blockIdx.x];
-    const uint32_t slot = request.request_handle.slot;
+    uint32_t slot = args.replay_slot;
+    uint32_t row_begin = 0u;
+    uint32_t row_count = args.replay_rows;
+    if (args.requests != nullptr) {
+        const ::shelf::runtime::DeviceRequestDescriptor request = args.requests[blockIdx.x];
+        slot = request.request_handle.slot;
+        row_begin = request.row_begin;
+        row_count = request.row_count;
+    }
     if (slot >= args.max_sequences) return;
     bf16_t* pooled = args.pooled_base +
                      static_cast<std::uint64_t>(slot) * args.pooled_slot_stride +
@@ -42,8 +49,8 @@ __global__ __launch_bounds__(kQsaHeadDim) void qsa_key_cache_batch_kernel(
 
     uint32_t partial_count = *partial_count_ptr;
     uint32_t pool_count = *pool_count_ptr;
-    for (uint32_t t = 0; t < request.row_count; ++t) {
-        const uint32_t row = request.row_begin + t;
+    for (uint32_t t = 0; t < row_count; ++t) {
+        const uint32_t row = row_begin + t;
         if (row >= args.actual_rows) break;
         if (args.partial_history != nullptr && row < args.history_rows) {
             bf16_t* hp = args.partial_history +
@@ -63,8 +70,14 @@ __global__ __launch_bounds__(kQsaHeadDim) void qsa_key_cache_batch_kernel(
                 hc[1] = partial_count;
             }
         }
+        const uint32_t src_row = args.raw_row_map != nullptr
+                                     ? static_cast<uint32_t>(args.raw_row_map[row])
+                                     : row;
         const bf16_t* raw =
-            args.raw_keys + static_cast<std::uint64_t>(row) * args.raw_row_stride;
+            args.raw_keys + static_cast<std::uint64_t>(src_row) * args.raw_row_stride;
+        if (args.key_journal != nullptr && row < args.journal_rows) {
+            args.key_journal[static_cast<std::uint64_t>(row) * args.head_dim + d] = raw[d];
+        }
         partial[static_cast<std::uint64_t>(partial_count) * args.head_dim + d] = raw[d];
         ++partial_count;
         __syncthreads();
@@ -441,12 +454,17 @@ namespace {
 
 bool key_cache_batch_valid(const QsaKeyCacheBatchArgs& args) {
     if (args.raw_keys == nullptr || args.norm_weight == nullptr ||
-        args.positions == nullptr || args.requests == nullptr ||
+        args.positions == nullptr ||
         args.pooled_base == nullptr || args.partial_base == nullptr ||
         args.pool_count_base == nullptr || args.partial_count_base == nullptr) {
         return false;
     }
-    if (args.num_requests == 0u || args.actual_rows == 0u || args.max_sequences == 0u ||
+    if (args.requests == nullptr) {
+        if (args.replay_rows == 0u || args.raw_row_map == nullptr) return false;
+    } else if (args.num_requests == 0u) {
+        return false;
+    }
+    if (args.actual_rows == 0u || args.max_sequences == 0u ||
         args.max_blocks == 0u || args.head_dim != kQsaHeadDim ||
         args.compress_ratio == 0u || args.compress_ratio > 4u ||
         args.rotary_dim == 0u || (args.rotary_dim & 1u) != 0u ||
@@ -468,7 +486,8 @@ bool key_cache_batch_valid(const QsaKeyCacheBatchArgs& args) {
 hipError_t launch_qsa_key_cache_batch(const QsaKeyCacheBatchArgs& args,
                                       hipStream_t stream) {
     if (!key_cache_batch_valid(args)) return hipErrorInvalidValue;
-    qsa_key_cache_batch_kernel<<<args.num_requests, kQsaHeadDim, 0, stream>>>(args);
+    const uint32_t grid = args.requests != nullptr ? args.num_requests : 1u;
+    qsa_key_cache_batch_kernel<<<grid, kQsaHeadDim, 0, stream>>>(args);
     return hipGetLastError();
 }
 

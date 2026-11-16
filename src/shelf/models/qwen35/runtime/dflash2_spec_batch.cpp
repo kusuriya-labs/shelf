@@ -22,6 +22,10 @@ Result<DFlash2SpecBatchContext> create_dflash2_spec_batch_context(
     ctx.tree_budget = tree_budget;
     ctx.history.resize(bindings.size());
     ctx.compact.resize(bindings.size());
+    ctx.spec_pools.resize(bindings.size());
+    ctx.spec_state.resize(bindings.size());
+    ctx.replay_rows.resize(bindings.size());
+    ctx.replay_positions.resize(bindings.size());
     if (tree_budget != 0u) {
         ctx.tree.resize(bindings.size());
         ctx.tree_parent_host.resize(max_rows);
@@ -79,6 +83,28 @@ Result<DFlash2SpecBatchContext> create_dflash2_spec_batch_context(
             static_cast<uint64_t>(ctx.history[r].conv_state_bytes +
                                   ctx.history[r].recurrent_state_bytes);
 
+        if (bindings[r].executor != nullptr) {
+            ctx.spec_pools[r].qsa = bindings[r].executor->qsa_state_pool.get();
+            ctx.spec_pools[r].ple = bindings[r].executor->ple_conv_state_pool.get();
+            if (tree_budget != 0u && ctx.spec_pools[r].ple != nullptr) {
+                return Status::unsupported(
+                    "dflash2: tree verify with PLE state is not supported", __FILE__,
+                    __LINE__);
+            }
+            auto spec = ::shelf::state::create_spec_state_history(arena, ctx.spec_pools[r],
+                                                                  max_rows);
+            if (!spec.ok()) return spec.status();
+            ctx.spec_state[r] = spec.release();
+            auto rows_alloc = arena.allocate_aligned(
+                static_cast<std::size_t>(max_rows) * sizeof(int32_t), 256u);
+            if (!rows_alloc.ok()) return rows_alloc.status();
+            ctx.replay_rows[r] = static_cast<int32_t*>(rows_alloc.release().data());
+            auto pos_alloc = arena.allocate_aligned(
+                static_cast<std::size_t>(max_rows) * sizeof(uint32_t), 256u);
+            if (!pos_alloc.ok()) return pos_alloc.status();
+            ctx.replay_positions[r] = static_cast<uint32_t*>(pos_alloc.release().data());
+        }
+
         const GdnStatePoolDeviceView view = pool.device_view();
         const uint64_t states = view.num_gdn_states;
         const uint64_t vdim = static_cast<uint64_t>(view.num_v_heads) * view.head_v;
@@ -112,6 +138,10 @@ Status shutdown_dflash2_spec_batch_context(DFlash2SpecBatchContext& context) noe
     }
     context.history.clear();
     context.compact.clear();
+    context.spec_pools.clear();
+    context.spec_state.clear();
+    context.replay_rows.clear();
+    context.replay_positions.clear();
     context.tree.clear();
     context.tree_parent_host.clear();
     context.tree_depth_host.clear();
