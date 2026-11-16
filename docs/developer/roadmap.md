@@ -35,10 +35,11 @@ draft GPU 時間は request 数に比例して増える。
 優先順は次のとおり。
 
 1. **BF16 small-M（M≤64）** と **kernel trace 内訳に基づく launch 削減**。
-   FP8 / MXFP4 の in-block split-K と、BF16 の block-per-output-row
-   （out_features <= 192、rows <= 16）は実装済みである。
-   残りは out_features > 192 の M=9..16 で ExactRows より速い
-   WmmaKPartition / Wmma を、MTP verify の縮約順契約と両立させることである
+   FP8 / MXFP4 の in-block split-K、BF16 の block-per-output-row
+   （out_features <= 192、rows <= 16）、BF16 の M=9..16 の
+   WmmaKPartition / Wmma は実装済みである。
+   残りは、M=1..8 と M=9..16 の縮約木が変わることによる MTP verify の
+   生成結果の確認と、必要なら性能側の再調整である
    （[../research/20261116/bf16_small_rows.md](../research/20261116/bf16_small_rows.md)）。
    内訳は rocprofv3 kernel-trace から取り直す（[../perf/methodology.md](../perf/methodology.md) §1）。
 2. **dynamic verify width**（round ごとの draft 数可変）。

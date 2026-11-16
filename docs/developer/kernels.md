@@ -101,9 +101,14 @@ optimized variantは `src/shelf/kernels/optimized/` に実装する。
     行ごとの縮約順は `kRows` に依存しない。
   - selector は rows <= 16、out_features <= 192、k が 8 要素整列、
     weight / input が 16 byte 整列、input row stride が 8 要素整列のとき
-    `SmallRows` を選ぶ。out_features > 192 の M=1..16 は `ExactRows` /
-    `ExactRowsDot2` のままである。
-  - `SmallRows` の実測と out_features 192 の上限は
+    `SmallRows` を選ぶ。
+  - out_features > 192 の rows 1..8 は `ExactRows` / `ExactRowsDot2`。
+    rows 9..16 は out_features <= 2560 なら `WmmaKPartition`、それより広い
+    出力は rows 9..10 が `ExactRows`、rows 11..16 が `Wmma` である。
+  - 行ごとの縮約順は各 kernel の内部では row 数に依存しない。ただし
+    rows 1..8 と 9..16 は別 kernel なので、その境界をまたぐ出力は
+    bit 一致しない。MTP verify は selector が選んだ同じ帯の kernel を使う。
+  - `SmallRows` の実測と out_features 192 の上限、M=9..16 の比較は
     [../research/20261116/bf16_small_rows.md](../research/20261116/bf16_small_rows.md)。
 
 ### linear / FP8 W8A8

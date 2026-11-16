@@ -2,9 +2,8 @@
 
 実験 ID: `SMALLM-BF16-1`
 
-[bf16_small_m_reference.md](bf16_small_m_reference.md) の案 A（block-per-output-row）を
-BF16 に実装し、既存の `ExactRows` と比較した記録である。案 B（M=9..16 の WMMA）は
-縮約順の契約を変えるため、実装と計測だけ行い selector には接続していない。
+[bf16_small_m_reference.md](bf16_small_m_reference.md) の案 A（block-per-output-row）と
+案 B（M=9..16 の WMMA）を BF16 に接続し、既存の `ExactRows` と比較した記録である。
 
 ## 1. 変更
 
@@ -22,16 +21,16 @@ BF16 に実装し、既存の `ExactRows` と比較した記録である。案 B
 
 ### 1.2 Selector
 
-`src/shelf/inference/execution/selectors/linear_selector.cpp` で、次の条件のとき
-`SmallRows` を選ぶ。
+`src/shelf/inference/execution/selectors/linear_selector.cpp` の選択は次のとおり。
 
-- `rows <= 16`
-- `out_features <= 192`
-- `allow_exact_rows`
-- `k % 8 == 0`、weight / input が 16 byte 整列、input row stride が 8 要素整列
-
-`out_features > 192` の M=1..16 は従来の `ExactRows` / `ExactRowsDot2` のままにした。
-MTP verify の exact-rows 契約を変えないためである。
+- `rows <= 16`、`out_features <= 192`、`allow_exact_rows`、
+  `k % 8 == 0`、weight / input が 16 byte 整列、input row stride が 8 要素整列:
+  `SmallRows`。
+- `out_features > 192` の rows 1..8: `ExactRows` / `ExactRowsDot2`。
+- `out_features > 192` の rows 9..16:
+  - `out_features <= 2560`: `WmmaKPartition`
+  - `out_features > 2560` かつ rows 9..10: `ExactRows`
+  - `out_features > 2560` かつ rows 11..16: `Wmma`
 
 ### 1.3 その他
 
@@ -88,9 +87,9 @@ p50 µs。`--impl exact` と `--impl smallrows` を交互に近い順で測っ�
 | 48:5120 | 16 | 14.8 | 9.0 | 1.64x |
 | 64:2048 | 8 | 6.7 | 5.0 | 1.34x |
 
-`1024:5120`, `2560:2560`, `5120:5120` の M=9..16 は ExactRows のままである。
+M=9..16 の auto は 3 節に記す。
 
-## 3. M=9..16 の候補（未接続）
+## 3. M=9..16 の接続
 
 既存の `WmmaKPartition`（8-way K split）と `Wmma`（1 row tile）を
 `--impl splitk` / `--impl wmma` で測った。p50 µs。
@@ -105,9 +104,22 @@ p50 µs。`--impl exact` と `--impl smallrows` を交互に近い順で測っ�
 
 - out_features <= 2560 は `WmmaKPartition` が ExactRows より速い。
 - out_features > 2560 は rows>=11 で `Wmma` が速い。rows=9〜10 は ExactRows が速い。
-- ただしこの切替は、M=1..8 の ExactRows と M=9..16 の split/Wmma で
-  縮約木が変わる。MTP verify の「M=1 と M=16 が同じ行順」という契約を
-  維持できないため、selector には接続していない。
+この切替は、M=1..8 の ExactRows と M=9..16 の split/Wmma で縮約木が変わる。
+行ごとの縮約順は各 kernel の内部では row 数に依存しないが、8/9 の境界を
+またぐ出力は bit 一致しない。MTP verify は selector が選んだ同じ帯の kernel を
+使うため、同じ帯の中では再現性がある。この契約変更を明示したうえで接続した。
+
+auto の実測（p50 µs、変更前は ExactRows）:
+
+| shape | rows | 変更前 | auto | 比 |
+| --- | ---: | ---: | ---: | ---: |
+| 256:2048 | 16 | 10.1 | 7.1 | 1.42x |
+| 1024:5120 | 12 | 23.7 | 15.0 | 1.58x |
+| 1024:5120 | 16 | 29.1 | 14.7 | 1.98x |
+| 2560:2560 | 12 | 28.0 | 15.7 | 1.78x |
+| 2560:2560 | 16 | 33.6 | 16.0 | 2.10x |
+| 5120:5120 | 12 | 91.9 | 72.2 | 1.27x |
+| 5120:5120 | 16 | 130.8 | 70.5 | 1.86x |
 
 ## 4. 採否
 
@@ -115,8 +127,10 @@ p50 µs。`--impl exact` と `--impl smallrows` を交互に近い順で測っ�
   GDN a|b（16/32）、48 幅の GDN 出力、64/128/192 の中間帯で 1.1〜2.2 倍。
 - REJECT: out_features>=256 への `SmallRows`。N=256 の異常と、広い出力では
   ExactRows の warp-per-row が勝つ。
-- DEFER: M=9..16 の `WmmaKPartition` / `Wmma`。性能は取れるが、
-  MTP verify の縮約順契約を変更する判断が必要である。
+- ACCEPT: M=9..16 の `WmmaKPartition`（out_features <= 2560）と
+  `Wmma`（out_features > 2560、rows >= 11）。M=1..8 との bit 一致は捨てる。
+- 契約: 行ごとの縮約順は各 kernel の内部で row 数に依存しない。
+  rows 1..8 と 9..16 は別 kernel なので、境界をまたぐ出力は一致しない。
 
 ## 5. 検証
 

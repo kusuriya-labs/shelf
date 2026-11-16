@@ -128,9 +128,10 @@ compute 出力が oracle（`3793, 248046` = `OK`）と一致せず `91`（`|`）
     rows 1..16 に接続した（docs/research/20261116/bf16_small_rows.md）。
     16:2048 rows=16 は 9.8 → 5.6 µs、48:5120 rows=16 は 14.8 → 9.0 µs。
   * BF16 の M=9..16 は、out_features <= 2560 で WmmaKPartition、
-    wide out で Wmma が ExactRows より速い。ただし M=1..8 と縮約木が変わるため、
-    MTP verify の M 不変契約をどう扱うか決めてから接続する。
-  * 次の候補は BF16 M=9..16 の契約判断、FP8 の grid.z split + scratch。
+    wide out で Wmma を選ぶようにした。1024:5120 rows=16 は 29.1 → 14.7 µs、
+    5120:5120 rows=16 は 130.8 → 70.5 µs。M=1..8 と 9..16 は別 kernel なので、
+    その境界をまたぐ出力は bit 一致しない。
+  * 次の候補は FP8 の grid.z split + scratch。
 
 ## マルチリクエスト + 投機推論
 

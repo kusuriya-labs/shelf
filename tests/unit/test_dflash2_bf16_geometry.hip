@@ -182,6 +182,9 @@ int main() {
     run_geometry(arena, stream, 5120u, 25600u, 17u, 222u, true);
     run_geometry(arena, stream, 5120u, 25600u, 33u, 333u, true);
     run_geometry(arena, stream, 5120u, 25600u, 18u, 444u, true);
+    run_geometry(arena, stream, 1024u, 5120u, 12u, 555u, false);
+    run_geometry(arena, stream, 5120u, 25600u, 12u, 666u, false);
+    run_geometry(arena, stream, 5120u, 25600u, 16u, 777u, false);
 
     shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     const shelf::Status shutdown = arena.shutdown();

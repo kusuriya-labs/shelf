@@ -229,6 +229,13 @@ select_bf16_gemm_config(const Bf16GemmSelectorInput& input) {
             return shelf::kernel::Bf16GemmConfig{
                 Id::SmallRows, static_cast<uint8_t>(input.rows)};
         }
+        if (input.rows > 8u && input.rows <= shelf::kernel::kBf16GemmExactRowsKernelMax) {
+            if (input.out_features <= shelf::kernel::kBf16GemmSmallMRowsSplitKMaxOut)
+                return shelf::kernel::Bf16GemmConfig{Id::WmmaKPartition, 0u};
+            if (input.rows >= shelf::kernel::kBf16GemmWmmaMinRows)
+                return shelf::kernel::Bf16GemmConfig{Id::Wmma, 0u};
+            // rows 9..10 and a wide output: exact-rows still wins.
+        }
     }
     if (input.allow_exact_rows && input.rows == 1u && k_aligned && input.weight_aligned16 &&
         input.input_aligned16)

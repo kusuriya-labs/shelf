@@ -116,6 +116,14 @@ void test_bf16() {
     }
     check(dot2_ok, "bf16 allow_dot2_rows rows 2..8 -> ExactRowsDot2(rows)");
 
+    bool split_rows_ok = true;
+    for (uint32_t rows = 9u; rows <= shelf::kernel::kBf16GemmExactRowsKernelMax; ++rows) {
+        split_rows_ok = split_rows_ok &&
+                        is_bf16(sel_bf16(rows, 1024, 2560, 2560, true, true, true),
+                                Bf16GemmConfigId::WmmaKPartition, 0u);
+    }
+    check(split_rows_ok, "bf16 rows 9..16 medium out -> WmmaKPartition");
+
     bool small_rows_ok = true;
     for (uint32_t rows = 1u; rows <= shelf::kernel::kBf16GemmSmallRowsMax; ++rows) {
         small_rows_ok = small_rows_ok &&
@@ -128,9 +136,12 @@ void test_bf16() {
     check(is_bf16(sel_bf16(9, 5120, 5120, 5120, true, true, true),
                   Bf16GemmConfigId::ExactRows, 9u),
           "bf16 rows=9 wide out -> ExactRows(9)");
+    check(is_bf16(sel_bf16(11, 5120, 5120, 5120, true, true, true),
+                  Bf16GemmConfigId::Wmma, 0u),
+          "bf16 rows=11 wide out -> Wmma");
     check(is_bf16(sel_bf16(16, 5120, 5120, 5120, true, true, true),
-                  Bf16GemmConfigId::ExactRows, 16u),
-          "bf16 rows=16 wide out -> ExactRows(16)");
+                  Bf16GemmConfigId::Wmma, 0u),
+          "bf16 rows=16 wide out -> Wmma");
     check(is_bf16(sel_bf16(1, 1024, 2560, 2560, true, true, true, true),
                   Bf16GemmConfigId::ExactRows, 1u),
           "bf16 rows=1 ignores allow_dot2_rows -> ExactRows(1)");
