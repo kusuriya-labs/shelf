@@ -1,7 +1,7 @@
-#include <shelf/inference/execution/fp8_activation_producer.h>
+#include <shelf/kernels/fused/fp8_activation_producer.h>
 #include <shelf/quantization/codec/e4m3_detail.h>
 #include <shelf/quantization/fp8/fp8_frag.h>
-#include "../../kernels/optimized/detail/rmsnorm_device.h"
+#include "../optimized/detail/rmsnorm_device.h"
 
 #include <hip/hip_bf16.h>
 #include <hip/hip_runtime.h>

@@ -7,7 +7,7 @@
 #include <shelf/inference/execution/boundary_deferred.h>
 #include <shelf/inference/execution/final_producer.h>
 #include <shelf/inference/execution/exl3_dispatch_decision.h>
-#include <shelf/inference/execution/fp8_activation_producer.h>
+#include <shelf/kernels/fused/fp8_activation_producer.h>
 #include <shelf/inference/execution/physical_launch.h>
 #include <shelf/quantization/quant_contract.h>
 #include <shelf/inference/execution/program_executor.h>

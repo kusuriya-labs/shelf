@@ -1,4 +1,4 @@
-#include <shelf/inference/execution/fp8_activation_producer.h>
+#include <shelf/kernels/fused/fp8_activation_producer.h>
 #include <shelf/inference/execution/optimized_dispatch.h>
 #include <shelf/inference/execution/program_executor.h>
 #include <shelf/kernels/optimized/activation_quantize.h>

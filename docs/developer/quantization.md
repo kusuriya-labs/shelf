@@ -288,7 +288,7 @@ rows / outputs が 16 以下で、batch context と output row mapping が使え
 dispatch の無効化は `SHELF_DISABLE_FP8_BOUNDARY` / `SHELF_DISABLE_FP8_FINAL` /
 `SHELF_DISABLE_FP8_SWIGLU` で行う。`SHELF_OP_DUMP`、`SHELF_OP_SYNC`、
 `SHELF_LINEAR_INPUT_DUMP`、value trace、layer override では融合しない。実装は
-`src/shelf/inference/execution/launch_fp8_activation_producer.hip` と
+`src/shelf/kernels/fused/fp8_activation_producer.hip` と
 `try_launch_fp8_residual_norm_quantize` / `try_launch_fp8_norm_quantize` /
 `try_launch_fp8_swiglu_quantize` / `try_launch_fp8_final_gather`
 （`optimized_dispatch.hip`）にある。

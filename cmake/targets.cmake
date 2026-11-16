@@ -132,6 +132,7 @@ set(SHELF_FUSED_KERNEL_SOURCES
     src/shelf/kernels/fused/exl3/producer_rotate.hip
     src/shelf/kernels/fused/exl3/producer_rotate_rows.hip
     src/shelf/kernels/fused/exl3/rotate_out.hip
+    src/shelf/kernels/fused/fp8_activation_producer.hip
     src/shelf/kernels/fused/exl3/rotate_quantize.hip
     src/shelf/kernels/fused/hyper_connection.hip
     src/shelf/kernels/fused/kv_append_octave.hip
@@ -259,7 +260,6 @@ add_library(shelf_inference_execution STATIC
     src/shelf/inference/execution/launch_boundary_fast.hip
     src/shelf/inference/execution/launch_final_rotate.hip
     src/shelf/inference/execution/launch_boundary_out_rotate.hip
-    src/shelf/inference/execution/launch_fp8_activation_producer.hip
     src/shelf/inference/execution/elementwise_dispatch.hip
     src/shelf/inference/execution/exl3_dense_gemm.hip
     src/shelf/inference/execution/gemm_lt.hip
