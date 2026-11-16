@@ -106,8 +106,11 @@ prefill は `max_visible_tokens < 12288` の間 masked tiled kernel を使い、
 
 - pipeline stage と tensor parallel は未実装（明示的に `Status::unsupported`）。
 - YaRN などの非 default rope profile は未実装。
-- speculative decode（MTP drafter）は未配線。`LoadedModel::has_mtp_block()` は QSA
-  family では false を返す（draft 棄却時に QSA state を巻き戻す経路が無いため）。
+- MTP drafter は未配線。`LoadedModel::has_mtp_block()` は QSA family では false を返す
+  （QSA checkpoint の MTP block を load する経路がまだ無い）。
+- DFlash2 の chain / tree verify は `shelf::state::SpecStateHistory` で QSA state を
+  巻き戻す（[dflash2.md](dflash2.md) の rolling state の rollback）。PLE を持つ target の
+  tree verify は未対応。
 - select kernel の上限は `indexer_head_dim == 128`、`indexer_heads <= 8`、
   `top_k <= 1024`。
 

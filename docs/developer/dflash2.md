@@ -618,6 +618,33 @@ token を host へ戻して次の position を決めたりしない。`draft_row
      GDN recurrence は role 固定の serial variant である。
    - target samples から `spec_greedy_accept` で longest-prefix acceptance を行う。
 
+### rolling state の rollback
+
+verify は target の rolling state を進めるため、reject された draft の分を戻す。
+
+- GDN: round 開始で conv / recurrent を snapshot し、partial accept は compact log を
+  受理 path だけ再適用する。
+- QSA key state: `shelf::state::SpecStateHistory` の per-row history を使う。
+  QSA key cache は verify 中に「その row を処理する前の partial と counts」を
+  row ごとに保存し、`restore_spec_state()` が指定 row の状態を書き戻す。
+  - chain: `row = accepted + 1`。
+  - tree: `row = 0`（round 開始）へ戻し、受理 path を journal から再適用する。
+    journal は verify 中に保存した各 row の normed indexer key で、
+    `Executor::replay_qsa_spec_state()` が受理 path の row と position で
+    同じ QSA key cache を回す。tree は受理 path が兄弟 row を飛ばすため、
+    per-row history の単純復元では足りない。
+- PLE conv state: 同じ history で row 単位に戻す。PLE を持つ target の tree verify は
+  未対応で、decoder 作成時に `Status::unsupported` を返す。
+
+buffer は rank ごとに `create_spec_state_history()`（`QSA / PLE` の optional pool と
+行数）で確保する。single decoder は自分の workspace、batched serve は
+`DFlash2SpecBatchContext` が所有する。行数は single が
+`max(history_rows, num_drafts + 1, tree_budget)`、batched が `max_rows` である。
+serve の TP=1 経路では rank binding に `executor` と `model_state` を渡す必要がある。
+
+journal は verify の QSA key cache が 1 row あたり `head_dim` の BF16 を書くだけで、
+通常 decode（history が null）には影響しない。
+
 ### batched step
 
 複数 request の target verify を 1 つの `ScheduledBatch` に統合する。serve mode の

@@ -168,3 +168,65 @@ QWEN35QSA-3 の 2000 token でも QSA 無効で不一致を確認している。
 
 NO-GO とするのは、tree を実装しないまま QSA + DFlash2 を有効化する場合である。
 その場合は現状どおり gate で拒否し、QWEN35QSA-3 の結論を維持する。
+
+## 8. 実装結果
+
+GO の条件どおり実装した。QSA 固有の分岐は追加せず、spec decode の rolling state の
+契約として `shelf::state::SpecStateHistory` を導入した。
+
+### 8.1 構成
+
+- `include/shelf/inference/state/spec_state_history.h`（新規）
+  - `SpecStatePools`（QSA / PLE の optional pool）
+  - `SpecStateHistory`（QSA partial / counts / key journal、PLE conv window）
+  - `create_spec_state_history` / `restore_spec_state`
+- `QsaSpecHistoryDeviceView` に `key_journal` / `journal_state_stride` を追加。
+- `QsaKeyCacheBatchArgs` に `key_journal` / `raw_row_map` / `replay_slot` / `replay_rows`
+  を追加。verify は journal を書き、replay は journal を compaction なしで読む。
+- `Executor::replay_qsa_spec_state()`: program の `QSA_KEY_CACHE` dispatch を
+  replay mode で実行する。model 固有の norm / rope / state index は executor が持つ。
+- DFlash2 は chain / tree の両方で、
+  - chain partial accept: `restore_spec_state(row = accepted + 1)`
+  - tree: `restore_spec_state(row = 0)` + `replay_qsa_spec_state(受理 path)`
+  を行う。single と batched serve の両経路に入れた。
+- PLE を持つ target の tree は `Status::unsupported` で拒否する（27B は PLE 無し）。
+
+MTP は既存のフィールド（`qsa_partial_history` 等）をそのまま使い、同じ view 型と
+restore 意味論を共有する。MTP の buffer 管理を `SpecStateHistory` に寄せる整理は
+別変更とする（qwen4exp の実機検証が必要なため）。
+
+### 8.2 状態の不変条件（実測）
+
+`4 × pool_count + partial_count == prompt + 生成 − 1` を確認した。
+
+| 経路 | prompt | 生成 | 期待 | 実測 |
+| --- | ---: | ---: | ---: | ---: |
+| single chain（drafts 4） | 3072 | 16 | 3087 | 771/3 |
+| single tree（既定） | 3072 | 16 | 3087 | 771/3 |
+| single tree | 16384 | 11 | 16394 | 4098/2 |
+| serve batched（1 session, tree） | 3072 | 16 | 3087 | 771/3 |
+| serve batched（2 session, chain） | 3072 / 3071 | 16 / 16 | 3087 / 3086 | 771/3 / 771/2 |
+
+### 8.3 速度
+
+R9700 1 枚、3k context、greedy、bf16 KV。
+
+| 条件 | decode |
+| --- | ---: |
+| DFlash2 chain（drafts 4、修正前） | 47.24 tok/s |
+| DFlash2 chain（drafts 4、修正後） | 46.96 tok/s |
+| DFlash2 tree（既定 budget 10） | 46.09 tok/s |
+
+replay / restore の追加は round あたり 1 launch と 40 KiB の journal 書き込みで、
+round 時間の 1 % 未満に収まった。16k・tree では 75.5 tok/s。
+
+### 8.4 テスト
+
+- `test_qsa_spec_state_replay`（新規）: journal が各行の normed key を記録すること、
+  replay が受理 path を直接実行した結果と pooled / partial / counts まで一致すること、
+  `create_spec_state_history` の stride、`restore_spec_state` の行復元と範囲外拒否。
+- `test_qsa_sparse_attention`: 変更なしで PASS。
+- `test_qsa_state_pool` / `test_qsa_key_path` / `test_paged_attention` /
+  `test_qwen35_*_selector` / `test_gemm_bf16_*` も PASS。
+- 非 QSA model（`models/kusuriya-labs/Qwen3.8-27B-EXL3-INT8-4bpw` + DFlash2）で
+  spec state が no-op のまま動作することを確認（63.79 tok/s、3 桁台の受け入れ）。

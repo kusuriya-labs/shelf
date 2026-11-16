@@ -49,6 +49,39 @@ date・build・GPU 割り当て・生成結果の一致アンカーとともに�
 | カテゴリ別 serving | `vendor/BetterBench`（methodology §9） | decode t/s、TTFT p50 |
 | fp8 KV の数値品質 | `tools/quality_gate.py` / `shelf-bench quality` | ppl 差、mean KL、top-1 一致率 |
 
+## 2026-11-16 Qwen3.8-27B-QSA DFlash2 reference
+
+QSA target の spec decode で、reject された draft の QSA key state を
+per-row history から復元する構成の reference run。qualified baseline ではない。
+
+- measurement revision: `e189338`
+- model: `models/Qwen3.8-27B-QSA-Quark-AWQ-MXFP4`
+- drafter: `models/Qwen3.8-27B-DFlash2-FP8`
+- GPU: Radeon AI PRO R9700 1 枚（`--device 0`）
+- bf16 KV、greedy、`--prefix-cache 0`、prompt は `tests/data/mtp_perf/prose.txt` を
+  tokenizer で encode して 3072 / 16384 token。decode は 16 token 生成。
+
+| 条件 | decode |
+| --- | ---: |
+| 3k、DFlash2 chain（drafts 4、QSA state rollback なし） | 47.24 tok/s |
+| 3k、DFlash2 chain（drafts 4、rollback あり） | 46.96 tok/s |
+| 3k、DFlash2 tree（既定 budget 10、rollback あり） | 46.09 tok/s |
+| 16k、DFlash2 tree（既定 budget 10、rollback あり） | 75.51 tok/s |
+
+- rollback の追加は round あたり 1 launch と 40 KiB の journal 書き込みで、round 時間の
+  1 % 未満だった。
+- QSA state の不変条件 `4 × pool_count + partial_count == prompt + 生成 − 1` は
+  single chain / single tree / 16k / serve の batched 経路で一致した。
+
+```text
+./build/shelf-compute --model-dir models/Qwen3.8-27B-QSA-Quark-AWQ-MXFP4 \
+  --dflash2-model-dir models/Qwen3.8-27B-DFlash2-FP8 \
+  --input-ids-file /tmp/opencode/qsa_3072.txt --max-new-tokens 16 \
+  --max-seq-len 3328 --device 0 --prefix-cache 0 --kv-cache-dtype bf16 \
+  --temperature 0
+# chain: 上に --dflash2-drafts 4（tree auto は drafts 7 + greedy で有効）
+```
+
 ## 2026-11-16 Qwen3.8-27B-QSA block-sparse attention reference
 
 QSA の block bitmap を、page 間引きの masked attention ではなく 4-token block 単位で
