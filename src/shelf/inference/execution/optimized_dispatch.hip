@@ -7,6 +7,7 @@
 #include <shelf/inference/execution/boundary_deferred.h>
 #include <shelf/inference/execution/final_producer.h>
 #include <shelf/inference/execution/exl3_dispatch_decision.h>
+#include <shelf/inference/execution/fp8_activation_producer.h>
 #include <shelf/inference/execution/physical_launch.h>
 #include <shelf/quantization/quant_contract.h>
 #include <shelf/inference/execution/program_executor.h>
@@ -1259,6 +1260,192 @@ Result<OptimizedLaunchResult> try_launch_attn_q(
 Result<OptimizedLaunchResult> try_launch_attn_kv(
     const ::shelf::runtime::Program&, size_t, size_t, HostExecutionContext&, hipStream_t);
 
+Result<OptimizedLaunchResult> try_launch_fp8_residual_norm_quantize(
+    const ::shelf::runtime::Program& program, size_t i, size_t end,
+    HostExecutionContext& ctx, hipStream_t stream) {
+    const OptimizedLaunchResult miss{OptimizedLaunchKind::NotApplicable};
+    static const bool enabled = std::getenv("SHELF_DISABLE_FP8_BOUNDARY") == nullptr &&
+        std::getenv("SHELF_OP_DUMP") == nullptr && std::getenv("SHELF_OP_SYNC") == nullptr &&
+        std::getenv("SHELF_LINEAR_INPUT_DUMP") == nullptr;
+    if (!enabled || ctx.value_trace || ctx.layer_override_count || ctx.tp_active ||
+        i + 3u >= end || ctx.workspace == nullptr || ctx.weights == nullptr) return miss;
+    const auto& add = program.dispatches[i];
+    const auto& norm = program.dispatches[i + 1u];
+    const auto& quant = program.dispatches[i + 2u];
+    const auto& linear = program.dispatches[i + 3u];
+    if (add.kernel_id != KernelId::RESIDUAL_ADD || norm.kernel_id != KernelId::RMS_NORM ||
+        quant.kernel_id != KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED ||
+        linear.kernel_id != KernelId::LINEAR_FP8_FINEGRAINED) return miss;
+    if (add.input_count != 2u || add.output_count != 1u ||
+        norm.input_count != 1u || norm.output_count != 1u ||
+        quant.input_count != 1u || linear.input_count != 0u ||
+        linear.output_count != 1u ||
+        add.output_slots[0] != norm.input_slots[0] ||
+        norm.output_slots[0] != quant.input_slots[0] ||
+        quant.workspace_slot == ::shelf::runtime::kNoWorkspace ||
+        quant.workspace_slot != linear.workspace_slot) return miss;
+    if (linear.weight_index >= ctx.weight_count) return miss;
+    const auto& w = ctx.weights[linear.weight_index];
+    if (w.encoding != 1u || w.cols != 5120u || w.k_padded != 5120u) return miss;
+    const auto* norm_binding =
+        program.find_value(::shelf::runtime::ValueId{norm.output_slots[0]});
+    if (norm_binding == nullptr ||
+        (norm_binding->storage != ::shelf::runtime::ValueStorage::WORKSPACE &&
+         norm_binding->storage != ::shelf::runtime::ValueStorage::WORKSPACE_VIEW))
+        return miss;
+    for (size_t j = i + 3u; j < program.dispatches.size(); ++j)
+        for (uint32_t k = 0; k < program.dispatches[j].input_count; ++k)
+            if (program.dispatches[j].input_slots[k] == norm.output_slots[0]) return miss;
+    PhysicalRmsNormLaunch n{};
+    auto resolved_norm = resolve_rmsnorm_physical(program, norm, ctx, n);
+    if (!resolved_norm.ok()) return resolved_norm.status();
+    if (resolved_norm.value() != PhysicalResolveStatus::Applicable ||
+        n.variant != PhysicalRmsNormVariant::Bf16PfOnePlus ||
+        n.features != 5120u || n.group_size != 5120u || n.rows == 0u || !n.weight)
+        return miss;
+    PhysicalActivationQuantizeLaunch q{};
+    auto resolved_quant = resolve_activation_quantize_physical(program, quant, ctx, q);
+    if (!resolved_quant.ok()) return resolved_quant.status();
+    if (resolved_quant.value() != PhysicalResolveStatus::Applicable ||
+        q.k != 5120u || q.k_padded != 5120u || q.rows != n.rows ||
+        q.code_row_stride == 0u || q.scale_row_stride == 0u ||
+        q.codes == 0u || q.scales == 0u) return miss;
+    auto a = resolve_host_value(program, ::shelf::runtime::ValueId{add.input_slots[0]}, ctx);
+    auto b = resolve_host_value(program, ::shelf::runtime::ValueId{add.input_slots[1]}, ctx);
+    auto r = resolve_host_value(program, ::shelf::runtime::ValueId{add.output_slots[0]}, ctx);
+    if (!a.ok()) return a.status();
+    if (!b.ok()) return b.status();
+    if (!r.ok()) return r.status();
+    if (a.value().dtype != ValueDType::BF16 || b.value().dtype != ValueDType::BF16 ||
+        r.value().dtype != ValueDType::BF16 ||
+        a.value().feature_count != 5120u || b.value().feature_count != 5120u ||
+        r.value().feature_count != 5120u || a.value().ptr == nullptr ||
+        b.value().ptr == nullptr || r.value().ptr == nullptr ||
+        rows_for(r.value(), ctx) != q.rows) return miss;
+    ::shelf::execution::Fp8ResidualNormArgs args{};
+    args.a = static_cast<const ::shelf::bf16_t*>(a.value().ptr);
+    args.b = static_cast<const ::shelf::bf16_t*>(b.value().ptr);
+    args.residual = static_cast<::shelf::bf16_t*>(r.value().ptr);
+    args.weight = reinterpret_cast<const ::shelf::bf16_t*>(n.weight);
+    args.codes = reinterpret_cast<uint8_t*>(q.codes);
+    args.scales = reinterpret_cast<float*>(q.scales);
+    args.rows = q.rows;
+    args.k = q.k;
+    args.k_padded = q.k_padded;
+    args.a_stride = a.value().row_stride;
+    args.b_stride = b.value().row_stride;
+    args.residual_stride = r.value().row_stride;
+    args.code_stride = q.code_row_stride;
+    args.scale_stride = q.scale_row_stride;
+    args.eps = n.eps;
+    const hipError_t herr =
+        ::shelf::execution::launch_fp8_residual_norm_quantize(args, stream);
+    if (herr != hipSuccess)
+        return Status::hip_error("fp8 residual norm quantize launch",
+                                 hipGetErrorString(herr), __FILE__, __LINE__);
+    record_physical_launch(1);
+    record_optimized_op();
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 3u};
+}
+
+Result<OptimizedLaunchResult> try_launch_fp8_final_gather(
+    const ::shelf::runtime::Program& program, size_t i, size_t end,
+    HostExecutionContext& ctx, hipStream_t stream) {
+    const OptimizedLaunchResult miss{OptimizedLaunchKind::NotApplicable};
+    static const bool enabled = std::getenv("SHELF_DISABLE_FP8_FINAL") == nullptr &&
+        std::getenv("SHELF_OP_DUMP") == nullptr && std::getenv("SHELF_OP_SYNC") == nullptr &&
+        std::getenv("SHELF_LINEAR_INPUT_DUMP") == nullptr;
+    if (!enabled || ctx.value_trace || ctx.layer_override_count || ctx.tp_active ||
+        ctx.num_prefill_requests || ctx.num_requests > 1u || ctx.batch_context == nullptr ||
+        ctx.actual_rows == 0u || ctx.actual_outputs == 0u || ctx.actual_outputs > 16u ||
+        i + 3u >= end || ctx.workspace == nullptr || ctx.weights == nullptr) return miss;
+    const auto& gather = program.dispatches[i];
+    const auto& norm = program.dispatches[i + 1u];
+    const auto& quant = program.dispatches[i + 2u];
+    const auto& linear = program.dispatches[i + 3u];
+    if (gather.kernel_id != KernelId::OUTPUT_GATHER || norm.kernel_id != KernelId::RMS_NORM ||
+        quant.kernel_id != KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED ||
+        linear.kernel_id != KernelId::LINEAR_FP8_FINEGRAINED) return miss;
+    if (gather.input_count != 1u || gather.output_count != 1u ||
+        norm.input_count != 1u || norm.output_count != 1u ||
+        quant.input_count != 1u || linear.input_count != 0u ||
+        linear.output_count != 1u ||
+        gather.output_slots[0] != norm.input_slots[0] ||
+        norm.output_slots[0] != quant.input_slots[0] ||
+        quant.workspace_slot == ::shelf::runtime::kNoWorkspace ||
+        quant.workspace_slot != linear.workspace_slot) return miss;
+    if (linear.weight_index >= ctx.weight_count) return miss;
+    const auto& w = ctx.weights[linear.weight_index];
+    if (w.encoding != 1u || w.cols != 5120u || w.k_padded != 5120u) return miss;
+    const auto* gathered_binding =
+        program.find_value(::shelf::runtime::ValueId{gather.output_slots[0]});
+    const auto* norm_binding =
+        program.find_value(::shelf::runtime::ValueId{norm.output_slots[0]});
+    if (gathered_binding == nullptr || norm_binding == nullptr ||
+        (gathered_binding->storage != ::shelf::runtime::ValueStorage::EXTERNAL_OUTPUT &&
+         gathered_binding->storage != ::shelf::runtime::ValueStorage::WORKSPACE &&
+         gathered_binding->storage != ::shelf::runtime::ValueStorage::WORKSPACE_VIEW) ||
+        (norm_binding->storage != ::shelf::runtime::ValueStorage::WORKSPACE &&
+         norm_binding->storage != ::shelf::runtime::ValueStorage::WORKSPACE_VIEW))
+        return miss;
+    for (size_t j = i + 3u; j < program.dispatches.size(); ++j)
+        for (uint32_t k = 0; k < program.dispatches[j].input_count; ++k)
+            if (program.dispatches[j].input_slots[k] == norm.output_slots[0]) return miss;
+    PhysicalRmsNormLaunch n{};
+    auto resolved_norm = resolve_rmsnorm_physical(program, norm, ctx, n);
+    if (!resolved_norm.ok()) return resolved_norm.status();
+    if (resolved_norm.value() != PhysicalResolveStatus::Applicable ||
+        n.variant != PhysicalRmsNormVariant::Bf16PfOnePlus ||
+        n.features != 5120u || n.group_size != 5120u || !n.weight) return miss;
+    PhysicalActivationQuantizeLaunch q{};
+    auto resolved_quant = resolve_activation_quantize_physical(program, quant, ctx, q);
+    if (!resolved_quant.ok()) return resolved_quant.status();
+    if (resolved_quant.value() != PhysicalResolveStatus::Applicable ||
+        q.k != 5120u || q.k_padded != 5120u || q.rows != ctx.actual_outputs ||
+        q.code_row_stride == 0u || q.scale_row_stride == 0u ||
+        q.codes == 0u || q.scales == 0u) return miss;
+    auto input = resolve_host_value(program, ::shelf::runtime::ValueId{gather.input_slots[0]}, ctx);
+    auto gathered = resolve_host_value(program, ::shelf::runtime::ValueId{gather.output_slots[0]}, ctx);
+    if (!input.ok()) return input.status();
+    if (!gathered.ok()) return gathered.status();
+    if (input.value().dtype != ValueDType::BF16 || gathered.value().dtype != ValueDType::BF16 ||
+        input.value().feature_count != 5120u || gathered.value().feature_count != 5120u ||
+        input.value().ptr == nullptr || gathered.value().ptr == nullptr ||
+        input.value().row_stride < 5120u || gathered.value().row_stride < 5120u ||
+        input.value().row_domain != ValueRowDomain::TOKEN_ROWS ||
+        gathered.value().row_domain != ValueRowDomain::OUTPUT_ROWS) return miss;
+    const auto src_start = reinterpret_cast<uintptr_t>(input.value().ptr);
+    const auto dst_start = reinterpret_cast<uintptr_t>(gathered.value().ptr);
+    const size_t src_size =
+        (size_t(ctx.actual_rows - 1u) * input.value().row_stride + 5120u) * 2u;
+    const size_t dst_size =
+        (size_t(ctx.actual_outputs - 1u) * gathered.value().row_stride + 5120u) * 2u;
+    if (src_start < dst_start + dst_size && dst_start < src_start + src_size) return miss;
+    ::shelf::execution::Fp8FinalProducer args{};
+    args.input = static_cast<const ::shelf::bf16_t*>(input.value().ptr);
+    args.weight = reinterpret_cast<const ::shelf::bf16_t*>(n.weight);
+    args.gathered = static_cast<::shelf::bf16_t*>(gathered.value().ptr);
+    args.codes = reinterpret_cast<uint8_t*>(q.codes);
+    args.scales = reinterpret_cast<float*>(q.scales);
+    args.batch = ctx.batch_context;
+    args.rows = ctx.actual_outputs;
+    args.k = q.k;
+    args.k_padded = q.k_padded;
+    args.input_stride = input.value().row_stride;
+    args.gathered_stride = gathered.value().row_stride;
+    args.code_stride = q.code_row_stride;
+    args.scale_stride = q.scale_row_stride;
+    args.eps = n.eps;
+    const hipError_t herr =
+        ::shelf::execution::launch_fp8_final_gather_norm_quantize(args, stream);
+    if (herr != hipSuccess)
+        return Status::hip_error("fp8 final gather norm quantize launch",
+                                 hipGetErrorString(herr), __FILE__, __LINE__);
+    record_physical_launch(1);
+    record_optimized_op();
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 3u};
+}
+
 Result<OptimizedLaunchResult> try_launch_final_gather(
     const ::shelf::runtime::Program& program, size_t i, size_t end,
     HostExecutionContext& ctx, hipStream_t stream) {
@@ -1438,6 +1625,8 @@ Result<OptimizedLaunchResult> try_launch_optimized(
         case KernelId::ROPE:
             return try_launch_rope(program, dispatch_index, ctx, stream);
         case KernelId::OUTPUT_GATHER: {
+            auto fp8 = try_launch_fp8_final_gather(program, dispatch_index, dispatch_end, ctx, stream);
+            if (!fp8.ok() || fp8.value().kind == OptimizedLaunchKind::Launched) return fp8;
             auto fused = try_launch_final_gather(program, dispatch_index, dispatch_end, ctx, stream);
             if (!fused.ok() || fused.value().kind == OptimizedLaunchKind::Launched) return fused;
             return try_launch_output_gather(program, b, ctx, stream);
@@ -1597,6 +1786,9 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             return try_launch_elementwise(program, dispatch_index, ctx, stream);
         }
         case KernelId::RESIDUAL_ADD: {
+            auto fp8 = try_launch_fp8_residual_norm_quantize(
+                program, dispatch_index, dispatch_end, ctx, stream);
+            if (!fp8.ok() || fp8.value().kind == OptimizedLaunchKind::Launched) return fp8;
             if (dispatch_index + 2u < dispatch_end &&
                 program.dispatches[dispatch_index + 1u].kernel_id == KernelId::RMS_NORM &&
                 program.dispatches[dispatch_index + 2u].kernel_id == KernelId::LINEAR_EXL3_INT8) {
