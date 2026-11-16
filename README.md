@@ -1,6 +1,6 @@
 # Shelf
 
-AMD RDNA4 GPU（R9700）向けの軽量推論エンジン。
+AMD RDNA4 GPU（R9700）向けの軽量推論エンジン
 
 特徴
 - まあまあの精度
@@ -32,6 +32,9 @@ cmake --build build --parallel
     --kv-cache-dtype octave:c5v5 \
     --port 8123
 ```
+
+- R9700 1枚で 4並列 コンテキストサイズ 131072 を確保
+- DFlash2 有りで実用的な速度で動作
 
 ## Contributors
 
