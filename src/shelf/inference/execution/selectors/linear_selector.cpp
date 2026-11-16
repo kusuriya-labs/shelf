@@ -219,6 +219,17 @@ select_bf16_gemm_config(const Bf16GemmSelectorInput& input) {
     }
 
     const bool k_aligned = (input.k & (shelf::kernel::kBf16GemmExactKAlignment - 1u)) == 0u;
+    const bool exact_eligible =
+        k_aligned && input.weight_aligned16 && input.input_aligned16 &&
+        (input.input_row_stride &
+         (shelf::kernel::kBf16GemmExactRowStrideAlignment - 1u)) == 0u;
+    if (input.allow_exact_rows && exact_eligible) {
+        if (input.rows <= shelf::kernel::kBf16GemmSmallRowsMax &&
+            input.out_features <= shelf::kernel::kBf16GemmSmallRowsMaxOutFeatures) {
+            return shelf::kernel::Bf16GemmConfig{
+                Id::SmallRows, static_cast<uint8_t>(input.rows)};
+        }
+    }
     if (input.allow_exact_rows && input.rows == 1u && k_aligned && input.weight_aligned16 &&
         input.input_aligned16)
         return shelf::kernel::Bf16GemmConfig{Id::ExactRows, 1u};

@@ -4,7 +4,9 @@
 
 目的は、Shelf の BF16 small-M（M=1〜64）を作り直す前に、`../references/` の
 実装が行 tile、K 分割、縮約順、batch 不変性をどう扱っているかを横並びで確認することである。
-この文書は調査記録であり、BF16 kernel の実装や採否はまだ確定していない。
+この文書は調査記録である。案 A の block-per-output-row は
+[bf16_small_rows.md](bf16_small_rows.md) で実装した。案 B（M=9..16 の WMMA）は
+縮約順の契約を変えるため、計測のみで selector には接続していない。
 
 ## 1. 比較対象
 

@@ -117,6 +117,7 @@ enum class PhysicalBf16Variant : uint8_t {
     WmmaWide = 2,
     Wmma = 3,
     ExactRowsDot2 = 4,
+    SmallRows = 5,
     Unsupported = 255,
 };
 

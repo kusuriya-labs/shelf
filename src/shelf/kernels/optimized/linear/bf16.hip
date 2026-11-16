@@ -323,6 +323,97 @@ __global__ void __launch_bounds__(kSplitThreadsPerBlock) gemm_bf16_splitk_wmma_k
                           out_features, k, input_row_stride, output_row_stride);
 }
 
+template <uint32_t kRows>
+__device__ __forceinline__ void gemm_bf16_small_rows_body(
+    const shelf::bf16_t* __restrict__ weight,
+    const shelf::bf16_t* __restrict__ input,
+    void* __restrict__ output,
+    const uint32_t output_dtype,
+    const uint32_t n,
+    const uint32_t k,
+    const uint32_t input_row_stride,
+    const uint32_t output_row_stride) {
+    const uint32_t tid = threadIdx.x;
+    const uint32_t lane = tid & 31u;
+    const uint32_t warp = tid >> 5u;
+    const uint32_t r = blockIdx.x;
+    if (r >= n)
+        return;
+
+    const shelf::bf16_t* wrow = weight + static_cast<size_t>(r) * k;
+    const shelf::bf16_t* xrow[kRows];
+    #pragma unroll
+    for (uint32_t m = 0; m < kRows; ++m)
+        xrow[m] = input + static_cast<size_t>(m) * input_row_stride;
+
+    float acc[kRows];
+    #pragma unroll
+    for (uint32_t m = 0; m < kRows; ++m)
+        acc[m] = 0.0f;
+
+    constexpr uint32_t kElementsPerIter = kExactRowsThreads * 8u;
+    const uint32_t iters = (k + kElementsPerIter - 1u) / kElementsPerIter;
+    for (uint32_t i = 0; i < iters; ++i) {
+        const uint32_t off = i * kElementsPerIter + tid * 8u;
+        const short8_t w = assemble_short8(load_bf16x4_masked(wrow, off, k),
+                                           load_bf16x4_masked(wrow, off + 4u, k));
+        #pragma unroll
+        for (uint32_t m = 0; m < kRows; ++m) {
+            const short8_t x = assemble_short8(load_bf16x4_masked(xrow[m], off, k),
+                                               load_bf16x4_masked(xrow[m], off + 4u, k));
+            #pragma unroll
+            for (uint32_t j = 0; j < 8u; ++j)
+                acc[m] += bf16_f32(w[j]) * bf16_f32(x[j]);
+        }
+    }
+
+    #pragma unroll
+    for (uint32_t m = 0; m < kRows; ++m) {
+        #pragma unroll
+        for (uint32_t s = 16u; s > 0u; s >>= 1u)
+            acc[m] += __shfl_down(acc[m], s, 32);
+    }
+
+    __shared__ float part[kRows][kExactRowsThreads / 32u];
+    if (lane == 0u) {
+        #pragma unroll
+        for (uint32_t m = 0; m < kRows; ++m)
+            part[m][warp] = acc[m];
+    }
+    detail::lds_barrier();
+
+    if (warp == 0u && lane == 0u) {
+        #pragma unroll
+        for (uint32_t m = 0; m < kRows; ++m) {
+            float sum = 0.0f;
+            #pragma unroll
+            for (uint32_t w = 0; w < kExactRowsThreads / 32u; ++w)
+                sum += part[m][w];
+            const size_t out_idx = static_cast<size_t>(m) * output_row_stride + r;
+            if (output_dtype == static_cast<uint32_t>(Bf16GemmOutputDType::BF16)) {
+                static_cast<shelf::bf16_t*>(output)[out_idx] =
+                    shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(sum))};
+            } else {
+                static_cast<float*>(output)[out_idx] = sum;
+            }
+        }
+    }
+}
+
+template <uint32_t kRows>
+__global__ void __launch_bounds__(kExactRowsThreads) gemm_bf16_small_rows_kernel(
+    const shelf::bf16_t* __restrict__ weight,
+    const shelf::bf16_t* __restrict__ input,
+    void* __restrict__ output,
+    const uint32_t output_dtype,
+    const uint32_t n,
+    const uint32_t k,
+    const uint32_t input_row_stride,
+    const uint32_t output_row_stride) {
+    gemm_bf16_small_rows_body<kRows>(weight, input, output, output_dtype, n, k,
+                                     input_row_stride, output_row_stride);
+}
+
 template <uint32_t kRows, bool kDot2 = false>
 __device__ __forceinline__ void gemm_bf16_exact_rows_body(
     const shelf::bf16_t* __restrict__ weight,
@@ -676,6 +767,45 @@ void shelf_gemm_bf16_splitk_wmma(Bf16GemmWmmaArgs args) {
         args.input_row_stride, args.output_row_stride);
 }
 
+hipError_t launch_gemm_bf16_small_rows(
+    const shelf::bf16_t* weight,
+    const shelf::bf16_t* input,
+    void* output,
+    Bf16GemmOutputDType output_dtype,
+    uint32_t rows,
+    uint32_t out_features,
+    uint32_t k,
+    uint32_t input_row_stride,
+    uint32_t output_row_stride,
+    hipStream_t stream) {
+    const uint32_t grid = out_features;
+    switch (rows) {
+#define PS_LAUNCH_SMALL_ROWS(R)                                                \
+    gemm_bf16_small_rows_kernel<R><<<grid, kExactRowsThreads, 0, stream>>>(    \
+        weight, input, output, static_cast<uint32_t>(output_dtype),             \
+        out_features, k, input_row_stride, output_row_stride);                  \
+    return hipGetLastError()
+    case 1u: PS_LAUNCH_SMALL_ROWS(1u);
+    case 2u: PS_LAUNCH_SMALL_ROWS(2u);
+    case 3u: PS_LAUNCH_SMALL_ROWS(3u);
+    case 4u: PS_LAUNCH_SMALL_ROWS(4u);
+    case 5u: PS_LAUNCH_SMALL_ROWS(5u);
+    case 6u: PS_LAUNCH_SMALL_ROWS(6u);
+    case 7u: PS_LAUNCH_SMALL_ROWS(7u);
+    case 8u: PS_LAUNCH_SMALL_ROWS(8u);
+    case 9u: PS_LAUNCH_SMALL_ROWS(9u);
+    case 10u: PS_LAUNCH_SMALL_ROWS(10u);
+    case 11u: PS_LAUNCH_SMALL_ROWS(11u);
+    case 12u: PS_LAUNCH_SMALL_ROWS(12u);
+    case 13u: PS_LAUNCH_SMALL_ROWS(13u);
+    case 14u: PS_LAUNCH_SMALL_ROWS(14u);
+    case 15u: PS_LAUNCH_SMALL_ROWS(15u);
+    case 16u: PS_LAUNCH_SMALL_ROWS(16u);
+    default: return hipErrorNotSupported;
+    }
+#undef PS_LAUNCH_SMALL_ROWS
+}
+
 hipError_t launch_gemm_bf16(
     const Bf16GemmConfig& config,
     const bf16_t* weight,
@@ -707,6 +837,14 @@ hipError_t launch_gemm_bf16(
             config.exact_rows != rows)
             return hipErrorNotSupported;
         return launch_gemm_bf16_exact_rows_dot2(
+            weight, input, output, output_dtype, config.exact_rows, out_features, k,
+            input_row_stride, output_row_stride, stream);
+    }
+    case Bf16GemmConfigId::SmallRows: {
+        if (config.exact_rows == 0u || config.exact_rows > kBf16GemmSmallRowsMax ||
+            config.exact_rows != rows)
+            return hipErrorNotSupported;
+        return launch_gemm_bf16_small_rows(
             weight, input, output, output_dtype, config.exact_rows, out_features, k,
             input_row_stride, output_row_stride, stream);
     }

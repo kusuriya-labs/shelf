@@ -78,7 +78,8 @@ bool is_mxfp4_mb(const std::optional<Mxfp4GemmConfig>& c, uint8_t split_mb) {
 bool is_bf16(const std::optional<Bf16GemmConfig>& c, Bf16GemmConfigId id,
              uint8_t exact_rows) {
     if (!c.has_value() || c->id != id) return false;
-    if (id == Bf16GemmConfigId::ExactRows || id == Bf16GemmConfigId::ExactRowsDot2)
+    if (id == Bf16GemmConfigId::ExactRows || id == Bf16GemmConfigId::ExactRowsDot2 ||
+        id == Bf16GemmConfigId::SmallRows)
         return c->exact_rows == exact_rows;
     return true;
 }
@@ -100,20 +101,36 @@ void test_bf16() {
           "bf16 rows=1 without allow_exact_rows -> Wmma");
 
     bool exact_ok = true;
-    for (uint32_t rows = 2u; rows <= shelf::kernel::kBf16GemmExactRowsKernelMax; ++rows) {
+    for (uint32_t rows = 2u; rows <= 8u; ++rows) {
         exact_ok = exact_ok &&
                    is_bf16(sel_bf16(rows, 1024, 2560, 2560, true, true, true),
                            Bf16GemmConfigId::ExactRows, static_cast<uint8_t>(rows));
     }
-    check(exact_ok, "bf16 rows 2..exact kernel max aligned -> ExactRows(rows)");
+    check(exact_ok, "bf16 rows 2..8 aligned -> ExactRows(rows)");
 
     bool dot2_ok = true;
-    for (uint32_t rows = 2u; rows <= shelf::kernel::kBf16GemmExactRowsKernelMax; ++rows) {
+    for (uint32_t rows = 2u; rows <= 8u; ++rows) {
         dot2_ok = dot2_ok &&
                   is_bf16(sel_bf16(rows, 1024, 2560, 2560, true, true, true, true),
                           Bf16GemmConfigId::ExactRowsDot2, static_cast<uint8_t>(rows));
     }
-    check(dot2_ok, "bf16 allow_dot2_rows rows 2..exact kernel max -> ExactRowsDot2(rows)");
+    check(dot2_ok, "bf16 allow_dot2_rows rows 2..8 -> ExactRowsDot2(rows)");
+
+    bool small_rows_ok = true;
+    for (uint32_t rows = 1u; rows <= shelf::kernel::kBf16GemmSmallRowsMax; ++rows) {
+        small_rows_ok = small_rows_ok &&
+                        is_bf16(sel_bf16(rows, 48, 5120, 5120, true, true, true),
+                                Bf16GemmConfigId::SmallRows,
+                                static_cast<uint8_t>(rows));
+    }
+    check(small_rows_ok, "bf16 narrow out rows 1..16 -> SmallRows(rows)");
+
+    check(is_bf16(sel_bf16(9, 5120, 5120, 5120, true, true, true),
+                  Bf16GemmConfigId::ExactRows, 9u),
+          "bf16 rows=9 wide out -> ExactRows(9)");
+    check(is_bf16(sel_bf16(16, 5120, 5120, 5120, true, true, true),
+                  Bf16GemmConfigId::ExactRows, 16u),
+          "bf16 rows=16 wide out -> ExactRows(16)");
     check(is_bf16(sel_bf16(1, 1024, 2560, 2560, true, true, true, true),
                   Bf16GemmConfigId::ExactRows, 1u),
           "bf16 rows=1 ignores allow_dot2_rows -> ExactRows(1)");

@@ -94,8 +94,17 @@ optimized variantは `src/shelf/kernels/optimized/` に実装する。
 - public launcher は semantic operator / optimization family ごとに置き、
   shape / dtype / algorithm variant の選択は launcher 内部に閉じ込め、runtime側へ漏らさない。
 - WMMA kernelはgfx12 builtin（`_gfx12`）を使う。
-- small-M（M=1..16）のbatch-invariant順序は `linear/bf16.hip` のexact-rows
-  経路が担う。MTP verifyはこの順序に依存する。
+- small-M（M=1..16）のbatch-invariant順序は `linear/bf16.hip` の exact-rows と
+  SmallRows が担う。MTP verify はこの順序に依存する。
+  - `SmallRows` は 1 block = 1 出力行、256 thread、`kRows=1..16` の accumulator を持つ。
+    K を 8 BF16 ずつ読み、warp shuffle と LDS で 8 warp をまとめる。
+    行ごとの縮約順は `kRows` に依存しない。
+  - selector は rows <= 16、out_features <= 192、k が 8 要素整列、
+    weight / input が 16 byte 整列、input row stride が 8 要素整列のとき
+    `SmallRows` を選ぶ。out_features > 192 の M=1..16 は `ExactRows` /
+    `ExactRowsDot2` のままである。
+  - `SmallRows` の実測と out_features 192 の上限は
+    [../research/20261116/bf16_small_rows.md](../research/20261116/bf16_small_rows.md)。
 
 ### linear / FP8 W8A8
 

@@ -494,6 +494,12 @@ Result<PhysicalResolveStatus> resolve_bf16_physical(
             out.grid_y = 1u;
             out.workgroup = ::shelf::kernel::kBf16GemmExactRowsThreads;
             break;
+        case ::shelf::kernel::Bf16GemmConfigId::SmallRows:
+            out.variant = PhysicalBf16Variant::SmallRows;
+            out.grid_x = e.rows;
+            out.grid_y = 1u;
+            out.workgroup = ::shelf::kernel::kBf16GemmExactRowsThreads;
+            break;
         case ::shelf::kernel::Bf16GemmConfigId::WmmaKPartition:
             out.variant = PhysicalBf16Variant::WmmaKPartition;
             out.grid_x = ::shelf::kernel::bf16_wmma_grid_x(e.rows);

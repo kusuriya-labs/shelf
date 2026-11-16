@@ -69,7 +69,7 @@ void usage(FILE* f) {
         "  --n N                          (default 5120)\n"
         "  --k N                          (default 5120)\n"
         "  --shapes N:K,N:K,...           (explicit shape list)\n"
-        "  --impl auto|wmma|wide|splitk|exact   (bf16 forced implementation)\n"
+        "  --impl auto|wmma|wide|splitk|exact|smallrows  (bf16 forced implementation)\n"
         "  --impl auto|splitk|rowblock1|2|4|prefill2d  (mxfp4 / fp8 forced implementation)\n"
         "  --fp8-split N                    fp8 split-K ways (default 8)\n"
         "  --fp8-split-mb N                 fp8 split-K row tile 1|2 (default auto)\n"
@@ -579,6 +579,9 @@ int run_gemm_bf16(Options& o) {
                     bf16_cfg = shelf::kernel::Bf16GemmConfig{Id::WmmaWide, 0u};
                 else if (o.impl == "splitk")
                     bf16_cfg = shelf::kernel::Bf16GemmConfig{Id::WmmaKPartition, 0u};
+                else if (o.impl == "smallrows")
+                    bf16_cfg = shelf::kernel::Bf16GemmConfig{Id::SmallRows,
+                                                          static_cast<uint8_t>(rows)};
                 else
                     bf16_cfg = shelf::kernel::Bf16GemmConfig{Id::ExactRows,
                                                           static_cast<uint8_t>(rows)};

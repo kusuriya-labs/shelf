@@ -119,6 +119,78 @@ bool run_rows(
     return ok;
 }
 
+bool run_small_rows(
+    uint32_t rows,
+    uint32_t N,
+    uint32_t K,
+    uint32_t seed,
+    shelf::gpu::GpuArena& arena,
+    hipStream_t stream,
+    const char* label) {
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<float> wd(-0.3f, 0.3f);
+    std::uniform_real_distribution<float> xd(-1.0f, 1.0f);
+    std::vector<uint16_t> w(static_cast<size_t>(N) * K);
+    std::vector<uint16_t> x(static_cast<size_t>(rows) * K);
+    for (auto& v : w) v = f32_bf16(wd(rng));
+    for (auto& v : x) v = f32_bf16(xd(rng));
+
+    const std::size_t out_bytes = static_cast<std::size_t>(rows) * N * 2u;
+    auto wr = arena.allocate_aligned(w.size() * 2u, 256);
+    auto xr = arena.allocate_aligned(x.size() * 2u, 256);
+    auto multi_r = arena.allocate_aligned(out_bytes, 256);
+    auto single_r = arena.allocate_aligned(out_bytes, 256);
+    if (!wr.ok() || !xr.ok() || !multi_r.ok() || !single_r.ok()) {
+        check(false, label);
+        return false;
+    }
+    uint16_t* d_w = static_cast<uint16_t*>(wr.release().data());
+    uint16_t* d_x = static_cast<uint16_t*>(xr.release().data());
+    void* d_multi = multi_r.release().data();
+    void* d_single = single_r.release().data();
+    if (hipMemcpy(d_w, w.data(), w.size() * 2u, hipMemcpyHostToDevice) != hipSuccess ||
+        hipMemcpy(d_x, x.data(), x.size() * 2u, hipMemcpyHostToDevice) != hipSuccess) {
+        check(false, label);
+        return false;
+    }
+    const ::shelf::bf16_t* dw = reinterpret_cast<const ::shelf::bf16_t*>(d_w);
+    const ::shelf::bf16_t* dx = reinterpret_cast<const ::shelf::bf16_t*>(d_x);
+
+    const shelf::kernel::Bf16GemmConfig multi_cfg{
+        shelf::kernel::Bf16GemmConfigId::SmallRows, static_cast<uint8_t>(rows)};
+    if (::shelf::kernel::launch_gemm_bf16(
+            multi_cfg, dw, dx, d_multi, shelf::kernel::Bf16GemmOutputDType::BF16, rows, N, K,
+            K, N, stream) != hipSuccess) {
+        check(false, label);
+        return false;
+    }
+    const shelf::kernel::Bf16GemmConfig single_cfg{
+        shelf::kernel::Bf16GemmConfigId::SmallRows, 1u};
+    for (uint32_t m = 0; m < rows; ++m) {
+        void* dst = static_cast<uint8_t*>(d_single) + static_cast<std::size_t>(m) * N * 2u;
+        if (::shelf::kernel::launch_gemm_bf16(
+                single_cfg, dw, dx + static_cast<std::size_t>(m) * K, dst,
+                shelf::kernel::Bf16GemmOutputDType::BF16, 1u, N, K, K, N, stream) != hipSuccess) {
+            check(false, label);
+            return false;
+        }
+    }
+    if (hipStreamSynchronize(stream) != hipSuccess) {
+        check(false, label);
+        return false;
+    }
+    std::vector<uint8_t> multi(out_bytes);
+    std::vector<uint8_t> single(out_bytes);
+    if (hipMemcpy(multi.data(), d_multi, out_bytes, hipMemcpyDeviceToHost) != hipSuccess ||
+        hipMemcpy(single.data(), d_single, out_bytes, hipMemcpyDeviceToHost) != hipSuccess) {
+        check(false, label);
+        return false;
+    }
+    const bool ok = std::memcmp(multi.data(), single.data(), out_bytes) == 0;
+    check(ok, label);
+    return ok;
+}
+
 }  // namespace
 
 int main() {
@@ -168,6 +240,18 @@ int main() {
         std::snprintf(label, sizeof(label), "exact vs M=1 gemv bf16 rows=9 in_stride=4096>K=3072");
         run_rows(9u, 1024u, 3072u, 4096u, 1024u, 0xB001u, shelf::kernel::Bf16GemmOutputDType::BF16,
                  arena, stream, label);
+    }
+
+    {
+        char label[160];
+        for (uint32_t rows : {2u, 4u, 8u, 16u}) {
+            std::snprintf(label, sizeof(label), "smallrows rows=%u N=16 K=2048", rows);
+            run_small_rows(rows, 16u, 2048u, 0xC000u + rows, arena, stream, label);
+            std::snprintf(label, sizeof(label), "smallrows rows=%u N=48 K=5120", rows);
+            run_small_rows(rows, 48u, 5120u, 0xD000u + rows, arena, stream, label);
+            std::snprintf(label, sizeof(label), "smallrows rows=%u N=192 K=2048", rows);
+            run_small_rows(rows, 192u, 2048u, 0xE000u + rows, arena, stream, label);
+        }
     }
 
     shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));

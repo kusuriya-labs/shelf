@@ -6,6 +6,14 @@ namespace shelf::kernel {
 
 inline constexpr uint32_t kBf16GemmExactRowsMax = 64u;
 inline constexpr uint32_t kBf16GemmExactRowsKernelMax = 16u;
+// One block per output row, all 256 threads on K, up to 8 token accumulators.
+// Used for the narrow-output small-M shapes where one warp per row leaves too
+// few blocks on the device.
+inline constexpr uint32_t kBf16GemmSmallRowsMax = 16u;
+// Narrow projections whose block count is the bottleneck on the 8-output-row
+// exact kernel (GDN a|b at 16/32, the 48-wide GDN output and the 64/128/192
+// mid-band). Above this width the exact kernel already has enough blocks.
+inline constexpr uint32_t kBf16GemmSmallRowsMaxOutFeatures = 192u;
 inline constexpr uint32_t kBf16GemmSplitKMaxOutFeatures = 256u;
 inline constexpr uint32_t kBf16GemmWideMinRows = 65u;
 inline constexpr uint32_t kBf16GemmExactKAlignment = 8u;
@@ -25,6 +33,7 @@ enum class Bf16GemmConfigId : uint8_t {
     WmmaKPartition,
     ExactRows,
     ExactRowsDot2,
+    SmallRows,
 };
 
 struct Bf16GemmConfig {

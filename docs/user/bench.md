@@ -231,7 +231,7 @@ model-dispatch correctness path の codes / scales も一致することを確�
 `--impl` は dtype ごとに次を強制する。`auto` は production selector を使う。
 
 ```text
-bf16   auto|wmma|wide|splitk|exact
+bf16   auto|wmma|wide|splitk|exact|smallrows
 fp8    auto|splitk|rowblock1|rowblock2|rowblock4|prefill2d
 mxfp4  auto|splitk|rowblock1|rowblock2|rowblock4|prefill2d
 ```

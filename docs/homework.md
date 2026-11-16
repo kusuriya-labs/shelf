@@ -124,11 +124,13 @@ compute 出力が oracle（`3793, 248046` = `OK`）と一致せず `91`（`|`）
   * FP8 / MXFP4 の in-block split-K、row tile 選択、split-K の MB 選択は実装済み
     （docs/research/20261116/fp8_mxfp4_small_m_splitk.md）。
     FP8 は narrow out の rows 1〜64 で最大 6 倍、MXFP4 は rows 33〜64 で 1.4〜2.1 倍。
-  * BF16 は M=8〜16 に崖が残る。`5120:5120` は M=16 が 125 µs で M=32 の 88 µs より遅い。
-    block-per-output-row と WMMA の比較は
-    docs/research/20261116/bf16_small_m_reference.md に整理した。
-  * 次の候補は BF16 の row-count-independent small-M、FP8 の rows=64 の MB 選択、
-    narrow out の grid.z split + scratch。
+  * BF16 は block-per-output-row の `SmallRows` を実装し、out_features <= 192 の
+    rows 1..16 に接続した（docs/research/20261116/bf16_small_rows.md）。
+    16:2048 rows=16 は 9.8 → 5.6 µs、48:5120 rows=16 は 14.8 → 9.0 µs。
+  * BF16 の M=9..16 は、out_features <= 2560 で WmmaKPartition、
+    wide out で Wmma が ExactRows より速い。ただし M=1..8 と縮約木が変わるため、
+    MTP verify の M 不変契約をどう扱うか決めてから接続する。
+  * 次の候補は BF16 M=9..16 の契約判断、FP8 の grid.z split + scratch。
 
 ## マルチリクエスト + 投機推論
 
