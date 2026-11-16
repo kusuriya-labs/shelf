@@ -161,6 +161,71 @@ __global__ void fp8_norm_quantize_kernel(Fp8NormArgs args) {
                         args.code_stride, args.scale_stride);
 }
 
+__global__ void fp8_swiglu_quantize_kernel(Fp8SwigluArgs args) {
+    const uint32_t row = blockIdx.x;
+    const uint32_t wave = threadIdx.x >> 5u;
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t groups = (args.k_padded + kGroup - 1u) / kGroup;
+    const bf16* gate = reinterpret_cast<const bf16*>(args.gate) +
+        static_cast<size_t>(row) * args.gate_stride;
+    const bf16* up = reinterpret_cast<const bf16*>(args.up) +
+        static_cast<size_t>(row) * args.up_stride;
+    uint8_t* crow = args.codes +
+        static_cast<size_t>(row >> 4u) * (static_cast<size_t>(args.code_stride) * 16u);
+    const uint32_t m_tile = row & 15u;
+    float* row_scales = args.scales + static_cast<size_t>(row) * (args.scale_stride / 4u);
+
+    for (uint32_t g = wave; g < groups; g += kWaves) {
+        const uint32_t i0 = g * kGroup + lane * kElemsPerLane;
+        float vals[kElemsPerLane];
+        float peak = 0.0f;
+        #pragma unroll
+        for (uint32_t l = 0u; l < kElemsPerLane; ++l) {
+            const uint32_t i = i0 + l;
+            float v = 0.0f;
+            if (i < args.k) {
+                const float gv = __bfloat162float(gate[i]);
+                const float uv = __bfloat162float(up[i]);
+                float y;
+                if (args.bf16_intermediate) {
+                    const float activated = gv / (1.0f + __expf(-gv));
+                    y = uv * __bfloat162float(__float2bfloat16(activated));
+                } else {
+                    y = uv * (gv / (1.0f + expf(-gv)));
+                }
+                v = __bfloat162float(__float2bfloat16(y));
+            }
+            vals[l] = v;
+            if (isfinite(v)) {
+                const float av = fabsf(v);
+                if (av > peak) peak = av;
+            }
+        }
+        #pragma unroll
+        for (uint32_t off = 16u; off > 0u; off >>= 1u)
+            peak = fmaxf(peak, __shfl_xor_sync(0xffffffffULL, peak, off));
+        const float total = __shfl_sync(0xffffffffULL, peak, 0u);
+        const float scale = total > 0.0f ? total / 448.0f : 0.0f;
+        const float inv = scale > 0.0f ? 1.0f / scale : 0.0f;
+        if (lane == 0u) row_scales[g] = scale;
+        uint32_t packed = 0u;
+        #pragma unroll
+        for (uint32_t l = 0u; l < kElemsPerLane; ++l) {
+            const float v = isfinite(vals[l]) ? vals[l] : 0.0f;
+            const uint8_t c = scale > 0.0f
+                ? ::shelf::quantization::codec::device::e4m3_encode_u8(v * inv)
+                : 0u;
+            packed |= static_cast<uint32_t>(c) << (8u * l);
+        }
+        if (i0 + kElemsPerLane <= args.k_padded) {
+            const uint32_t off =
+                (i0 >> 6u) * ::shelf::quantization::fp8::kFragBlockBytes +
+                ::shelf::quantization::fp8::fp8_frag_offset(m_tile, i0 & 63u);
+            *reinterpret_cast<uint32_t*>(crow + off) = packed;
+        }
+    }
+}
+
 __global__ void fp8_final_gather_norm_quantize_kernel(Fp8FinalProducer args) {
     __shared__ __align__(16) bf16 x[kFeatures];
     __shared__ float sums[kWaves];
@@ -207,6 +272,16 @@ hipError_t launch_fp8_norm_quantize(const Fp8NormArgs& args, hipStream_t stream)
         args.code_stride == 0u || args.scale_stride == 0u)
         return hipErrorInvalidValue;
     fp8_norm_quantize_kernel<<<args.rows, kThreads, 0, stream>>>(args);
+    return hipGetLastError();
+}
+
+hipError_t launch_fp8_swiglu_quantize(const Fp8SwigluArgs& args, hipStream_t stream) {
+    if (args.gate == nullptr || args.up == nullptr || args.codes == nullptr ||
+        args.scales == nullptr || args.rows == 0u || args.k == 0u ||
+        args.k_padded < args.k || args.gate_stride < args.k || args.up_stride < args.k ||
+        args.code_stride == 0u || args.scale_stride == 0u)
+        return hipErrorInvalidValue;
+    fp8_swiglu_quantize_kernel<<<args.rows, kThreads, 0, stream>>>(args);
     return hipGetLastError();
 }
 

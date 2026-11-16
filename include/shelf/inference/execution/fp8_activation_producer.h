@@ -41,8 +41,22 @@ struct Fp8NormArgs {
     float eps = 0.0f;
 };
 
-struct Fp8FinalProducer {
-    const ::shelf::bf16_t* input = nullptr;
+struct Fp8SwigluArgs {
+    const ::shelf::bf16_t* gate = nullptr;
+    const ::shelf::bf16_t* up = nullptr;
+    uint8_t* codes = nullptr;
+    float* scales = nullptr;
+    uint32_t rows = 0;
+    uint32_t k = 0;
+    uint32_t k_padded = 0;
+    uint32_t gate_stride = 0;
+    uint32_t up_stride = 0;
+    uint32_t code_stride = 0;
+    uint32_t scale_stride = 0;
+    bool bf16_intermediate = false;
+};
+
+struct Fp8FinalProducer {    const ::shelf::bf16_t* input = nullptr;
     const ::shelf::bf16_t* weight = nullptr;
     ::shelf::bf16_t* gathered = nullptr;
     uint8_t* codes = nullptr;
@@ -61,6 +75,7 @@ struct Fp8FinalProducer {
 hipError_t launch_fp8_residual_norm_quantize(const Fp8ResidualNormArgs& args,
                                              hipStream_t stream);
 hipError_t launch_fp8_norm_quantize(const Fp8NormArgs& args, hipStream_t stream);
+hipError_t launch_fp8_swiglu_quantize(const Fp8SwigluArgs& args, hipStream_t stream);
 hipError_t launch_fp8_final_gather_norm_quantize(const Fp8FinalProducer& args,
                                                  hipStream_t stream);
 

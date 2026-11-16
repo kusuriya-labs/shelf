@@ -1260,6 +1260,77 @@ Result<OptimizedLaunchResult> try_launch_attn_q(
 Result<OptimizedLaunchResult> try_launch_attn_kv(
     const ::shelf::runtime::Program&, size_t, size_t, HostExecutionContext&, hipStream_t);
 
+Result<OptimizedLaunchResult> try_launch_fp8_swiglu_quantize(
+    const ::shelf::runtime::Program& program, size_t i, size_t end,
+    HostExecutionContext& ctx, hipStream_t stream) {
+    const OptimizedLaunchResult miss{OptimizedLaunchKind::NotApplicable};
+    static const bool enabled = std::getenv("SHELF_DISABLE_FP8_SWIGLU") == nullptr &&
+        std::getenv("SHELF_OP_DUMP") == nullptr && std::getenv("SHELF_OP_SYNC") == nullptr &&
+        std::getenv("SHELF_LINEAR_INPUT_DUMP") == nullptr;
+    if (!enabled || ctx.value_trace || ctx.layer_override_count ||
+        i + 2u >= end || ctx.workspace == nullptr || ctx.weights == nullptr) return miss;
+    const auto& swiglu = program.dispatches[i];
+    const auto& quant = program.dispatches[i + 1u];
+    const auto& linear = program.dispatches[i + 2u];
+    if (swiglu.kernel_id != KernelId::SWIGLU ||
+        quant.kernel_id != KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED ||
+        linear.kernel_id != KernelId::LINEAR_FP8_FINEGRAINED) return miss;
+    if (swiglu.input_count != 2u || swiglu.output_count != 1u ||
+        quant.input_count != 1u || linear.input_count != 0u ||
+        linear.output_count != 1u ||
+        swiglu.output_slots[0] != quant.input_slots[0] ||
+        quant.workspace_slot == ::shelf::runtime::kNoWorkspace ||
+        quant.workspace_slot != linear.workspace_slot) return miss;
+    if (linear.weight_index >= ctx.weight_count) return miss;
+    const auto& w = ctx.weights[linear.weight_index];
+    if (w.encoding != 1u) return miss;
+    const auto* out_binding =
+        program.find_value(::shelf::runtime::ValueId{swiglu.output_slots[0]});
+    if (out_binding == nullptr ||
+        (out_binding->storage != ::shelf::runtime::ValueStorage::WORKSPACE &&
+         out_binding->storage != ::shelf::runtime::ValueStorage::WORKSPACE_VIEW))
+        return miss;
+    for (size_t j = i + 2u; j < program.dispatches.size(); ++j)
+        for (uint32_t k = 0; k < program.dispatches[j].input_count; ++k)
+            if (program.dispatches[j].input_slots[k] == swiglu.output_slots[0]) return miss;
+    PhysicalElementwiseLaunch elem{};
+    auto resolved_elem = resolve_elementwise_physical(program, swiglu, ctx, elem);
+    if (!resolved_elem.ok()) return resolved_elem.status();
+    if (resolved_elem.value() != PhysicalResolveStatus::Applicable ||
+        elem.profile != ElementwiseProfile::SwigluBf16 ||
+        elem.rows == 0u || elem.features == 0u || !elem.in0 || !elem.in1 ||
+        elem.in0_stride < elem.features || elem.in1_stride < elem.features)
+        return miss;
+    PhysicalActivationQuantizeLaunch q{};
+    auto resolved_quant = resolve_activation_quantize_physical(program, quant, ctx, q);
+    if (!resolved_quant.ok()) return resolved_quant.status();
+    if (resolved_quant.value() != PhysicalResolveStatus::Applicable ||
+        q.k != elem.features || q.rows != elem.rows || q.k_padded < q.k ||
+        w.cols != q.k || w.k_padded != q.k_padded ||
+        q.code_row_stride == 0u || q.scale_row_stride == 0u ||
+        q.codes == 0u || q.scales == 0u) return miss;
+    ::shelf::execution::Fp8SwigluArgs args{};
+    args.gate = reinterpret_cast<const ::shelf::bf16_t*>(elem.in0);
+    args.up = reinterpret_cast<const ::shelf::bf16_t*>(elem.in1);
+    args.codes = reinterpret_cast<uint8_t*>(q.codes);
+    args.scales = reinterpret_cast<float*>(q.scales);
+    args.rows = elem.rows;
+    args.k = q.k;
+    args.k_padded = q.k_padded;
+    args.gate_stride = elem.in0_stride;
+    args.up_stride = elem.in1_stride;
+    args.code_stride = q.code_row_stride;
+    args.scale_stride = q.scale_row_stride;
+    args.bf16_intermediate = elem.aux != 0u;
+    const hipError_t herr = ::shelf::execution::launch_fp8_swiglu_quantize(args, stream);
+    if (herr != hipSuccess)
+        return Status::hip_error("fp8 swiglu quantize launch", hipGetErrorString(herr),
+                                 __FILE__, __LINE__);
+    record_physical_launch(1);
+    record_optimized_op();
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 2u};
+}
+
 Result<OptimizedLaunchResult> try_launch_fp8_norm_quantize(
     const ::shelf::runtime::Program& program, size_t i, size_t end,
     HostExecutionContext& ctx, hipStream_t stream) {
@@ -1712,6 +1783,8 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             return try_launch_l2_normalize(program, dispatch_index, ctx, stream);
         }
         case KernelId::SWIGLU: {
+            auto fp8 = try_launch_fp8_swiglu_quantize(program, dispatch_index, dispatch_end, ctx, stream);
+            if (!fp8.ok() || fp8.value().kind == OptimizedLaunchKind::Launched) return fp8;
             static const bool rq_enabled = std::getenv("SHELF_DISABLE_SWIGLU_RQ") == nullptr &&
                 std::getenv("SHELF_OP_DUMP") == nullptr && std::getenv("SHELF_OP_SYNC") == nullptr &&
                 std::getenv("SHELF_LINEAR_INPUT_DUMP") == nullptr &&

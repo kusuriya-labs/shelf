@@ -192,6 +192,97 @@ bool run_residual(uint32_t kRows) {
 }
 
 
+
+bool run_swiglu(uint32_t kRows, uint32_t kFeatures, bool bf16_intermediate) {
+    const auto layout = shelf::runtime::Int8ActivationWorkspaceLayout::make(kFeatures, kRows);
+    const uint32_t code_stride = layout.code_row_stride_bytes;
+    const uint32_t scale_stride = layout.scale_row_stride_bytes;
+    const uint32_t rows_padded = (kRows + 15u) & ~15u;
+    std::vector<shelf::bf16_t> hg(kRows * kFeatures), hu(kRows * kFeatures);
+    for (uint32_t r = 0; r < kRows; ++r) {
+        for (uint32_t i = 0; i < kFeatures; ++i) {
+            hg[r * kFeatures + i] = to_bf16(value(701u + r, i));
+            hu[r * kFeatures + i] = to_bf16(value(811u + r, i) * 0.5f);
+        }
+    }
+    void *dg = nullptr, *du = nullptr, *d_sw = nullptr;
+    void *d_codes_ref = nullptr, *d_codes_fused = nullptr;
+    void *d_scales_ref = nullptr, *d_scales_fused = nullptr;
+    auto cleanup = [&]() {
+        void* all[] = {dg, du, d_sw, d_codes_ref, d_codes_fused, d_scales_ref, d_scales_fused};
+        for (void* p : all)
+            if (p != nullptr) shelf::gpu::discard_cleanup_result(hipFree(p));
+    };
+    const size_t elem = sizeof(shelf::bf16_t);
+    if (hipMalloc(&dg, hg.size() * elem) != hipSuccess ||
+        hipMalloc(&du, hu.size() * elem) != hipSuccess ||
+        hipMalloc(&d_sw, hg.size() * elem) != hipSuccess ||
+        hipMalloc(&d_codes_ref, rows_padded * code_stride) != hipSuccess ||
+        hipMalloc(&d_codes_fused, rows_padded * code_stride) != hipSuccess ||
+        hipMalloc(&d_scales_ref, kRows * scale_stride) != hipSuccess ||
+        hipMalloc(&d_scales_fused, kRows * scale_stride) != hipSuccess) {
+        cleanup();
+        return false;
+    }
+    if (!copy_to(dg, hg.data(), hg.size() * elem) ||
+        !copy_to(du, hu.data(), hu.size() * elem)) {
+        cleanup();
+        return false;
+    }
+    shelf::gpu::discard_cleanup_result(hipMemset(d_codes_ref, 0xAB, rows_padded * code_stride));
+    shelf::gpu::discard_cleanup_result(hipMemset(d_codes_fused, 0xAB, rows_padded * code_stride));
+    shelf::gpu::discard_cleanup_result(hipMemset(d_scales_ref, 0xAB, kRows * scale_stride));
+    shelf::gpu::discard_cleanup_result(hipMemset(d_scales_fused, 0xAB, kRows * scale_stride));
+    const auto gate = static_cast<const shelf::bf16_t*>(dg);
+    const auto up = static_cast<const shelf::bf16_t*>(du);
+    auto* sw = static_cast<shelf::bf16_t*>(d_sw);
+    auto* codes_ref = static_cast<uint8_t*>(d_codes_ref);
+    auto* codes_fused = static_cast<uint8_t*>(d_codes_fused);
+    auto* scales_ref = static_cast<float*>(d_scales_ref);
+    auto* scales_fused = static_cast<float*>(d_scales_fused);
+    hipError_t err = shelf::kernel::launch_swiglu_bf16(
+        gate, kFeatures, up, kFeatures, sw, kFeatures, kRows, kFeatures, nullptr,
+        bf16_intermediate);
+    if (err == hipSuccess)
+        err = shelf::kernel::launch_activation_quantize_fp8_finegrained(
+            sw, codes_ref, scales_ref, kRows, kFeatures, kFeatures, kFeatures,
+            code_stride, scale_stride, nullptr, nullptr);
+    if (err != hipSuccess) {
+        std::printf("  swiglu reference launch failed: %s\n", hipGetErrorString(err));
+        cleanup();
+        return false;
+    }
+    shelf::execution::Fp8SwigluArgs args{};
+    args.gate = gate;
+    args.up = up;
+    args.codes = codes_fused;
+    args.scales = scales_fused;
+    args.rows = kRows;
+    args.k = kFeatures;
+    args.k_padded = kFeatures;
+    args.gate_stride = kFeatures;
+    args.up_stride = kFeatures;
+    args.code_stride = code_stride;
+    args.scale_stride = scale_stride;
+    args.bf16_intermediate = bf16_intermediate;
+    err = shelf::execution::launch_fp8_swiglu_quantize(args, nullptr);
+    if (err != hipSuccess) {
+        std::printf("  swiglu fused launch failed: %s\n", hipGetErrorString(err));
+        cleanup();
+        return false;
+    }
+    std::vector<uint8_t> h_codes_ref(rows_padded * code_stride), h_codes_fused(rows_padded * code_stride);
+    std::vector<float> h_scales_ref(kRows * scale_stride / 4u), h_scales_fused(kRows * scale_stride / 4u);
+    bool ok = copy_from(h_codes_ref, d_codes_ref) && copy_from(h_codes_fused, d_codes_fused) &&
+              copy_from(h_scales_ref, d_scales_ref) && copy_from(h_scales_fused, d_scales_fused);
+    if (ok)
+        ok = std::memcmp(h_codes_ref.data(), h_codes_fused.data(), h_codes_ref.size()) == 0 &&
+             std::memcmp(h_scales_ref.data(), h_scales_fused.data(),
+                         h_scales_ref.size() * sizeof(float)) == 0;
+    cleanup();
+    return ok;
+}
+
 bool run_norm(uint32_t kRows) {
     constexpr uint32_t kFeatures = 5120;
     constexpr float kEps = 1e-6f;
@@ -618,6 +709,10 @@ bool run_tp_dispatch(int mode) {
 int main() {
     check(run_residual(3u), "fp8 residual norm quantize rows=3");
     check(run_residual(17u), "fp8 residual norm quantize rows=17");
+    check(run_swiglu(3u, 17408u, false), "fp8 swiglu quantize rows=3 k=17408");
+    check(run_swiglu(17u, 17408u, false), "fp8 swiglu quantize rows=17 k=17408");
+    check(run_swiglu(3u, 17408u, true), "fp8 swiglu quantize rounded rows=3 k=17408");
+    check(run_swiglu(3u, 5120u, false), "fp8 swiglu quantize rows=3 k=5120");
     check(run_norm(3u), "fp8 norm quantize rows=3");
     check(run_norm(17u), "fp8 norm quantize rows=17");
     check(run_final(3u), "fp8 final gather norm quantize outputs=3");
