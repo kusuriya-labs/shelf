@@ -11,6 +11,9 @@ inline constexpr uint32_t kDflash2TopKMaxK = 16u;
 inline constexpr uint32_t kDflash2TopKMaxPartitions = 64u;
 inline constexpr uint32_t kDflash2TopKScratchPerRow =
     kDflash2TopKThreads * kDflash2TopKMaxK;
+inline constexpr uint32_t kDflash2MergeMaxPeers = 4u;
+inline constexpr uint32_t kDflash2MergeMaxCandidates =
+    kDflash2TopKMaxK * kDflash2MergeMaxPeers;
 
 struct DFlash2TopKPlan {
     uint32_t partitions = 32u;
@@ -44,6 +47,19 @@ hipError_t launch_dflash2_topk_f32_optimized(
     float* scratch_logits,
     int32_t id_offset,
     const DFlash2TopKPlan& plan,
+    hipStream_t stream);
+
+// Selects the k best entries out of `candidates` per row. Each row of
+// `candidate_ids` / `candidate_logits` holds the per-rank top-k of one rank,
+// laid out rank-major; ids are already global vocabulary ids.
+hipError_t launch_dflash2_merge_topk(
+    const int32_t* candidate_ids,
+    const float* candidate_logits,
+    uint32_t rows,
+    uint32_t candidates,
+    uint32_t k,
+    int32_t* out_ids,
+    float* out_logits,
     hipStream_t stream);
 
 }  // namespace shelf::kernel

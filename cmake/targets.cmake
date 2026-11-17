@@ -204,6 +204,7 @@ add_library(shelf_kernels_dflash2 STATIC
     src/shelf/kernels/dflash2/grouped_dynamic_conv.hip
     src/shelf/kernels/dflash2/kv_ring.hip
     src/shelf/kernels/dflash2/noise_input.hip
+    src/shelf/kernels/dflash2/proposal_stats.hip
     src/shelf/kernels/dflash2/rmsnorm.hip
     src/shelf/kernels/dflash2/rope.hip
     src/shelf/kernels/dflash2/swiglu.hip
@@ -223,6 +224,7 @@ add_library(shelf_dflash2 STATIC
     src/shelf/runtime/dflash2/dflash2_session_pool.cpp
     src/shelf/runtime/dflash2/context_state.hip
     src/shelf/runtime/dflash2/executor.hip
+    src/shelf/runtime/dflash2/proposal_shard.cpp
     src/shelf/runtime/dflash2/weights.cpp
 )
 target_compile_features(shelf_dflash2 PRIVATE cxx_std_20)

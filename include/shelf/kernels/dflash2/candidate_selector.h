@@ -22,6 +22,18 @@ hipError_t launch_dflash2_tree_probabilities(
     DFlash2TreeProbabilities* output, uint32_t rows, uint32_t vocab,
     uint32_t top_k, hipStream_t stream);
 
+// Turns a merged top-k list into tree probabilities with a normalizer that was
+// computed over the full vocabulary. `normalizers` holds rows * 2 floats laid
+// out as [max, denominator].
+hipError_t launch_dflash2_topk_probabilities(
+    const int32_t* topk_ids,
+    const float* topk_logits,
+    const float* normalizers,
+    DFlash2TreeProbabilities* output,
+    uint32_t rows,
+    uint32_t top_k,
+    hipStream_t stream);
+
 struct DFlash2CandidateSelectorArgs {
     const bf16_t* hidden_proj = nullptr;
     const int32_t* topk_ids = nullptr;

@@ -111,7 +111,62 @@ __global__ void dflash2_topk_merge_kernel(
     }
 }
 
+
+__global__ void dflash2_merge_topk_kernel(
+    const int32_t* candidate_ids,
+    const float* candidate_logits,
+    uint32_t candidates,
+    uint32_t k,
+    int32_t* out_ids,
+    float* out_logits) {
+    const uint32_t row = blockIdx.x;
+    if (threadIdx.x != 0u) return;
+    const int32_t* row_ids =
+        candidate_ids + static_cast<std::size_t>(row) * candidates;
+    const float* row_logits =
+        candidate_logits + static_cast<std::size_t>(row) * candidates;
+
+    float best_logits[kTopK];
+    int32_t best_ids[kTopK];
+    for (uint32_t i = 0u; i < k; ++i) {
+        best_logits[i] = -INFINITY;
+        best_ids[i] = 0x7FFFFFFF;
+    }
+    for (uint32_t i = 0u; i < candidates; ++i) {
+        const float value = row_logits[i];
+        if (value == -INFINITY) continue;
+        topk_insert(best_logits, best_ids, value, row_ids[i]);
+    }
+    for (uint32_t i = 0u; i < k; ++i) {
+        out_ids[static_cast<std::size_t>(row) * k + i] = best_ids[i];
+        out_logits[static_cast<std::size_t>(row) * k + i] = best_logits[i];
+    }
+}
+
 }  // namespace
+
+hipError_t launch_dflash2_merge_topk(
+    const int32_t* candidate_ids,
+    const float* candidate_logits,
+    uint32_t rows,
+    uint32_t candidates,
+    uint32_t k,
+    int32_t* out_ids,
+    float* out_logits,
+    hipStream_t stream) {
+    if (candidate_ids == nullptr || candidate_logits == nullptr || out_ids == nullptr ||
+        out_logits == nullptr) {
+        return hipErrorInvalidValue;
+    }
+    if (rows == 0u) return hipSuccess;
+    if (k == 0u || k > kDflash2TopKMaxK) return hipErrorInvalidValue;
+    if (candidates < k || candidates > kDflash2MergeMaxCandidates) {
+        return hipErrorInvalidValue;
+    }
+    dflash2_merge_topk_kernel<<<rows, 1u, 0, stream>>>(
+        candidate_ids, candidate_logits, candidates, k, out_ids, out_logits);
+    return hipGetLastError();
+}
 
 hipError_t launch_dflash2_topk_f32(
     const float* logits,

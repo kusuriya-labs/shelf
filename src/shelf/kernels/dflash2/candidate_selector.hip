@@ -199,6 +199,35 @@ __global__ void dflash2_candidate_selector_requests_kernel(
         request.num_drafts, rank, top_k, partial);
 }
 
+
+__global__ void topk_probabilities_kernel(
+    const int32_t* ids,
+    const float* top_logits,
+    const float* normalizers,
+    DFlash2TreeProbabilities* output,
+    uint32_t top_k) {
+    if (threadIdx.x != 0u) return;
+    const uint32_t row = blockIdx.x;
+    const float maximum = normalizers[static_cast<std::size_t>(row) * 2u];
+    const float denominator = normalizers[static_cast<std::size_t>(row) * 2u + 1u];
+    float mass = 0.0f;
+    for (uint32_t j = 0; j < kDflash2TreeRetained; ++j) {
+        if (j >= top_k) {
+            output[row].ids[j] = -1;
+            output[row].probabilities[j] = 0.0f;
+            continue;
+        }
+        output[row].ids[j] = ids[static_cast<std::size_t>(row) * top_k + j];
+        const float p = denominator > 0.0f
+            ? expf(top_logits[static_cast<std::size_t>(row) * top_k + j] - maximum) /
+                  denominator
+            : 0.0f;
+        output[row].probabilities[j] = p;
+        mass += p;
+    }
+    output[row].residual = fmaxf(0.0f, 1.0f - mass);
+}
+
 }  // namespace
 
 hipError_t launch_dflash2_tree_probabilities(
@@ -263,6 +292,25 @@ hipError_t launch_dflash2_candidate_selector(
         reinterpret_cast<const bf16*>(args.successor_codebook), args.anchor_token,
         args.row_predecessors, args.output_tokens, args.output_scores, args.draft_rows, args.rank,
         args.top_k);
+    return hipGetLastError();
+}
+
+hipError_t launch_dflash2_topk_probabilities(
+    const int32_t* topk_ids,
+    const float* topk_logits,
+    const float* normalizers,
+    DFlash2TreeProbabilities* output,
+    uint32_t rows,
+    uint32_t top_k,
+    hipStream_t stream) {
+    if (topk_ids == nullptr || topk_logits == nullptr || normalizers == nullptr ||
+        output == nullptr) {
+        return hipErrorInvalidValue;
+    }
+    if (rows == 0u) return hipSuccess;
+    if (top_k == 0u) return hipErrorInvalidValue;
+    topk_probabilities_kernel<<<rows, 1u, 0, stream>>>(
+        topk_ids, topk_logits, normalizers, output, top_k);
     return hipGetLastError();
 }
 
