@@ -636,11 +636,16 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
     draft_config.proposal_distributor = tp_proposal.get();
     draft_config.vocab_offset = head_vocab_offset;
     draft_config.local_vocab = head_local_vocab;
+    const shelf::weights::MatrixWeight* draft_embed = &model.embed_tokens();
+    if (tp_sharded) {
+        draft_embed = tp_proposal != nullptr
+            ? runtime.tp_coordinator()->rank(0).rank_model()->embed_tokens()
+            : private_embed;
+    }
     draft_config.target_lm_head =
         tp_proposal != nullptr ? head_shards[0]
                                : (tp_sharded ? private_lm_head : &model.lm_head());
-    draft_config.target_embed_tokens =
-        tp_sharded ? private_embed : &model.embed_tokens();
+    draft_config.target_embed_tokens = draft_embed;
     auto draft_result = ::shelf::runtime::dflash2::create_dflash2_executor(
         dflash_config, dflash_weights, arena, draft_config);
     if (!draft_result.ok()) {

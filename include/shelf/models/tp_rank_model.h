@@ -89,6 +89,9 @@ public:
     // The rank's own target head. It is this rank's vocabulary shard when the load split
     // the vocabulary, and the full head otherwise. Null for a family without an untied head.
     virtual const shelf::weights::MatrixWeight* lm_head() const { return nullptr; }
+    // The rank's own embedding table. It is this rank's vocabulary shard when the load
+    // split the vocabulary, and the full table otherwise.
+    virtual const shelf::weights::MatrixWeight* embed_tokens() const { return nullptr; }
     // The dense family's model, for callers that need its weights. Null for a model whose FFN
     // runs on grouped expert rows, which has no dense model to reach.
     virtual const shelf::qwen35::Qwen35Model* dense_model() const { return nullptr; }

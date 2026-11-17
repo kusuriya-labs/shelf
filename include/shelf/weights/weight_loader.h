@@ -62,12 +62,17 @@ Status validate_quantized_model(const quantization::bundle::QuantizedModelReader
 // property of the weight loading layer, not of any model family.
 // `partition_plan` selects an optional logical TP partition that is
 // materialized before any preshuffle; nullptr keeps the global load path.
+class PinnedHostArena;
+
 struct WeightLoadOptions {
     bool preshuffle = true;
     // Converts a BF16 matrix to INT8 codes with one FP16 scale per 32-element block.
     // The row-major payload feeds the lm_head FP8 kernel, so the BF16 copy is never
     // uploaded and the arena keeps only the quantized form.
     bool quantize_int8_w32 = false;
+    // Places a BF16 payload in page-locked host memory instead of VRAM. Only the
+    // embedding table uses it, and never when it is tied to the lm_head.
+    PinnedHostArena* pinned_host = nullptr;
     const TensorPartitionPlan* partition_plan = nullptr;
 };
 

@@ -402,6 +402,7 @@ Result<Qwen35MoeModelWeights> load_qwen35moe_weights(
     out.layers.resize(num_layers);
 
     qhy::HybridLoadOptions hybrid_options = options;
+    hybrid_options.embedding_host_pinned = true;
     hybrid_options.load_embedding = load_embedding;
     hybrid_options.load_lm_head = load_final;
     hybrid_options.load_final_norm = load_final;

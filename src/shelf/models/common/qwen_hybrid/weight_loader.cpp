@@ -123,9 +123,13 @@ Status load_hybrid_model_level_quantized(
         options.load_embedding ||
         (options.load_lm_head && config.tie_word_embeddings);
     if (need_embedding) {
+        shelf::weights::WeightLoadOptions embed_options = options.weights;
+        if (options.embedding_host_pinned && !config.tie_word_embeddings) {
+            embed_options.pinned_host = &weights.pinned_host;
+        }
         auto embed = shelf::weights::load_quantized_matrix(
             reader, "model.language_model.embed_tokens.weight", arena, stream,
-            options.weights);
+            embed_options);
         if (!embed.ok()) return embed.status();
         weights.embed_tokens = embed.release();
     }

@@ -9,6 +9,7 @@
 #include <shelf/quantization/mxfp4/mxfp4.h>
 #include <shelf/quantization/mxfp4/mxfp4_native.h>
 #include <shelf/weights/canonical_partition.h>
+#include <shelf/weights/pinned_host_arena.h>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -308,6 +309,16 @@ Result<MatrixWeight> load_quantized_view(
         }
         w.encoding = MatrixEncoding::Bf16;
         w.k_padded = static_cast<uint32_t>(k);
+        if (options.pinned_host != nullptr) {
+            void* host = nullptr;
+            st = options.pinned_host->allocate(static_cast<std::size_t>(m * k * 2), &host);
+            if (!st.ok()) return st;
+            std::memcpy(host, v.data.data, static_cast<std::size_t>(m * k * 2));
+            w.host_resident = true;
+            w.host_payload = host;
+            apply_default_compute_spec(w);
+            return w;
+        }
         std::vector<std::size_t> shape = {m, k};
         std::vector<std::size_t> strides = {k, 1};
         w.bf16 = alloc_bytes(m * k * 2, shape, strides, arena);

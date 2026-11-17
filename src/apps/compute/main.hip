@@ -179,7 +179,7 @@ int main(int argc, char** argv) {
         config.dflash2_tree_extra = opt.serve_stdio ? 0u : static_cast<uint32_t>(opt.dflash2_tree_budget ? opt.dflash2_tree_budget - opt.dflash2_drafts - 1 : opt.dflash2_tree_extra);
         config.dflash2_max_sessions = static_cast<uint32_t>(opt.dflash2_max_sessions);
         if (opt.tp > 1) {
-            config.private_target_weights = true;
+            config.private_target_weights = opt.mtp;
             config.private_target_lm_head = opt.mtp;
         }
     }

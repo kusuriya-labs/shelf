@@ -30,6 +30,9 @@ struct HybridLoadOptions {
     bool load_lm_head = true;
     bool load_final_norm = true;
     bool quantize_lm_head_int8_w32 = false;
+    // Keeps the embedding table in page-locked host memory. A tied embedding stays in
+    // VRAM because the lm_head reads it as a matrix.
+    bool embedding_host_pinned = false;
     shelf::weights::WeightLoadOptions weights;
 };
 

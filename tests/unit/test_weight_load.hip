@@ -1108,8 +1108,17 @@ static void test_qwen35_hf_fp8_model_load(gpu::GpuArena& arena, hipStream_t stre
 
     check(w.embed_tokens.encoding == weights::MatrixEncoding::Bf16, "hf fp8 embed bf16");
     {
-        const auto got = d2h(w.embed_tokens.bf16.data<void>(), f.bf16.at("model.language_model.embed_tokens.weight").size());
-        check(got == f.bf16.at("model.language_model.embed_tokens.weight"), "hf fp8 embed bytes");
+        // An untied embedding is page-locked host memory, not VRAM: the device
+        // tensor stays empty and the payload is compared from the host pointer.
+        check(w.embed_tokens.host_resident, "hf fp8 embed lives in pinned host memory");
+        check(w.embed_tokens.bf16.ndim() == 0, "hf fp8 embed keeps no device tensor");
+        check(!w.pinned_host.empty(), "hf fp8 weights own the pinned host arena");
+        const auto& want = f.bf16.at("model.language_model.embed_tokens.weight");
+        const auto* got = static_cast<const std::uint8_t*>(w.embed_tokens.host_payload);
+        check(got != nullptr && want.size() == static_cast<std::size_t>(w.embed_tokens.rows) *
+                                                   w.embed_tokens.cols * 2u &&
+                  std::memcmp(got, want.data(), want.size()) == 0,
+              "hf fp8 embed bytes match the checkpoint");
     }
     {
         // The BF16 lm_head is converted at load time, so the arena keeps only the

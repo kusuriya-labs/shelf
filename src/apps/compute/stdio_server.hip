@@ -1390,13 +1390,17 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
         draft_config.proposal_distributor = dflash.tp_proposal.get();
         draft_config.vocab_offset = head_vocab_offset;
         draft_config.local_vocab = head_local_vocab;
+        const shelf::weights::MatrixWeight* draft_embed = &runtime.model().embed_tokens();
+        if (serve_tp_sharded) {
+            draft_embed = dflash.tp_proposal != nullptr
+                ? runtime.tp_coordinator()->rank(0).rank_model()->embed_tokens()
+                : private_embed;
+        }
         draft_config.target_lm_head =
             dflash.tp_proposal != nullptr
                 ? head_shards[0]
                 : (serve_tp_sharded ? private_lm_head : &runtime.model().lm_head());
-        draft_config.target_embed_tokens =
-            serve_tp_sharded ? private_embed
-                             : &runtime.model().embed_tokens();
+        draft_config.target_embed_tokens = draft_embed;
         auto draft_result = ::shelf::runtime::dflash2::create_dflash2_executor(
             dflash.config, dflash.weights, runtime.arena(), draft_config);
         if (!draft_result.ok()) {

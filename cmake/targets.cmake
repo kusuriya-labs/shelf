@@ -43,6 +43,7 @@ add_library(shelf_weights STATIC
     src/shelf/weights/weight_loader.cpp
     src/shelf/weights/tensor_partition.cpp
     src/shelf/weights/canonical_partition.cpp
+    src/shelf/weights/pinned_host_arena.cpp
 )
 target_compile_features(shelf_weights PRIVATE cxx_std_20)
 target_include_directories(shelf_weights PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")

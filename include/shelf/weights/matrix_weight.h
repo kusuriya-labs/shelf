@@ -24,6 +24,11 @@ struct MatrixWeight {
     quantization::ComputeSpecId compute_spec = quantization::ComputeSpecId::BF16_F32_BF16;
     MatrixEncoding encoding = MatrixEncoding::Bf16;
     gpu::Tensor bf16;
+    // Embedding tables that live in page-locked host memory instead of VRAM. `bf16`
+    // stays empty and kernels read `host_payload` through the unified address space.
+    // A tied embedding stays in VRAM: the lm_head reads it as a matrix.
+    bool host_resident = false;
+    const void* host_payload = nullptr;
     gpu::Tensor data;
     gpu::Tensor codes;
     gpu::Tensor scales;
@@ -58,6 +63,12 @@ struct MatrixWeight {
     bool preshuffled = false;
     std::optional<TensorPartitionDesc> partition;
 };
+
+// Pointer a lookup or a matrix read starts from, whether the payload is in VRAM or
+// in pinned host memory.
+inline const void* matrix_payload(const MatrixWeight& w) noexcept {
+    return w.host_resident ? w.host_payload : w.bf16.data();
+}
 
 inline quantization::QuantSpecId encoding_to_quant_spec(MatrixEncoding enc) noexcept {
     switch (enc) {

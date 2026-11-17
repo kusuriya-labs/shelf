@@ -26,6 +26,9 @@ public:
     const shelf::weights::MatrixWeight* lm_head() const override {
         return &model_.weights().lm_head;
     }
+    const shelf::weights::MatrixWeight* embed_tokens() const override {
+        return &model_.weights().embed_tokens;
+    }
 
     std::uint64_t weight_bytes() const override {
         const Qwen35ModelWeights& w = model_.weights();
