@@ -234,9 +234,9 @@ MEMORY_PLAN mode=auto tp=2 rank=0
 `target weights` はその rank が private weight を load した場合はそれを含む。
 `draft weights` は `--dflash2-model-dir` の safetensors 合計、`drafter runtime` は
 drafter の scratch・session pool・MTP batch の予約、`runtime workspace` は
-`--working-set-reserve-gib`（auto は slack を含む）、`prefix cache` は capture slot と
-family shadow である。rank 間で private weight が異なるため、`KV budget` も
-rank ごとに違ってよい。
+`--working-set-reserve-gib`（auto は slack を含む）、`prefix cache` は VRAM の
+capture slot である。checkpoint は host memory に置かれるため arena を消費しない。
+rank 間で private weight が異なるため、`KV budget` も rank ごとに違ってよい。
 
 ## Scheduler
 

@@ -214,14 +214,16 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
         const PrefixCacheBytes prefix_bytes =
             prefix_cache_bytes(prefix_config, gdn_layout_result);
         reserved += prefix_bytes.total();
-        const std::size_t family_shadow =
-            rank->model_->executor_state_reserve_bytes(
-                2u * static_cast<std::size_t>(prefix_config.checkpoints));
-        reserved += family_shadow;
-        plan.prefix = prefix_bytes.total() + family_shadow;
-        std::fprintf(stderr, "MEMORY_PLAN tp prefix cache: %s (family shadow %s)\n",
+        const std::size_t capture_state =
+            prefix_config.capture_slots == 0u
+                ? 0u
+                : rank->model_->executor_state_reserve_bytes(
+                      prefix_config.capture_slots);
+        reserved += capture_state;
+        plan.prefix = prefix_bytes.total() + capture_state;
+        std::fprintf(stderr, "MEMORY_PLAN tp prefix cache: %s (capture state %s)\n",
                      gpu::format_gib(prefix_bytes.total()).c_str(),
-                     gpu::format_gib(family_shadow).c_str());
+                     gpu::format_gib(capture_state).c_str());
     }
     if (config.drafter_config != nullptr) {
         DFlash2SpecDecoderConfig spec_config;
