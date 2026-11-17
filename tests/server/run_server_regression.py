@@ -65,6 +65,9 @@ GROUPS = OrderedDict([
         "test_plamo3_template.py",
         "test_inference_budget.py",
     ]),
+    ("commonized-runtime", [
+        "test_commonized_runtime_e2e.py",
+    ]),
     ("tools", [
         "test_server_tools.py",
         "test_server_stream_tools.py",
