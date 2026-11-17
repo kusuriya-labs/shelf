@@ -105,6 +105,10 @@ Result<TensorPartitionPlan> build_qwen35_tensor_partition_plan(
         if (!st.ok()) return st;
     }
 
+    if (!config.tie_word_embeddings) {
+        Status st = shelf::qwen_hybrid::add_embedding_partitions(plan, config, body);
+        if (!st.ok()) return st;
+    }
     if (shard_lm_head && !config.tie_word_embeddings) {
         Status st = shelf::qwen_hybrid::add_lm_head_partitions(plan, config, body);
         if (!st.ok()) return st;

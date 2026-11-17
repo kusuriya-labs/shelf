@@ -198,7 +198,9 @@ struct PhysicalEmbeddingLaunch {
     uint64_t output = 0;
     uint32_t rows = 0;
     uint32_t vocab_size = 0;
+    uint32_t vocab_offset = 0;
     uint32_t hidden_size = 0;
+    uint32_t partial_vocab = 0;
     uint32_t output_row_stride = 0;
 };
 

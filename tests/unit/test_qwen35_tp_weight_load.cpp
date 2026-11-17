@@ -134,9 +134,14 @@ int main() {
         check(r0.layers[0].attn_dt_bias.dim(0) == 4, "rank0 dt_bias local");
         check(r1.layers[0].attn_dt_bias.dim(0) == 4, "rank1 dt_bias local");
         check(r0.layers[0].attn_norm_weight.dim(0) == 128, "gdn norm replicated");
-        check(r0.embed_tokens.rows == 128 && r0.embed_tokens.cols == 64,
-              "embedding replicated");
-        check(!r0.embed_tokens.partition.has_value(), "embedding has no partition");
+        check(r0.embed_tokens.rows == 64 && r0.embed_tokens.cols == 64,
+              "rank0 embedding is the low half of the vocabulary");
+        check(r0.embed_tokens.partition.has_value() &&
+                  r0.embed_tokens.partition->index == 0u,
+              "rank0 embedding carries its partition");
+        check(r1.embed_tokens.rows == 64 && r1.embed_tokens.partition.has_value() &&
+                  r1.embed_tokens.partition->index == 1u,
+              "rank1 embedding carries the other half");
         check(r0.layers[0].input_layernorm_weight.dim(0) == 64, "input norm replicated");
 
         // The model invariants are stated for the model, not for one rank: a rank holds an

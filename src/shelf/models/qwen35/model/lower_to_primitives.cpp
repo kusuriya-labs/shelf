@@ -530,13 +530,14 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
     if (first_stage) {
         tokens = em.value(0, RT::ValueDType::I32);
         RT::EmbeddingLookupNode n;
-        n.vocab_size = weights.embed_tokens.rows;
+        n.vocab_size = static_cast<std::uint32_t>(config.vocab_size);
         n.hidden_size = hidden_size;
         n.weight_shape =
             RT::MatrixwiseShapeKey{weights.embed_tokens.rows, weights.embed_tokens.cols};
         n.weight_index = embed_index;
         em.emit(RT::PrimitiveNode{n}, {tokens}, {layer_input});
         pg.nodes.back().debug_name = "embedding";
+        if (weights.embed_tokens.partition.has_value()) pg.nodes.back().tp_combine = 1;
         pg.external_inputs.push_back(tokens);
     } else {
         pg.external_inputs.push_back(layer_input);

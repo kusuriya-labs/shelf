@@ -204,7 +204,28 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
         return Status::invalid_argument(
             "create_dflash2_spec_decoder: target hidden_size mismatch", __FILE__, __LINE__);
     }
-    if (embed.rows != dcfg.vocab_size) {
+    if (draft.target_embed_shards.count != 0u) {
+        if (draft.target_embed_shards.count > shelf::kernel::kEmbeddingMaxShards) {
+            return Status::invalid_argument(
+                "create_dflash2_spec_decoder: too many embedding shards", __FILE__,
+                __LINE__);
+        }
+        uint64_t covered = 0u;
+        for (uint32_t s = 0; s < draft.target_embed_shards.count; ++s) {
+            const auto& shard = draft.target_embed_shards.refs[s];
+            if (shard.table == nullptr || shard.rows == 0u) {
+                return Status::invalid_argument(
+                    "create_dflash2_spec_decoder: embedding shard is empty", __FILE__,
+                    __LINE__);
+            }
+            covered += shard.rows;
+        }
+        if (covered != dcfg.vocab_size) {
+            return Status::invalid_argument(
+                "create_dflash2_spec_decoder: embedding shards do not cover the vocabulary",
+                __FILE__, __LINE__);
+        }
+    } else if (embed.rows != dcfg.vocab_size) {
         return Status::invalid_argument(
             "create_dflash2_spec_decoder: target vocab_size mismatch", __FILE__, __LINE__);
     }

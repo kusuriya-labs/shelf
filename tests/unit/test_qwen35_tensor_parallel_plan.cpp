@@ -138,7 +138,7 @@ static void test_lm_head_fail_open() {
     auto unsharded_plan = build_qwen35_tensor_partition_plan(unsharded, 2, 0, false);
     check(unsharded_plan.ok(), "unsharded plan builds");
     if (unsharded_plan.ok()) {
-        check(unsharded_plan.value().tensors.size() == 36,
+        check(unsharded_plan.value().tensors.size() == 37,
               "unsharded lm_head plan entry count");
         check(find(unsharded_plan.value(), "lm_head.weight") == nullptr,
               "unsharded lm_head is not partitioned");
@@ -152,7 +152,7 @@ static void test_mini_plan_rank(uint32_t rank) {
     if (!plan_result.ok()) return;
     const TensorPartitionPlan& plan = plan_result.value();
     check(plan.tp_size == 2 && plan.tp_rank == rank, "mini plan geometry");
-    check(plan.tensors.size() == 38, "mini plan entry count");
+    check(plan.tensors.size() == 39, "mini plan entry count");
     check(validate_tensor_partition_plan(plan).ok(), "mini plan validates");
 
     const std::string p0 = "model.language_model.layers.0.";
@@ -232,7 +232,8 @@ static void test_mini_plan_rank(uint32_t rank) {
         check(validate_tensor_partition(kv.second).ok(), "entry validates: " + kv.first);
         const bool vocab_shard =
             kv.first == "model.language_model.lm_head.weight" ||
-            kv.first == "lm_head.weight";
+            kv.first == "lm_head.weight" ||
+            kv.first == "model.language_model.embed_tokens.weight";
         const bool replicated_shape =
             !vocab_shard &&
             (kv.first.find("norm") != std::string::npos ||
@@ -284,7 +285,7 @@ static void test_qwen38_27b_plan() {
     if (!p0.ok() || !p1.ok()) return;
     const TensorPartitionPlan& rank0 = p0.value();
     const TensorPartitionPlan& rank1 = p1.value();
-    check(rank0.tensors.size() == 642, "qwen3.8-27b entry count");
+    check(rank0.tensors.size() == 643, "qwen3.8-27b entry count");
     check(validate_tensor_partition_plan(rank0).ok(), "qwen3.8-27b rank0 plan validates");
     check(validate_tensor_partition_plan(rank1).ok(), "qwen3.8-27b rank1 plan validates");
 
@@ -360,7 +361,8 @@ static void test_qwen38_27b_plan() {
               "27b entry validates: " + kv.first);
         const bool vocab_shard =
             kv.first == "model.language_model.lm_head.weight" ||
-            kv.first == "lm_head.weight";
+            kv.first == "lm_head.weight" ||
+            kv.first == "model.language_model.embed_tokens.weight";
         const bool replicated_shape =
             !vocab_shard &&
             (kv.first.find("norm") != std::string::npos ||
@@ -377,7 +379,7 @@ static void test_layer_type_fallback() {
     auto plan = build_qwen35_tensor_partition_plan(c, 2, 0);
     check(plan.ok(), "layer type fallback plan builds");
     if (plan.ok()) {
-        check(plan.value().tensors.size() == 38,
+        check(plan.value().tensors.size() == 39,
               "layer type fallback matches explicit layer types");
     }
 }

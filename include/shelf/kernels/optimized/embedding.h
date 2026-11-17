@@ -50,4 +50,31 @@ hipError_t launch_embedding_bf16(
     hipStream_t stream,
     uint32_t vocab_offset = 0u,
     uint32_t partial_vocab = 0u);
+// One vocabulary shard of a lookup table. The tables are page-locked host
+// buffers, so the kernel reads them over the bus.
+struct EmbeddingShardRef {
+    const bf16_t* table = nullptr;
+    uint32_t vocab_offset = 0;
+    uint32_t rows = 0;
+};
+
+inline constexpr uint32_t kEmbeddingMaxShards = 4u;
+
+struct EmbeddingShardTable {
+    EmbeddingShardRef refs[kEmbeddingMaxShards];
+    uint32_t count = 0;
+};
+
+// Looks rows up across every shard. A token outside all shards writes zeros.
+// Used where one consumer needs the whole vocabulary while each rank keeps
+// only its shard.
+hipError_t launch_embedding_shards_bf16(
+    const EmbeddingShardTable& shards,
+    const int32_t* token_ids,
+    bf16_t* output,
+    uint32_t rows,
+    uint32_t hidden_size,
+    uint32_t output_row_stride,
+    hipStream_t stream);
+
 }  // namespace shelf::kernel

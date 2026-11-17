@@ -105,6 +105,8 @@ Result<PhysicalResolveStatus> resolve_embedding_physical(
     out.output = reinterpret_cast<uint64_t>(outv.ptr);
     out.rows = rows;
     out.vocab_size = vocab;
+    out.vocab_offset = we.vocab_offset;
+    out.partial_vocab = we.vocab_sharded ? 1u : 0u;
     out.hidden_size = hidden;
     out.output_row_stride = outv.row_stride;
     return PhysicalResolveStatus::Applicable;
@@ -128,7 +130,7 @@ Result<OptimizedLaunchResult> try_launch_embedding(
             reinterpret_cast<const int32_t*>(phys.token_ids),
             reinterpret_cast<::shelf::bf16_t*>(phys.output), phys.rows,
             phys.vocab_size, phys.hidden_size, phys.output_row_stride,
-            ctx.error_word, stream);
+            ctx.error_word, stream, phys.vocab_offset, phys.partial_vocab);
         if (herr != hipSuccess)
             return Status::hip_error("embedding optimized launch",
                                      hipGetErrorString(herr), __FILE__, __LINE__);

@@ -59,12 +59,62 @@ __device__ __forceinline__ void body(const EmbeddingBf16Args& args) {
     }
 }
 
+
+__device__ __forceinline__ void shard_lookup_body(
+    const EmbeddingShardTable& shards,
+    const int32_t* __restrict__ token_ids,
+    bf16_t* __restrict__ output,
+    uint32_t hidden_size,
+    uint32_t output_row_stride) {
+    const uint32_t row = blockIdx.x;
+    const int32_t token = token_ids[row];
+    bf16_t* __restrict__ dst = output + static_cast<size_t>(row) * output_row_stride;
+    const bf16_t* src = nullptr;
+    for (uint32_t s = 0; s < shards.count; ++s) {
+        const EmbeddingShardRef& shard = shards.refs[s];
+        if (token < 0) break;
+        const uint32_t id = static_cast<uint32_t>(token);
+        if (id >= shard.vocab_offset && id < shard.vocab_offset + shard.rows) {
+            src = shard.table + static_cast<size_t>(id - shard.vocab_offset) * hidden_size;
+            break;
+        }
+    }
+    if (src == nullptr) {
+        for (uint32_t base = threadIdx.x * kVec; base < hidden_size;
+             base += static_cast<uint32_t>(blockDim.x) * kVec) {
+            const uint32_t end = min(base + kVec, hidden_size);
+            for (uint32_t i = base; i < end; ++i) dst[i] = bf16_t{};
+        }
+        return;
+    }
+    for (uint32_t base = threadIdx.x * kVec; base < hidden_size;
+         base += static_cast<uint32_t>(blockDim.x) * kVec) {
+        if (base + kVec <= hidden_size) {
+            const uint4 v = *reinterpret_cast<const uint4*>(src + base);
+            *reinterpret_cast<uint4*>(dst + base) = v;
+        } else {
+            const uint32_t end = min(base + kVec, hidden_size);
+            for (uint32_t i = base; i < end; ++i) dst[i] = src[i];
+        }
+    }
+}
+
 }  // namespace op_embedding_bf16
 }  // namespace
 
 extern "C" __global__ void shelf_embedding_bf16(
     EmbeddingBf16Args args) {
     op_embedding_bf16::body(args);
+}
+
+extern "C" __global__ void shelf_embedding_shards(
+    EmbeddingShardTable shards,
+    const int32_t* token_ids,
+    bf16_t* output,
+    uint32_t hidden_size,
+    uint32_t output_row_stride) {
+    op_embedding_bf16::shard_lookup_body(shards, token_ids, output, hidden_size,
+                                         output_row_stride);
 }
 
 hipError_t launch_embedding_bf16(
@@ -94,5 +144,26 @@ hipError_t launch_embedding_bf16(
 
 namespace {
 }  // namespace
+
+hipError_t launch_embedding_shards_bf16(
+    const EmbeddingShardTable& shards,
+    const int32_t* token_ids,
+    bf16_t* output,
+    uint32_t rows,
+    uint32_t hidden_size,
+    uint32_t output_row_stride,
+    hipStream_t stream) {
+    if (rows == 0u) return hipSuccess;
+    if (hidden_size == 0u || output_row_stride < hidden_size) return hipErrorInvalidValue;
+    if (token_ids == nullptr || output == nullptr) return hipErrorInvalidValue;
+    if (shards.count == 0u || shards.count > kEmbeddingMaxShards) return hipErrorInvalidValue;
+    for (uint32_t s = 0; s < shards.count; ++s) {
+        if (shards.refs[s].table == nullptr || shards.refs[s].rows == 0u)
+            return hipErrorInvalidValue;
+    }
+    shelf_embedding_shards<<<rows, kEmbeddingThreads, 0, stream>>>(
+        shards, token_ids, output, hidden_size, output_row_stride);
+    return hipGetLastError();
+}
 
 }  // namespace shelf::kernel

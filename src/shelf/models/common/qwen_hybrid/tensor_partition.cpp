@@ -258,5 +258,22 @@ Status add_lm_head_partitions(TensorPartitionPlan& plan, const QwenHybridConfig&
                vocab_range);
 }
 
+Status add_embedding_partitions(TensorPartitionPlan& plan, const QwenHybridConfig& config,
+                                const HybridPartition& partition) {
+    if (config.tie_word_embeddings) {
+        return Status::invalid_argument("embedding partition requires untied embeddings",
+                                        __FILE__, __LINE__);
+    }
+    Status st = require_divisible(config.vocab_size, partition.tp_size,
+                                  "hybrid tp requires vocab_size divisible by tp_size");
+    if (!st.ok()) return st;
+    const uint64_t vocab = config.vocab_size;
+    const uint64_t local_vocab = vocab / partition.tp_size;
+    const uint64_t vocab_offset = static_cast<uint64_t>(partition.tp_rank) * local_vocab;
+    const std::vector<TensorPartitionRange> vocab_range = {range_of(vocab_offset, local_vocab)};
+    return add(plan, partition, "model.language_model.embed_tokens.weight", 0,
+               shape2(vocab, partition.hidden), vocab_range);
+}
+
 }  // namespace qwen_hybrid
 }  // namespace shelf

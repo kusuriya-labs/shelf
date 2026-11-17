@@ -62,6 +62,13 @@ Status add_hybrid_layer_partitions(weights::TensorPartitionPlan& plan,
                                    bool is_gdn);
 
 // Adds the vocab-parallel lm_head entries under both names a checkpoint may use.
+// Splits the vocabulary axis of the embedding table across ranks. The table is a
+// lookup, so each rank keeps only the rows it can serve and the lookup zero-fills
+// the rest; the ranks sum their rows back into the batch.
+Status add_embedding_partitions(weights::TensorPartitionPlan& plan,
+                                const QwenHybridConfig& config,
+                                const HybridPartition& partition);
+
 Status add_lm_head_partitions(weights::TensorPartitionPlan& plan,
                               const QwenHybridConfig& config,
                               const HybridPartition& partition);

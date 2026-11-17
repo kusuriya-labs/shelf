@@ -8,6 +8,7 @@
 #include <shelf/runtime/dflash2_config.h>
 #include <shelf/runtime/dflash2/weights.h>
 #include <shelf/kernels/dflash2/feature_concat.h>
+#include <shelf/kernels/optimized/embedding.h>
 #include <shelf/weights/matrix_weight.h>
 #include <hip/hip_runtime.h>
 
@@ -50,6 +51,10 @@ struct DFlash2ExecutorConfig {
     uint32_t vocab_offset = 0;
     uint32_t local_vocab = 0;
     DFlash2ProposalDistributor* proposal_distributor = nullptr;
+    // Shards of the target embedding table. The drafter reads the whole
+    // vocabulary, so it looks a token up across every rank's shard. Empty keeps
+    // `target_embed_tokens` as the single table.
+    shelf::kernel::EmbeddingShardTable target_embed_shards{};
 };
 
 struct DFlash2Executor {
@@ -101,6 +106,7 @@ struct DFlash2Executor {
 
     const shelf::weights::MatrixWeight* target_lm_head = nullptr;
     const shelf::weights::MatrixWeight* target_embed_tokens = nullptr;
+    shelf::kernel::EmbeddingShardTable target_embed_shards{};
     uint32_t draft_rows = 0;
 
     gpu::Tensor noise_token_ids;

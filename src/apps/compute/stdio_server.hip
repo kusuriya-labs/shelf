@@ -1336,6 +1336,7 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
         std::vector<const shelf::weights::MatrixWeight*> head_shards;
         uint32_t head_vocab_offset = 0;
         uint32_t head_local_vocab = 0;
+        shelf::kernel::EmbeddingShardTable embed_config_shards{};
         if (serve_tp_sharded) {
             auto* tp = runtime.tp_coordinator();
             bool sharded = tp != nullptr;
@@ -1375,6 +1376,28 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
                         proposal_result.release());
                 head_vocab_offset = offsets[0];
                 head_local_vocab = proposal_config.local_vocab;
+                shelf::kernel::EmbeddingShardTable embed_shards{};
+                bool embed_sharded = tp->tp_size() <=
+                                     static_cast<int>(shelf::kernel::kEmbeddingMaxShards);
+                for (int r = 0; embed_sharded && r < tp->tp_size(); ++r) {
+                    const auto* embed = tp->rank(static_cast<std::size_t>(r))
+                                            .rank_model()
+                                            ->embed_tokens();
+                    if (embed == nullptr || !embed->partition.has_value() ||
+                        !embed->host_resident) {
+                        embed_sharded = false;
+                        break;
+                    }
+                    embed_shards.refs[static_cast<std::size_t>(r)] =
+                        shelf::kernel::EmbeddingShardRef{
+                            static_cast<const shelf::bf16_t*>(embed->host_payload),
+                            static_cast<uint32_t>(embed->partition->index) * embed->rows,
+                            embed->rows};
+                }
+                if (embed_sharded && tp->tp_size() > 1) {
+                    embed_shards.count = static_cast<uint32_t>(tp->tp_size());
+                    embed_config_shards = embed_shards;
+                }
             } else {
                 fprintf(stderr,
                         "dflash2 tp: target lm_head is not split across ranks, "
@@ -1390,6 +1413,7 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
         draft_config.proposal_distributor = dflash.tp_proposal.get();
         draft_config.vocab_offset = head_vocab_offset;
         draft_config.local_vocab = head_local_vocab;
+        draft_config.target_embed_shards = embed_config_shards;
         const shelf::weights::MatrixWeight* draft_embed = &runtime.model().embed_tokens();
         if (serve_tp_sharded) {
             draft_embed = dflash.tp_proposal != nullptr

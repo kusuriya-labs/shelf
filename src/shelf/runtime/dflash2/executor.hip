@@ -495,8 +495,10 @@ Result<DFlash2Executor> create_dflash2_executor(
     if (!st.ok()) return st;
 
     ex.target_embed_tokens = exec_config.target_embed_tokens;
+    ex.target_embed_shards = exec_config.target_embed_shards;
     if (exec_config.target_embed_tokens != nullptr) {
-        if (exec_config.target_embed_tokens->rows != config.vocab_size ||
+        if ((exec_config.target_embed_shards.count == 0u &&
+             exec_config.target_embed_tokens->rows != config.vocab_size) ||
             exec_config.target_embed_tokens->cols != config.hidden_size) {
             return Status::invalid_argument("dflash2 target embed_tokens shape mismatch",
                                             __FILE__, __LINE__);
@@ -546,6 +548,7 @@ Status dflash2_executor_shutdown(DFlash2Executor& executor) noexcept {
     executor.backbone_output = gpu::Tensor{};
     executor.target_lm_head = nullptr;
     executor.target_embed_tokens = nullptr;
+    executor.target_embed_shards = shelf::kernel::EmbeddingShardTable{};
     executor.vocab_offset = 0;
     executor.local_vocab = 0;
     executor.proposal_sharded = false;
@@ -1762,10 +1765,15 @@ Status dflash2_prepare_noise_embedding(
     const int32_t* token_ids = executor.noise_token_ids.data<int32_t>();
     bf16_t* output = executor.noise_embedding.data<bf16_t>();
     if (embed.encoding == shelf::weights::MatrixEncoding::Bf16) {
+        if (executor.target_embed_shards.count != 0u) {
+        err = shelf::kernel::launch_embedding_shards_bf16(
+            executor.target_embed_shards, token_ids, output, block_rows, hidden, hidden,
+            stream);
+    } else {
         err = shelf::kernel::launch_embedding_bf16(
             static_cast<const bf16_t*>(shelf::weights::matrix_payload(embed)), token_ids,
-            output, block_rows, vocab, hidden, hidden,
-            nullptr, stream);
+            output, block_rows, vocab, hidden, hidden, nullptr, stream);
+    }
     } else {
         return Status::unsupported("dflash2 target embed_tokens encoding is not supported",
                                    __FILE__, __LINE__);
@@ -2172,11 +2180,18 @@ Status dflash2_propose_batch(
         return Status::unsupported("dflash2 target embed_tokens encoding is not supported",
                                    __FILE__, __LINE__);
     }
-    err = shelf::kernel::launch_embedding_bf16(
-        static_cast<const bf16_t*>(shelf::weights::matrix_payload(embed)),
-        executor.noise_token_ids.data<int32_t>(),
-        executor.noise_embedding.data<bf16_t>(), stage.total_rows, vocab, hidden, hidden,
-        nullptr, stream);
+    if (executor.target_embed_shards.count != 0u) {
+        err = shelf::kernel::launch_embedding_shards_bf16(
+            executor.target_embed_shards, executor.noise_token_ids.data<int32_t>(),
+            executor.noise_embedding.data<bf16_t>(), stage.total_rows, hidden, hidden,
+            stream);
+    } else {
+        err = shelf::kernel::launch_embedding_bf16(
+            static_cast<const bf16_t*>(shelf::weights::matrix_payload(embed)),
+            executor.noise_token_ids.data<int32_t>(),
+            executor.noise_embedding.data<bf16_t>(), stage.total_rows, vocab, hidden, hidden,
+            nullptr, stream);
+    }
     if (err != hipSuccess) {
         return Status::hip_error("dflash2 batch noise embedding launch", hipGetErrorString(err),
                                  __FILE__, __LINE__);

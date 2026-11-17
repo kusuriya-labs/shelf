@@ -376,13 +376,15 @@ Result<shelf::qwen35::Qwen35LoweredPrimitives> lower_qwen35qsa_to_primitives(
     RT::ValueId layer_input = em.value(hidden_size);
     {
         RT::EmbeddingLookupNode n;
-        n.vocab_size = weights.backbone.embed_tokens.rows;
+        n.vocab_size = static_cast<std::uint32_t>(config.vocab_size);
         n.hidden_size = hidden_size;
         n.weight_shape = RT::MatrixwiseShapeKey{weights.backbone.embed_tokens.rows,
                                                 weights.backbone.embed_tokens.cols};
         n.weight_index = embed_index;
         em.emit(RT::PrimitiveNode{n}, {tokens}, {layer_input});
         pg.nodes.back().debug_name = "embedding";
+        if (weights.backbone.embed_tokens.partition.has_value())
+            pg.nodes.back().tp_combine = 1;
         pg.external_inputs.push_back(tokens);
     }
 

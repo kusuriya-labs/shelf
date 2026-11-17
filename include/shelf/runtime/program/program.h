@@ -54,6 +54,11 @@ struct WeightSlot {
     uint64_t exl3_marker_batch_stride_bytes = 0;
     uint32_t output_col_offset = 0;
     uint32_t output_col_total = 0;
+    // First vocabulary row this table can serve. Set with vocab_sharded for a
+    // vocabulary-sharded embedding; the lookup zero-fills tokens outside
+    // [offset, offset + rows) so the ranks can sum their rows back.
+    uint32_t vocab_offset = 0;
+    bool vocab_sharded = false;
     bool plamo_exl3_split4 = false;
     bool plamo_exl3_linear = false;
 };
