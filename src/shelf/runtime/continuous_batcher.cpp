@@ -5,7 +5,7 @@
 #include <shelf/runtime/spec_decode.h>
 #include <shelf/core/gpu/scoped_device.h>
 #include <shelf/runtime/executor.h>
-#include <shelf/runtime/kernels/dflash2/feature_concat.h>
+#include <shelf/kernels/dflash2/feature_concat.h>
 #include <shelf/runtime/state_types.h>
 #include <algorithm>
 #include <chrono>

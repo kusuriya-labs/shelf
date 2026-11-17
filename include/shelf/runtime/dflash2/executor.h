@@ -7,7 +7,7 @@
 #include <shelf/core/status.h>
 #include <shelf/runtime/dflash2_config.h>
 #include <shelf/runtime/dflash2/weights.h>
-#include <shelf/runtime/kernels/dflash2/feature_concat.h>
+#include <shelf/kernels/dflash2/feature_concat.h>
 #include <shelf/weights/matrix_weight.h>
 #include <hip/hip_runtime.h>
 

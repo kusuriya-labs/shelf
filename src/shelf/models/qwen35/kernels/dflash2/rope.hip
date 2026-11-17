@@ -1,4 +1,4 @@
-#include <shelf/runtime/kernels/dflash2/rope.h>
+#include <shelf/kernels/dflash2/rope.h>
 #include "detail/rope_device.h"
 #include <shelf/kernels/optimized/detail/vector_io.h>
 #include <hip/hip_runtime.h>

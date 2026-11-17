@@ -1,7 +1,7 @@
 #pragma once
 
 #include <shelf/core/memory/types.h>
-#include <shelf/runtime/kernels/dflash2/batch.h>
+#include <shelf/kernels/dflash2/batch.h>
 #include <hip/hip_runtime.h>
 #include <cstdint>
 

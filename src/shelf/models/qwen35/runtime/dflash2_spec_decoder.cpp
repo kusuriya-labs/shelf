@@ -6,8 +6,8 @@
 #include <shelf/models/qwen35/runtime/spec_decode.h>
 #include <shelf/models/qwen35/runtime/dflash2_tree.h>
 #include <shelf/models/qwen35/runtime/dflash2_tree_budget.h>
-#include <shelf/runtime/kernels/dflash2/candidate_selector.h>
-#include <shelf/runtime/kernels/dflash2/feature_concat.h>
+#include <shelf/kernels/dflash2/candidate_selector.h>
+#include <shelf/kernels/dflash2/feature_concat.h>
 
 #include <algorithm>
 #include <array>

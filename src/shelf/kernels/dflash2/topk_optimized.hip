@@ -1,4 +1,4 @@
-#include <shelf/runtime/kernels/dflash2/topk.h>
+#include <shelf/kernels/dflash2/topk.h>
 #include <hip/hip_runtime.h>
 
 #include <cstdint>

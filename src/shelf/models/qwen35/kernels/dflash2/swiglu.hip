@@ -1,4 +1,4 @@
-#include <shelf/runtime/kernels/dflash2/swiglu.h>
+#include <shelf/kernels/dflash2/swiglu.h>
 #include <shelf/kernels/optimized/detail/vector_io.h>
 #include "detail/swiglu_device.h"
 #include <hip/hip_runtime.h>

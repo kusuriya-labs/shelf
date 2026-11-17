@@ -1,7 +1,7 @@
 #include <shelf/runtime/dflash2_spec_decoder.h>
 
 #include <shelf/core/gpu/cleanup.h>
-#include <shelf/runtime/kernels/dflash2/candidate_selector.h>
+#include <shelf/kernels/dflash2/candidate_selector.h>
 
 #include <vector>
 #include <type_traits>

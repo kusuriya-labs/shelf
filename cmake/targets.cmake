@@ -196,6 +196,26 @@ target_link_libraries(shelf_kernels_optimized PUBLIC shelf_gpu shelf_runtime she
 target_compile_options(shelf_kernels_optimized PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 shelf_set_hip_archs(shelf_kernels_optimized)
 
+add_library(shelf_kernels_dflash2 STATIC
+    src/shelf/kernels/dflash2/attention.hip
+    src/shelf/kernels/dflash2/candidate_selector.hip
+    src/shelf/kernels/dflash2/feature_concat.hip
+    src/shelf/kernels/dflash2/grouped_dynamic_conv.hip
+    src/shelf/kernels/dflash2/kv_ring.hip
+    src/shelf/kernels/dflash2/noise_input.hip
+    src/shelf/kernels/dflash2/rmsnorm.hip
+    src/shelf/kernels/dflash2/rope.hip
+    src/shelf/kernels/dflash2/swiglu.hip
+    src/shelf/kernels/dflash2/topk.hip
+    src/shelf/kernels/dflash2/topk_optimized.hip
+)
+target_compile_features(shelf_kernels_dflash2 PRIVATE cxx_std_20)
+target_include_directories(shelf_kernels_dflash2 PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(shelf_kernels_dflash2 PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(shelf_kernels_dflash2 PUBLIC shelf_gpu shelf_kernels_optimized)
+target_compile_options(shelf_kernels_dflash2 PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
+shelf_set_hip_archs(shelf_kernels_dflash2)
+
 add_library(shelf_dflash2 STATIC
     src/shelf/runtime/dflash2/dflash2_footprint.cpp
     src/shelf/runtime/dflash2/dflash2_spec_batch.cpp
@@ -203,22 +223,11 @@ add_library(shelf_dflash2 STATIC
     src/shelf/runtime/dflash2/context_state.hip
     src/shelf/runtime/dflash2/executor.hip
     src/shelf/runtime/dflash2/weights.cpp
-    src/shelf/runtime/kernels/dflash2/attention.hip
-    src/shelf/runtime/kernels/dflash2/candidate_selector.hip
-    src/shelf/runtime/kernels/dflash2/feature_concat.hip
-    src/shelf/runtime/kernels/dflash2/grouped_dynamic_conv.hip
-    src/shelf/runtime/kernels/dflash2/kv_ring.hip
-    src/shelf/runtime/kernels/dflash2/noise_input.hip
-    src/shelf/runtime/kernels/dflash2/rmsnorm.hip
-    src/shelf/runtime/kernels/dflash2/rope.hip
-    src/shelf/runtime/kernels/dflash2/swiglu.hip
-    src/shelf/runtime/kernels/dflash2/topk.hip
-    src/shelf/runtime/kernels/dflash2/topk_optimized.hip
 )
 target_compile_features(shelf_dflash2 PRIVATE cxx_std_20)
 target_include_directories(shelf_dflash2 PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(shelf_dflash2 PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(shelf_dflash2 PUBLIC shelf_runtime shelf_kernels_optimized shelf_inference_state shelf_gpu)
+target_link_libraries(shelf_dflash2 PUBLIC shelf_runtime shelf_kernels_dflash2 shelf_inference_state shelf_gpu)
 target_compile_options(shelf_dflash2 PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 shelf_set_hip_archs(shelf_dflash2)
 

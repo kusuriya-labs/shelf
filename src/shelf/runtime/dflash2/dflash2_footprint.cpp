@@ -6,9 +6,9 @@
 #include <shelf/inference/state/gdn_state_pool.h>
 #include <shelf/runtime/batch/device_batch_context.h>
 #include <shelf/runtime/program/int8_activation_workspace.h>
-#include <shelf/runtime/kernels/dflash2/batch.h>
-#include <shelf/runtime/kernels/dflash2/topk.h>
-#include <shelf/runtime/kernels/dflash2/candidate_selector.h>
+#include <shelf/kernels/dflash2/batch.h>
+#include <shelf/kernels/dflash2/topk.h>
+#include <shelf/kernels/dflash2/candidate_selector.h>
 
 #include <algorithm>
 #include <cstring>

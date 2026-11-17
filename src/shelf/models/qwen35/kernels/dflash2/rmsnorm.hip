@@ -1,4 +1,4 @@
-#include <shelf/runtime/kernels/dflash2/rmsnorm.h>
+#include <shelf/kernels/dflash2/rmsnorm.h>
 #include "detail/rmsnorm_device.h"
 #include <hip/hip_runtime.h>
 

@@ -2,7 +2,7 @@
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/memory/tensor.h>
 #include <shelf/core/memory/types.h>
-#include <shelf/runtime/kernels/dflash2/grouped_dynamic_conv.h>
+#include <shelf/kernels/dflash2/grouped_dynamic_conv.h>
 #include <hip/hip_runtime.h>
 
 #include <cmath>

@@ -29,7 +29,7 @@ kernel層
   kernels/optimized  (family per file; linear / attention / gdn / elementwise / ...)
   kernels/fused      (複数処理を 1 launch に統合; moe / exl3 / octave / ...)
   kernels/correctness (1 TU + detail/*.inc + standalone/)
-  models/qwen35/kernels/dflash2 = shelf_qwen35_kernels_optimized
+  kernels/dflash2    (speculative decode の drafter; shelf_kernels_dflash2)
       ↓
 shelf_runtime
   PrimitiveGraph / Program / ProgramSet / DeviceBatchContext / workspace layout / TP transport

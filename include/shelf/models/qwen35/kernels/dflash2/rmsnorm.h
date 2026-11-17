@@ -1,3 +1,3 @@
 #pragma once
 
-#include <shelf/runtime/kernels/dflash2/rmsnorm.h>
+#include <shelf/kernels/dflash2/rmsnorm.h>

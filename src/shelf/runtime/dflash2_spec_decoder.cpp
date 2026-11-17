@@ -6,8 +6,8 @@
 #include <shelf/runtime/spec_decode.h>
 #include <shelf/runtime/dflash2/dflash2_tree.h>
 #include <shelf/runtime/dflash2/dflash2_tree_budget.h>
-#include <shelf/runtime/kernels/dflash2/candidate_selector.h>
-#include <shelf/runtime/kernels/dflash2/feature_concat.h>
+#include <shelf/kernels/dflash2/candidate_selector.h>
+#include <shelf/kernels/dflash2/feature_concat.h>
 
 #include <algorithm>
 #include <array>
