@@ -598,7 +598,7 @@ __device__ __forceinline__ void octave_unpack_segment_cooperative(
 }
 
 template <bool kCompact, uint32_t kRopeBits, uint32_t kNopeBits,
-          uint32_t kVBits>
+          uint32_t kVBits, bool kQsa = false>
 __global__ __launch_bounds__(kOctaveWmmaThreads, 1)
 void octave_split_wmma(PagedAttentionCommonArgs args, const uint8_t* k_pool,
                        const uint8_t* v_pool, const float* levels,
@@ -695,13 +695,46 @@ void octave_split_wmma(PagedAttentionCommonArgs args, const uint8_t* k_pool,
     #pragma unroll
     for (uint32_t i = 0u; i < 4u; ++i) output_accumulator[i] = f32x8_t{};
 
-    for (uint32_t base_item = 0u; base_item < item_count;
-         base_item += kOctaveWmmaTokens) {
+    const uint32_t* qsa_words = reinterpret_cast<const uint32_t*>(
+        args.block_mask + static_cast<std::size_t>(row) * args.mask_stride);
+    const uint32_t qsa_mask_words =
+        args.mask_block_shift == 2u ? (args.mask_blocks + 31u) >> 5u : 0u;
+    uint32_t qsa_selected[kOctaveWmmaTokens / 4u] = {};
+    uint32_t qsa_count = 0u;
+    uint32_t qsa_ordinal = 0u;
+    uint32_t qsa_wi = 0u;
+    uint32_t qsa_bits = 0u;
+    auto next_qsa_chunk = [&]() -> bool {
+        qsa_count = 0u;
+        while (qsa_wi < qsa_mask_words) {
+            if (qsa_bits == 0u) qsa_bits = qsa_words[qsa_wi++];
+            if (qsa_bits == 0u) continue;
+            const uint32_t block = (qsa_wi - 1u) * 32u +
+                static_cast<uint32_t>(__ffs(static_cast<int>(qsa_bits)) - 1);
+            qsa_bits &= qsa_bits - 1u;
+            if ((qsa_ordinal++ % splits) != split) continue;
+            qsa_selected[qsa_count++] = block;
+            if (qsa_count == (kOctaveWmmaTokens / 4u)) return true;
+        }
+        return qsa_count != 0u;
+    };
+
+    for (uint32_t base_item = 0u;
+         kQsa ? next_qsa_chunk() : base_item < item_count;
+         base_item += kQsa ? 0u : kOctaveWmmaTokens) {
         if (tid < kOctaveWmmaTokens) {
             const uint32_t item = base_item + tid;
             bool active = item < item_count;
             uint32_t position = 0u;
-            if (active) {
+            if constexpr (kQsa) {
+                active = tid < qsa_count * 4u;
+                if (active) {
+                    position = qsa_selected[tid >> 2u] * 4u + (tid & 3u);
+                    active = paged_token_visible(
+                        args.block_mask, args.mask_stride, args.mask_blocks,
+                        args.mask_block_shift, row, position);
+                }
+            } else if (active) {
                 position = item < committed_count
                     ? token_begin + item
                     : args.tree_anc_positions[s.ancestor_begin + item - committed_count];
@@ -942,7 +975,8 @@ void octave_reduce(PagedAttentionCommonArgs args, const float* partials,
 }
 }  // namespace
 
-hipError_t launch_attention_paged_octave_split(
+template <bool kQsa>
+hipError_t launch_octave_split_impl(
     const PagedAttentionCommonArgs& common, const uint8_t* k_pool,
     const uint8_t* v_pool, const float* levels, OctaveKVCacheFormat format,
     float* partials, uint32_t splits, hipStream_t stream) {
@@ -959,51 +993,53 @@ hipError_t launch_attention_paged_octave_split(
         const char* value = std::getenv("SHELF_OCTAVE_DECODE_LEGACY");
         return value != nullptr && value[0] == '1' && value[1] == '\0';
     }();
+    const bool use_legacy = legacy && !kQsa;
     const uint32_t q_per_kv = common.q_heads / common.kv_heads;
-    const uint32_t q_group = legacy ? kOctaveQPerKv : kOctaveWmmaQueries;
+    const uint32_t q_group = use_legacy ? kOctaveQPerKv : kOctaveWmmaQueries;
     for (uint32_t q_base = 0u; q_base < q_per_kv; q_base += q_group) {
-        if (legacy) {
+        if (use_legacy) {
             octave_split_legacy<<<static_cast<uint32_t>(grid), kOctaveThreads, 0u, stream>>>(
                 common, k_pool, v_pool, levels, format, partials, splits, q_base, q_per_kv);
         } else if (format.k_mode == OctaveKMode::Compact &&
                    format.k_nope_bits == 3u && format.v_bits == 3u) {
-            octave_split_wmma<true, 3u, 3u, 3u>
+            octave_split_wmma<true, 3u, 3u, 3u, kQsa>
                 <<<static_cast<uint32_t>(grid), kOctaveWmmaThreads, 0u, stream>>>(
                     common, k_pool, v_pool, levels, format, partials, splits, q_base,
                     q_per_kv);
         } else if (format.k_mode == OctaveKMode::Compact &&
                    format.k_nope_bits == 4u && format.v_bits == 4u) {
-            octave_split_wmma<true, 4u, 4u, 4u>
+            octave_split_wmma<true, 4u, 4u, 4u, kQsa>
                 <<<static_cast<uint32_t>(grid), kOctaveWmmaThreads, 0u, stream>>>(
                     common, k_pool, v_pool, levels, format, partials, splits, q_base,
                     q_per_kv);
         } else if (format.k_mode == OctaveKMode::Compact &&
                    format.k_nope_bits == 5u && format.v_bits == 5u) {
-            octave_split_wmma<true, 5u, 5u, 5u>
+            octave_split_wmma<true, 5u, 5u, 5u, kQsa>
                 <<<static_cast<uint32_t>(grid), kOctaveWmmaThreads, 0u, stream>>>(
                     common, k_pool, v_pool, levels, format, partials, splits, q_base,
                     q_per_kv);
         } else if (format.k_mode == OctaveKMode::Compact &&
                    format.k_nope_bits == 6u && format.v_bits == 6u) {
-            octave_split_wmma<true, 6u, 6u, 6u>
+            octave_split_wmma<true, 6u, 6u, 6u, kQsa>
                 <<<static_cast<uint32_t>(grid), kOctaveWmmaThreads, 0u, stream>>>(
                     common, k_pool, v_pool, levels, format, partials, splits, q_base,
                     q_per_kv);
         } else if (format.k_mode == OctaveKMode::Block &&
                    format.k_rope_bits == 4u && format.k_nope_bits == 3u &&
                    format.v_bits == 3u) {
-            octave_split_wmma<false, 4u, 3u, 3u>
+            octave_split_wmma<false, 4u, 3u, 3u, kQsa>
                 <<<static_cast<uint32_t>(grid), kOctaveWmmaThreads, 0u, stream>>>(
                     common, k_pool, v_pool, levels, format, partials, splits, q_base,
                     q_per_kv);
         } else if (format.k_mode == OctaveKMode::Block &&
                    format.k_rope_bits == 4u && format.k_nope_bits == 3u &&
                    format.v_bits == 4u) {
-            octave_split_wmma<false, 4u, 3u, 4u>
+            octave_split_wmma<false, 4u, 3u, 4u, kQsa>
                 <<<static_cast<uint32_t>(grid), kOctaveWmmaThreads, 0u, stream>>>(
                     common, k_pool, v_pool, levels, format, partials, splits, q_base,
                     q_per_kv);
         } else {
+            if constexpr (kQsa) return hipErrorNotSupported;
             // Uncommon mixed bit-width descriptors keep the exact scalar path;
             // the production descriptors above use the gfx12 WMMA path.
             octave_split_legacy<<<static_cast<uint32_t>(grid), kOctaveThreads, 0u, stream>>>(
@@ -1011,6 +1047,22 @@ hipError_t launch_attention_paged_octave_split(
         }
     }
     return hipGetLastError();
+}
+
+hipError_t launch_attention_paged_octave_split(
+    const PagedAttentionCommonArgs& common, const uint8_t* k_pool,
+    const uint8_t* v_pool, const float* levels, OctaveKVCacheFormat format,
+    float* partials, uint32_t splits, hipStream_t stream) {
+    return launch_octave_split_impl<false>(common, k_pool, v_pool, levels, format,
+                                           partials, splits, stream);
+}
+
+hipError_t launch_attention_paged_octave_qsa_split(
+    const PagedAttentionCommonArgs& common, const uint8_t* k_pool,
+    const uint8_t* v_pool, const float* levels, OctaveKVCacheFormat format,
+    float* partials, uint32_t splits, hipStream_t stream) {
+    return launch_octave_split_impl<true>(common, k_pool, v_pool, levels, format,
+                                          partials, splits, stream);
 }
 
 hipError_t launch_attention_paged_octave_reduce(

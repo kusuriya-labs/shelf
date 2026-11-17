@@ -598,16 +598,20 @@ PhysicalResolveStatus append_qsa_region(const PagedAttentionResolvedArgs& a,
     k.splits = splits;
     k.grid = region.rows * region.kv_heads * splits;
     k.workgroup = 64u;
-    if (splits <= 1u) return PhysicalResolveStatus::Applicable;
+    const bool octave_split = k.variant == PhysicalPagedAttentionVariant::QsaSparseOctave;
+    if (splits <= 1u && !octave_split)
+        return PhysicalResolveStatus::Applicable;
 
     k.partials = reinterpret_cast<uint64_t>(ctx.decode_attn_partials);
     PhysicalPagedAttentionKernel& reduce = out.kernels[out.physical_count++];
     reduce.common = region;
-    reduce.variant = PhysicalPagedAttentionVariant::QsaReduce;
+    reduce.variant = octave_split
+        ? PhysicalPagedAttentionVariant::OctaveReduce
+        : PhysicalPagedAttentionVariant::QsaReduce;
     reduce.partials = reinterpret_cast<uint64_t>(ctx.decode_attn_partials);
     reduce.splits = splits;
     reduce.grid = region.rows * region.q_heads;
-    reduce.workgroup = ::shelf::kernel::kQsaSparseHeadDim;
+    reduce.workgroup = octave_split ? 256u : ::shelf::kernel::kQsaSparseHeadDim;
     return PhysicalResolveStatus::Applicable;
 }
 
@@ -898,7 +902,7 @@ hipError_t launch_paged_attention_physical(const PhysicalPagedAttentionPlan& pla
                     reinterpret_cast<float*>(k.partials), k.splits, stream);
                 break;
             case PhysicalPagedAttentionVariant::QsaSparseOctave:
-                herr = ::shelf::kernel::launch_qsa_sparse_attention_octave(
+                herr = ::shelf::kernel::launch_attention_paged_octave_qsa_split(
                     k.common, reinterpret_cast<const uint8_t*>(k.k_pool),
                     reinterpret_cast<const uint8_t*>(k.v_pool),
                     reinterpret_cast<const float*>(k.k_extra_pool),
