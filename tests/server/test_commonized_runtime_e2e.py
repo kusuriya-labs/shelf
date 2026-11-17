@@ -31,7 +31,11 @@ MODELS = {
     "mxfp4": REPO / "models/Qwen3.8-27B-QSA-Quark-AWQ-MXFP4",
     "flash-next": REPO / "models/kusuriya-labs/Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw",
 }
-DEFAULT_DRAFT = REPO / "models/Qwen3.8-27B-DFlash2-FP8"
+DRAFTS = {
+    "fp8": REPO / "models/Qwen3.8-27B-DFlash2-FP8",
+    "mxfp4": REPO / "models/Qwen3.8-27B-DFlash2-FP8",
+    "flash-next": REPO / "models/Qwen3.8-Flash-Next-DFlash2",
+}
 PROMPT = "What is 2+2? Answer with the number only."
 MAX_NEW_TOKENS = 8
 
@@ -58,9 +62,9 @@ CASES = [
 ]
 
 
-def draft_dir() -> Path:
+def draft_dir(model_name: str) -> Path:
     env = os.environ.get("SHELF_DFLASH2_MODEL_DIR")
-    return Path(env) if env else DEFAULT_DRAFT
+    return Path(env) if env else DRAFTS[model_name]
 
 
 def devices(tp: int) -> str:
@@ -89,7 +93,8 @@ def collect(harness):
             raise RuntimeError(str(event))
 
 
-def run_case(label, model, *, dflash2, prefix, rope, tp, max_seq_len):
+def run_case(label, model_name, *, dflash2, prefix, rope, tp, max_seq_len):
+    model = MODELS[model_name]
     os.environ["SHELF_MODEL_DIR"] = str(model)
     support._PROCESSOR_CACHE.clear()
     input_ids = paged_prompt(prompt_ids(PROMPT), 96)
@@ -100,7 +105,7 @@ def run_case(label, model, *, dflash2, prefix, rope, tp, max_seq_len):
         max_seq_len=max_seq_len,
         devices=devices(tp),
         tp=tp,
-        dflash2_model_dir=str(draft_dir()) if dflash2 else None,
+        dflash2_model_dir=str(draft_dir(model_name)) if dflash2 else None,
         prefix_cache_enabled=prefix,
         rope_factor=rope,
     )
@@ -125,7 +130,6 @@ def run_case(label, model, *, dflash2, prefix, rope, tp, max_seq_len):
 def main() -> int:
     checker = Checker("commonized runtime e2e")
     baselines = {}
-    draft = draft_dir()
 
     only = os.environ.get("SHELF_E2E_ONLY")
     cases = CASES
@@ -135,6 +139,7 @@ def main() -> int:
 
     for model_name, dflash2, prefix, rope, tp, seq in cases:
         model = MODELS[model_name]
+        draft = draft_dir(model_name)
         if not model.is_dir():
             print(f"SKIP: {model} is not a directory")
             continue
@@ -148,7 +153,7 @@ def main() -> int:
 
         try:
             results, stderr = run_case(
-                label, model, dflash2=dflash2, prefix=prefix, rope=rope,
+                label, model_name, dflash2=dflash2, prefix=prefix, rope=rope,
                 tp=tp, max_seq_len=seq)
         except Exception as exc:  # noqa: BLE001 - E2E harness reports failures as text
             checker.check(f"{label} run", False, repr(exc))
