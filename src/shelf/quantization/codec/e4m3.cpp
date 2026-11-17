@@ -2,45 +2,9 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 
 namespace shelf::quantization::codec {
-
-namespace {
-
-constexpr int kGridCount = 126;
-
-struct GridEntry {
-    double value;
-    uint8_t code;
-    uint8_t mant;
-};
-
-const GridEntry* e4m3_grid() {
-    static GridEntry table[kGridCount];
-    static bool init = false;
-    if (!init) {
-        int n = 0;
-        for (uint32_t m = 1; m <= 7; ++m) {
-            table[n].value = std::ldexp(static_cast<double>(m), -9);
-            table[n].code = static_cast<uint8_t>(m);
-            table[n].mant = static_cast<uint8_t>(m);
-            ++n;
-        }
-        for (uint32_t e = 1; e <= 15; ++e) {
-            const uint32_t mmax = (e == 15u) ? 6u : 7u;
-            for (uint32_t m = 0; m <= mmax; ++m) {
-                table[n].value = std::ldexp(static_cast<double>(8u + m), static_cast<int>(e) - 10);
-                table[n].code = static_cast<uint8_t>((e << 3) | m);
-                table[n].mant = static_cast<uint8_t>(m);
-                ++n;
-            }
-        }
-        init = true;
-    }
-    return table;
-}
-
-}  // namespace
 
 float e4m3_decode_f32(uint8_t x) {
     const uint32_t sign = (static_cast<uint32_t>(x) >> 7) & 1u;
@@ -59,43 +23,40 @@ uint8_t e4m3_encode_u8(float x) {
     if (std::isnan(x)) {
         return 0x7Fu;
     }
-    const uint8_t sign = std::signbit(x) ? 0x80u : 0x00u;
-    if (x == 0.0f) {
-        return sign;
-    }
-    if (std::isinf(x) || x >= 448.0f || x <= -448.0f) {
+    uint32_t bits = 0;
+    std::memcpy(&bits, &x, sizeof(bits));
+    const uint8_t sign = static_cast<uint8_t>((bits >> 24) & 0x80u);
+    const uint32_t mag = bits & 0x7FFFFFFFu;
+    // 448.0f is 0x43E00000. Everything above it saturates to the largest finite code,
+    // the same code that infinite input produces.
+    if (mag >= 0x43E00000u) {
         return static_cast<uint8_t>(sign | 0x7Eu);
     }
-    const double v = static_cast<double>(std::fabs(x));
-    const GridEntry* g = e4m3_grid();
-    int lo = -1;
-    int hi = kGridCount;
-    while (hi - lo > 1) {
-        const int mid = lo + (hi - lo) / 2;
-        if (g[mid].value >= v) {
-            hi = mid;
-        } else {
-            lo = mid;
+    const int exp = static_cast<int>(mag >> 23) - 127;
+    const uint32_t mant = mag & 0x7FFFFFu;
+    if (exp >= -6) {
+        uint32_t e4 = static_cast<uint32_t>(exp + 7);
+        constexpr uint32_t kShift = 20u;
+        uint32_t m3 = mant >> kShift;
+        const uint32_t rem = mant & ((1u << kShift) - 1u);
+        const uint32_t half = 1u << (kShift - 1u);
+        if (rem > half || (rem == half && (m3 & 1u) != 0u)) ++m3;
+        if (m3 >= 8u) {
+            m3 = 0u;
+            ++e4;
         }
-    }
-    const double vlo = (lo >= 0) ? g[lo].value : 0.0;
-    const double vhi = g[hi].value;
-    const double twice = 2.0 * v;
-    const double mid2 = vlo + vhi;
-    const GridEntry* picked = nullptr;
-    if (twice < mid2) {
-        picked = (lo >= 0) ? &g[lo] : nullptr;
-    } else if (twice > mid2) {
-        picked = &g[hi];
-    } else {
-        if ((g[hi].mant & 1u) == 0u) {
-            picked = &g[hi];
-        } else if (lo >= 0) {
-            picked = &g[lo];
+        if (e4 >= 15u) {
+            // 0x7F is NaN in E4M3FN, so the largest finite value is 0x7E.
+            if (e4 > 15u || m3 > 6u) return static_cast<uint8_t>(sign | 0x7Eu);
+            return static_cast<uint8_t>(sign | 0x78u | m3);
         }
+        return static_cast<uint8_t>(sign | (e4 << 3) | m3);
     }
-    const uint8_t code = (picked != nullptr) ? picked->code : 0x00u;
-    return static_cast<uint8_t>(code | sign);
+    // Subnormal range: the quantum is 2^-9 and codes 0..7 cover it.
+    int code = static_cast<int>(std::nearbyintf(std::fabs(x) * 512.0f));
+    if (code >= 8) return static_cast<uint8_t>(sign | 0x08u);
+    if (code < 0) code = 0;
+    return static_cast<uint8_t>(sign | static_cast<uint8_t>(code));
 }
 
 }  // namespace shelf::quantization::codec

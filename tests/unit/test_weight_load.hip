@@ -8,6 +8,7 @@
 #include <shelf/quantization/manifest/crc32.h>
 #include <shelf/quantization/manifest/quantized_manifest.h>
 #include <shelf/quantization/bundle/hf_manifest.h>
+#include <shelf/quantization/codec/e4m3.h>
 #include <shelf/quantization/bundle/quantized_model_reader.h>
 #include <shelf/quantization/fp8/fp8.h>
 #include <shelf/quantization/fp8/fp8_native.h>
@@ -1113,8 +1114,38 @@ static void test_qwen35_hf_fp8_model_load(gpu::GpuArena& arena, hipStream_t stre
         check(got == f.bf16.at("model.language_model.embed_tokens.weight"), "hf fp8 embed bytes");
     }
     {
-        const auto got = d2h(w.lm_head.bf16.data<void>(), f.bf16.at("lm_head.weight").size());
-        check(got == f.bf16.at("lm_head.weight"), "hf fp8 lm_head bytes via bare name");
+        // The BF16 lm_head is converted at load time, so the arena keeps only the
+        // row-major E4M3 codes and one FP16 scale per 32-element block.
+        check(w.lm_head.encoding == weights::MatrixEncoding::Fp8W32,
+              "hf fp8 lm_head is fp8 w32");
+        check(w.lm_head.k_padded == w.lm_head.cols, "hf fp8 lm_head k_padded");
+        check(w.lm_head.codes.ndim() != 0 && w.lm_head.scales.ndim() != 0,
+              "hf fp8 lm_head payload present");
+        const std::size_t code_bytes = static_cast<std::size_t>(w.lm_head.rows) * w.lm_head.cols;
+        const std::size_t scale_bytes =
+            static_cast<std::size_t>(w.lm_head.rows) * (w.lm_head.cols / 32u) * 2u;
+        const auto codes = d2h(w.lm_head.codes.data<void>(), code_bytes);
+        const auto scales = d2h(w.lm_head.scales.data<void>(), scale_bytes);
+        const auto& source = f.bf16.at("lm_head.weight");
+        bool close = codes.size() == code_bytes && scales.size() == scale_bytes;
+        if (close) {
+            for (std::size_t i = 0; i < w.lm_head.cols && i < 256u; ++i) {
+                const std::uint8_t code = static_cast<std::uint8_t>(codes[i]);
+                std::uint16_t scale_bits = 0;
+                std::memcpy(&scale_bits, scales.data() + (i / 32u) * 2u, 2);
+                const float scale = static_cast<float>(*reinterpret_cast<const _Float16*>(&scale_bits));
+                const float dequant = shelf::quantization::codec::e4m3_decode_f32(code) * scale;
+                const std::uint16_t bits = static_cast<std::uint16_t>(
+                    static_cast<std::uint16_t>(source[2u * i]) |
+                    (static_cast<std::uint16_t>(source[2u * i + 1u]) << 8u));
+                const std::uint32_t wide = static_cast<std::uint32_t>(bits) << 16u;
+                float original = 0.0f;
+                std::memcpy(&original, &wide, sizeof(original));
+                if (std::fabs(dequant - original) > 0.07f * std::fabs(original) + 1e-6f)
+                    close = false;
+            }
+        }
+        check(close, "hf fp8 lm_head codes dequantize to the checkpoint rows");
     }
 
     check_fp8_hf_matrix(w.layers[0].ffn.gate, f, hf_layer_prefix(0) + "mlp.gate_proj.weight", 128, 128);

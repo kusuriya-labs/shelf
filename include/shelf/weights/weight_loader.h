@@ -64,6 +64,10 @@ Status validate_quantized_model(const quantization::bundle::QuantizedModelReader
 // materialized before any preshuffle; nullptr keeps the global load path.
 struct WeightLoadOptions {
     bool preshuffle = true;
+    // Converts a BF16 matrix to E4M3 codes with one FP16 scale per 32-element block.
+    // The row-major payload feeds the lm_head FP8 kernel, so the BF16 copy is never
+    // uploaded and the arena keeps only the quantized form.
+    bool quantize_fp8_w32 = false;
     const TensorPartitionPlan* partition_plan = nullptr;
 };
 

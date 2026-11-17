@@ -670,7 +670,8 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
         uint32_t lm_head_col_offset = 0;
         if (!lm_tied && options.tp != nullptr &&
             options.tp->vocab_parallel_lm_head &&
-            lmw->encoding == shelf::weights::MatrixEncoding::Bf16 &&
+            (lmw->encoding == shelf::weights::MatrixEncoding::Bf16 ||
+         lmw->encoding == shelf::weights::MatrixEncoding::Fp8W32) &&
             lmw->partition.has_value()) {
             const auto& part = lmw->partition.value();
             vocab_parallel = part.axis == 0 && part.count == options.tp->tp_size &&

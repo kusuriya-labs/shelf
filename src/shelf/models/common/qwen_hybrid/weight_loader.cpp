@@ -134,11 +134,13 @@ Status load_hybrid_model_level_quantized(
         weights.lm_head = weights.embed_tokens;
         weights.lm_head_tied = true;
     } else if (options.load_lm_head) {
+        shelf::weights::WeightLoadOptions head_options = options.weights;
+        head_options.quantize_fp8_w32 = options.quantize_lm_head_fp8_w32;
         auto head = shelf::weights::load_quantized_matrix(
-            reader, "model.language_model.lm_head.weight", arena, stream, options.weights);
+            reader, "model.language_model.lm_head.weight", arena, stream, head_options);
         if (!head.ok()) {
             head = shelf::weights::load_quantized_matrix(
-                reader, "lm_head.weight", arena, stream, options.weights);
+                reader, "lm_head.weight", arena, stream, head_options);
             if (!head.ok()) return head.status();
         }
         weights.lm_head = head.release();

@@ -1,6 +1,7 @@
 #include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/kernels/optimized/linear/lm_head_fp8.h>
+#include <shelf/quantization/codec/e4m3.h>
 
 #include <hip/hip_runtime.h>
 
@@ -321,6 +322,51 @@ int main() {
         shelf::gpu::discard_cleanup_result(hipFree(d_special));
         shelf::gpu::discard_cleanup_result(hipFree(d_special_codes));
         shelf::gpu::discard_cleanup_result(hipFree(d_special_scales));
+    }
+
+    {
+        // ホスト側エンコーダと GPU の v_cvt_pk_fp8_f32 が同じコードを返すこと。
+        // 各 block に 448 を入れて scale を 1.0 に固定する。
+        constexpr std::uint32_t kBlocks = 8u;
+        constexpr std::uint32_t kSpan = kBlocks * 32u;
+        std::mt19937 erng(7u);
+        std::uniform_real_distribution<float> edist(-448.0f, 448.0f);
+        std::vector<shelf::bf16_t> span(kSpan);
+        for (std::uint32_t b = 0; b < kBlocks; ++b) {
+            span[b * 32u].data = shelf::f32_to_bf16_rne(448.0f);
+            for (std::uint32_t i = 1; i < 32u; ++i)
+                span[b * 32u + i].data = shelf::f32_to_bf16_rne(edist(erng));
+        }
+        shelf::bf16_t* d_span = nullptr;
+        std::uint8_t* d_span_codes = nullptr;
+        shelf::fp16_t* d_span_scales = nullptr;
+        check(hipMalloc(&d_span, kSpan * sizeof(shelf::bf16_t)) == hipSuccess, "malloc span");
+        check(hipMalloc(&d_span_codes, kSpan) == hipSuccess, "malloc span codes");
+        check(hipMalloc(&d_span_scales, kBlocks * sizeof(shelf::fp16_t)) == hipSuccess,
+              "malloc span scales");
+        check(hipMemcpy(d_span, span.data(), kSpan * sizeof(shelf::bf16_t),
+                        hipMemcpyHostToDevice) == hipSuccess, "copy span");
+        check(shelf::kernel::launch_quantize_bf16_to_fp8_w32(
+                  d_span, kSpan, d_span_codes, d_span_scales, 1u, kSpan, nullptr) == hipSuccess,
+              "quantize span");
+        std::vector<std::uint8_t> span_codes(kSpan);
+        check(hipMemcpy(span_codes.data(), d_span_codes, kSpan, hipMemcpyDeviceToHost) ==
+                  hipSuccess,
+              "copy span codes");
+        bool host_matches = true;
+        for (std::uint32_t i = 0; i < kSpan; ++i) {
+            const float value = bf16_to_float(span[i].data);
+            const std::uint8_t host = shelf::quantization::codec::e4m3_encode_u8(value);
+            if (host != span_codes[i]) {
+                std::fprintf(stderr, "enc %u: host %02x gpu %02x (value %a)\n", i, host,
+                             span_codes[i], value);
+                host_matches = false;
+            }
+        }
+        check(host_matches, "host encoder matches the gpu encoder");
+        shelf::gpu::discard_cleanup_result(hipFree(d_span));
+        shelf::gpu::discard_cleanup_result(hipFree(d_span_codes));
+        shelf::gpu::discard_cleanup_result(hipFree(d_span_scales));
     }
 
     shelf::gpu::discard_cleanup_result(hipFree(d_weight));
