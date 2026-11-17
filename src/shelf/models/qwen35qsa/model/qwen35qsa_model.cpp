@@ -133,5 +133,16 @@ std::size_t qwen35qsa_executor_reserve_bytes(
     return total;
 }
 
+std::size_t qwen35qsa_prefix_capture_bytes(
+    const Qwen35QsaTextConfig& config,
+    std::uint32_t max_context_tokens,
+    std::size_t capture_slots) {
+    if (capture_slots == 0u || max_context_tokens <= config.indexer.budget) return 0u;
+    const auto layout = qsa_layout(config, max_context_tokens);
+    return ::shelf::state::qsa_key_state_pool_bytes(
+               static_cast<std::uint32_t>(capture_slots), layout)
+        .total();
+}
+
 }
 }

@@ -77,5 +77,14 @@ std::size_t qwen35qsa_executor_reserve_bytes(
     bool exl3_linear_workspace,
     std::size_t max_sequences);
 
+// Arena bytes the prefix cache's capture pool costs: one QSA key state per captured
+// sequence. The memory plan must include it before sizing the KV pool, because the pool is
+// allocated after the KV pool is fixed. Zero when the context never exceeds the indexer
+// budget or when nothing is captured.
+std::size_t qwen35qsa_prefix_capture_bytes(
+    const Qwen35QsaTextConfig& config,
+    std::uint32_t max_context_tokens,
+    std::size_t capture_slots);
+
 }
 }

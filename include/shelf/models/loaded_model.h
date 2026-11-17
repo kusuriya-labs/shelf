@@ -107,6 +107,13 @@ public:
                                        std::size_t tp_size,
                                        std::size_t max_context_tokens) const;
 
+    // Arena bytes the prefix cache allocates for the state it captures, on top of what
+    // prefix_cache_bytes() reports. The plan must include it before the KV pool is sized,
+    // because the capture pool is allocated after the KV pool is fixed.
+    [[nodiscard]]
+    std::size_t prefix_capture_state_bytes(std::size_t capture_slots,
+                                           std::size_t max_context_tokens) const;
+
     Result<shelf::qwen35::Executor> create_executor(
         shelf::qwen35::SequenceSlotPool& sequence_pool,
         shelf::qwen35::GdnStatePool& gdn_state_pool,

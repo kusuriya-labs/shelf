@@ -315,8 +315,11 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     };
 
     qwen35::runtime::PrefixCacheBytes prefix_bytes{};
+    std::size_t prefix_capture_bytes = 0u;
     if (config_.prefix_cache) {
         prefix_bytes = prefix_bytes_for();
+        prefix_capture_bytes = model_->prefix_capture_state_bytes(
+            prefix_config.capture_slots, max_seq + 1u);
     }
 
     const std::size_t kv_page_bytes = state::PagedKVPool::page_bytes(
@@ -374,12 +377,12 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         plan.workspace = config_.working_set_reserve_bytes;
         plan.kv = kv_bytes;
         plan.kv_tokens = kv_tokens;
-        plan.prefix = prefix_bytes.total();
+        plan.prefix = prefix_bytes.total() + prefix_capture_bytes;
         plan.prefix_enabled = config_.prefix_cache;
         return plan;
     };
 
-    const std::size_t reserved_bytes = prefix_bytes.total() +
+    const std::size_t reserved_bytes = prefix_bytes.total() + prefix_capture_bytes +
         config_.working_set_reserve_bytes + drafter_total_bytes;
     const std::size_t arena_free = arena_->capacity() - arena_->used();
     if (arena_free <= reserved_bytes) {
@@ -487,7 +490,7 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
                 "kv_tokens=%u prefix_est=%zu rest=%zu left=%zu reserve=%zu\n",
                 arena_->capacity(), used_after_weights,
                 used_after_pools - used_after_weights, used_after_kv - used_after_pools,
-                physical_capacity_tokens, prefix_bytes.total(),
+                physical_capacity_tokens, prefix_bytes.total() + prefix_capture_bytes,
                 arena_->used() - used_after_kv, left, config_.working_set_reserve_bytes);
         fflush(stderr);
     }

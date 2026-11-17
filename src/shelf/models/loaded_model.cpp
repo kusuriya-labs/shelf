@@ -217,6 +217,13 @@ std::size_t LoadedModel::executor_reserve_bytes(std::size_t max_batch_rows,
     return total;
 }
 
+std::size_t LoadedModel::prefix_capture_state_bytes(std::size_t capture_slots,
+                                                    std::size_t max_context_tokens) const {
+    if (qsa_ == nullptr) return 0u;
+    return shelf::qwen35qsa::qwen35qsa_prefix_capture_bytes(
+        qsa_->text_config(), static_cast<std::uint32_t>(max_context_tokens), capture_slots);
+}
+
 Result<shelf::qwen35::Executor> LoadedModel::create_executor(
     shelf::qwen35::SequenceSlotPool& sequence_pool,
     shelf::qwen35::GdnStatePool& gdn_state_pool,
