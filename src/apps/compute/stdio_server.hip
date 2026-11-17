@@ -1363,7 +1363,8 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
                 proposal_config.top_k = static_cast<uint32_t>(dflash.config.selector_top_k);
                 proposal_config.hidden_stride =
                     static_cast<uint32_t>(dflash.config.hidden_size);
-                proposal_config.max_rows = static_cast<uint32_t>(dflash.config.block_size);
+                proposal_config.max_rows = std::max<uint32_t>(
+                    static_cast<uint32_t>(dflash.config.block_size), batch_max_rows);
                 auto proposal_result =
                     ::shelf::runtime::dflash2::DFlash2TpProposal::create(proposal_config);
                 if (!proposal_result.ok()) {
