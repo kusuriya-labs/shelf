@@ -78,6 +78,10 @@ public:
         return total;
     }
 
+    std::uint64_t host_pinned_bytes() const override {
+        return model_.weights().pinned_host.used();
+    }
+
     // A model with grouped experts has no token-row FFN of the routed kind: what still sits
     // at token rows is its shared expert, and that is already this rank's local width.
     std::size_t token_row_ffn_size() const override {

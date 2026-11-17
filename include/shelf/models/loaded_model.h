@@ -97,6 +97,10 @@ public:
     [[nodiscard]]
     shelf::weights::Exl3LinearShape exl3_linear_shape() const;
 
+    // Page-locked host bytes the model holds outside the arena: the embedding table today.
+    [[nodiscard]]
+    std::uint64_t host_pinned_bytes() const noexcept;
+
     // The arena bytes the executor needs: the shared part plus, for grouped experts, the
     // group-row planes and the routing plan.
     [[nodiscard]]

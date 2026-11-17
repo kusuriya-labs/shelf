@@ -172,6 +172,12 @@ shelf::weights::Exl3LinearShape LoadedModel::exl3_linear_shape() const {
     return {};
 }
 
+std::uint64_t LoadedModel::host_pinned_bytes() const noexcept {
+    if (moe_ != nullptr) return moe_->weights().pinned_host.used();
+    if (dense_ != nullptr) return dense_->weights().pinned_host.used();
+    return 0u;
+}
+
 std::size_t LoadedModel::executor_reserve_bytes(std::size_t max_batch_rows,
                                                 std::size_t max_scheduled_requests,
                                                 std::size_t max_scheduled_output_rows,

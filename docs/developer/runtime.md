@@ -238,6 +238,20 @@ drafter の scratch・session pool・MTP batch の予約、`runtime workspace` �
 capture slot である。checkpoint は host memory に置かれるため arena を消費しない。
 rank 間で private weight が異なるため、`KV budget` も rank ごとに違ってよい。
 
+arena 外の page-locked host memory は、上の表とは別に 1 ブロックで出す。
+
+```text
+MEMORY_PLAN host memory tp=2
+  embedding rank 0    0.52 GiB
+  embedding rank 1    0.52 GiB
+  prefix checkpoint   1.79 GiB
+  total               2.83 GiB
+```
+
+`embedding` は rank ごとの語彙 shard を pinned host RAM に置いた量である
+（tied embedding のモデルでは 0）。`prefix checkpoint` は prefix cache が保持する
+checkpoint の全 rank 分で、`MEMORY_PLAN host memory` の `total` は両者の合計である。
+
 ## Scheduler
 
 名前は2つに分離した。`max_num_batched_tokens` は 1 scheduled step の token 予算

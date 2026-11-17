@@ -81,6 +81,28 @@ void print_memory_plan(const MemoryPlan& plan, const char* scope = "") {
     fflush(stderr);
 }
 
+void print_host_memory(const std::vector<std::size_t>& embeddings,
+                       std::size_t prefix_bytes, const char* scope = "") {
+    std::size_t total = prefix_bytes;
+    for (std::size_t bytes : embeddings) total += bytes;
+    if (total == 0u) return;
+    fprintf(stderr, "MEMORY_PLAN host memory%s\n", scope);
+    if (embeddings.size() <= 1u) {
+        const std::size_t embedding = embeddings.empty() ? 0u : embeddings[0];
+        fprintf(stderr, "  embedding (pinned)   %s\n",
+                gpu::format_gib(embedding).c_str());
+    } else {
+        for (std::size_t rank = 0; rank < embeddings.size(); ++rank) {
+            fprintf(stderr, "  embedding rank %zu    %s\n", rank,
+                    gpu::format_gib(embeddings[rank]).c_str());
+        }
+    }
+    fprintf(stderr, "  prefix checkpoint    %s\n",
+            gpu::format_gib(prefix_bytes).c_str());
+    fprintf(stderr, "  total                %s\n", gpu::format_gib(total).c_str());
+    fflush(stderr);
+}
+
 }  // namespace
 
 Result<std::unique_ptr<Qwen35ComputeRuntime>> Qwen35ComputeRuntime::create(
@@ -478,10 +500,11 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         if (!prefix_result.ok())
             return prefix_result.status();
         prefix_cache_.emplace(prefix_result.release());
-        std::fprintf(stderr, "MEMORY_PLAN prefix cache host checkpoint: %s\n",
-                     gpu::format_gib(prefix_cache_->reserved_bytes()).c_str());
         batcher_->set_prefix_cache(&prefix_cache_.value());
     }
+
+    print_host_memory({model_->host_pinned_bytes()},
+                      prefix_cache_.has_value() ? prefix_cache_->reserved_bytes() : 0u);
 
     if (std::getenv("SHELF_BATCH_TRACE") != nullptr) {
         const std::size_t left = arena_->capacity() - arena_->used();
@@ -841,13 +864,23 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
             if (!prefix_result.ok())
                 return prefix_result.status();
             prefix_cache_.emplace(prefix_result.release());
-            std::fprintf(stderr,
-                         "MEMORY_PLAN prefix cache host checkpoint: %s\n",
-                         gpu::format_gib(prefix_cache_->reserved_bytes()).c_str());
             (void)prefix_cache_->set_tp_hook(tp_coordinator_);
             batcher_->set_prefix_cache(&prefix_cache_.value());
         }
     }
+
+    std::vector<std::size_t> host_embeddings;
+    host_embeddings.reserve(static_cast<std::size_t>(tp_coordinator_->tp_size()));
+    for (int r = 0; r < tp_coordinator_->tp_size(); ++r) {
+        const shelf::models::TpRankModel* rank_model =
+            tp_coordinator_->rank(static_cast<std::size_t>(r)).rank_model();
+        host_embeddings.push_back(rank_model != nullptr ? rank_model->host_pinned_bytes() : 0u);
+    }
+    char host_scope[32];
+    std::snprintf(host_scope, sizeof(host_scope), " tp=%d", config_.tp);
+    print_host_memory(host_embeddings,
+                      prefix_cache_.has_value() ? prefix_cache_->reserved_bytes() : 0u,
+                      host_scope);
 
     return Status::make_ok();
 }
