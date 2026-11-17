@@ -356,6 +356,32 @@ uint32_t probe_rows(const HostResolvedValue& v, const HostExecutionContext& ctx)
     return ctx.actual_rows != 0 ? ctx.actual_rows : 1u;
 }
 
+bool output_tail_has_no_work(
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
+    const HostExecutionContext& ctx) {
+    if (ctx.actual_outputs != 0u) return false;
+    switch (b.kernel_id) {
+        case ::shelf::runtime::KernelId::RMS_NORM:
+        case ::shelf::runtime::KernelId::OUTPUT_GATHER:
+        case ::shelf::runtime::KernelId::SAMPLING:
+            break;
+        default:
+            return false;
+    }
+    const uint32_t slots = b.input_count + b.output_count;
+    for (uint32_t s = 0; s < slots; ++s) {
+        const uint32_t slot = s < b.input_count ? b.input_slots[s]
+                                                : b.output_slots[s - b.input_count];
+        const Result<HostResolvedValue> v =
+            resolve_host_value(program, ::shelf::runtime::ValueId{slot}, ctx);
+        if (!v.ok()) continue;
+        if (v.value().row_domain == ::shelf::runtime::ValueRowDomain::OUTPUT_ROWS)
+            return true;
+    }
+    return false;
+}
+
 Status record_value_trace(const ::shelf::runtime::Program& program, std::size_t first,
                           uint32_t count, const HostExecutionContext& ctx,
                           hipStream_t stream) {
@@ -397,6 +423,10 @@ Status execute_program_range(
     size_t i = begin;
     while (i < end) {
         const auto& binding = program.dispatches[i];
+        if (output_tail_has_no_work(program, binding, ctx)) {
+            ++i;
+            continue;
+        }
         if (ctx.layer_overrides != nullptr && ctx.layer_override_count != 0) {
             for (uint32_t oi = 0; oi < ctx.layer_override_count; ++oi) {
                 if (ctx.layer_override_injected[oi] != 0) continue;
