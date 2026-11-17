@@ -268,6 +268,61 @@ int main() {
         shelf::gpu::discard_cleanup_result(hipFree(d_tiny_scales));
     }
 
+    {
+        // E4M3FN の特殊値。amax を 448 にして scale を 1.0 に固定し、
+        // v_cvt_pk_fp8_f32 のコードを OCP の期待値と直接比較する。
+        constexpr std::uint32_t kSpecials = 32u;
+        const float values[kSpecials] = {
+            0.0f, -0.0f, 448.0f, -448.0f, 449.0f, 1.0f, 2.0f, 0.5f,
+            -0.5f, 0x1p-9f, 0x1p-13f, 0x1p-10f, 256.0f, 288.0f, 320.0f, 384.0f,
+            0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+            0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+        const std::uint8_t expected[kSpecials] = {
+            0x00u, 0x80u, 0x7Eu, 0xFEu, 0x7Eu, 0x38u, 0x40u, 0x30u,
+            0xB0u, 0x01u, 0x00u, 0x00u, 0x78u, 0x79u, 0x7Au, 0x7Cu,
+            0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u,
+            0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u};
+        std::vector<shelf::bf16_t> special(kSpecials);
+        for (std::uint32_t i = 0; i < kSpecials; ++i)
+            special[i].data = shelf::f32_to_bf16_rne(values[i]);
+        shelf::bf16_t* d_special = nullptr;
+        std::uint8_t* d_special_codes = nullptr;
+        shelf::fp16_t* d_special_scales = nullptr;
+        check(hipMalloc(&d_special, kSpecials * sizeof(shelf::bf16_t)) == hipSuccess,
+              "malloc special");
+        check(hipMalloc(&d_special_codes, kSpecials) == hipSuccess, "malloc special codes");
+        check(hipMalloc(&d_special_scales, sizeof(shelf::fp16_t)) == hipSuccess,
+              "malloc special scale");
+        check(hipMemcpy(d_special, special.data(), kSpecials * sizeof(shelf::bf16_t),
+                        hipMemcpyHostToDevice) == hipSuccess, "copy special");
+        check(shelf::kernel::launch_quantize_bf16_to_fp8_w32(
+                  d_special, kSpecials, d_special_codes, d_special_scales, 1u, kSpecials,
+                  nullptr) == hipSuccess,
+              "quantize special");
+        std::uint8_t got_codes[kSpecials] = {};
+        shelf::fp16_t got_scale{};
+        check(hipMemcpy(got_codes, d_special_codes, kSpecials, hipMemcpyDeviceToHost) ==
+                  hipSuccess,
+              "copy special codes");
+        check(hipMemcpy(&got_scale, d_special_scales, sizeof(got_scale), hipMemcpyDeviceToHost) ==
+                  hipSuccess,
+              "copy special scale");
+        check(std::fabs(shelf::fp16_to_f32(got_scale) - 1.0f) < 1e-6f,
+              "special block keeps unit scale");
+        bool codes_ok = true;
+        for (std::uint32_t i = 0; i < kSpecials; ++i) {
+            if (got_codes[i] != expected[i]) {
+                std::fprintf(stderr, "special %u: got %02x expected %02x (value %a)\n", i,
+                             got_codes[i], expected[i], values[i]);
+                codes_ok = false;
+            }
+        }
+        check(codes_ok, "e4m3 codes match the OCP special values");
+        shelf::gpu::discard_cleanup_result(hipFree(d_special));
+        shelf::gpu::discard_cleanup_result(hipFree(d_special_codes));
+        shelf::gpu::discard_cleanup_result(hipFree(d_special_scales));
+    }
+
     shelf::gpu::discard_cleanup_result(hipFree(d_weight));
     shelf::gpu::discard_cleanup_result(hipFree(d_hidden));
     shelf::gpu::discard_cleanup_result(hipFree(d_hidden_strided));
