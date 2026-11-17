@@ -263,7 +263,7 @@ shelf_add_test(NAME test_qsa_state_pool SOURCE unit/test_qsa_state_pool.cpp LABE
 shelf_add_test(NAME test_executor_state_reserve SOURCE unit/test_executor_state_reserve.cpp LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_inference_state shelf_gpu)
 shelf_add_test(NAME test_qsa_attention_mask SOURCE unit/test_qsa_attention_mask.cpp LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_qsa_sparse_attention SOURCE unit/test_qsa_sparse_attention.cpp LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_optimized shelf_gpu)
-shelf_add_test(NAME test_lm_head_fp8 SOURCE unit/test_lm_head_fp8.cpp LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_optimized shelf_quant_reference shelf_gpu)
+shelf_add_test(NAME test_lm_head_int8 SOURCE unit/test_lm_head_int8.cpp LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_optimized shelf_quant_reference shelf_gpu)
 shelf_add_test(NAME test_qsa_spec_state_replay SOURCE unit/test_qsa_spec_state_replay.cpp LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_optimized shelf_inference_state shelf_gpu)
 shelf_add_test(NAME test_moe_program_execute SOURCE unit/test_moe_program_execute.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_inference_execution shelf_kernels_optimized shelf_runtime shelf_gpu shelf_core)
 shelf_add_test(NAME test_program_block_scaled_lowering SOURCE unit/test_program_block_scaled_lowering.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)

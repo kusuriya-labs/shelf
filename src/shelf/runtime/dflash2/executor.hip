@@ -4,6 +4,7 @@
 #include <shelf/quantization/quant_contract.h>
 #include <shelf/runtime/dflash2/context_state.h>
 #include <shelf/kernels/dflash2/attention.h>
+#include <shelf/kernels/optimized/linear/lm_head_int8.h>
 #include <shelf/kernels/dflash2/candidate_selector.h>
 #include <shelf/kernels/dflash2/feature_concat.h>
 #include <shelf/kernels/dflash2/grouped_dynamic_conv.h>
@@ -1075,7 +1076,8 @@ Status lm_head_validate(
     const bool bf16 = weight.encoding == shelf::weights::MatrixEncoding::Bf16;
     const bool fp8 = weight.encoding == shelf::weights::MatrixEncoding::Fp8Finegrained;
     const bool exl3 = weight.encoding == shelf::weights::MatrixEncoding::Exl3;
-    if (!bf16 && !fp8 && !exl3) {
+    const bool int8_w32 = weight.encoding == shelf::weights::MatrixEncoding::Int8W32;
+    if (!bf16 && !fp8 && !exl3 && !int8_w32) {
         return Status::unsupported("dflash2 target lm_head encoding unsupported", __FILE__,
                                    __LINE__);
     }
@@ -1087,6 +1089,12 @@ Status lm_head_validate(
         if (weight.bf16.ndim() == 0) {
             return Status::invalid_argument("dflash2 target lm_head payload missing", __FILE__,
                                             __LINE__);
+        }
+    } else if (int8_w32) {
+        if (weight.k_padded != weight.cols || (weight.cols % 128u) != 0u ||
+            weight.codes.ndim() == 0 || weight.scales.ndim() == 0) {
+            return Status::invalid_argument("dflash2 target lm_head int8 w32 layout invalid",
+                                            __FILE__, __LINE__);
         }
     } else if (fp8) {
         if (!weight.preshuffled ||
@@ -1164,6 +1172,17 @@ Status lm_head_gemm(
     float* logits,
     uint32_t logits_row_stride,
     hipStream_t stream) {
+    if (weight.encoding == shelf::weights::MatrixEncoding::Int8W32) {
+        const hipError_t err = shelf::kernel::launch_lm_head_int8_w32(
+            hidden, weight.cols, weight.codes.data<uint8_t>(),
+            weight.scales.data<shelf::fp16_t>(), logits, logits_row_stride, rows, weight.rows,
+            weight.cols, stream);
+        if (err != hipSuccess) {
+            return Status::hip_error("dflash2 target lm_head int8 w32 launch",
+                                     hipGetErrorString(err), __FILE__, __LINE__);
+        }
+        return Status::make_ok();
+    }
     if (weight.encoding == shelf::weights::MatrixEncoding::Exl3) {
         if (weight.quant_spec == quantization::QuantSpecId::EXL3_MUL24_INT8_V1) {
             const auto layout = shelf::runtime::Int8ActivationWorkspaceLayout::make(

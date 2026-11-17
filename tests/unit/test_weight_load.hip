@@ -8,7 +8,6 @@
 #include <shelf/quantization/manifest/crc32.h>
 #include <shelf/quantization/manifest/quantized_manifest.h>
 #include <shelf/quantization/bundle/hf_manifest.h>
-#include <shelf/quantization/codec/e4m3.h>
 #include <shelf/quantization/bundle/quantized_model_reader.h>
 #include <shelf/quantization/fp8/fp8.h>
 #include <shelf/quantization/fp8/fp8_native.h>
@@ -1116,7 +1115,7 @@ static void test_qwen35_hf_fp8_model_load(gpu::GpuArena& arena, hipStream_t stre
     {
         // The BF16 lm_head is converted at load time, so the arena keeps only the
         // row-major E4M3 codes and one FP16 scale per 32-element block.
-        check(w.lm_head.encoding == weights::MatrixEncoding::Fp8W32,
+        check(w.lm_head.encoding == weights::MatrixEncoding::Int8W32,
               "hf fp8 lm_head is fp8 w32");
         check(w.lm_head.k_padded == w.lm_head.cols, "hf fp8 lm_head k_padded");
         check(w.lm_head.codes.ndim() != 0 && w.lm_head.scales.ndim() != 0,
@@ -1134,7 +1133,8 @@ static void test_qwen35_hf_fp8_model_load(gpu::GpuArena& arena, hipStream_t stre
                 std::uint16_t scale_bits = 0;
                 std::memcpy(&scale_bits, scales.data() + (i / 32u) * 2u, 2);
                 const float scale = static_cast<float>(*reinterpret_cast<const _Float16*>(&scale_bits));
-                const float dequant = shelf::quantization::codec::e4m3_decode_f32(code) * scale;
+                const float dequant =
+                    static_cast<float>(static_cast<std::int8_t>(code)) * scale;
                 const std::uint16_t bits = static_cast<std::uint16_t>(
                     static_cast<std::uint16_t>(source[2u * i]) |
                     (static_cast<std::uint16_t>(source[2u * i + 1u]) << 8u));

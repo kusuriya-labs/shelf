@@ -45,27 +45,28 @@ Status proposal_shard_compute(
     uint32_t vocab_offset,
     hipStream_t stream);
 
-// Merges per-rank candidate lists. `candidate_ids` / `candidate_logits` hold
-// rank_count * k entries per row, rank-major.
+// Merges per-rank candidate lists. Rank q's list for row r starts at
+// q * rank_stride + r * k.
 Status proposal_merge_candidates(
     const int32_t* candidate_ids,
     const float* candidate_logits,
+    uint32_t ranks,
+    uint32_t rank_stride,
     uint32_t rows,
-    uint32_t candidates,
     uint32_t k,
     int32_t* out_ids,
     float* out_logits,
     hipStream_t stream);
 
-// Host-side normalization of the sharded softmax. `rank_stats[i]` points at
-// `rows * 2` floats for rank i, laid out as [max, sum]. The merged max is the
-// global maximum and the denominator is the full-vocabulary sum of
-// exp(x - max).
-void proposal_combine_denominators(
-    const float* const* rank_stats,
-    uint32_t rank_count,
+// Normalizes the sharded softmax on device. `rank_stats` holds [max, sum] for
+// every rank and row, rank-major: rank q at q * rank_stride. `out` receives
+// {global max, full-vocabulary denominator} per row.
+Status proposal_combine_denominators(
+    const float* rank_stats,
+    uint32_t ranks,
+    uint32_t rank_stride,
     uint32_t rows,
-    float* out_max,
-    float* out_denominator);
+    float* out,
+    hipStream_t stream);
 
 }  // namespace shelf::runtime::dflash2

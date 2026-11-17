@@ -49,14 +49,15 @@ hipError_t launch_dflash2_topk_f32_optimized(
     const DFlash2TopKPlan& plan,
     hipStream_t stream);
 
-// Selects the k best entries out of `candidates` per row. Each row of
-// `candidate_ids` / `candidate_logits` holds the per-rank top-k of one rank,
-// laid out rank-major; ids are already global vocabulary ids.
-hipError_t launch_dflash2_merge_topk(
+// Selects the k best entries out of the per-rank top-k lists. Rank q's list for
+// row r starts at q * rank_stride + r * k; ids are already global vocabulary
+// ids.
+hipError_t launch_dflash2_merge_ranked_topk(
     const int32_t* candidate_ids,
     const float* candidate_logits,
+    uint32_t ranks,
+    uint32_t rank_stride,
     uint32_t rows,
-    uint32_t candidates,
     uint32_t k,
     int32_t* out_ids,
     float* out_logits,

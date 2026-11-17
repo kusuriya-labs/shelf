@@ -43,20 +43,20 @@ Status validate_host_weight_slot(const ::shelf::runtime::WeightSlot& s, size_t i
     if (enc == 6u) {
         if (s.device_ptr != nullptr || s.codes == nullptr || s.scales == nullptr) {
             return Status::invalid_argument(
-                ("fp8 w32 weight table slot needs codes+scales and no device_ptr: index " +
+                ("int8 w32 weight table slot needs codes+scales and no device_ptr: index " +
                  std::to_string(index))
                     .c_str(),
                 __FILE__, __LINE__);
         }
         if (s.k_padded != s.cols || (s.cols & 127u) != 0u) {
             return Status::invalid_argument(
-                ("fp8 w32 weight table slot k_padded invalid: index " + std::to_string(index))
+                ("int8 w32 weight table slot k_padded invalid: index " + std::to_string(index))
                     .c_str(),
                 __FILE__, __LINE__);
         }
         if (s.codes_row_stride_bytes != 0u && s.codes_row_stride_bytes != s.cols) {
             return Status::invalid_argument(
-                ("fp8 w32 weight table slot code stride invalid: index " +
+                ("int8 w32 weight table slot code stride invalid: index " +
                  std::to_string(index))
                     .c_str(),
                 __FILE__, __LINE__);
@@ -65,7 +65,7 @@ Status validate_host_weight_slot(const ::shelf::runtime::WeightSlot& s, size_t i
         if (s.scale_row_stride_bytes != 0u &&
             s.scale_row_stride_bytes != blocks * 2u) {
             return Status::invalid_argument(
-                ("fp8 w32 weight table slot scale stride invalid: index " +
+                ("int8 w32 weight table slot scale stride invalid: index " +
                  std::to_string(index))
                     .c_str(),
                 __FILE__, __LINE__);

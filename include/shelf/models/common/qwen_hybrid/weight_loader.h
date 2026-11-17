@@ -29,7 +29,7 @@ struct HybridLoadOptions {
     bool load_embedding = true;
     bool load_lm_head = true;
     bool load_final_norm = true;
-    bool quantize_lm_head_fp8_w32 = false;
+    bool quantize_lm_head_int8_w32 = false;
     shelf::weights::WeightLoadOptions weights;
 };
 

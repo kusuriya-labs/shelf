@@ -2,9 +2,8 @@
 
 #include <shelf/kernels/dflash2/proposal_stats.h>
 #include <shelf/kernels/dflash2/topk.h>
-#include <shelf/kernels/optimized/linear/lm_head_fp8.h>
+#include <shelf/kernels/optimized/linear/lm_head_int8.h>
 
-#include <cmath>
 #include <cstddef>
 #include <limits>
 #include <vector>
@@ -93,7 +92,7 @@ Status proposal_shard_compute(
         return Status::invalid_argument("proposal shard rows out of range", __FILE__,
                                         __LINE__);
     }
-    if (head.encoding != shelf::weights::MatrixEncoding::Fp8W32) {
+    if (head.encoding != shelf::weights::MatrixEncoding::Int8W32) {
         return Status::unsupported("proposal shard head must be fp8 w32", __FILE__,
                                    __LINE__);
     }
@@ -106,7 +105,7 @@ Status proposal_shard_compute(
         return Status::invalid_argument("proposal shard head payload missing", __FILE__,
                                         __LINE__);
     }
-    hipError_t err = shelf::kernel::launch_lm_head_fp8_w32(
+    hipError_t err = shelf::kernel::launch_lm_head_int8_w32(
         hidden, hidden_stride, head.codes.data<uint8_t>(), head.scales.data<shelf::fp16_t>(),
         buffers.logits.data<float>(), buffers.local_vocab, rows, buffers.local_vocab,
         head.cols, stream);
@@ -136,14 +135,16 @@ Status proposal_shard_compute(
 Status proposal_merge_candidates(
     const int32_t* candidate_ids,
     const float* candidate_logits,
+    uint32_t ranks,
+    uint32_t rank_stride,
     uint32_t rows,
-    uint32_t candidates,
     uint32_t k,
     int32_t* out_ids,
     float* out_logits,
     hipStream_t stream) {
-    const hipError_t err = shelf::kernel::launch_dflash2_merge_topk(
-        candidate_ids, candidate_logits, rows, candidates, k, out_ids, out_logits, stream);
+    const hipError_t err = shelf::kernel::launch_dflash2_merge_ranked_topk(
+        candidate_ids, candidate_logits, ranks, rank_stride, rows, k, out_ids, out_logits,
+        stream);
     if (err != hipSuccess) {
         return Status::hip_error("proposal merge topk launch", hipGetErrorString(err),
                                  __FILE__, __LINE__);
@@ -151,29 +152,20 @@ Status proposal_merge_candidates(
     return Status::make_ok();
 }
 
-void proposal_combine_denominators(
-    const float* const* rank_stats,
-    uint32_t rank_count,
+Status proposal_combine_denominators(
+    const float* rank_stats,
+    uint32_t ranks,
+    uint32_t rank_stride,
     uint32_t rows,
-    float* out_max,
-    float* out_denominator) {
-    for (uint32_t r = 0; r < rows; ++r) {
-        float maximum = -INFINITY;
-        for (uint32_t rank = 0; rank < rank_count; ++rank) {
-            maximum = std::fmax(maximum, rank_stats[rank][static_cast<std::size_t>(r) * 2u]);
-        }
-        double total = 0.0;
-        for (uint32_t rank = 0; rank < rank_count; ++rank) {
-            const float local_max =
-                rank_stats[rank][static_cast<std::size_t>(r) * 2u];
-            const float local_sum =
-                rank_stats[rank][static_cast<std::size_t>(r) * 2u + 1u];
-            total += static_cast<double>(std::exp(local_max - maximum)) *
-                     static_cast<double>(local_sum);
-        }
-        out_max[r] = maximum;
-        out_denominator[r] = static_cast<float>(total);
+    float* out,
+    hipStream_t stream) {
+    const hipError_t err = shelf::kernel::launch_dflash2_combine_denominators(
+        rank_stats, ranks, rank_stride, rows, out, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("proposal denominator launch", hipGetErrorString(err),
+                                 __FILE__, __LINE__);
     }
+    return Status::make_ok();
 }
 
 }  // namespace shelf::runtime::dflash2

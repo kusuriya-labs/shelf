@@ -1,4 +1,4 @@
-#include <shelf/kernels/optimized/linear/lm_head_fp8.h>
+#include <shelf/kernels/optimized/linear/lm_head_int8.h>
 
 #include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
@@ -16,7 +16,7 @@ constexpr uint32_t kChunk = 32u * kVec;
 constexpr uint32_t kWarps = 8u;
 constexpr uint32_t kThreads = kWarps * 32u;
 constexpr uint32_t kMaxRows = 16u;
-constexpr float kE4M3Max = 448.0f;
+constexpr float kInt8Max = 127.0f;
 
 using f16x8_t = _Float16 __attribute__((ext_vector_type(8)));
 using f16x2_t = _Float16 __attribute__((ext_vector_type(2)));
@@ -50,6 +50,12 @@ __device__ __forceinline__ fp16_t fp16_from_float(float v) {
     return out;
 }
 
+__device__ __forceinline__ int8_t int8_code(float v) {
+    const float rounded = rintf(v);
+    const float clamped = fminf(fmaxf(rounded, -127.0f), 127.0f);
+    return static_cast<int8_t>(static_cast<int32_t>(clamped));
+}
+
 __device__ __forceinline__ float warp_sum(float v) {
 #pragma unroll
     for (uint32_t offset = 16u; offset > 0u; offset >>= 1u)
@@ -71,12 +77,10 @@ __device__ __forceinline__ void lm_head_row_body(
         const uint32_t offset = base + lane * kVec;
         const uint32_t packed = *reinterpret_cast<const uint32_t*>(code_row + offset);
         const float scale = fp16_value(scale_row + offset / kBlock);
-        const auto lo = __builtin_amdgcn_cvt_pk_f32_fp8(static_cast<int>(packed), false);
-        const auto hi = __builtin_amdgcn_cvt_pk_f32_fp8(static_cast<int>(packed), true);
-        const float w0 = lo[0] * scale;
-        const float w1 = lo[1] * scale;
-        const float w2 = hi[0] * scale;
-        const float w3 = hi[1] * scale;
+        const float w0 = static_cast<float>(static_cast<int8_t>(packed & 0xFFu)) * scale;
+        const float w1 = static_cast<float>(static_cast<int8_t>((packed >> 8u) & 0xFFu)) * scale;
+        const float w2 = static_cast<float>(static_cast<int8_t>((packed >> 16u) & 0xFFu)) * scale;
+        const float w3 = static_cast<float>(static_cast<int8_t>((packed >> 24u) & 0xFFu)) * scale;
 #pragma unroll
         for (uint32_t r = 0; r < kRows; ++r) {
             if (kExact || r < rows) {
@@ -99,7 +103,7 @@ __device__ __forceinline__ void lm_head_row_body(
 }
 
 template <uint32_t kRows, bool kExact>
-__global__ __launch_bounds__(kThreads) void lm_head_fp8_w32_kernel(
+__global__ __launch_bounds__(kThreads) void lm_head_int8_w32_kernel(
     const bf16_t* __restrict__ hidden, uint32_t hidden_row_stride,
     const uint8_t* __restrict__ codes, const fp16_t* __restrict__ scales,
     float* __restrict__ logits, uint32_t logits_row_stride,
@@ -116,19 +120,13 @@ __global__ __launch_bounds__(kThreads) void lm_head_fp8_w32_kernel(
 }
 
 __device__ __forceinline__ f16x8_t w32_codes_to_f16x8(const uint2 raw) {
-    const auto lo0 = __builtin_amdgcn_cvt_pk_f32_fp8(static_cast<int>(raw.x), false);
-    const auto lo1 = __builtin_amdgcn_cvt_pk_f32_fp8(static_cast<int>(raw.x), true);
-    const auto hi0 = __builtin_amdgcn_cvt_pk_f32_fp8(static_cast<int>(raw.y), false);
-    const auto hi1 = __builtin_amdgcn_cvt_pk_f32_fp8(static_cast<int>(raw.y), true);
+    const uint32_t words[2] = {raw.x, raw.y};
     f16x8_t out;
-    out[0] = static_cast<_Float16>(lo0[0]);
-    out[1] = static_cast<_Float16>(lo0[1]);
-    out[2] = static_cast<_Float16>(lo1[0]);
-    out[3] = static_cast<_Float16>(lo1[1]);
-    out[4] = static_cast<_Float16>(hi0[0]);
-    out[5] = static_cast<_Float16>(hi0[1]);
-    out[6] = static_cast<_Float16>(hi1[0]);
-    out[7] = static_cast<_Float16>(hi1[1]);
+#pragma unroll
+    for (uint32_t i = 0u; i < 8u; ++i) {
+        out[i] = static_cast<_Float16>(static_cast<int8_t>(
+            (words[i >> 2u] >> (8u * (i & 3u))) & 0xFFu));
+    }
     return out;
 }
 
@@ -143,7 +141,7 @@ __device__ __forceinline__ void w32_scales_to_floats(const uint4 raw, float* out
     }
 }
 
-__global__ __launch_bounds__(kWmmaThreads) void lm_head_fp8_w32_wmma_kernel(
+__global__ __launch_bounds__(kWmmaThreads) void lm_head_int8_w32_wmma_kernel(
     const bf16_t* __restrict__ hidden, uint32_t hidden_row_stride,
     const uint8_t* __restrict__ codes, const fp16_t* __restrict__ scales,
     float* __restrict__ logits, uint32_t logits_row_stride,
@@ -230,7 +228,7 @@ __global__ __launch_bounds__(kWmmaThreads) void lm_head_fp8_w32_wmma_kernel(
     }
 }
 
-__global__ __launch_bounds__(256) void quantize_bf16_to_fp8_w32_kernel(
+__global__ __launch_bounds__(256) void quantize_bf16_to_int8_w32_kernel(
     const bf16_t* __restrict__ src, uint32_t src_row_stride,
     uint8_t* __restrict__ codes, fp16_t* __restrict__ scales,
     uint32_t rows, uint32_t k) {
@@ -262,12 +260,18 @@ __global__ __launch_bounds__(256) void quantize_bf16_to_fp8_w32_kernel(
         amax = fmaxf(amax, __shfl_xor(amax, 2u, 8u));
         amax = fmaxf(amax, __shfl_xor(amax, 4u, 8u));
         const fp16_t stored = fp16_from_float(
-            amax > 0.0f ? fmaxf(amax / kE4M3Max, kMinHalfSubnormal) : 1.0f);
+            amax > 0.0f ? fmaxf(amax / kInt8Max, kMinHalfSubnormal) : 1.0f);
         const float inv = 1.0f / fp16_value(&stored);
-        int packed = __builtin_amdgcn_cvt_pk_fp8_f32(v0 * inv, v1 * inv, 0, false);
-        packed = __builtin_amdgcn_cvt_pk_fp8_f32(v2 * inv, v3 * inv, packed, true);
+        const int8_t c0 = int8_code(v0 * inv);
+        const int8_t c1 = int8_code(v1 * inv);
+        const int8_t c2 = int8_code(v2 * inv);
+        const int8_t c3 = int8_code(v3 * inv);
+        const uint32_t packed = static_cast<uint32_t>(static_cast<uint8_t>(c0)) |
+                                (static_cast<uint32_t>(static_cast<uint8_t>(c1)) << 8u) |
+                                (static_cast<uint32_t>(static_cast<uint8_t>(c2)) << 16u) |
+                                (static_cast<uint32_t>(static_cast<uint8_t>(c3)) << 24u);
         *reinterpret_cast<uint32_t*>(codes + static_cast<std::size_t>(row) * k + element) =
-            static_cast<uint32_t>(packed);
+            packed;
         if (lane_in_group == 0u)
             scales[static_cast<std::size_t>(row) * blocks_per_row + block] = stored;
     }
@@ -280,7 +284,7 @@ inline hipError_t launch_lm_head_rows(
     float* logits, uint32_t logits_row_stride,
     uint32_t rows, uint32_t vocab, uint32_t k, hipStream_t stream) {
     const uint32_t grid = (vocab + kWarps - 1u) / kWarps;
-    lm_head_fp8_w32_kernel<kRows, kExact><<<grid, kThreads, 0, stream>>>(
+    lm_head_int8_w32_kernel<kRows, kExact><<<grid, kThreads, 0, stream>>>(
         hidden, hidden_row_stride, weight_codes, weight_scales, logits,
         logits_row_stride, rows, vocab, k);
     return hipGetLastError();
@@ -292,7 +296,7 @@ inline hipError_t launch_lm_head_wmma(
     float* logits, uint32_t logits_row_stride,
     uint32_t rows, uint32_t vocab, uint32_t k, hipStream_t stream) {
     const uint32_t grid = (vocab + kWmmaBlockVocab - 1u) / kWmmaBlockVocab;
-    lm_head_fp8_w32_wmma_kernel<<<grid, kWmmaThreads, 0, stream>>>(
+    lm_head_int8_w32_wmma_kernel<<<grid, kWmmaThreads, 0, stream>>>(
         hidden, hidden_row_stride, weight_codes, weight_scales, logits,
         logits_row_stride, rows, vocab, k);
     return hipGetLastError();
@@ -300,7 +304,7 @@ inline hipError_t launch_lm_head_wmma(
 
 }  // namespace
 
-hipError_t launch_lm_head_fp8_w32(
+hipError_t launch_lm_head_int8_w32(
     const bf16_t* hidden, uint32_t hidden_row_stride,
     const uint8_t* weight_codes, const fp16_t* weight_scales,
     float* logits, uint32_t logits_row_stride,
@@ -344,7 +348,7 @@ hipError_t launch_lm_head_fp8_w32(
     }
 }
 
-hipError_t launch_quantize_bf16_to_fp8_w32(
+hipError_t launch_quantize_bf16_to_int8_w32(
     const bf16_t* src, uint32_t src_row_stride,
     uint8_t* codes, fp16_t* scales,
     uint32_t rows, uint32_t k, hipStream_t stream) {
@@ -356,7 +360,7 @@ hipError_t launch_quantize_bf16_to_fp8_w32(
     constexpr uint32_t kThreadsPerBlock = 256u;
     uint32_t grid = static_cast<uint32_t>((work + kThreadsPerBlock - 1u) / kThreadsPerBlock);
     if (grid > 65535u) grid = 65535u;
-    quantize_bf16_to_fp8_w32_kernel<<<grid, kThreadsPerBlock, 0, stream>>>(
+    quantize_bf16_to_int8_w32_kernel<<<grid, kThreadsPerBlock, 0, stream>>>(
         src, src_row_stride, codes, scales, rows, k);
     return hipGetLastError();
 }

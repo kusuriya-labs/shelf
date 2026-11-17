@@ -1,7 +1,6 @@
 #include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/memory/types.h>
-#include <shelf/kernels/optimized/linear/lm_head_fp8.h>
-#include <shelf/quantization/codec/e4m3.h>
+#include <shelf/kernels/optimized/linear/lm_head_int8.h>
 
 #include <hip/hip_runtime.h>
 
@@ -32,19 +31,15 @@ float bf16_to_float(std::uint16_t bits) {
     return value;
 }
 
-float e4m3_to_float(std::uint8_t bits) {
-    const std::uint32_t sign = (bits >> 7u) & 1u;
-    const std::uint32_t exponent = (bits >> 3u) & 0xFu;
-    const std::uint32_t mantissa = bits & 0x7u;
-    if (exponent == 0xFu && mantissa == 0x7u) return NAN;
-    float value = 0.0f;
-    if (exponent == 0u) {
-        value = std::ldexp(static_cast<float>(mantissa) / 8.0f, -6);
-    } else {
-        value = std::ldexp(1.0f + static_cast<float>(mantissa) / 8.0f,
-                           static_cast<int>(exponent) - 7);
-    }
-    return sign != 0u ? -value : value;
+float int8_to_float(std::uint8_t bits) {
+    return static_cast<float>(static_cast<std::int8_t>(bits));
+}
+
+std::uint8_t int8_code(float value) {
+    const float rounded = std::nearbyintf(value);
+    const float clamped = std::fmin(std::fmax(rounded, -127.0f), 127.0f);
+    return static_cast<std::uint8_t>(
+        static_cast<std::int8_t>(static_cast<std::int32_t>(clamped)));
 }
 
 std::vector<shelf::bf16_t> random_bf16(std::size_t count, std::mt19937& rng) {
@@ -57,7 +52,7 @@ std::vector<shelf::bf16_t> random_bf16(std::size_t count, std::mt19937& rng) {
 constexpr std::uint32_t kVocab = 1024u;
 constexpr std::uint32_t kK = 5120u;
 constexpr std::uint32_t kRows = 16u;
-constexpr std::uint32_t kCheckedRows[] = {1u, 2u, 3u, 4u, 5u, 8u, 16u};
+constexpr std::uint32_t kCheckedRows[] = {1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 12u, 15u, 16u};
 
 }  // namespace
 
@@ -103,7 +98,7 @@ int main() {
               "copy hidden row");
     }
 
-    check(shelf::kernel::launch_quantize_bf16_to_fp8_w32(
+    check(shelf::kernel::launch_quantize_bf16_to_int8_w32(
               d_weight, kK, d_codes, d_scales, kVocab, kK, nullptr) == hipSuccess,
           "quantize");
 
@@ -132,14 +127,14 @@ int main() {
                 const std::uint32_t index = block * 32u + i;
                 const float original =
                     bf16_to_float(weight[static_cast<std::size_t>(v) * kK + index].data);
-                const float dequant = e4m3_to_float(code_row[index]) * scale;
+                const float dequant = int8_to_float(code_row[index]) * scale;
                 block_amax = std::fmax(block_amax, std::fabs(original));
                 worst_scale = std::fmax(worst_scale, std::fabs(dequant - original));
                 dequant_row[index] = dequant;
                 weight_row[index] = original;
             }
             if (block_amax > 0.0f &&
-                std::fabs(scale * 448.0f - block_amax) > block_amax * 1e-2f) {
+                std::fabs(scale * 127.0f - block_amax) > block_amax * 1e-2f) {
                 check(false, "block scale matches the block maximum");
                 block_amax = -1.0f;
             }
@@ -167,14 +162,14 @@ int main() {
     }
 
     std::vector<float> logits(static_cast<std::size_t>(kRows) * logits_stride);
-    for (const std::uint32_t rows : kCheckedRows) {
+    auto run_and_compare = [&](std::uint32_t rows, std::uint32_t vocab, const char* tag) {
         check(hipMemset(d_logits, 0,
                         static_cast<std::size_t>(kRows) * logits_stride * sizeof(float)) ==
                   hipSuccess,
               "clear logits");
-        check(shelf::kernel::launch_lm_head_fp8_w32(
+        check(shelf::kernel::launch_lm_head_int8_w32(
                   d_hidden_strided, hidden_stride, d_codes, d_scales, d_logits, logits_stride,
-                  rows, kVocab, kK, nullptr) == hipSuccess,
+                  rows, vocab, kK, nullptr) == hipSuccess,
               "lm head");
         check(hipDeviceSynchronize() == hipSuccess, "sync");
         check(hipMemcpy(logits.data(), d_logits, logits.size() * sizeof(float),
@@ -187,10 +182,10 @@ int main() {
         std::uint32_t argmax_ties = 0;
         for (std::uint32_t r = 0; r < rows; ++r) {
             float bf16_best = -INFINITY;
-            float fp8_best = -INFINITY;
+            float int8_best = -INFINITY;
             std::uint32_t bf16_argmax = 0;
-            std::uint32_t fp8_argmax = 0;
-            for (std::uint32_t v = 0; v < kVocab; ++v) {
+            std::uint32_t int8_argmax = 0;
+            for (std::uint32_t v = 0; v < vocab; ++v) {
                 const std::size_t slot = static_cast<std::size_t>(v) * kRows + r;
                 const float got = logits[static_cast<std::size_t>(r) * logits_stride + v];
                 worst = std::fmax(
@@ -202,32 +197,161 @@ int main() {
                     bf16_best = comparison;
                     bf16_argmax = v;
                 }
-                if (got > fp8_best || v == 0u) {
-                    fp8_best = got;
-                    fp8_argmax = v;
+                if (got > int8_best || v == 0u) {
+                    int8_best = got;
+                    int8_argmax = v;
                 }
             }
-            if (bf16_argmax == fp8_argmax) {
+            if (bf16_argmax == int8_argmax) {
                 ++argmax_matches;
             } else if (std::fabs(static_cast<float>(
-                           bf16_reference[static_cast<std::size_t>(fp8_argmax) * kRows + r]) -
+                           bf16_reference[static_cast<std::size_t>(int8_argmax) * kRows + r]) -
                                bf16_best) <=
                        std::fabs(bf16_best) * 0.05f) {
                 ++argmax_ties;
             }
         }
-
-        check(worst < 2.0e-2f, "logits match the dequantized reference");
+        check(worst < 2.0e-2f, (std::string(tag) + ": logits match the dequantized reference").c_str());
         check(argmax_matches + argmax_ties == rows,
-              "fp8 keeps the bf16 argmax inside the quantization error");
+              (std::string(tag) + ": int8 keeps the bf16 argmax inside the error").c_str());
         check(bf16_worst < reference_magnitude * 0.05f,
-              "fp8 logits stay within 5% of the bf16 logits");
+              (std::string(tag) + ": int8 logits stay within 5% of bf16").c_str());
+        if (vocab < kVocab) {
+            bool tail_ok = true;
+            for (std::uint32_t r = 0; r < rows; ++r)
+                for (std::uint32_t v = vocab; v < kVocab; ++v)
+                    if (logits[static_cast<std::size_t>(r) * logits_stride + v] != 0.0f)
+                        tail_ok = false;
+            check(tail_ok,
+                  (std::string(tag) + ": rows past the vocabulary are untouched").c_str());
+        }
         std::fprintf(stderr,
-                     "rows %2u: worst logit diff %.6f, worst bf16 diff %.6f "
+                     "%-14s rows %2u: worst logit diff %.6f, worst bf16 diff %.6f "
                      "(max |logit| %.3f), argmax %u/%u (%u ties)\n",
-                     rows, worst, bf16_worst, reference_magnitude, argmax_matches, rows,
+                     tag, rows, worst, bf16_worst, reference_magnitude, argmax_matches, rows,
                      argmax_ties);
+    };
+
+    for (const std::uint32_t rows : kCheckedRows)
+        run_and_compare(rows, kVocab, "full-vocab");
+    for (const std::uint32_t vocab : {1000u, 1001u, 1007u, 127u, 129u})
+        run_and_compare(8u, vocab, "vocab-tail");
+    run_and_compare(16u, 1007u, "vocab-tail");
+    run_and_compare(6u, 1000u, "vocab-tail");
+
+    {
+        // GEMV（rows<=4）と WMMA（rows>=5）が同じ行で同じ値になること。
+        // 端数 rows でも先頭行が変わらないことを、既存の重みで確かめる。
+        std::vector<float> gemv_logits(static_cast<std::size_t>(kRows) * logits_stride);
+        std::vector<float> wmma_logits(static_cast<std::size_t>(kRows) * logits_stride);
+        check(shelf::kernel::launch_lm_head_int8_w32(
+                  d_hidden_strided, hidden_stride, d_codes, d_scales, d_logits, logits_stride,
+                  4u, kVocab, kK, nullptr) == hipSuccess,
+              "boundary gemv");
+        check(hipMemcpy(gemv_logits.data(), d_logits, gemv_logits.size() * sizeof(float),
+                        hipMemcpyDeviceToHost) == hipSuccess,
+              "boundary gemv copy");
+        check(shelf::kernel::launch_lm_head_int8_w32(
+                  d_hidden_strided, hidden_stride, d_codes, d_scales, d_logits, logits_stride,
+                  5u, kVocab, kK, nullptr) == hipSuccess,
+              "boundary wmma");
+        check(hipMemcpy(wmma_logits.data(), d_logits, wmma_logits.size() * sizeof(float),
+                        hipMemcpyDeviceToHost) == hipSuccess,
+              "boundary wmma copy");
+        float boundary_worst = 0.0f;
+        for (std::uint32_t r = 0; r < 4u; ++r)
+            for (std::uint32_t v = 0; v < kVocab; ++v) {
+                const std::size_t at = static_cast<std::size_t>(r) * logits_stride + v;
+                boundary_worst = std::fmax(
+                    boundary_worst, std::fabs(gemv_logits[at] - wmma_logits[at]));
+            }
+        check(boundary_worst < reference_magnitude * 1e-3f,
+              "gemv and wmma agree on the shared rows");
+        std::fprintf(stderr, "gemv/wmma boundary worst diff %.6f\n", boundary_worst);
+
+        check(shelf::kernel::launch_lm_head_int8_w32(
+                  d_hidden_strided, hidden_stride, d_codes, d_scales, d_logits, logits_stride,
+                  17u, kVocab, kK, nullptr) == hipErrorInvalidValue,
+              "rows above the tile are rejected");
     }
+
+    {
+        // k が WMMA のステージ幅で割り切れないときは GEMV へ戻る。そちらも
+        // 逆量子化リファレンスと一致すること。
+        constexpr std::uint32_t kTailK = 5248u;
+        constexpr std::uint32_t kTailVocab = 256u;
+        constexpr std::uint32_t kTailRows = 8u;
+        std::mt19937 trng(23u);
+        std::uniform_real_distribution<float> tdist(-1.0f, 1.0f);
+        std::vector<shelf::bf16_t> tw(static_cast<std::size_t>(kTailVocab) * kTailK);
+        for (auto& w : tw) w.data = shelf::f32_to_bf16_rne(tdist(trng));
+        std::vector<shelf::bf16_t> th(static_cast<std::size_t>(kTailRows) * kTailK);
+        for (auto& h : th) h.data = shelf::f32_to_bf16_rne(tdist(trng));
+        shelf::bf16_t* d_tw = nullptr;
+        shelf::bf16_t* d_th = nullptr;
+        std::uint8_t* d_tc = nullptr;
+        shelf::fp16_t* d_ts = nullptr;
+        float* d_tl = nullptr;
+        check(hipMalloc(&d_tw, tw.size() * sizeof(shelf::bf16_t)) == hipSuccess, "malloc tail w");
+        check(hipMalloc(&d_th, th.size() * sizeof(shelf::bf16_t)) == hipSuccess, "malloc tail h");
+        check(hipMalloc(&d_tc, tw.size()) == hipSuccess, "malloc tail codes");
+        check(hipMalloc(&d_ts, kTailVocab * (kTailK / 32u) * sizeof(shelf::fp16_t)) == hipSuccess,
+              "malloc tail scales");
+        check(hipMalloc(&d_tl, static_cast<std::size_t>(kTailRows) * kTailVocab * sizeof(float)) ==
+                  hipSuccess,
+              "malloc tail logits");
+        check(hipMemcpy(d_tw, tw.data(), tw.size() * sizeof(shelf::bf16_t),
+                        hipMemcpyHostToDevice) == hipSuccess, "copy tail w");
+        check(hipMemcpy(d_th, th.data(), th.size() * sizeof(shelf::bf16_t),
+                        hipMemcpyHostToDevice) == hipSuccess, "copy tail h");
+        check(shelf::kernel::launch_quantize_bf16_to_int8_w32(
+                  d_tw, kTailK, d_tc, d_ts, kTailVocab, kTailK, nullptr) == hipSuccess,
+              "quantize tail");
+        std::vector<std::uint8_t> tc(tw.size());
+        std::vector<shelf::fp16_t> ts(kTailVocab * (kTailK / 32u));
+        check(hipMemcpy(tc.data(), d_tc, tc.size(), hipMemcpyDeviceToHost) == hipSuccess,
+              "copy tail codes");
+        check(hipMemcpy(ts.data(), d_ts, ts.size() * sizeof(shelf::fp16_t),
+                        hipMemcpyDeviceToHost) == hipSuccess,
+              "copy tail scales");
+        std::vector<float> tl(static_cast<std::size_t>(kTailRows) * kTailVocab);
+        if (shelf::kernel::launch_lm_head_int8_w32(
+                d_th, kTailK, d_tc, d_ts, d_tl, kTailVocab, kTailRows, kTailVocab, kTailK,
+                nullptr) != hipSuccess) {
+            check(false, "tail lm head launch");
+        } else if (hipMemcpy(tl.data(), d_tl, tl.size() * sizeof(float),
+                             hipMemcpyDeviceToHost) != hipSuccess) {
+            check(false, "tail logits copy");
+        } else {
+            float tail_worst = 0.0f;
+            for (std::uint32_t r = 0; r < kTailRows; ++r)
+                for (std::uint32_t v = 0; v < kTailVocab; ++v) {
+                    double want = 0.0;
+                    for (std::uint32_t i = 0; i < kTailK; ++i) {
+                        const std::uint8_t code =
+                            tc[static_cast<std::size_t>(v) * kTailK + i];
+                        const float scale = shelf::fp16_to_f32(
+                            ts[static_cast<std::size_t>(v) * (kTailK / 32u) + i / 32u]);
+                        want += static_cast<double>(int8_to_float(code) * scale) *
+                                bf16_to_float(
+                                    th[static_cast<std::size_t>(r) * kTailK + i].data);
+                    }
+                    tail_worst = std::fmax(
+                        tail_worst,
+                        static_cast<float>(
+                            std::fabs(static_cast<double>(
+                                tl[static_cast<std::size_t>(r) * kTailVocab + v]) - want)));
+                }
+            check(tail_worst < 5.0e-2f, "gemv fallback matches the dequantized reference");
+            std::fprintf(stderr, "gemv fallback worst diff %.6f\n", tail_worst);
+        }
+        shelf::gpu::discard_cleanup_result(hipFree(d_tw));
+        shelf::gpu::discard_cleanup_result(hipFree(d_th));
+        shelf::gpu::discard_cleanup_result(hipFree(d_tc));
+        shelf::gpu::discard_cleanup_result(hipFree(d_ts));
+        shelf::gpu::discard_cleanup_result(hipFree(d_tl));
+    }
+
     std::fprintf(stderr, "worst weight diff %.6f\n", worst_scale);
 
     {
@@ -251,7 +375,7 @@ int main() {
               "malloc tiny scales");
         check(hipMemcpy(d_tiny, tiny.data(), tiny.size() * sizeof(shelf::bf16_t),
                         hipMemcpyHostToDevice) == hipSuccess, "copy tiny");
-        check(shelf::kernel::launch_quantize_bf16_to_fp8_w32(
+        check(shelf::kernel::launch_quantize_bf16_to_int8_w32(
                   d_tiny, kTinyK, d_tiny_codes, d_tiny_scales, kTinyRows, kTinyK,
                   nullptr) == hipSuccess,
               "quantize tiny");
@@ -273,10 +397,10 @@ int main() {
                     block_amax,
                     std::fabs(bf16_to_float(
                         tiny[static_cast<std::size_t>(r) * kTinyK + i].data)));
-            const float bound = block_amax * 0.0625f + 1.0e-9f;
+            const float bound = scale * 0.5f + block_amax * 1.0e-3f + 1.0e-9f;
             for (std::uint32_t i = 0; i < kTinyK; ++i) {
                 const float original = bf16_to_float(tiny[static_cast<std::size_t>(r) * kTinyK + i].data);
-                const float dequant = e4m3_to_float(tiny_codes[static_cast<std::size_t>(r) * kTinyK + i]) * scale;
+                const float dequant = int8_to_float(tiny_codes[static_cast<std::size_t>(r) * kTinyK + i]) * scale;
                 if (std::fabs(dequant - original) > bound && original != 0.0f) scales_ok = false;
             }
         }
@@ -287,17 +411,20 @@ int main() {
     }
 
     {
-        // E4M3FN の特殊値。amax を 448 にして scale を 1.0 に固定し、
-        // v_cvt_pk_fp8_f32 のコードを OCP の期待値と直接比較する。
+        // INT8 の丸め。scale が 2^-7 に固定されるよう amax を 127 * 2^-7 にして、
+        // 偶数丸めと符号を直接比較する。
         constexpr std::uint32_t kSpecials = 32u;
+        const float unit = 0x1p-8f;
         const float values[kSpecials] = {
-            0.0f, -0.0f, 448.0f, -448.0f, 449.0f, 1.0f, 2.0f, 0.5f,
-            -0.5f, 0x1p-9f, 0x1p-13f, 0x1p-10f, 256.0f, 288.0f, 320.0f, 384.0f,
+            0.0f, -0.0f, 127.0f * unit, -127.0f * unit,
+            unit, -unit, 0.5f * unit, 1.5f * unit,
+            2.5f * unit, 3.5f * unit, 126.0f * unit, -126.0f * unit,
+            0.49f * unit, 0.51f * unit, 1.49f * unit, 1.51f * unit,
             0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
             0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
         const std::uint8_t expected[kSpecials] = {
-            0x00u, 0x80u, 0x7Eu, 0xFEu, 0x7Eu, 0x38u, 0x40u, 0x30u,
-            0xB0u, 0x01u, 0x00u, 0x00u, 0x78u, 0x79u, 0x7Au, 0x7Cu,
+            0x00u, 0x00u, 0x7Fu, 0x81u, 0x01u, 0xFFu, 0x00u, 0x02u,
+            0x02u, 0x04u, 0x7Eu, 0x82u, 0x00u, 0x01u, 0x01u, 0x02u,
             0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u,
             0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u};
         std::vector<shelf::bf16_t> special(kSpecials);
@@ -313,7 +440,7 @@ int main() {
               "malloc special scale");
         check(hipMemcpy(d_special, special.data(), kSpecials * sizeof(shelf::bf16_t),
                         hipMemcpyHostToDevice) == hipSuccess, "copy special");
-        check(shelf::kernel::launch_quantize_bf16_to_fp8_w32(
+        check(shelf::kernel::launch_quantize_bf16_to_int8_w32(
                   d_special, kSpecials, d_special_codes, d_special_scales, 1u, kSpecials,
                   nullptr) == hipSuccess,
               "quantize special");
@@ -325,8 +452,8 @@ int main() {
         check(hipMemcpy(&got_scale, d_special_scales, sizeof(got_scale), hipMemcpyDeviceToHost) ==
                   hipSuccess,
               "copy special scale");
-        check(std::fabs(shelf::fp16_to_f32(got_scale) - 1.0f) < 1e-6f,
-              "special block keeps unit scale");
+        check(std::fabs(shelf::fp16_to_f32(got_scale) - unit) < 1e-9f,
+              "special block stores the power of two scale");
         bool codes_ok = true;
         for (std::uint32_t i = 0; i < kSpecials; ++i) {
             if (got_codes[i] != expected[i]) {
@@ -335,55 +462,10 @@ int main() {
                 codes_ok = false;
             }
         }
-        check(codes_ok, "e4m3 codes match the OCP special values");
+        check(codes_ok, "int8 codes round half to even");
         shelf::gpu::discard_cleanup_result(hipFree(d_special));
         shelf::gpu::discard_cleanup_result(hipFree(d_special_codes));
         shelf::gpu::discard_cleanup_result(hipFree(d_special_scales));
-    }
-
-    {
-        // ホスト側エンコーダと GPU の v_cvt_pk_fp8_f32 が同じコードを返すこと。
-        // 各 block に 448 を入れて scale を 1.0 に固定する。
-        constexpr std::uint32_t kBlocks = 8u;
-        constexpr std::uint32_t kSpan = kBlocks * 32u;
-        std::mt19937 erng(7u);
-        std::uniform_real_distribution<float> edist(-448.0f, 448.0f);
-        std::vector<shelf::bf16_t> span(kSpan);
-        for (std::uint32_t b = 0; b < kBlocks; ++b) {
-            span[b * 32u].data = shelf::f32_to_bf16_rne(448.0f);
-            for (std::uint32_t i = 1; i < 32u; ++i)
-                span[b * 32u + i].data = shelf::f32_to_bf16_rne(edist(erng));
-        }
-        shelf::bf16_t* d_span = nullptr;
-        std::uint8_t* d_span_codes = nullptr;
-        shelf::fp16_t* d_span_scales = nullptr;
-        check(hipMalloc(&d_span, kSpan * sizeof(shelf::bf16_t)) == hipSuccess, "malloc span");
-        check(hipMalloc(&d_span_codes, kSpan) == hipSuccess, "malloc span codes");
-        check(hipMalloc(&d_span_scales, kBlocks * sizeof(shelf::fp16_t)) == hipSuccess,
-              "malloc span scales");
-        check(hipMemcpy(d_span, span.data(), kSpan * sizeof(shelf::bf16_t),
-                        hipMemcpyHostToDevice) == hipSuccess, "copy span");
-        check(shelf::kernel::launch_quantize_bf16_to_fp8_w32(
-                  d_span, kSpan, d_span_codes, d_span_scales, 1u, kSpan, nullptr) == hipSuccess,
-              "quantize span");
-        std::vector<std::uint8_t> span_codes(kSpan);
-        check(hipMemcpy(span_codes.data(), d_span_codes, kSpan, hipMemcpyDeviceToHost) ==
-                  hipSuccess,
-              "copy span codes");
-        bool host_matches = true;
-        for (std::uint32_t i = 0; i < kSpan; ++i) {
-            const float value = bf16_to_float(span[i].data);
-            const std::uint8_t host = shelf::quantization::codec::e4m3_encode_u8(value);
-            if (host != span_codes[i]) {
-                std::fprintf(stderr, "enc %u: host %02x gpu %02x (value %a)\n", i, host,
-                             span_codes[i], value);
-                host_matches = false;
-            }
-        }
-        check(host_matches, "host encoder matches the gpu encoder");
-        shelf::gpu::discard_cleanup_result(hipFree(d_span));
-        shelf::gpu::discard_cleanup_result(hipFree(d_span_codes));
-        shelf::gpu::discard_cleanup_result(hipFree(d_span_scales));
     }
 
     shelf::gpu::discard_cleanup_result(hipFree(d_weight));
@@ -394,9 +476,9 @@ int main() {
     shelf::gpu::discard_cleanup_result(hipFree(d_logits));
 
     if (failures != 0) {
-        std::fprintf(stderr, "lm head fp8: %d failures\n", failures);
+        std::fprintf(stderr, "lm head int8: %d failures\n", failures);
         return 1;
     }
-    std::fprintf(stderr, "lm head fp8: 0 failures\n");
+    std::fprintf(stderr, "lm head int8: 0 failures\n");
     return 0;
 }

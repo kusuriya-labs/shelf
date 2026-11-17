@@ -50,7 +50,7 @@ enum class KernelId : uint32_t {
     ACTIVATION_QUANTIZE_FP8_PERTOKEN,
     LINEAR_FP8_PTPC,
     LINEAR_EXL3_INT8,
-    LINEAR_FP8_W32,
+    LINEAR_INT8_W32,
     COUNT,
 };
 
@@ -81,7 +81,7 @@ inline const char* kernel_to_name(KernelId id) noexcept {
         case KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED: return "ACTIVATION_QUANTIZE_FP8_FINEGRAINED";
         case KernelId::ACTIVATION_QUANTIZE_MXFP4_ROWREF: return "ACTIVATION_QUANTIZE_MXFP4_ROWREF";
         case KernelId::LINEAR_FP8_FINEGRAINED: return "LINEAR_FP8_FINEGRAINED";
-        case KernelId::LINEAR_FP8_W32: return "LINEAR_FP8_W32";
+        case KernelId::LINEAR_INT8_W32: return "LINEAR_INT8_W32";
         case KernelId::LINEAR_MXFP4_W4A8: return "LINEAR_MXFP4_W4A8";
         case KernelId::CONCAT: return "CONCAT";
         case KernelId::VERIFY_ACCEPT: return "VERIFY_ACCEPT";

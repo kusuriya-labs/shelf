@@ -7,12 +7,12 @@
 #include <shelf/quantization/manifest/runtime_resolution.h>
 #include <shelf/quantization/fp8/fp8_native.h>
 #include <shelf/quantization/mxfp4/mxfp4.h>
-#include <shelf/quantization/codec/e4m3.h>
 #include <shelf/quantization/mxfp4/mxfp4_native.h>
 #include <shelf/weights/canonical_partition.h>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -26,9 +26,9 @@ namespace {
 
 namespace {
 
-constexpr std::uint64_t kFp8W32Block = 32u;
-constexpr float kFp8W32Max = 448.0f;
-constexpr float kFp8W32MinScale = 0x1p-24f;
+constexpr std::uint64_t kInt8W32Block = 32u;
+constexpr float kInt8W32Max = 127.0f;
+constexpr float kInt8W32MinScale = 0x1p-24f;
 
 float bf16_bits_to_f32(std::uint16_t bits) {
     const std::uint32_t wide = static_cast<std::uint32_t>(bits) << 16u;
@@ -39,27 +39,31 @@ float bf16_bits_to_f32(std::uint16_t bits) {
 
 // Host-side conversion for the lm_head. The source is the mmap'd checkpoint row, so
 // quantizing here keeps the BF16 payload off the device entirely.
-void quantize_bf16_to_fp8_w32_host(const void* src, std::uint64_t rows, std::uint64_t k,
+void quantize_bf16_to_int8_w32_host(const void* src, std::uint64_t rows, std::uint64_t k,
                                    std::uint8_t* codes, shelf::fp16_t* scales) {
     const auto* in = static_cast<const shelf::bf16_t*>(src);
-    const std::uint64_t blocks = k / kFp8W32Block;
+    const std::uint64_t blocks = k / kInt8W32Block;
     for (std::uint64_t r = 0; r < rows; ++r) {
         const shelf::bf16_t* row = in + r * k;
         for (std::uint64_t b = 0; b < blocks; ++b) {
-            float values[kFp8W32Block];
+            float values[kInt8W32Block];
             float amax = 0.0f;
-            for (std::uint32_t i = 0; i < kFp8W32Block; ++i) {
-                values[i] = bf16_bits_to_f32(row[b * kFp8W32Block + i].data);
+            for (std::uint32_t i = 0; i < kInt8W32Block; ++i) {
+                values[i] = bf16_bits_to_f32(row[b * kInt8W32Block + i].data);
                 amax = std::max(amax, std::fabs(values[i]));
             }
-            const float raw = amax > 0.0f ? amax / kFp8W32Max : 1.0f;
+            const float raw = amax > 0.0f ? amax / kInt8W32Max : 1.0f;
             const shelf::fp16_t stored =
-                shelf::f32_to_fp16(amax > 0.0f ? std::max(raw, kFp8W32MinScale) : 1.0f);
+                shelf::f32_to_fp16(amax > 0.0f ? std::max(raw, kInt8W32MinScale) : 1.0f);
             const float inv = 1.0f / shelf::fp16_to_f32(stored);
             scales[r * blocks + b] = stored;
-            std::uint8_t* out = codes + r * k + b * kFp8W32Block;
-            for (std::uint32_t i = 0; i < kFp8W32Block; ++i)
-                out[i] = shelf::quantization::codec::e4m3_encode_u8(values[i] * inv);
+            std::uint8_t* out = codes + r * k + b * kInt8W32Block;
+            for (std::uint32_t i = 0; i < kInt8W32Block; ++i) {
+                const float scaled =
+                    std::fmin(std::fmax(std::nearbyintf(values[i] * inv), -127.0f), 127.0f);
+                out[i] = static_cast<std::uint8_t>(static_cast<std::int8_t>(
+                    static_cast<std::int32_t>(scaled)));
+            }
         }
     }
 }
@@ -270,19 +274,19 @@ Result<MatrixWeight> load_quantized_view(
         }
         auto st = expect_bytes(name + " data", v.data, m * k * 2);
         if (!st.ok()) return st;
-        if (options.quantize_fp8_w32 && (k % 128u) == 0u) {
-            const std::uint64_t blocks = k / kFp8W32Block;
+        if (options.quantize_int8_w32 && (k % 128u) == 0u) {
+            const std::uint64_t blocks = k / kInt8W32Block;
             std::vector<std::uint8_t> codes(static_cast<std::size_t>(m * k));
             std::vector<shelf::fp16_t> scales(static_cast<std::size_t>(m * blocks));
-            quantize_bf16_to_fp8_w32_host(v.data.data, m, k, codes.data(), scales.data());
-            w.encoding = MatrixEncoding::Fp8W32;
+            quantize_bf16_to_int8_w32_host(v.data.data, m, k, codes.data(), scales.data());
+            w.encoding = MatrixEncoding::Int8W32;
             w.k_padded = static_cast<uint32_t>(k);
             std::vector<std::size_t> code_shape = {m, k};
             std::vector<std::size_t> code_strides = {k, 1};
             w.codes = alloc_bytes(m * k, code_shape, code_strides, arena);
             if (w.codes.ndim() == 0) {
                 return Status::insufficient_memory(
-                    ("fp8 w32 codes allocation failed: " + name).c_str(), __FILE__, __LINE__);
+                    ("int8 w32 codes allocation failed: " + name).c_str(), __FILE__, __LINE__);
             }
             st = copy_to_device(w.codes.data<void>(), codes.data(), codes.size(), stream);
             if (!st.ok()) return st;
@@ -292,7 +296,7 @@ Result<MatrixWeight> load_quantized_view(
                                    scale_strides, arena);
             if (w.scales.ndim() == 0) {
                 return Status::insufficient_memory(
-                    ("fp8 w32 scales allocation failed: " + name).c_str(), __FILE__, __LINE__);
+                    ("int8 w32 scales allocation failed: " + name).c_str(), __FILE__, __LINE__);
             }
             st = copy_to_device(w.scales.data<void>(), scales.data(),
                                 scales.size() * sizeof(shelf::fp16_t), stream);

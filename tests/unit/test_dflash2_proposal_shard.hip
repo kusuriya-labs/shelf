@@ -3,7 +3,7 @@
 #include <shelf/core/memory/tensor.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/kernels/dflash2/candidate_selector.h>
-#include <shelf/kernels/optimized/linear/lm_head_fp8.h>
+#include <shelf/kernels/optimized/linear/lm_head_int8.h>
 #include <shelf/runtime/dflash2/proposal_shard.h>
 #include <hip/hip_runtime.h>
 
@@ -115,13 +115,13 @@ int main() {
                     host_weight.size() * sizeof(shelf::bf16_t), hipMemcpyHostToDevice);
     (void)hipMemcpy(device_hidden.data<void>(), host_hidden.data(),
                     host_hidden.size() * sizeof(shelf::bf16_t), hipMemcpyHostToDevice);
-    check(shelf::kernel::launch_quantize_bf16_to_fp8_w32(
+    check(shelf::kernel::launch_quantize_bf16_to_int8_w32(
               device_weight.data<shelf::bf16_t>(), k, codes.data<uint8_t>(),
               scales.data<shelf::fp16_t>(), vocab, k, stream) == hipSuccess,
           "quantize head");
 
     shelf::weights::MatrixWeight full_head;
-    full_head.encoding = shelf::weights::MatrixEncoding::Fp8W32;
+    full_head.encoding = shelf::weights::MatrixEncoding::Int8W32;
     full_head.rows = vocab;
     full_head.cols = k;
     full_head.k_padded = k;
@@ -175,16 +175,16 @@ int main() {
     const Outputs part_a = read(shard_a, rows, top_k);
     const Outputs part_b = read(shard_b, rows, top_k);
 
-    std::vector<int32_t> host_ids(static_cast<std::size_t>(rows) * top_k * 2u);
-    std::vector<float> host_logits(static_cast<std::size_t>(rows) * top_k * 2u);
+    const std::size_t rank_stride = static_cast<std::size_t>(rows) * top_k;
+    std::vector<int32_t> host_ids(rank_stride * 2u);
+    std::vector<float> host_logits(rank_stride * 2u);
     for (uint32_t r = 0; r < rows; ++r) {
         for (uint32_t j = 0; j < top_k; ++j) {
-            const std::size_t lhs = static_cast<std::size_t>(r) * top_k * 2u + j;
-            const std::size_t rhs = lhs + top_k;
-            host_ids[lhs] = part_a.ids[static_cast<std::size_t>(r) * top_k + j];
-            host_logits[lhs] = part_a.logits[static_cast<std::size_t>(r) * top_k + j];
-            host_ids[rhs] = part_b.ids[static_cast<std::size_t>(r) * top_k + j];
-            host_logits[rhs] = part_b.logits[static_cast<std::size_t>(r) * top_k + j];
+            const std::size_t slot = static_cast<std::size_t>(r) * top_k + j;
+            host_ids[slot] = part_a.ids[slot];
+            host_logits[slot] = part_a.logits[slot];
+            host_ids[rank_stride + slot] = part_b.ids[slot];
+            host_logits[rank_stride + slot] = part_b.logits[slot];
         }
     }
     shelf::gpu::Tensor candidate_ids;
@@ -203,9 +203,9 @@ int main() {
     (void)hipMemcpy(candidate_logits.data<void>(), host_logits.data(),
                     host_logits.size() * sizeof(float), hipMemcpyHostToDevice);
     check(shelf::runtime::dflash2::proposal_merge_candidates(
-              candidate_ids.data<int32_t>(), candidate_logits.data<float>(), rows,
-              top_k * 2u, top_k, merged_ids.data<int32_t>(), merged_logits.data<float>(),
-              stream).ok(),
+              candidate_ids.data<int32_t>(), candidate_logits.data<float>(), 2u,
+              rank_stride, rows, top_k, merged_ids.data<int32_t>(),
+              merged_logits.data<float>(), stream).ok(),
           "merge candidates");
     std::vector<int32_t> got_ids(static_cast<std::size_t>(rows) * top_k);
     std::vector<float> got_logits(static_cast<std::size_t>(rows) * top_k);
@@ -225,11 +225,38 @@ int main() {
     check(logit_mismatch == 0, "merged logits match the full head (" +
                                    std::to_string(logit_mismatch) + ")");
 
-    const float* rank_stats[2] = {part_a.stats.data(), part_b.stats.data()};
+    std::vector<float> host_stats(static_cast<std::size_t>(rows) * 2u * 2u);
+    for (uint32_t r = 0; r < rows; ++r) {
+        for (uint32_t k2 = 0; k2 < 2u; ++k2) {
+            host_stats[static_cast<std::size_t>(r) * 2u + k2] =
+                part_a.stats[static_cast<std::size_t>(r) * 2u + k2];
+            host_stats[static_cast<std::size_t>(rows) * 2u +
+                       static_cast<std::size_t>(r) * 2u + k2] =
+                part_b.stats[static_cast<std::size_t>(r) * 2u + k2];
+        }
+    }
+    shelf::gpu::Tensor device_stats;
+    shelf::gpu::Tensor device_combined;
+    if (!alloc<float>(arena, {rows * 2u * 2u}, device_stats) ||
+        !alloc<float>(arena, {rows, 2u}, device_combined)) {
+        std::printf("FAIL alloc stats\n");
+        return 1;
+    }
+    (void)hipMemcpy(device_stats.data<void>(), host_stats.data(),
+                    host_stats.size() * sizeof(float), hipMemcpyHostToDevice);
+    check(shelf::runtime::dflash2::proposal_combine_denominators(
+              device_stats.data<float>(), 2u, static_cast<uint32_t>(rows * 2u), rows,
+              device_combined.data<float>(), stream).ok(),
+          "combine denominators");
+    std::vector<float> combined(static_cast<std::size_t>(rows) * 2u);
+    (void)hipMemcpy(combined.data(), device_combined.data<void>(),
+                    combined.size() * sizeof(float), hipMemcpyDeviceToHost);
     std::vector<float> merged_max(rows);
     std::vector<float> merged_denominator(rows);
-    shelf::runtime::dflash2::proposal_combine_denominators(
-        rank_stats, 2u, rows, merged_max.data(), merged_denominator.data());
+    for (uint32_t r = 0; r < rows; ++r) {
+        merged_max[r] = combined[static_cast<std::size_t>(r) * 2u];
+        merged_denominator[r] = combined[static_cast<std::size_t>(r) * 2u + 1u];
+    }
     bool stats_ok = true;
     for (uint32_t r = 0; r < rows; ++r) {
         if (merged_max[r] != reference.stats[static_cast<std::size_t>(r) * 2u])

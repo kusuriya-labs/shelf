@@ -14,9 +14,9 @@ enum class MatrixEncoding : uint8_t {
     Mxfp4 = 3,
     Exl3 = 4,
     Fp8PerChannel = 5,
-    // Row-major E4M3 codes with one FP16 scale per 32-element block. Produced at load
+    // Row-major signed INT8 codes with one FP16 scale per 32-element block. Produced at load
     // time from a BF16 checkpoint, consumed by the decode-shaped lm_head kernel.
-    Fp8W32 = 6,
+    Int8W32 = 6,
 };
 
 struct MatrixWeight {
@@ -68,7 +68,7 @@ inline quantization::QuantSpecId encoding_to_quant_spec(MatrixEncoding enc) noex
         case MatrixEncoding::Fp8PerChannel: return quantization::QuantSpecId::FP8_PERTokenChannel_V1;
         // The w32 form is derived at load time from a BF16 tensor, so it carries the
         // BF16 quant spec; the linear contract keys off the encoding instead.
-        case MatrixEncoding::Fp8W32: return quantization::QuantSpecId::BF16_V1;
+        case MatrixEncoding::Int8W32: return quantization::QuantSpecId::BF16_V1;
     }
     return quantization::QuantSpecId::BF16_V1;
 }
@@ -80,7 +80,7 @@ inline quantization::ComputeSpecId encoding_to_compute_spec(MatrixEncoding enc) 
         case MatrixEncoding::Mxfp4: return quantization::ComputeSpecId::MXFP4_W4A8_F32_BF16;
         case MatrixEncoding::Exl3: return quantization::ComputeSpecId::EXL3_W16A16_F32_BF16;
         case MatrixEncoding::Fp8PerChannel: return quantization::ComputeSpecId::FP8_PERTokenChannel_W8A8_F32_BF16;
-        case MatrixEncoding::Fp8W32: return quantization::ComputeSpecId::BF16_F32_BF16;
+        case MatrixEncoding::Int8W32: return quantization::ComputeSpecId::BF16_F32_BF16;
     }
     return quantization::ComputeSpecId::BF16_F32_BF16;
 }

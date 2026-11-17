@@ -4,7 +4,7 @@
 #include <shelf/kernels/fused/exl3/epilogue.h>
 #include <shelf/kernels/fused/exl3/grouped.h>
 #include <shelf/inference/execution/optimized_dispatch.h>
-#include <shelf/kernels/optimized/linear/lm_head_fp8.h>
+#include <shelf/kernels/optimized/linear/lm_head_int8.h>
 #include <shelf/inference/execution/boundary_deferred.h>
 #include <shelf/inference/execution/final_producer.h>
 #include <shelf/inference/execution/exl3_dispatch_decision.h>
@@ -997,7 +997,7 @@ Result<OptimizedLaunchResult> try_launch_linear_bf16(
 }
 
 
-Result<OptimizedLaunchResult> try_launch_linear_fp8_w32(
+Result<OptimizedLaunchResult> try_launch_linear_int8_w32(
     const ::shelf::runtime::Program& program,
     const ::shelf::runtime::DispatchBinding& b,
     HostExecutionContext& ctx,
@@ -1007,7 +1007,7 @@ Result<OptimizedLaunchResult> try_launch_linear_fp8_w32(
     if (b.weight_index >= ctx.weight_count || ctx.weights == nullptr)
         return miss;
     const auto& e = ctx.weights[b.weight_index];
-    if (e.encoding != static_cast<uint8_t>(::shelf::weights::MatrixEncoding::Fp8W32)) return miss;
+    if (e.encoding != static_cast<uint8_t>(::shelf::weights::MatrixEncoding::Int8W32)) return miss;
     if (e.codes == nullptr || e.scales == nullptr || e.rows == 0u || e.cols == 0u) return miss;
     if ((e.cols % 128u) != 0u || e.k_padded != e.cols) return miss;
     auto input = resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
@@ -1018,7 +1018,7 @@ Result<OptimizedLaunchResult> try_launch_linear_fp8_w32(
     const HostResolvedValue& outv = output.value();
     const uint32_t rows = rows_for(outv, ctx);
     // A zero-row context still walks the head dispatch; there is nothing to compute,
-    // and the device interpreter has no fp8 w32 opcode to fall back to.
+    // and the device interpreter has no int8 w32 opcode to fall back to.
     if (rows == 0u) return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
     if (rows > 16u) return miss;
     if (inv.ptr == nullptr || outv.ptr == nullptr) return miss;
@@ -1029,13 +1029,13 @@ Result<OptimizedLaunchResult> try_launch_linear_fp8_w32(
     if (inv.row_stride < e.cols || outv.row_stride < outv.feature_count) return miss;
     if (static_cast<uint64_t>(e.output_col_offset) + e.rows > outv.feature_count) return miss;
     auto* logits = static_cast<float*>(outv.ptr) + e.output_col_offset;
-    const hipError_t herr = ::shelf::kernel::launch_lm_head_fp8_w32(
+    const hipError_t herr = ::shelf::kernel::launch_lm_head_int8_w32(
         static_cast<const ::shelf::bf16_t*>(inv.ptr), inv.row_stride,
         static_cast<const uint8_t*>(e.codes),
         static_cast<const ::shelf::fp16_t*>(e.scales), logits, outv.row_stride, rows,
         e.rows, e.cols, stream);
     if (herr != hipSuccess)
-        return Status::hip_error("fp8 w32 lm_head launch", hipGetErrorString(herr),
+        return Status::hip_error("int8 w32 lm_head launch", hipGetErrorString(herr),
                                  __FILE__, __LINE__);
     record_physical_launch(1);
     record_optimized_op();
@@ -1806,8 +1806,8 @@ Result<OptimizedLaunchResult> try_launch_optimized(
         }
         case KernelId::LINEAR_BF16:
             return try_launch_linear_bf16(program, b, ctx, stream);
-        case KernelId::LINEAR_FP8_W32:
-            return try_launch_linear_fp8_w32(program, b, ctx, stream);
+        case KernelId::LINEAR_INT8_W32:
+            return try_launch_linear_int8_w32(program, b, ctx, stream);
         case KernelId::RMS_NORM: {
             auto fp8 = try_launch_fp8_norm_quantize(program, dispatch_index, dispatch_end, ctx, stream);
             if (!fp8.ok() || fp8.value().kind == OptimizedLaunchKind::Launched) return fp8;

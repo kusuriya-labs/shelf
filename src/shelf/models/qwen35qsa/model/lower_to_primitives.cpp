@@ -525,7 +525,7 @@ Result<shelf::qwen35::Qwen35LoweredPrimitives> lower_qwen35qsa_to_primitives(
     if (!lm_tied && backbone_options.tp != nullptr &&
         backbone_options.tp->vocab_parallel_lm_head &&
         (lmw->encoding == shelf::weights::MatrixEncoding::Bf16 ||
-         lmw->encoding == shelf::weights::MatrixEncoding::Fp8W32) &&
+         lmw->encoding == shelf::weights::MatrixEncoding::Int8W32) &&
         lmw->partition.has_value()) {
         const auto& part = lmw->partition.value();
         vocab_parallel = part.axis == 0 && part.count == backbone_options.tp->tp_size &&

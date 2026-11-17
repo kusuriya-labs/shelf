@@ -569,7 +569,7 @@ Result<Qwen35ModelWeights> load_qwen35_weights_quantized_impl(
     hybrid_options.load_embedding = load_embedding;
     hybrid_options.load_lm_head = load_final;
     hybrid_options.load_final_norm = load_final;
-    hybrid_options.quantize_lm_head_fp8_w32 =
+    hybrid_options.quantize_lm_head_int8_w32 =
         load_final && !config.tie_word_embeddings;
 
     Status model_level = shelf::qwen_hybrid::load_hybrid_model_level_quantized(
