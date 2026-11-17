@@ -1,8 +1,10 @@
 #include <shelf/kernels/optimized/attention/qsa_sparse.h>
 #include <shelf/kernels/optimized/detail/lds_barrier_device.h>
+#include <shelf/kernels/fused/detail/octave_common.h>
 #include <shelf/quantization/codec/e4m3_detail.h>
 
 #include <hip/hip_bf16.h>
+#include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
 #include <cmath>
@@ -13,6 +15,7 @@ namespace shelf::kernel {
 namespace {
 
 using bf16 = __hip_bfloat16;
+namespace oct = ::shelf::kernel::detail::octave;
 
 constexpr uint32_t kD = kQsaSparseHeadDim;
 constexpr uint32_t kR = kQsaSparseBlockTokens;
@@ -32,9 +35,9 @@ struct QsaKVReader<KVCacheDType::BF16> {
         uint4 cell[kR];
     };
 
-    __device__ __forceinline__ static void load(const uint8_t* base, uint32_t stride,
-                                                uint32_t lane, uint32_t cells,
-                                                Block& raw) {
+    __device__ __forceinline__ static void load_k(const uint8_t* base, uint32_t stride,
+                                                  uint32_t lane, uint32_t cells,
+                                                  Block& raw) {
 #pragma unroll
         for (uint32_t c = 0; c < kR; ++c) {
             if (c < cells)
@@ -44,6 +47,12 @@ struct QsaKVReader<KVCacheDType::BF16> {
             else
                 raw.cell[c] = uint4{0u, 0u, 0u, 0u};
         }
+    }
+
+    __device__ __forceinline__ static void load_v(const uint8_t* base, uint32_t stride,
+                                                  uint32_t lane, uint32_t cells,
+                                                  Block& raw) {
+        load_k(base, stride, lane, cells, raw);
     }
 
     __device__ __forceinline__ static void values(const Block& raw, uint32_t c,
@@ -60,11 +69,11 @@ struct QsaKVReader<KVCacheDType::FP8_E4M3> {
         float cell[kR][kDimsPerLane];
     };
 
-    __device__ __forceinline__ static void load(const uint8_t* base, uint32_t stride,
-                                                uint32_t lane, uint32_t cells,
-                                                uint32_t scale_stride,
-                                                const float* scales,
-                                                const unsigned short* lut, Block& raw) {
+    __device__ __forceinline__ static void load_k(const uint8_t* base, uint32_t stride,
+                                                  uint32_t lane, uint32_t cells,
+                                                  uint32_t scale_stride,
+                                                  const float* scales,
+                                                  const unsigned short* lut, Block& raw) {
 #pragma unroll
         for (uint32_t c = 0; c < kR; ++c) {
             if (c >= cells) {
@@ -80,6 +89,97 @@ struct QsaKVReader<KVCacheDType::FP8_E4M3> {
                 const unsigned short bits = lut[codes[d]];
                 raw.cell[c][d] = __bfloat162float(__ushort_as_bfloat16(bits)) * scale;
             }
+        }
+    }
+
+    __device__ __forceinline__ static void load_v(const uint8_t* base, uint32_t stride,
+                                                  uint32_t lane, uint32_t cells,
+                                                  uint32_t scale_stride,
+                                                  const float* scales,
+                                                  const unsigned short* lut, Block& raw) {
+        load_k(base, stride, lane, cells, scale_stride, scales, lut, raw);
+    }
+
+    __device__ __forceinline__ static void values(const Block& raw, uint32_t c,
+                                                  float (&x)[kDimsPerLane]) {
+#pragma unroll
+        for (uint32_t d = 0; d < kDimsPerLane; ++d) x[d] = raw.cell[c][d];
+    }
+};
+
+template <>
+struct QsaKVReader<KVCacheDType::OCTAVE> {
+    struct Block {
+        float cell[kR][kDimsPerLane];
+    };
+
+    __device__ __forceinline__ static void load_k(const uint8_t* base, uint32_t stride,
+                                                  uint32_t lane, uint32_t cells,
+                                                  OctaveKVCacheFormat format,
+                                                  const float* levels, Block& raw) {
+        const uint32_t slot_bytes = octave_k_slot_bytes(format);
+        const uint32_t segment =
+            format.k_mode == OctaveKMode::Compact ? 256u : 64u;
+        const uint32_t dim = lane * kDimsPerLane;
+        const uint32_t plane = dim / segment;
+        const uint32_t local = dim & (segment - 1u);
+        const bool compact = format.k_mode == OctaveKMode::Compact;
+        const uint32_t bits = (compact || plane == 0u) ? format.k_nope_bits
+                                                       : format.k_rope_bits;
+        const uint32_t code_offset = (compact || plane == 0u)
+            ? 0u
+            : octave_plane_bytes(64u, format.k_rope_bits) +
+                  (plane - 1u) * octave_plane_bytes(64u, format.k_nope_bits);
+        const uint32_t scale_count = compact ? 1u : 4u;
+#pragma unroll
+        for (uint32_t c = 0; c < kR; ++c) {
+            if (c >= cells) {
+#pragma unroll
+                for (uint32_t d = 0; d < kDimsPerLane; ++d) raw.cell[c][d] = 0.0f;
+                continue;
+            }
+            const uint8_t* token = base + static_cast<std::size_t>(c) * stride;
+            const float scale = oct::half_at(
+                token + slot_bytes - scale_count * 2u + plane * 2u);
+            uint32_t codes[kDimsPerLane];
+            oct::unpack8(token + code_offset, local, segment, bits, codes);
+            float values[kDimsPerLane];
+#pragma unroll
+            for (uint32_t d = 0; d < kDimsPerLane; ++d)
+                values[d] = levels[bits * 64u + codes[d]] * scale;
+            oct::inverse_wave(values, lane, compact);
+#pragma unroll
+            for (uint32_t d = 0; d < kDimsPerLane; ++d)
+                raw.cell[c][d] = values[d] * oct::sign_of(dim + d, 11u);
+
+        }
+    }
+
+    __device__ __forceinline__ static void load_v(const uint8_t* base, uint32_t stride,
+                                                  uint32_t lane, uint32_t cells,
+                                                  OctaveKVCacheFormat format,
+                                                  const float* levels, Block& raw) {
+        const uint32_t slot_bytes = octave_v_slot_bytes(format);
+        const uint32_t dim = lane * kDimsPerLane;
+#pragma unroll
+        for (uint32_t c = 0; c < kR; ++c) {
+            if (c >= cells) {
+#pragma unroll
+                for (uint32_t d = 0; d < kDimsPerLane; ++d) raw.cell[c][d] = 0.0f;
+                continue;
+            }
+            const uint8_t* token = base + static_cast<std::size_t>(c) * stride;
+            const float scale = oct::half_at(token + slot_bytes - 2u);
+            uint32_t codes[kDimsPerLane];
+            oct::unpack8(token, dim, 256u, format.v_bits, codes);
+            float values[kDimsPerLane];
+#pragma unroll
+            for (uint32_t d = 0; d < kDimsPerLane; ++d)
+                values[d] = levels[format.v_bits * 64u + codes[d]] * scale;
+            oct::inverse_wave(values, lane, true);
+#pragma unroll
+            for (uint32_t d = 0; d < kDimsPerLane; ++d)
+                raw.cell[c][d] = values[d] * oct::sign_of(dim + d, 29u);
         }
     }
 
@@ -103,8 +203,10 @@ template <KVCacheDType DType, bool kSplit>
 __global__ __launch_bounds__(kThreads) void qsa_sparse_attention_kernel(
     const PagedAttentionCommonArgs a, const uint8_t* __restrict__ k_pool,
     const uint8_t* __restrict__ v_pool, const float* __restrict__ k_scales,
-    const float* __restrict__ v_scales, float* __restrict__ partials, uint32_t splits) {
-    static_assert(DType == KVCacheDType::BF16 || DType == KVCacheDType::FP8_E4M3,
+    const float* __restrict__ v_scales, const float* __restrict__ octave_levels,
+    OctaveKVCacheFormat octave_format, float* __restrict__ partials, uint32_t splits) {
+    static_assert(DType == KVCacheDType::BF16 || DType == KVCacheDType::FP8_E4M3 ||
+                      DType == KVCacheDType::OCTAVE,
                   "Unsupported QSA Sparse KV dtype");
     const uint32_t lane = threadIdx.x;
     const uint32_t warp = threadIdx.y;
@@ -165,12 +267,21 @@ __global__ __launch_bounds__(kThreads) void qsa_sparse_attention_kernel(
             a.block_tables + static_cast<std::size_t>(slot) * a.block_table_stride;
         const uint32_t* words = reinterpret_cast<const uint32_t*>(
             a.block_mask + static_cast<std::size_t>(row) * a.mask_stride);
+        const uint32_t k_slot_bytes = octave_k_slot_bytes(octave_format);
+        const uint32_t v_slot_bytes = octave_v_slot_bytes(octave_format);
         const uint32_t elem_bytes =
-            DType == KVCacheDType::FP8_E4M3 ? 1u : static_cast<uint32_t>(sizeof(bf16));
-        const uint8_t* k_layer = k_pool +
-            static_cast<std::size_t>(a.layer) * a.elems_per_layer * elem_bytes;
-        const uint8_t* v_layer = v_pool +
-            static_cast<std::size_t>(a.layer) * a.elems_per_layer * elem_bytes;
+            DType == KVCacheDType::FP8_E4M3
+                ? 1u
+                : (DType == KVCacheDType::OCTAVE ? k_slot_bytes
+                                                 : static_cast<uint32_t>(sizeof(bf16)));
+        const uint8_t* k_layer = DType == KVCacheDType::OCTAVE
+            ? k_pool + static_cast<std::size_t>(a.layer) * a.elems_per_layer /
+                           a.head_dim * k_slot_bytes
+            : k_pool + static_cast<std::size_t>(a.layer) * a.elems_per_layer * elem_bytes;
+        const uint8_t* v_layer = DType == KVCacheDType::OCTAVE
+            ? v_pool + static_cast<std::size_t>(a.layer) * a.elems_per_layer /
+                           a.head_dim * v_slot_bytes
+            : v_pool + static_cast<std::size_t>(a.layer) * a.elems_per_layer * elem_bytes;
         const float* k_scale_layer = k_scales != nullptr
             ? k_scales + static_cast<std::size_t>(a.layer) * a.num_pages *
                              a.page_tokens * a.kv_heads
@@ -206,20 +317,30 @@ __global__ __launch_bounds__(kThreads) void qsa_sparse_attention_kernel(
                         a.kv_heads + h_kv;
                 typename QsaKVReader<DType>::Block kr;
                 typename QsaKVReader<DType>::Block vr;
-                const uint32_t byte_stride = a.elems_per_token * elem_bytes;
-                if constexpr (DType == KVCacheDType::FP8_E4M3) {
+                if constexpr (DType == KVCacheDType::OCTAVE) {
+                    const std::size_t token_head = elem / a.head_dim;
+                    QsaKVReader<DType>::load_k(
+                        k_layer + token_head * k_slot_bytes, k_slot_bytes, lane, cells,
+                        octave_format, octave_levels, kr);
+                    QsaKVReader<DType>::load_v(
+                        v_layer + token_head * v_slot_bytes, v_slot_bytes, lane, cells,
+                        octave_format, octave_levels, vr);
+                } else if constexpr (DType == KVCacheDType::FP8_E4M3) {
+                    const uint32_t byte_stride = a.elems_per_token * elem_bytes;
                     const float* k_ptr = k_scale_layer + scale_index;
                     const float* v_ptr = v_scale_layer + scale_index;
-                    QsaKVReader<DType>::load(k_layer + elem * elem_bytes, byte_stride,
-                                             lane, cells, a.kv_heads, k_ptr, fp8_lut, kr);
-                    QsaKVReader<DType>::load(v_layer + elem * elem_bytes, byte_stride,
-                                             lane, cells, a.kv_heads, v_ptr, fp8_lut, vr);
+                    QsaKVReader<DType>::load_k(k_layer + elem * elem_bytes, byte_stride,
+                                               lane, cells, a.kv_heads, k_ptr, fp8_lut, kr);
+                    QsaKVReader<DType>::load_v(v_layer + elem * elem_bytes, byte_stride,
+                                               lane, cells, a.kv_heads, v_ptr, fp8_lut, vr);
                 } else {
-                    QsaKVReader<DType>::load(k_layer + elem * elem_bytes, byte_stride,
-                                             lane, cells, kr);
-                    QsaKVReader<DType>::load(v_layer + elem * elem_bytes, byte_stride,
-                                             lane, cells, vr);
+                    const uint32_t byte_stride = a.elems_per_token * elem_bytes;
+                    QsaKVReader<DType>::load_k(k_layer + elem * elem_bytes, byte_stride,
+                                               lane, cells, kr);
+                    QsaKVReader<DType>::load_v(v_layer + elem * elem_bytes, byte_stride,
+                                               lane, cells, vr);
                 }
+
 
                 float part[kHeadsPerWarp][kR];
 #pragma unroll
@@ -385,6 +506,7 @@ hipError_t launch_qsa_sparse_attention_typed(
     const PagedAttentionCommonArgs& common,
     const uint8_t* k_pool, const uint8_t* v_pool,
     const float* k_scales, const float* v_scales,
+    const float* octave_levels, OctaveKVCacheFormat octave_format,
     float* partials, uint32_t splits, hipStream_t stream) {
     if (common.q == nullptr || common.output == nullptr || common.block_mask == nullptr ||
         common.row_positions == nullptr || common.row_sequence_slots == nullptr ||
@@ -392,6 +514,9 @@ hipError_t launch_qsa_sparse_attention_typed(
         return hipErrorInvalidValue;
     if (DType == KVCacheDType::FP8_E4M3 &&
         (k_scales == nullptr || v_scales == nullptr))
+        return hipErrorInvalidValue;
+    if (DType == KVCacheDType::OCTAVE &&
+        (octave_levels == nullptr || !octave_format_valid(octave_format)))
         return hipErrorInvalidValue;
     if (common.rows == 0u || common.kv_heads == 0u || splits == 0u) return hipErrorInvalidValue;
     if (common.head_dim != kD || common.q_heads != common.kv_heads * kQsaSparseQPerKv ||
@@ -409,10 +534,12 @@ hipError_t launch_qsa_sparse_attention_typed(
     const dim3 block(32u, kWarps);
     if (splits > 1u) {
         qsa_sparse_attention_kernel<DType, true><<<grid, block, 0, stream>>>(
-            common, k_pool, v_pool, k_scales, v_scales, partials, splits);
+            common, k_pool, v_pool, k_scales, v_scales, octave_levels,
+            octave_format, partials, splits);
     } else {
         qsa_sparse_attention_kernel<DType, false><<<grid, block, 0, stream>>>(
-            common, k_pool, v_pool, k_scales, v_scales, partials, splits);
+            common, k_pool, v_pool, k_scales, v_scales, octave_levels,
+            octave_format, partials, splits);
     }
     return hipGetLastError();
 }
@@ -423,8 +550,8 @@ hipError_t launch_qsa_sparse_attention(const PagedAttentionCommonArgs& common,
                                        hipStream_t stream) {
     return launch_qsa_sparse_attention_typed<KVCacheDType::BF16>(
         common, reinterpret_cast<const uint8_t*>(k_pool),
-        reinterpret_cast<const uint8_t*>(v_pool), nullptr, nullptr,
-        partials, splits, stream);
+        reinterpret_cast<const uint8_t*>(v_pool), nullptr, nullptr, nullptr,
+        OctaveKVCacheFormat{}, partials, splits, stream);
 }
 
 hipError_t launch_qsa_sparse_attention_fp8(
@@ -433,7 +560,18 @@ hipError_t launch_qsa_sparse_attention_fp8(
     const float* k_scales, const float* v_scales,
     float* partials, uint32_t splits, hipStream_t stream) {
     return launch_qsa_sparse_attention_typed<KVCacheDType::FP8_E4M3>(
-        common, k_pool, v_pool, k_scales, v_scales, partials, splits, stream);
+        common, k_pool, v_pool, k_scales, v_scales, nullptr,
+        OctaveKVCacheFormat{}, partials, splits, stream);
+}
+
+hipError_t launch_qsa_sparse_attention_octave(
+    const PagedAttentionCommonArgs& common,
+    const uint8_t* k_pool, const uint8_t* v_pool,
+    const float* levels, OctaveKVCacheFormat format,
+    float* partials, uint32_t splits, hipStream_t stream) {
+    return launch_qsa_sparse_attention_typed<KVCacheDType::OCTAVE>(
+        common, k_pool, v_pool, nullptr, nullptr, levels, format,
+        partials, splits, stream);
 }
 
 hipError_t launch_qsa_sparse_reduce(const PagedAttentionCommonArgs& common,

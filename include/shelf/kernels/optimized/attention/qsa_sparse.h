@@ -27,6 +27,12 @@ hipError_t launch_qsa_sparse_attention_fp8(
     const float* k_scales, const float* v_scales,
     float* partials, uint32_t splits, hipStream_t stream);
 
+hipError_t launch_qsa_sparse_attention_octave(
+    const PagedAttentionCommonArgs& common,
+    const uint8_t* k_pool, const uint8_t* v_pool,
+    const float* levels, OctaveKVCacheFormat format,
+    float* partials, uint32_t splits, hipStream_t stream);
+
 hipError_t launch_qsa_sparse_reduce(const PagedAttentionCommonArgs& common,
                                     const float* partials, uint32_t splits,
                                     hipStream_t stream);

@@ -49,9 +49,13 @@ constexpr uint32_t kQsaSparsePrefillMinTokens = 12288u;
 bool qsa_sparse_supported(const PagedAttentionResolvedArgs& args,
                           const HostExecutionContext& ctx) {
     const auto& c = args.common;
+    const bool octave_ok =
+        args.kv_dtype == ::shelf::kernel::KVCacheDType::OCTAVE &&
+        ::shelf::kernel::octave_format_valid(args.octave_format) &&
+        args.octave_levels != nullptr;
     const bool dtype_ok =
         args.kv_dtype == ::shelf::kernel::KVCacheDType::BF16 ||
-        args.kv_dtype == ::shelf::kernel::KVCacheDType::FP8_E4M3;
+        args.kv_dtype == ::shelf::kernel::KVCacheDType::FP8_E4M3 || octave_ok;
     return dtype_ok &&
            args.output_dtype == ::shelf::runtime::ValueDType::F32 && c.block_mask != nullptr &&
            c.tree_anc_offsets == nullptr &&
@@ -579,6 +583,13 @@ PhysicalResolveStatus append_qsa_region(const PagedAttentionResolvedArgs& a,
         k.v_pool = reinterpret_cast<uint64_t>(a.v_fp8_pool);
         k.k_scale_pool = reinterpret_cast<uint64_t>(a.k_scale_pool);
         k.v_scale_pool = reinterpret_cast<uint64_t>(a.v_scale_pool);
+    } else if (a.kv_dtype == ::shelf::kernel::KVCacheDType::OCTAVE) {
+        k.variant = PhysicalPagedAttentionVariant::QsaSparseOctave;
+        k.k_pool = reinterpret_cast<uint64_t>(a.k_octave_pool);
+        k.v_pool = reinterpret_cast<uint64_t>(a.v_octave_pool);
+        k.k_extra_pool = reinterpret_cast<uint64_t>(a.octave_levels);
+        k.octave_format = a.octave_format;
+        k.common.layer = a.octave_source_layer;
     } else {
         k.variant = PhysicalPagedAttentionVariant::QsaSparse;
         k.k_pool = reinterpret_cast<uint64_t>(a.k_bf16_pool);
@@ -885,6 +896,14 @@ hipError_t launch_paged_attention_physical(const PhysicalPagedAttentionPlan& pla
                     reinterpret_cast<const float*>(k.k_scale_pool),
                     reinterpret_cast<const float*>(k.v_scale_pool),
                     reinterpret_cast<float*>(k.partials), k.splits, stream);
+                break;
+            case PhysicalPagedAttentionVariant::QsaSparseOctave:
+                herr = ::shelf::kernel::launch_qsa_sparse_attention_octave(
+                    k.common, reinterpret_cast<const uint8_t*>(k.k_pool),
+                    reinterpret_cast<const uint8_t*>(k.v_pool),
+                    reinterpret_cast<const float*>(k.k_extra_pool),
+                    k.octave_format, reinterpret_cast<float*>(k.partials),
+                    k.splits, stream);
                 break;
             case PhysicalPagedAttentionVariant::QsaReduce:
                 herr = ::shelf::kernel::launch_qsa_sparse_reduce(
