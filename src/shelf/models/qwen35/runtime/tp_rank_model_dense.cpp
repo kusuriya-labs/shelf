@@ -23,6 +23,9 @@ public:
         return model_.text_config();
     }
     const Qwen35TensorParallelContext& context() const override { return context_; }
+    const shelf::weights::MatrixWeight* lm_head() const override {
+        return &model_.weights().lm_head;
+    }
 
     std::uint64_t weight_bytes() const override {
         const Qwen35ModelWeights& w = model_.weights();

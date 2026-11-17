@@ -7,6 +7,7 @@
 #include <shelf/models/qwen35/dflash2/executor.h>
 #include <shelf/models/qwen35/dflash2/weights.h>
 #include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
+#include <shelf/runtime/dflash2/tp_proposal.h>
 #include <shelf/runtime/state_types.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 
@@ -182,10 +183,6 @@ inline RunResult run_dflash2_tp1(const DFlash2Options& opts) {
     draft_config.target_embed_tokens = &model.weights().embed_tokens;
     auto draft_result = ::shelf::runtime::dflash2::create_dflash2_executor(
         dflash_config, dflash_weights, arena, draft_config);
-    if (!draft_result.ok()) {
-        result.error = "dflash2 draft executor: " + draft_result.status().message();
-        return result;
-    }
     auto draft = draft_result.release();
 
     auto sequence_result = ::shelf::state::create_paged_sequence_state(
@@ -268,7 +265,6 @@ inline RunResult run_dflash2_tp2(const DFlash2Options& opts) {
     config.target_hidden_tap_count = static_cast<std::uint32_t>(
         std::min<std::size_t>(o.taps.size(), static_cast<std::size_t>(kMaxTargetHiddenTaps)));
     config.load_options.verify_quantized_payload_crc = o.verify_crc;
-    config.load_options.vocab_parallel_lm_head = false;
 
     config.build_rank_model = &build_dense_tp_rank_model;
     auto coordinator_result = TpCoordinator::create(config);
@@ -291,13 +287,48 @@ inline RunResult run_dflash2_tp2(const DFlash2Options& opts) {
     }
     auto dflash_weights = weights_result.release();
 
+    std::vector<const shelf::weights::MatrixWeight*> head_shards;
+    std::vector<std::uint32_t> head_offsets;
+    for (std::size_t r = 0; r < 2; ++r) {
+        const auto* shard = coordinator->rank(r).rank_model()->lm_head();
+        if (shard == nullptr || !shard->partition.has_value()) {
+            result.error = "dflash2 tp2 lm_head is not split across ranks";
+            return result;
+        }
+        head_shards.push_back(shard);
+        head_offsets.push_back(static_cast<std::uint32_t>(shard->partition->index) *
+                               static_cast<std::uint32_t>(shard->rows));
+    }
+    ::shelf::runtime::dflash2::DFlash2TpProposalConfig proposal_config;
+    proposal_config.coordinator = coordinator.get();
+    proposal_config.heads = head_shards;
+    proposal_config.vocab_offsets = head_offsets;
+    proposal_config.local_vocab = static_cast<std::uint32_t>(head_shards[0]->rows);
+    proposal_config.top_k = static_cast<std::uint32_t>(dflash_config.selector_top_k);
+    proposal_config.hidden_stride = static_cast<std::uint32_t>(dflash_config.hidden_size);
+    proposal_config.max_rows = static_cast<std::uint32_t>(dflash_config.block_size);
+    auto proposal_result =
+        ::shelf::runtime::dflash2::DFlash2TpProposal::create(proposal_config);
+    if (!proposal_result.ok()) {
+        result.error = "dflash2 tp2 proposal: " + proposal_result.status().message();
+        return result;
+    }
+    auto proposal = proposal_result.release();
+
     ::shelf::runtime::dflash2::DFlash2ExecutorConfig draft_config;
     draft_config.max_rows = static_cast<std::uint32_t>(dflash_config.block_size);
     draft_config.max_context_rows = static_cast<std::uint32_t>(dflash_config.sliding_window);
-    draft_config.target_lm_head = &model.weights().lm_head;
+    draft_config.target_lm_head = head_shards[0];
     draft_config.target_embed_tokens = &model.weights().embed_tokens;
+    draft_config.vocab_offset = head_offsets[0];
+    draft_config.local_vocab = proposal_config.local_vocab;
+    draft_config.proposal_distributor = &proposal;
     auto draft_result = ::shelf::runtime::dflash2::create_dflash2_executor(
         dflash_config, dflash_weights, arena, draft_config);
+    if (!draft_result.ok()) {
+        result.error = "dflash2 draft executor: " + draft_result.status().message();
+        return result;
+    }
     if (!draft_result.ok()) {
         result.error = "dflash2 draft executor: " + draft_result.status().message();
         return result;

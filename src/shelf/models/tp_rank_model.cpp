@@ -42,6 +42,9 @@ public:
 
     const qhy::QwenHybridConfig& hybrid_config() const override { return model_.text_config(); }
     const q35::Qwen35TensorParallelContext& context() const override { return context_; }
+    const shelf::weights::MatrixWeight* lm_head() const override {
+        return &model_.weights().lm_head;
+    }
 
     std::uint64_t weight_bytes() const override {
         const qmoe::Qwen35MoeModelWeights& w = model_.weights();
@@ -185,6 +188,9 @@ public:
         return model_.text_config();
     }
     const q35::Qwen35TensorParallelContext& context() const override { return context_; }
+    const shelf::weights::MatrixWeight* lm_head() const override {
+        return &model_.weights().lm_head;
+    }
 
     std::uint64_t weight_bytes() const override {
         const qwen4exp::Qwen4ExpRankWeights& w = model_.weights();
@@ -581,6 +587,9 @@ public:
         return model_.text_config();
     }
     const q35::Qwen35TensorParallelContext& context() const override { return context_; }
+    const shelf::weights::MatrixWeight* lm_head() const override {
+        return &model_.weights().backbone.lm_head;
+    }
 
     std::uint64_t weight_bytes() const override {
         const q35::Qwen35ModelWeights& w = model_.weights().backbone;

@@ -225,6 +225,7 @@ add_library(shelf_dflash2 STATIC
     src/shelf/runtime/dflash2/context_state.hip
     src/shelf/runtime/dflash2/executor.hip
     src/shelf/runtime/dflash2/proposal_shard.cpp
+    src/shelf/runtime/dflash2/tp_proposal.hip
     src/shelf/runtime/dflash2/weights.cpp
 )
 target_compile_features(shelf_dflash2 PRIVATE cxx_std_20)

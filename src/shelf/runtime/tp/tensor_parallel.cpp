@@ -218,6 +218,8 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
                       prefix_config.capture_slots);
         reserved += capture_state;
         plan.prefix = prefix_bytes.total() + capture_state;
+        std::fprintf(stderr, "MEMORY_PLAN tp rank %u weights: %s\n", config.tp_rank,
+                     gpu::format_gib(plan.target_weights).c_str());
         std::fprintf(stderr, "MEMORY_PLAN tp prefix cache: %s (capture state %s)\n",
                      gpu::format_gib(prefix_bytes.total()).c_str(),
                      gpu::format_gib(capture_state).c_str());

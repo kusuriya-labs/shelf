@@ -95,7 +95,7 @@ int main(int argc, char** argv) {
     config.tp = static_cast<uint32_t>(opt.tp);
     if (opt.mtp && opt.tp > 1) {
         config.private_target_weights = true;
-        config.private_target_lm_head = true;
+        config.private_target_lm_head = opt.mtp;
     }
     config.pipeline_parallel = static_cast<uint32_t>(opt.pipeline_parallel);
     if (shelf::kernel::parse_octave_kv_cache_format(
@@ -180,7 +180,7 @@ int main(int argc, char** argv) {
         config.dflash2_max_sessions = static_cast<uint32_t>(opt.dflash2_max_sessions);
         if (opt.tp > 1) {
             config.private_target_weights = true;
-            config.private_target_lm_head = true;
+            config.private_target_lm_head = opt.mtp;
         }
     }
 

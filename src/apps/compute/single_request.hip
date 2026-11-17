@@ -5,6 +5,7 @@
 #include <shelf/core/gpu/scoped_device.h>
 #include <shelf/runtime/dflash2/context_state.h>
 #include <shelf/runtime/dflash2/executor.h>
+#include <shelf/runtime/dflash2/tp_proposal.h>
 #include <shelf/runtime/dflash2/weights.h>
 #include "private_target_weights.h"
 #include <shelf/runtime/decode_backend.h>
@@ -582,11 +583,62 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
             private_embed = &rank0.private_embed_tokens();
         }
     }
+    std::unique_ptr<::shelf::runtime::dflash2::DFlash2TpProposal> tp_proposal;
+    std::vector<const shelf::weights::MatrixWeight*> head_shards;
+    uint32_t head_vocab_offset = 0;
+    uint32_t head_local_vocab = 0;
+    if (tp_sharded) {
+        auto* tp = runtime.tp_coordinator();
+        bool sharded = tp != nullptr;
+        for (int r = 0; sharded && r < tp->tp_size(); ++r) {
+            const auto* head = tp->rank(static_cast<std::size_t>(r)).rank_model()->lm_head();
+            if (head == nullptr || !head->partition.has_value()) {
+                sharded = false;
+                break;
+            }
+            head_shards.push_back(head);
+        }
+        if (sharded) {
+            std::vector<uint32_t> offsets;
+            for (const auto* head : head_shards) {
+                offsets.push_back(static_cast<uint32_t>(head->partition->index) *
+                                  static_cast<uint32_t>(head->rows));
+            }
+            ::shelf::runtime::dflash2::DFlash2TpProposalConfig proposal_config;
+            proposal_config.coordinator = tp;
+            proposal_config.heads = head_shards;
+            proposal_config.vocab_offsets = offsets;
+            proposal_config.local_vocab = static_cast<uint32_t>(head_shards[0]->rows);
+            proposal_config.top_k = static_cast<uint32_t>(dflash_config.selector_top_k);
+            proposal_config.hidden_stride = static_cast<uint32_t>(dflash_config.hidden_size);
+            proposal_config.max_rows = static_cast<uint32_t>(dflash_config.block_size);
+            auto proposal_result =
+                ::shelf::runtime::dflash2::DFlash2TpProposal::create(proposal_config);
+            if (!proposal_result.ok()) {
+                fprintf(stderr, "dflash2 tp proposal create failed: %s\n",
+                        proposal_result.status().message().c_str());
+                return 1;
+            }
+            tp_proposal = std::make_unique<::shelf::runtime::dflash2::DFlash2TpProposal>(
+                proposal_result.release());
+            head_vocab_offset = offsets[0];
+            head_local_vocab = proposal_config.local_vocab;
+        } else {
+            fprintf(stderr,
+                    "dflash2 tp: target lm_head is not split across ranks, "
+                    "a full private copy is required\n");
+            return 1;
+        }
+    }
     ::shelf::runtime::dflash2::DFlash2ExecutorConfig draft_config;
     draft_config.max_rows = static_cast<uint32_t>(dflash_config.block_size);
     draft_config.max_context_rows = static_cast<uint32_t>(dflash_config.sliding_window);
+    draft_config.proposal_distributor = tp_proposal.get();
+    draft_config.vocab_offset = head_vocab_offset;
+    draft_config.local_vocab = head_local_vocab;
     draft_config.target_lm_head =
-        tp_sharded ? private_lm_head : &model.lm_head();
+        tp_proposal != nullptr ? head_shards[0]
+                               : (tp_sharded ? private_lm_head : &model.lm_head());
     draft_config.target_embed_tokens =
         tp_sharded ? private_embed : &model.embed_tokens();
     auto draft_result = ::shelf::runtime::dflash2::create_dflash2_executor(
