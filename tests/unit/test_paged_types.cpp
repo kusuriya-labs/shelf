@@ -1,10 +1,10 @@
-#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/runtime/state_types.h>
 
 #include <cassert>
 #include <limits>
 #include <cstdio>
 
-using namespace shelf::qwen35;
+using namespace shelf::runtime;
 
 int main() {
     const PageId page = 42;

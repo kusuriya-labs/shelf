@@ -4,7 +4,7 @@
 #include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35/runtime/continuous_batcher.h>
 #include <shelf/models/qwen35/runtime/tensor_parallel.h>
-#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/runtime/state_types.h>
 #include <shelf/quantization/manifest/crc32.h>
 #include <shelf/quantization/manifest/quantized_manifest.h>
 #include <shelf/inference/execution/program_executor.h>

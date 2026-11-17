@@ -11,9 +11,9 @@
 #include <shelf/models/qwen35/runtime/executor.h>
 #include <shelf/models/qwen35/runtime/prefix_cache.h>
 #include <shelf/models/qwen35/runtime/pipeline_parallel.h>
-#include <shelf/models/qwen35/runtime/scheduling_types.h>
+#include <shelf/runtime/scheduling_types.h>
 #include <shelf/models/qwen35/runtime/tensor_parallel.h>
-#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/runtime/state_types.h>
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/status.h>
 #include <hip/hip_runtime.h>

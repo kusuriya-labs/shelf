@@ -3,7 +3,7 @@
 #include <shelf/models/qwen35/runtime/continuous_batcher.h>
 #include <shelf/models/qwen35/runtime/executor.h>
 #include <shelf/models/qwen35/runtime/prefix_cache.h>
-#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/runtime/state_types.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 
 #include <hip/hip_runtime.h>

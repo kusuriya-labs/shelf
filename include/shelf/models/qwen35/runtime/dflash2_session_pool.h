@@ -6,7 +6,7 @@
 #include <shelf/models/qwen35/dflash2/executor.h>
 #include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
 #include <shelf/models/qwen35/runtime/executor.h>
-#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/runtime/state_types.h>
 #include <hip/hip_runtime.h>
 
 #include <cstddef>

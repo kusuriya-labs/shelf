@@ -5,8 +5,8 @@
 #include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
 #include <shelf/models/qwen35/runtime/executor.h>
-#include <shelf/models/qwen35/runtime/scheduling_types.h>
-#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/runtime/scheduling_types.h>
+#include <shelf/runtime/state_types.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <hip/hip_runtime.h>
 
@@ -25,7 +25,7 @@ using shelf::qwen35::dflash2::DFlash2Executor;
 using shelf::qwen35::dflash2::DFlash2ExecutorConfig;
 using shelf::qwen35::dflash2::DFlash2Weights;
 using shelf::qwen35::SchedulePlan;
-using shelf::qwen35::ScheduledBatch;
+using ::shelf::runtime::ScheduledBatch;
 using shelf::qwen35::runtime::DFlash2SpecBatchContext;
 
 static int g_fail = 0;

@@ -6,8 +6,8 @@
 #include <shelf/models/loaded_model.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <shelf/models/qwen35/runtime/executor.h>
-#include <shelf/models/qwen35/runtime/scheduling_types.h>
-#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/runtime/scheduling_types.h>
+#include <shelf/runtime/state_types.h>
 #include <shelf/runtime/execution/row_bucket.h>
 
 #include <hip/hip_runtime.h>
@@ -51,11 +51,11 @@ inline float bf16_bits_to_f32(uint16_t v) {
     return f;
 }
 
-q35::ScheduledBatch make_batch(st::PagedSequenceState& sequence,
-                               std::vector<q35::ScheduledRequest>& requests,
+::shelf::runtime::ScheduledBatch make_batch(st::PagedSequenceState& sequence,
+                               std::vector<::shelf::runtime::ScheduledRequest>& requests,
                                const int32_t* tokens, uint32_t num_tokens,
                                uint32_t output_rows, rt::ExecutionClass exec_class) {
-    q35::ScheduledRequest req;
+    ::shelf::runtime::ScheduledRequest req;
     req.sequence = &sequence;
     req.handle = sequence.request_handle();
     req.execution_class = exec_class;
@@ -68,7 +68,7 @@ q35::ScheduledBatch make_batch(st::PagedSequenceState& sequence,
     requests.clear();
     requests.push_back(req);
 
-    q35::ScheduledBatch batch;
+    ::shelf::runtime::ScheduledBatch batch;
     batch.token_ids = tokens;
     batch.requests = requests;
     batch.num_tokens = num_tokens;
@@ -95,7 +95,7 @@ std::vector<uint16_t> run_walk(q35::Executor& ex, st::SequenceSlotPool& seq_pool
         return rows;
     }
     st::PagedSequenceState seq = seq_result.release();
-    std::vector<q35::ScheduledRequest> requests;
+    std::vector<::shelf::runtime::ScheduledRequest> requests;
     uint32_t off = 0u;
     for (const uint32_t len : chunks) {
         const bool decode = off > 0u && len == 1u;

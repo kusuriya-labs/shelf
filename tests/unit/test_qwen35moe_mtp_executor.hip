@@ -6,7 +6,7 @@
 #include <shelf/inference/state/sequence_slot_pool.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <shelf/models/qwen35/runtime/executor.h>
-#include <shelf/models/qwen35/runtime/scheduling_types.h>
+#include <shelf/runtime/scheduling_types.h>
 #include <shelf/models/qwen35moe/model/lower_to_primitives.h>
 #include <shelf/models/qwen35moe/weights/qwen35moe_model_load.h>
 #include <shelf/runtime/execution/row_bucket.h>
@@ -43,11 +43,11 @@ void check(bool cond, const std::string& msg) {
 
 uint32_t ceil_div(uint32_t a, uint32_t b) { return (a + b - 1u) / b; }
 
-q35::ScheduledBatch make_batch(st::PagedSequenceState& sequence,
-                               std::vector<q35::ScheduledRequest>& requests,
+::shelf::runtime::ScheduledBatch make_batch(st::PagedSequenceState& sequence,
+                               std::vector<::shelf::runtime::ScheduledRequest>& requests,
                                const int32_t* tokens, uint32_t num_tokens,
                                uint32_t output_rows) {
-    q35::ScheduledRequest req;
+    ::shelf::runtime::ScheduledRequest req;
     req.sequence = &sequence;
     req.handle = sequence.request_handle();
     req.execution_class = num_tokens == 1u ? rt::ExecutionClass::DECODE
@@ -61,7 +61,7 @@ q35::ScheduledBatch make_batch(st::PagedSequenceState& sequence,
     requests.clear();
     requests.push_back(req);
 
-    q35::ScheduledBatch batch;
+    ::shelf::runtime::ScheduledBatch batch;
     batch.token_ids = tokens;
     batch.requests = requests;
     batch.num_tokens = num_tokens;
@@ -84,7 +84,7 @@ struct Round {
 Round run_rounds(q35::Executor& ex, st::PagedSequenceState& seq, hipStream_t stream,
                  const std::vector<int32_t>& prompt) {
     Round round;
-    std::vector<q35::ScheduledRequest> requests;
+    std::vector<::shelf::runtime::ScheduledRequest> requests;
     std::vector<int32_t> sampled;
 
     const auto call = [&](const std::vector<int32_t>& tokens, const char* tag) {

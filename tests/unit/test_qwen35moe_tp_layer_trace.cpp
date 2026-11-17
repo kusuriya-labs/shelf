@@ -409,9 +409,9 @@ RunResult run_rank(const std::string& model_dir, int device, std::uint32_t tp_si
     }
     st::PagedSequenceState sequence = seq_state.release();
 
-    std::vector<q35::ScheduledRequest> requests;
+    std::vector<::shelf::runtime::ScheduledRequest> requests;
     auto submit = [&](const int32_t* tokens, uint32_t count) -> bool {
-        q35::ScheduledRequest req;
+        ::shelf::runtime::ScheduledRequest req;
         req.sequence = &sequence;
         req.handle = sequence.request_handle();
         req.execution_class = count == 1u ? rt::ExecutionClass::DECODE : rt::ExecutionClass::PREFILL;
@@ -423,7 +423,7 @@ RunResult run_rank(const std::string& model_dir, int device, std::uint32_t tp_si
         req.num_output_rows = 1u;
         requests.clear();
         requests.push_back(req);
-        q35::ScheduledBatch batch;
+        ::shelf::runtime::ScheduledBatch batch;
         batch.token_ids = tokens;
         batch.requests = requests;
         batch.num_tokens = count;

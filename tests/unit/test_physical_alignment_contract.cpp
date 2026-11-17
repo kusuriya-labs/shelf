@@ -1,5 +1,5 @@
 #include <shelf/runtime/program/int8_activation_workspace.h>
-#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/runtime/state_types.h>
 #include <shelf/core/memory/alignment.h>
 #include <cstdio>
 #include <cstdint>

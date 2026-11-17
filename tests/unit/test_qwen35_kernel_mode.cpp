@@ -1,4 +1,4 @@
-#include <shelf/models/qwen35/runtime/execution_types.h>
+#include <shelf/runtime/execution_types.h>
 #include <shelf/core/status.h>
 #include <cstdio>
 #include <cstdlib>
@@ -21,8 +21,8 @@ void check(bool cond, const char* name) {
 }  // namespace
 
 int main() {
-    using shelf::qwen35::runtime::KernelMode;
-    using shelf::qwen35::runtime::read_kernel_mode;
+    using shelf::execution::KernelMode;
+    using shelf::execution::read_kernel_mode;
 
     unsetenv("SHELF_QWEN35_KERNEL_MODE");
     auto r0 = read_kernel_mode();

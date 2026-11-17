@@ -5,8 +5,8 @@
 #include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35/runtime/executor.h>
 #include <shelf/inference/execution/program_executor.h>
-#include <shelf/models/qwen35/runtime/scheduling_types.h>
-#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/runtime/scheduling_types.h>
+#include <shelf/runtime/state_types.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <hip/hip_runtime.h>
 
@@ -41,14 +41,14 @@ static uint32_t count_attention_layers(const shelf::qwen35::Qwen35TextConfig& tc
     return n;
 }
 
-static shelf::qwen35::ScheduledBatch make_batch(
+static ::shelf::runtime::ScheduledBatch make_batch(
     shelf::state::PagedSequenceState& sequence,
-    std::vector<shelf::qwen35::ScheduledRequest>& requests,
+    std::vector<::shelf::runtime::ScheduledRequest>& requests,
     const int32_t* tokens,
     uint32_t num_tokens,
     uint32_t prefix_tokens,
     uint32_t output_rows) {
-    shelf::qwen35::ScheduledRequest req;
+    ::shelf::runtime::ScheduledRequest req;
     req.sequence = &sequence;
     req.handle = sequence.request_handle();
     req.execution_class = num_tokens == 1u ? shelf::runtime::ExecutionClass::DECODE
@@ -61,7 +61,7 @@ static shelf::qwen35::ScheduledBatch make_batch(
     req.num_output_rows = output_rows;
     requests.clear();
     requests.push_back(req);
-    shelf::qwen35::ScheduledBatch batch;
+    ::shelf::runtime::ScheduledBatch batch;
     batch.token_ids = tokens;
     batch.requests = requests;
     batch.num_tokens = num_tokens;
@@ -224,8 +224,8 @@ int main() {
             check(seq_result.ok(), "sequence create (no taps)");
             if (seq_result.ok()) {
                 shelf::state::PagedSequenceState seq = seq_result.release();
-                std::vector<shelf::qwen35::ScheduledRequest> requests;
-                shelf::qwen35::ScheduledBatch batch = make_batch(
+                std::vector<::shelf::runtime::ScheduledRequest> requests;
+                ::shelf::runtime::ScheduledBatch batch = make_batch(
                     seq, requests, prompt.data(), max_tokens, 0u, 1u);
                 auto executed = shelf::qwen35::execute_batch(ex, batch, stream);
                 check(executed.ok(), "execute (no taps): " +
@@ -313,8 +313,8 @@ int main() {
             };
             ex.value_trace = &sink;
 
-            std::vector<shelf::qwen35::ScheduledRequest> requests;
-            shelf::qwen35::ScheduledBatch batch =
+            std::vector<::shelf::runtime::ScheduledRequest> requests;
+            ::shelf::runtime::ScheduledBatch batch =
                 make_batch(seq, requests, prompt.data(), n, 0u, 1u);
             auto executed = shelf::qwen35::execute_batch(ex, batch, stream);
             check(executed.ok(), "execute (taps, n=" + std::to_string(n) +

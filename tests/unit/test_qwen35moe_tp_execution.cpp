@@ -3,8 +3,8 @@
 #include <shelf/inference/execution/program_executor.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <shelf/models/qwen35/runtime/executor.h>
-#include <shelf/models/qwen35/runtime/scheduling_types.h>
-#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/runtime/scheduling_types.h>
+#include <shelf/runtime/state_types.h>
 #include <shelf/models/qwen35moe/model/lower_to_primitives.h>
 #include <shelf/models/qwen35moe/model/qwen35moe_model.h>
 #include <shelf/models/qwen35moe/model/tensor_parallel_context.h>
@@ -56,10 +56,10 @@ std::vector<int32_t> make_prompt(uint32_t count) {
     return ids;
 }
 
-q35::ScheduledBatch make_batch(st::PagedSequenceState& sequence,
-                               std::vector<q35::ScheduledRequest>& requests,
+::shelf::runtime::ScheduledBatch make_batch(st::PagedSequenceState& sequence,
+                               std::vector<::shelf::runtime::ScheduledRequest>& requests,
                                const int32_t* tokens, uint32_t num_tokens) {
-    q35::ScheduledRequest req;
+    ::shelf::runtime::ScheduledRequest req;
     req.sequence = &sequence;
     req.handle = sequence.request_handle();
     req.execution_class = num_tokens == 1u ? rt::ExecutionClass::DECODE
@@ -72,7 +72,7 @@ q35::ScheduledBatch make_batch(st::PagedSequenceState& sequence,
     req.num_output_rows = 1u;
     requests.clear();
     requests.push_back(req);
-    q35::ScheduledBatch batch;
+    ::shelf::runtime::ScheduledBatch batch;
     batch.token_ids = tokens;
     batch.requests = requests;
     batch.num_tokens = num_tokens;
@@ -276,7 +276,7 @@ RunResult run_rank(const std::string& model_dir, int device, std::uint32_t tp_si
             return result;
         }
     }
-    std::vector<q35::ScheduledRequest> requests;
+    std::vector<::shelf::runtime::ScheduledRequest> requests;
     auto prefill = q35::execute_batch(ex, make_batch(sequence, requests, prompt.data(),
                                                      static_cast<std::uint32_t>(prompt.size())),
                                       stream);

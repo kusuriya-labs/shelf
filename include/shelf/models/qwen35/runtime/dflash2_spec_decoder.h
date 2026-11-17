@@ -8,7 +8,7 @@
 #include <shelf/inference/state/spec_state_history.h>
 #include <shelf/models/qwen35/runtime/gdn_spec_history.h>
 #include <shelf/models/qwen35/runtime/tp_batch_hook.h>
-#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/runtime/state_types.h>
 #include <shelf/models/common/qwen_hybrid/stop_tokens.h>
 #include <shelf/runtime/dflash2_spec_config.h>
 #include <shelf/runtime/execution/execution_types.h>

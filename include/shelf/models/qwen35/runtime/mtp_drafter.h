@@ -11,7 +11,7 @@
 #include <shelf/models/qwen35/model/rope_profile.h>
 #include <shelf/models/qwen35/runtime/executor.h>
 #include <shelf/models/qwen35/runtime/gdn_spec_history.h>
-#include <shelf/models/qwen35/runtime/scheduling_types.h>
+#include <shelf/runtime/scheduling_types.h>
 #include <shelf/runtime/tp/tp_batch_hook.h>
 #include <shelf/weights/matrix_weight.h>
 #include <hip/hip_runtime.h>

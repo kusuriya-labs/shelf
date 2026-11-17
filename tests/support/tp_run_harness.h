@@ -8,7 +8,7 @@
 #include <shelf/inference/execution/program_executor.h>
 #include <shelf/models/qwen35/runtime/tensor_parallel.h>
 #include <shelf/models/tp_rank_model.h>
-#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/runtime/state_types.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 
 #include <hip/hip_runtime.h>

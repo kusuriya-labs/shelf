@@ -6,7 +6,7 @@
 #include <shelf/core/gpu/scoped_device.h>
 #include <shelf/models/qwen35/runtime/executor.h>
 #include <shelf/models/qwen35/kernels/dflash2/feature_concat.h>
-#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/runtime/state_types.h>
 #include <algorithm>
 #include <chrono>
 #include <cstdio>

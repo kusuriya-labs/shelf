@@ -1,14 +1,14 @@
-#include <shelf/models/qwen35/runtime/scheduling_types.h>
+#include <shelf/runtime/scheduling_types.h>
 
 #include <cmath>
 #include <cstdio>
 #include <limits>
 
-using shelf::qwen35::runtime::SamplingConfig;
-using shelf::qwen35::runtime::SamplingMode;
-using shelf::qwen35::runtime::make_sampling_request;
-using shelf::qwen35::runtime::sampling_config_is_default;
-using shelf::qwen35::runtime::validate_sampling_config;
+using shelf::runtime::SamplingConfig;
+using shelf::runtime::SamplingMode;
+using shelf::runtime::make_sampling_request;
+using shelf::runtime::sampling_config_is_default;
+using shelf::runtime::validate_sampling_config;
 
 static int g_fail = 0;
 

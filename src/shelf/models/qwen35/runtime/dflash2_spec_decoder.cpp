@@ -2,7 +2,7 @@
 
 #include <shelf/core/gpu/cleanup.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
-#include <shelf/models/qwen35/runtime/scheduling_types.h>
+#include <shelf/runtime/scheduling_types.h>
 #include <shelf/models/qwen35/runtime/spec_decode.h>
 #include <shelf/models/qwen35/runtime/dflash2_tree.h>
 #include <shelf/models/qwen35/runtime/dflash2_tree_budget.h>

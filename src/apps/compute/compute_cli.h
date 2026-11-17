@@ -3,7 +3,7 @@
 #include <shelf/core/status.h>
 #include <shelf/runtime/decode_backend.h>
 #include <shelf/models/qwen35/runtime/mtp_drafter.h>
-#include <shelf/models/qwen35/runtime/scheduling_types.h>
+#include <shelf/runtime/scheduling_types.h>
 
 #include <cstddef>
 #include <cstdint>

@@ -6,7 +6,7 @@
 #include <shelf/inference/state/sequence_slot_pool.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <shelf/models/qwen35/runtime/executor.h>
-#include <shelf/models/qwen35/runtime/scheduling_types.h>
+#include <shelf/runtime/scheduling_types.h>
 #include <shelf/models/qwen4exp/model/lower_to_primitives.h>
 #include <shelf/models/qwen4exp/model/qwen4exp_config.h>
 #include <shelf/models/qwen4exp/weights/qwen4exp_weights.h>
@@ -38,10 +38,10 @@ void check(bool condition, const char* what) {
     }
 }
 
-q35::ScheduledBatch make_batch(st::PagedSequenceState& sequence,
-                               std::vector<q35::ScheduledRequest>& requests,
+::shelf::runtime::ScheduledBatch make_batch(st::PagedSequenceState& sequence,
+                               std::vector<::shelf::runtime::ScheduledRequest>& requests,
                                const std::vector<int32_t>& tokens, uint32_t output_rows) {
-    q35::ScheduledRequest req;
+    ::shelf::runtime::ScheduledRequest req;
     req.sequence = &sequence;
     req.handle = sequence.request_handle();
     req.execution_class = tokens.size() == 1u ? rt::ExecutionClass::DECODE
@@ -55,9 +55,9 @@ q35::ScheduledBatch make_batch(st::PagedSequenceState& sequence,
     requests.clear();
     requests.push_back(req);
 
-    q35::ScheduledBatch batch;
+    ::shelf::runtime::ScheduledBatch batch;
     batch.token_ids = tokens.data();
-    batch.token_ids_location = q35::TokenIdsLocation::Host;
+    batch.token_ids_location = ::shelf::runtime::TokenIdsLocation::Host;
     batch.requests = requests;
     batch.num_tokens = static_cast<uint32_t>(tokens.size());
     batch.num_requests = 1u;
@@ -219,7 +219,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::vector<q35::ScheduledRequest> requests;
+    std::vector<::shelf::runtime::ScheduledRequest> requests;
     const std::vector<int32_t> tokens{248041, 77091, 279, 2614};
     auto out = q35::execute_batch(
         ex, make_batch(sequence.value(), requests, tokens, 1u), stream);

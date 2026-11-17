@@ -1,7 +1,7 @@
 #pragma once
 
-#include <shelf/models/qwen35/state/state_types.h>
-#include <shelf/models/qwen35/runtime/scheduling_types.h>
+#include <shelf/runtime/state_types.h>
+#include <shelf/runtime/scheduling_types.h>
 #include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
 #include <shelf/models/common/qwen_hybrid/stop_tokens.h>
 #include <shelf/core/status.h>

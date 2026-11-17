@@ -1,7 +1,7 @@
 #pragma once
 
 #include <shelf/models/qwen35/runtime/runtime_request.h>
-#include <shelf/models/qwen35/runtime/scheduling_types.h>
+#include <shelf/runtime/scheduling_types.h>
 #include <shelf/models/qwen35/runtime/dflash2_session_pool.h>
 #include <shelf/models/qwen35/runtime/token_budget_scheduler.h>
 #include <shelf/models/qwen35/runtime/executor.h>

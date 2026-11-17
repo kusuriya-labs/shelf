@@ -6,10 +6,10 @@
 #include <shelf/models/model_weights_factory.h>
 #include <shelf/runtime/decode_backend.h>
 #include <shelf/models/qwen35/runtime/executor.h>
-#include <shelf/models/qwen35/runtime/scheduling_types.h>
+#include <shelf/runtime/scheduling_types.h>
 #include <shelf/models/qwen35/runtime/tensor_parallel.h>
 #include <shelf/models/qwen35/weights/model_weights.h>
-#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/runtime/state_types.h>
 #include <shelf/core/status.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <hip/hip_runtime.h>
@@ -599,7 +599,7 @@ int run_pp(int argc, char** argv) {
         for (uint32_t processed = 0; processed < total_tokens;) {
             const uint32_t chunk_len = std::min(chunk, total_tokens - processed);
             const bool last = processed + chunk_len == total_tokens;
-            shelf::qwen35::ScheduledRequest req;
+            ::shelf::runtime::ScheduledRequest req;
             req.sequence = &seq; req.handle = seq.request_handle();
             req.execution_class = shelf::runtime::ExecutionClass::PREFILL;
             req.token_begin = 0;
@@ -607,8 +607,8 @@ int run_pp(int argc, char** argv) {
             req.prefix_tokens = seq.position;
             req.compute_logits = last;
             req.sample = last && opts.mode == "greedy";
-            std::vector<shelf::qwen35::ScheduledRequest> reqs = {req};
-            shelf::qwen35::ScheduledBatch batch;
+            std::vector<::shelf::runtime::ScheduledRequest> reqs = {req};
+            ::shelf::runtime::ScheduledBatch batch;
             batch.token_ids = prompt_tokens_host + processed;
             batch.requests = reqs;
             batch.num_tokens = chunk_len;

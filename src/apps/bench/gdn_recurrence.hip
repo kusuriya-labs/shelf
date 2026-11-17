@@ -1,6 +1,6 @@
 #include <shelf/kernels/optimized/gdn/recurrence.h>
 #include <shelf/kernels/correctness/model_dispatch_correctness.h>
-#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/runtime/state_types.h>
 #include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/runtime/program/device_program.h>

@@ -4,11 +4,11 @@
 #include <shelf/models/tp_rank_model.h>
 #include <shelf/runtime/decode_backend.h>
 #include <shelf/models/qwen35/runtime/executor.h>
-#include <shelf/models/qwen35/runtime/scheduling_types.h>
+#include <shelf/runtime/scheduling_types.h>
 #include <shelf/models/qwen35/runtime/tensor_parallel.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/models/qwen35/weights/model_weights.h>
-#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/runtime/state_types.h>
 #include <shelf/core/status.h>
 #include <shelf/core/gpu/cleanup.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
@@ -566,7 +566,7 @@ int run_tg(int argc, char** argv) {
         }
     }
 
-    auto run_batch = [&](const shelf::qwen35::ScheduledBatch& batch)
+    auto run_batch = [&](const ::shelf::runtime::ScheduledBatch& batch)
         -> shelf::Result<shelf::qwen35::BatchExecutionOutput> {
         if (tp_coordinator != nullptr) return tp_coordinator->on_execute(batch);
         return shelf::qwen35::execute_batch(*executor, batch, stream);
@@ -615,7 +615,7 @@ int run_tg(int argc, char** argv) {
         uint32_t processed = 0;
         while (processed < static_cast<uint32_t>(opts.context)) {
             const uint32_t chunk_len = std::min(chunk, static_cast<uint32_t>(opts.context) - processed);
-            shelf::qwen35::ScheduledRequest req;
+            ::shelf::runtime::ScheduledRequest req;
             req.sequence = &seq; req.handle = seq.request_handle();
             req.execution_class = shelf::runtime::ExecutionClass::PREFILL;
             req.token_begin = 0;
@@ -623,8 +623,8 @@ int run_tg(int argc, char** argv) {
             req.prefix_tokens = seq.position;
             req.compute_logits = false;
             req.sample = false;
-            std::vector<shelf::qwen35::ScheduledRequest> reqs = {req};
-            shelf::qwen35::ScheduledBatch batch;
+            std::vector<::shelf::runtime::ScheduledRequest> reqs = {req};
+            ::shelf::runtime::ScheduledBatch batch;
             batch.token_ids = context_tokens.data() + processed;
             batch.requests = reqs;
             batch.num_tokens = chunk_len;
@@ -649,7 +649,7 @@ int run_tg(int argc, char** argv) {
 
     auto run_decode_step = [&](bool compute_logits, bool sample) -> shelf::Status {
         std::vector<int32_t> token_ids = {token_id};
-        shelf::qwen35::ScheduledRequest req;
+        ::shelf::runtime::ScheduledRequest req;
         req.sequence = &seq; req.handle = seq.request_handle();
         req.execution_class = shelf::runtime::ExecutionClass::DECODE;
         req.token_begin = 0;
@@ -657,8 +657,8 @@ int run_tg(int argc, char** argv) {
         req.prefix_tokens = seq.position;
         req.compute_logits = compute_logits;
         req.sample = sample;
-        std::vector<shelf::qwen35::ScheduledRequest> reqs = {req};
-        shelf::qwen35::ScheduledBatch batch;
+        std::vector<::shelf::runtime::ScheduledRequest> reqs = {req};
+        ::shelf::runtime::ScheduledBatch batch;
         batch.token_ids = token_ids.data();
         batch.requests = reqs;
         batch.num_tokens = 1;
@@ -759,7 +759,7 @@ int run_tg(int argc, char** argv) {
                 return 1;
             }
             std::vector<int32_t> token_ids = {token_id};
-            shelf::qwen35::ScheduledRequest req;
+            ::shelf::runtime::ScheduledRequest req;
             req.sequence = &seq; req.handle = seq.request_handle();
             req.execution_class = shelf::runtime::ExecutionClass::DECODE;
             req.token_begin = 0;
@@ -767,8 +767,8 @@ int run_tg(int argc, char** argv) {
             req.prefix_tokens = seq.position;
             req.compute_logits = opts.compute_logits;
             req.sample = false;
-            std::vector<shelf::qwen35::ScheduledRequest> reqs = {req};
-            shelf::qwen35::ScheduledBatch batch;
+            std::vector<::shelf::runtime::ScheduledRequest> reqs = {req};
+            ::shelf::runtime::ScheduledBatch batch;
             batch.token_ids = token_ids.data();
             batch.requests = reqs;
             batch.num_tokens = 1;
@@ -833,7 +833,7 @@ int run_tg(int argc, char** argv) {
                 return 1;
             }
             std::vector<int32_t> token_ids = {token_id};
-            shelf::qwen35::ScheduledRequest req;
+            ::shelf::runtime::ScheduledRequest req;
             req.sequence = &seq; req.handle = seq.request_handle();
             req.execution_class = shelf::runtime::ExecutionClass::DECODE;
             req.token_begin = 0;
@@ -841,8 +841,8 @@ int run_tg(int argc, char** argv) {
             req.prefix_tokens = seq.position;
             req.compute_logits = true;
             req.sample = true;
-            std::vector<shelf::qwen35::ScheduledRequest> reqs = {req};
-            shelf::qwen35::ScheduledBatch batch;
+            std::vector<::shelf::runtime::ScheduledRequest> reqs = {req};
+            ::shelf::runtime::ScheduledBatch batch;
             batch.token_ids = token_ids.data();
             batch.requests = reqs;
             batch.num_tokens = 1;

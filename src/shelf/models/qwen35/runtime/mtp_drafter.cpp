@@ -62,7 +62,7 @@ ScheduledBatch make_batch(state::PagedSequenceState& sequence,
 
     ScheduledBatch batch;
     batch.token_ids = tokens;
-    batch.token_ids_location = shelf::qwen35::TokenIdsLocation::Host;
+    batch.token_ids_location = ::shelf::runtime::TokenIdsLocation::Host;
     batch.requests = requests;
     batch.num_tokens = num_tokens;
     batch.num_requests = 1u;
@@ -1517,7 +1517,7 @@ Result<MtpSpecBatchOutput> mtp_spec_step_batch(
 
         ScheduledBatch batch;
         batch.token_ids = token_ids.data();
-        batch.token_ids_location = shelf::qwen35::TokenIdsLocation::Host;
+        batch.token_ids_location = ::shelf::runtime::TokenIdsLocation::Host;
         batch.requests = requests;
         batch.num_tokens = chunk_rows;
         batch.num_requests = static_cast<uint32_t>(requests.size());

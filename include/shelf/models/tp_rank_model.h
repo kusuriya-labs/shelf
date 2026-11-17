@@ -6,7 +6,7 @@
 #include <shelf/models/qwen35/model/tensor_parallel_context.h>
 #include <shelf/models/qwen35/runtime/executor.h>
 #include <shelf/models/qwen35/runtime/tensor_parallel.h>
-#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/runtime/state_types.h>
 #include <shelf/models/qwen35moe/model/qwen35moe_model.h>
 #include <shelf/models/qwen35qsa/model/qwen35qsa_model.h>
 #include <shelf/models/qwen4exp/model/qwen4exp_model.h>

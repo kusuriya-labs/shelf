@@ -1,25 +1,10 @@
 #pragma once
 
-#include <shelf/inference/execution/decode_perf_stats.h>
-#include <shelf/inference/execution/elementwise_dispatch.h>
-#include <shelf/inference/execution/embedding_dispatch.h>
-#include <shelf/inference/execution/gdn_conv_dispatch.h>
-#include <shelf/inference/execution/gdn_recurrence_dispatch.h>
-#include <shelf/inference/execution/kv_append_dispatch.h>
-#include <shelf/inference/execution/kv_calib_dump.h>
-#include <shelf/inference/execution/l2_normalize_dispatch.h>
-#include <shelf/inference/execution/optimized_dispatch.h>
-#include <shelf/inference/execution/paged_attention_dispatch.h>
-#include <shelf/inference/execution/physical_launch.h>
-#include <shelf/inference/execution/program_executor.h>
-#include <shelf/inference/execution/rope_dispatch.h>
-#include <shelf/inference/execution/sampling_dispatch.h>
-#include <shelf/inference/execution/spec_decode_context.h>
+#include <shelf/runtime/execution_types.h>
 
-namespace shelf {
-namespace qwen35 {
+namespace shelf::qwen35::runtime {
 
-namespace runtime {
+using namespace ::shelf::runtime;
 
 using ::shelf::execution::DecodePerfStats;
 using ::shelf::execution::KernelDispatchCounters;
@@ -122,7 +107,4 @@ using ::shelf::execution::try_launch_sampling;
 using ::shelf::execution::upload_host_parameter_table;
 using ::shelf::execution::upload_host_weight_table;
 
-}
-
-}
-}
+}  // namespace shelf::qwen35::runtime

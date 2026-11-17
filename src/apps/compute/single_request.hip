@@ -12,7 +12,7 @@
 #include <shelf/models/qwen35/runtime/mtp_drafter.h>
 #include <shelf/models/qwen35/runtime/dflash2_session_pool.h>
 #include <shelf/models/qwen35/runtime/runtime_request.h>
-#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/runtime/state_types.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <hip/hip_runtime.h>
 

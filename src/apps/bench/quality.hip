@@ -5,9 +5,9 @@
 #include <shelf/models/loaded_model.h>
 #include <shelf/models/tp_rank_model.h>
 #include <shelf/models/qwen35/runtime/executor.h>
-#include <shelf/models/qwen35/runtime/scheduling_types.h>
+#include <shelf/runtime/scheduling_types.h>
 #include <shelf/models/qwen35/runtime/tensor_parallel.h>
-#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/runtime/state_types.h>
 #include <shelf/models/qwen35/weights/model_weights.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <hip/hip_runtime.h>
@@ -506,7 +506,7 @@ int run_quality(int argc, char** argv) {
     uint32_t processed = 0u;
     while (processed < context) {
         const uint32_t chunk_len = std::min(chunk, context - processed);
-        std::vector<shelf::qwen35::ScheduledRequest> reqs(batch_size);
+        std::vector<::shelf::runtime::ScheduledRequest> reqs(batch_size);
         std::vector<int32_t> token_ids;
         token_ids.reserve(static_cast<size_t>(batch_size) * chunk_len);
         for (uint32_t i = 0; i < batch_size; ++i) {
@@ -521,7 +521,7 @@ int run_quality(int argc, char** argv) {
             req.sample = false;
             token_ids.insert(token_ids.end(), corpus.begin() + processed, corpus.begin() + processed + chunk_len);
         }
-        shelf::qwen35::ScheduledBatch batch;
+        ::shelf::runtime::ScheduledBatch batch;
         batch.token_ids = token_ids.data();
         batch.requests = reqs;
         batch.num_tokens = chunk_len * batch_size;
@@ -603,7 +603,7 @@ int run_quality(int argc, char** argv) {
         const int32_t feed_token = corpus[feed_index];
         const int32_t target = corpus[feed_index + 1u];
         std::vector<int32_t> token_ids(batch_size, feed_token);
-        std::vector<shelf::qwen35::ScheduledRequest> reqs(batch_size);
+        std::vector<::shelf::runtime::ScheduledRequest> reqs(batch_size);
         for (uint32_t i = 0; i < batch_size; ++i) {
             auto& req = reqs[i];
             req.sequence = &sequences[i];
@@ -615,7 +615,7 @@ int run_quality(int argc, char** argv) {
             req.compute_logits = true;
             req.sample = false;
         }
-        shelf::qwen35::ScheduledBatch batch;
+        ::shelf::runtime::ScheduledBatch batch;
         batch.token_ids = token_ids.data();
         batch.requests = reqs;
         batch.num_tokens = batch_size;

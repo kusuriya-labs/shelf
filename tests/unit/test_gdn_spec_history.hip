@@ -5,7 +5,7 @@
 #include <shelf/kernels/optimized/gdn/conv1d.h>
 #include <shelf/kernels/optimized/gdn/recurrence.h>
 #include <shelf/models/qwen35/runtime/gdn_spec_history.h>
-#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/runtime/state_types.h>
 #include <shelf/runtime/batch/device_batch_context.h>
 #include <hip/hip_runtime.h>
 

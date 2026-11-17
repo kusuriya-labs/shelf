@@ -2,7 +2,7 @@
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/status.h>
 #include <shelf/models/qwen35/runtime/prefix_cache.h>
-#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/runtime/state_types.h>
 #include <shelf/kernels/kv_types.h>
 #include <hip/hip_runtime.h>
 
