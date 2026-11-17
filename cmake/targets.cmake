@@ -196,6 +196,7 @@ add_library(shelf_runtime STATIC
     src/shelf/runtime/stream_bridge.cpp
     src/shelf/runtime/program/program.cpp
     src/shelf/runtime/tp/tensor_parallel.cpp
+    src/shelf/runtime/tp/pipeline_parallel.cpp
     src/shelf/runtime/tp/tp_execution.cpp
     src/shelf/runtime/tp/tp_barrier_group.cpp
     src/shelf/runtime/tp/tp_transports.cpp
@@ -431,10 +432,10 @@ target_compile_options(shelf_models PRIVATE -Wall -Wextra -Wpedantic -Werror=ret
 add_library(shelf_qwen35_runtime STATIC
     src/shelf/models/qwen35/runtime/executor_model.cpp
     src/shelf/models/qwen35/runtime/tp_rank_model_dense.cpp
+    src/shelf/models/qwen35/runtime/pipeline_stage_model_dense.cpp
     src/shelf/models/qwen35/runtime/runtime_request.cpp
     src/shelf/models/qwen35/runtime/token_budget_scheduler.cpp
     src/shelf/models/qwen35/runtime/continuous_batcher.cpp
-    src/shelf/models/qwen35/runtime/pipeline_parallel.cpp
     src/shelf/models/qwen35/runtime/spec_decode.cpp
     src/shelf/models/qwen35/runtime/mtp_drafter.cpp
     src/shelf/models/qwen35/runtime/dflash2_spec_decoder.cpp
