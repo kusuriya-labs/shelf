@@ -191,6 +191,8 @@ add_library(shelf_runtime STATIC
     src/shelf/runtime/dflash2_config.cpp
     src/shelf/runtime/executor.hip
     src/shelf/runtime/executor_footprint.cpp
+    src/shelf/runtime/gdn_spec_history.hip
+    src/shelf/runtime/spec_decode.cpp
     src/shelf/runtime/prefix_cache.cpp
     src/shelf/runtime/graph/primitive_graph.cpp
     src/shelf/runtime/stream_bridge.cpp
@@ -436,13 +438,11 @@ add_library(shelf_qwen35_runtime STATIC
     src/shelf/models/qwen35/runtime/runtime_request.cpp
     src/shelf/models/qwen35/runtime/token_budget_scheduler.cpp
     src/shelf/models/qwen35/runtime/continuous_batcher.cpp
-    src/shelf/models/qwen35/runtime/spec_decode.cpp
     src/shelf/models/qwen35/runtime/mtp_drafter.cpp
     src/shelf/models/qwen35/runtime/dflash2_spec_decoder.cpp
     src/shelf/models/qwen35/runtime/dflash2_spec_batch.cpp
     src/shelf/models/qwen35/runtime/dflash2_session_pool.cpp
     src/shelf/models/qwen35/runtime/dflash2_footprint.cpp
-    src/shelf/models/qwen35/runtime/gdn_spec_history.hip
     src/shelf/models/qwen35/dflash2/executor.hip
     src/shelf/models/common/drafter/linear.hip
 )
