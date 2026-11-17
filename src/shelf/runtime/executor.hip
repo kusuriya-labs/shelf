@@ -1,4 +1,4 @@
-#include <shelf/models/qwen35/runtime/executor.h>
+#include <shelf/runtime/executor.h>
 #include <shelf/runtime/stream_bridge.h>
 #include <shelf/kernels/kv_types.h>
 #include <shelf/inference/execution/program_executor.h>
@@ -6,14 +6,11 @@
 #include <shelf/inference/execution/qsa_dispatch.h>
 #include <shelf/kernels/optimized/attention/rope.h>
 #include <cstdlib>
-#include <shelf/models/qwen35/runtime/scheduling_types.h>
-#include <shelf/models/qwen35/state/state_types.h>
 #include <shelf/runtime/execution/row_bucket.h>
-#include <shelf/models/qwen35/runtime/exl3_dense_workspace.h>
+#include <shelf/runtime/exl3_dense_workspace.h>
 #include <shelf/kernels/optimized/gdn/recurrence.h>
-#include <shelf/models/qwen35/runtime/executor_footprint.h>
+#include <shelf/runtime/executor_footprint.h>
 #include <shelf/runtime/program/program.h>
-#include <shelf/models/qwen35/model/lower_to_primitives.h>
 #include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/memory/types.h>
 #include <hip/hip_runtime.h>
@@ -32,10 +29,9 @@
 #include <shelf/kernels/optimized/radix_topn.h>
 #include <shelf/kernels/optimized/qsa.h>
 #include <shelf/kernels/optimized/sampling_common.h>
-#include <shelf/models/qwen35/model/gdn_state_layout.h>
 
 namespace shelf {
-namespace qwen35 {
+namespace runtime {
 namespace {
 
 struct PreparedBatch {
@@ -245,8 +241,8 @@ Status build_host_execution_context(
         qsa_end = (qsa_end + total + 255ull) & ~255ull;
     }
     if (program_needs_exl3_workspace(program)) {
-        const runtime::Exl3WorkspaceBytes exl3 = runtime::exl3_workspace_bytes(
-            runtime::qwen35_padded_row_count(executor.config.max_batch_rows),
+        const Exl3WorkspaceBytes exl3 = exl3_workspace_bytes(
+            padded_row_count(executor.config.max_batch_rows),
             executor.config.exl3_linear_shape);
         const uint64_t workspace_bytes = executor.execution_workspace.allocation_bytes();
         const uint64_t exl3_xrot_offset = qsa_end;
@@ -1942,7 +1938,7 @@ Result<Executor> create_executor(
         && kv_pool.dtype() != KVCacheDType::FP8_E4M3
         && kv_pool.dtype() != KVCacheDType::OCTAVE) {
         return Status::unsupported(
-            "Qwen35 target executor supports BF16, FP8_E4M3 or Octave KV only",
+            "target executor supports BF16, FP8_E4M3 or Octave KV only",
             __FILE__, __LINE__);
     }
     if (kv_pool.dtype() == KVCacheDType::FP8_E4M3) {
@@ -1999,61 +1995,10 @@ Result<Executor> create_executor(
                 __FILE__, __LINE__);
         }
     }
-    {
-        const GdnStatePoolLayout expected_storage =
-            make_qwen35_gdn_state_layout_local(
-                tc, qwen35_stage_gdn_layers(tc, config.stage),
-                config.tp != nullptr ? config.tp->local_gdn_key_heads
-                                     : static_cast<std::uint32_t>(tc.linear_num_key_heads),
-                config.tp != nullptr ? config.tp->local_gdn_value_heads
-                                     : static_cast<std::uint32_t>(tc.linear_num_value_heads));
-        const GdnStatePoolLayout& expected_gdn = expected_storage;
-        const auto& actual_gdn = gdn_state_pool.layout();
-        const bool empty_gdn = actual_gdn.num_gdn_states == 0u &&
-            qwen35_stage_gdn_layers(tc, config.stage) == 0u;
-        if (!empty_gdn &&
-            (actual_gdn.num_gdn_states != expected_gdn.num_gdn_states ||
-             actual_gdn.conv_dim != expected_gdn.conv_dim ||
-             actual_gdn.conv_history != expected_gdn.conv_history ||
-             actual_gdn.num_v_heads != expected_gdn.num_v_heads ||
-             actual_gdn.head_k != expected_gdn.head_k ||
-             actual_gdn.head_v != expected_gdn.head_v)) {
-            std::string msg =
-                "GDN state pool geometry does not match model config: actual("
-                + std::to_string(actual_gdn.num_gdn_states) + ","
-                + std::to_string(actual_gdn.conv_dim) + ","
-                + std::to_string(actual_gdn.conv_history) + ","
-                + std::to_string(actual_gdn.num_v_heads) + ","
-                + std::to_string(actual_gdn.head_k) + ","
-                + std::to_string(actual_gdn.head_v) + ") expected("
-                + std::to_string(expected_gdn.num_gdn_states) + ","
-                + std::to_string(expected_gdn.conv_dim) + ","
-                + std::to_string(expected_gdn.conv_history) + ","
-                + std::to_string(expected_gdn.num_v_heads) + ","
-                + std::to_string(expected_gdn.head_k) + ","
-                + std::to_string(expected_gdn.head_v) + ")";
-            return Status::invalid_argument(msg.c_str(), __FILE__, __LINE__);
-        }
-        const uint32_t expected_attn_layers =
-            qwen35_stage_attention_layers(tc, config.stage);
-        const uint32_t expected_kv_heads =
-            (config.tp != nullptr && config.tp->tp_size > 1)
-                ? config.tp->local_key_value_heads
-                : static_cast<uint32_t>(tc.num_key_value_heads);
-        const uint32_t expected_head_dim = static_cast<uint32_t>(tc.attention_head_dim);
-        if (kv_pool.num_attention_layers() != expected_attn_layers ||
-            kv_pool.kv_heads() != expected_kv_heads ||
-            kv_pool.head_dim() != expected_head_dim) {
-            std::string msg =
-                "KV pool geometry does not match model config: actual("
-                + std::to_string(kv_pool.num_attention_layers()) + ","
-                + std::to_string(kv_pool.kv_heads()) + ","
-                + std::to_string(kv_pool.head_dim()) + ") expected("
-                + std::to_string(expected_attn_layers) + ","
-                + std::to_string(expected_kv_heads) + ","
-                + std::to_string(expected_head_dim) + ")";
-            return Status::invalid_argument(msg.c_str(), __FILE__, __LINE__);
-        }
+    if (config.validate_geometry) {
+        Status status = config.validate_geometry(
+            tc, config.tp, config.stage, gdn_state_pool.layout(), kv_pool);
+        if (!status.ok()) return status;
     }
     const std::size_t H = tc.hidden_size;
     const std::size_t V = tc.vocab_size;
@@ -2375,7 +2320,7 @@ Result<Executor> create_executor(
             const std::size_t exec_workspace_bytes =
                 max_workspace_bytes + kScratchBytes + runtime::kDecodeAttnPartialBytes +
                 (exl3_workspace
-                     ? runtime::exl3_workspace_bytes(Npad, config.exl3_linear_shape).total()
+                     ? exl3_workspace_bytes(Npad, config.exl3_linear_shape).total()
                      : 0u) +
                 (qsa_workspace ? ::shelf::kernel::qsa_select_workspace_bytes() : 0u) +
                 512u;
@@ -2843,43 +2788,5 @@ DecodeStatus poll_decode(const Executor& executor, uint64_t generation) noexcept
                : DecodeStatus::Error;
 }
 
-Result<Executor> create_model_executor(
-    const Qwen35Model& model,
-    SequenceSlotPool& sequence_pool,
-    GdnStatePool& gdn_state_pool,
-    PagedKVPool& kv_pool,
-    gpu::GpuArena& arena,
-    const ExecutorConfig& config) {
-
-    std::vector<LayerOverrideSource> overrides =
-        read_layer_override_sources(static_cast<uint32_t>(model.text_config().hidden_size));
-    std::vector<uint32_t> override_layers;
-    override_layers.reserve(overrides.size());
-    for (const auto& ov : overrides) override_layers.push_back(ov.layer);
-
-    Qwen35LowerOptions lower_options;
-    lower_options.rope_profile = config.rope_profile;
-    lower_options.stage = config.stage;
-    lower_options.emit_normed_token_hidden = config.emit_normed_token_hidden;
-    lower_options.hidden_taps = std::span<const uint32_t>(
-        config.target_hidden_taps.data(), config.target_hidden_tap_count);
-    lower_options.tp = config.tp;
-    lower_options.tp_combine_f32 = config.tp_combine_f32 != 0;
-    lower_options.override_layers =
-        std::span<const uint32_t>(override_layers.data(), override_layers.size());
-
-    auto lower_res =
-        lower_qwen35_to_primitives(model.text_config(), model.weights(), lower_options);
-    if (!lower_res.ok()) return lower_res.status();
-
-    ExecutorModelInput input;
-    input.model.config = &model.text_config();
-    input.model.embed_tokens = &model.weights().embed_tokens;
-    input.lowered = lower_res.release();
-    input.layer_overrides = std::move(overrides);
-    return create_executor(std::move(input), sequence_pool, gdn_state_pool, kv_pool, arena,
-                           config);
-}
-
-}
-}
+}  // namespace runtime
+}  // namespace shelf

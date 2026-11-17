@@ -18,8 +18,6 @@
 namespace shelf {
 namespace qwen35 {
 
-struct Executor;
-
 namespace runtime {
 
 struct ContinuousBatcherConfig {

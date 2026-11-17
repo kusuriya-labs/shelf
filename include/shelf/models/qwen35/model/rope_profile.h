@@ -1,10 +1,13 @@
 #pragma once
 #include <shelf/core/status.h>
+#include <shelf/runtime/rope_profile.h>
 #include <cstdint>
 #include <string>
 
 namespace shelf {
 namespace qwen35 {
+
+using ::shelf::runtime::EffectiveRopeProfile;
 
 struct Qwen35RopeParameters {
     std::string rope_type = "default";
@@ -23,22 +26,6 @@ struct Qwen35RopeParameters {
 };
 
 enum class RopeFactorSelection : std::uint8_t { Auto, One, Two, Four };
-
-struct EffectiveRopeProfile {
-    enum class Type : std::uint8_t { Default, Yarn };
-    Type type = Type::Default;
-    double theta = 10000000.0;
-    std::uint32_t rotary_dim = 0;
-    std::uint32_t original_max_position_embeddings = 0;
-    double factor = 1.0;
-    double attention_factor = 1.0;
-    double beta_fast = 32.0;
-    double beta_slow = 1.0;
-    bool truncate = true;
-    bool from_cli = false;
-    // Match models which construct inverse frequencies in float32.
-    bool float32_frequencies = false;
-};
 
 Result<Qwen35RopeParameters> read_qwen35_rope_parameters(const std::string& model_dir);
 

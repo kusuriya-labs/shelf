@@ -8,6 +8,7 @@
 #include <shelf/models/qwen35/runtime/prefix_cache.h>
 #include <shelf/models/qwen35/runtime/tp_batch_hook.h>
 #include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/runtime/rope_profile.h>
 #include <shelf/runtime/tp/tp_barrier_group.h>
 #include <shelf/runtime/tp/tp_transports.h>
 
@@ -91,7 +92,7 @@ struct TpRankRuntimeConfig {
     std::uint32_t target_hidden_tap_count = 0;
     std::uint32_t tp_combine_f32 = 0;
     bool emit_normed_token_hidden = false;
-    EffectiveRopeProfile rope_profile;
+    ::shelf::runtime::EffectiveRopeProfile rope_profile;
     Qwen35LoadOptions load_options;
     MtpBatchReserveConfig mtp_batch;
 };
@@ -197,7 +198,7 @@ struct TpCoordinatorConfig {
     std::uint32_t target_hidden_tap_count = 0;
     std::uint32_t tp_combine_f32 = 0;
     bool emit_normed_token_hidden = false;
-    EffectiveRopeProfile rope_profile;
+    ::shelf::runtime::EffectiveRopeProfile rope_profile;
     Qwen35LoadOptions load_options;
     MtpBatchReserveConfig mtp_batch;
 };

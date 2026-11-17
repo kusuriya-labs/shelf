@@ -188,6 +188,8 @@ shelf_set_hip_archs(shelf_qwen35_kernels_optimized)
 add_library(shelf_runtime STATIC
     src/shelf/runtime/batch/device_batch_context.hip
     src/shelf/runtime/decode_backend.cpp
+    src/shelf/runtime/executor.hip
+    src/shelf/runtime/executor_footprint.cpp
     src/shelf/runtime/graph/primitive_graph.cpp
     src/shelf/runtime/stream_bridge.cpp
     src/shelf/runtime/program/program.cpp
@@ -425,20 +427,19 @@ target_link_libraries(shelf_models PUBLIC shelf_qwen35 shelf_qwen35_runtime shel
 target_compile_options(shelf_models PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
 add_library(shelf_qwen35_runtime STATIC
+    src/shelf/models/qwen35/runtime/executor_model.cpp
     src/shelf/models/qwen35/runtime/runtime_request.cpp
     src/shelf/models/qwen35/runtime/token_budget_scheduler.cpp
     src/shelf/models/qwen35/runtime/continuous_batcher.cpp
     src/shelf/models/qwen35/runtime/prefix_cache.cpp
     src/shelf/models/qwen35/runtime/tensor_parallel.cpp
     src/shelf/models/qwen35/runtime/pipeline_parallel.cpp
-    src/shelf/models/qwen35/runtime/executor.hip
     src/shelf/models/qwen35/runtime/spec_decode.cpp
     src/shelf/models/qwen35/runtime/mtp_drafter.cpp
     src/shelf/models/qwen35/runtime/dflash2_spec_decoder.cpp
     src/shelf/models/qwen35/runtime/dflash2_spec_batch.cpp
     src/shelf/models/qwen35/runtime/dflash2_session_pool.cpp
     src/shelf/models/qwen35/runtime/dflash2_footprint.cpp
-    src/shelf/models/qwen35/runtime/executor_footprint.cpp
     src/shelf/models/qwen35/runtime/gdn_spec_history.hip
     src/shelf/models/qwen35/dflash2/executor.hip
     src/shelf/models/common/drafter/linear.hip
@@ -452,7 +453,7 @@ shelf_set_hip_archs(shelf_qwen35_runtime)
 if(SHELF_HIP_GRAPH)
     set_source_files_properties(
         src/shelf/inference/execution/program_executor.hip
-        src/shelf/models/qwen35/runtime/executor.hip
+        src/shelf/runtime/executor.hip
         PROPERTIES COMPILE_DEFINITIONS "SHELF_HIP_GRAPH")
 endif()
 

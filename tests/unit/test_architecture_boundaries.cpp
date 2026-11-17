@@ -206,7 +206,7 @@ int main() {
         root / "src/shelf/runtime",
     };
     for (const auto& dir : core_dirs) {
-        scan_clean(dir, {"qwen35", "Qwen35", "shelf/models/"});
+        scan_clean(dir, {"qwen35", "Qwen35", "shelf/models/qwen35", "shelf/models/qwen"});
     }
 
     const std::vector<fs::path> generic_dirs = {

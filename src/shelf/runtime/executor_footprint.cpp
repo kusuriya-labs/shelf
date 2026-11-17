@@ -1,5 +1,5 @@
-#include <shelf/models/qwen35/runtime/executor_footprint.h>
-#include <shelf/models/qwen35/runtime/exl3_dense_workspace.h>
+#include <shelf/runtime/executor_footprint.h>
+#include <shelf/runtime/exl3_dense_workspace.h>
 
 #include <shelf/runtime/batch/device_batch_context.h>
 #include <shelf/inference/execution/program_executor.h>
@@ -10,7 +10,7 @@
 
 #include <algorithm>
 
-namespace shelf::qwen35 {
+namespace shelf {
 namespace runtime {
 
 namespace {
@@ -27,7 +27,7 @@ std::size_t align_up(std::size_t bytes) noexcept {
 
 }  // namespace
 
-std::size_t qwen35_padded_row_count(std::uint32_t max_batch_rows) noexcept {
+std::size_t padded_row_count(std::uint32_t max_batch_rows) noexcept {
     std::size_t rows = max_batch_rows;
     auto bucket = ::shelf::runtime::resolve_row_bucket(max_batch_rows);
     if (bucket.ok()) {
@@ -39,7 +39,7 @@ std::size_t qwen35_padded_row_count(std::uint32_t max_batch_rows) noexcept {
     return rows;
 }
 
-std::size_t qwen35_executor_reserve_bytes(const shelf::qwen_hybrid::QwenHybridConfig& text_config,
+std::size_t executor_reserve_bytes(const shelf::qwen_hybrid::QwenHybridConfig& text_config,
                                           std::size_t ffn_intermediate_size,
                                           const ExecutorConfig& config,
                                           std::size_t tp_size,
@@ -50,7 +50,7 @@ std::size_t qwen35_executor_reserve_bytes(const shelf::qwen_hybrid::QwenHybridCo
     }
     const std::size_t hidden = text_config.hidden_size != 0u ? text_config.hidden_size : 1u;
     const std::size_t vocab = text_config.vocab_size != 0u ? text_config.vocab_size : 1u;
-    const std::size_t rows = qwen35_padded_row_count(config.max_batch_rows);
+    const std::size_t rows = padded_row_count(config.max_batch_rows);
     const std::size_t requests =
         config.max_scheduled_requests != 0u ? config.max_scheduled_requests : 1u;
 
@@ -115,4 +115,4 @@ std::size_t qwen35_executor_reserve_bytes(const shelf::qwen_hybrid::QwenHybridCo
 }
 
 }  // namespace runtime
-}  // namespace shelf::qwen35
+}  // namespace shelf

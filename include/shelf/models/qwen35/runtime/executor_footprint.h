@@ -1,29 +1,29 @@
 #pragma once
 
-#include <shelf/models/common/qwen_hybrid/config.h>
 #include <shelf/models/qwen35/model/qwen35_model.h>
-#include <shelf/models/qwen35/runtime/executor.h>
-
-#include <cstddef>
+#include <shelf/runtime/executor_footprint.h>
 
 namespace shelf::qwen35 {
+
+using ::shelf::runtime::ExecutorConfig;
+
 namespace runtime {
 
-std::size_t qwen35_padded_row_count(std::uint32_t max_batch_rows) noexcept;
+inline std::size_t qwen35_padded_row_count(std::uint32_t max_batch_rows) noexcept {
+    return ::shelf::runtime::padded_row_count(max_batch_rows);
+}
 
-// The bytes an arena must leave for the executor: its staging, output buffers, state
-// descriptors and the program workspace estimate. `ffn_intermediate_size` is the model's
-// dense FFN width, or 0 when the model has none. An FFN that runs on grouped rows sizes its
-// own planes by the plan capacity instead, and the caller adds that part here; it does not
-// scale with a dense intermediate width. `exl3_linear_workspace` says whether the model
-// carries its linears in the rotated-domain trellis form: that form's staging planes are
-// large and only a program which runs such a linear needs them.
-std::size_t qwen35_executor_reserve_bytes(const shelf::qwen_hybrid::QwenHybridConfig& text_config,
-                                          std::size_t ffn_intermediate_size,
-                                          const ExecutorConfig& config,
-                                          std::size_t tp_size,
-                                          bool exl3_linear_workspace,
-                                          bool qsa_workspace = false) noexcept;
+inline std::size_t qwen35_executor_reserve_bytes(
+    const shelf::qwen_hybrid::QwenHybridConfig& text_config,
+    std::size_t ffn_intermediate_size,
+    const ::shelf::runtime::ExecutorConfig& config,
+    std::size_t tp_size,
+    bool exl3_linear_workspace,
+    bool qsa_workspace = false) noexcept {
+    return ::shelf::runtime::executor_reserve_bytes(
+        text_config, ffn_intermediate_size, config, tp_size, exl3_linear_workspace,
+        qsa_workspace);
+}
 
 }  // namespace runtime
 }  // namespace shelf::qwen35
