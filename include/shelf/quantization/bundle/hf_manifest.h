@@ -30,6 +30,8 @@ struct HfQuantizedSource {
 
 bool is_hf_quantized_model_dir(const std::string& model_dir);
 
+Result<bool> has_hf_quantization_config(const std::string& model_dir);
+
 Result<HfQuantMethod> detect_hf_quant_method(const std::string& model_dir);
 
 Result<HfQuantizedSource> synthesize_hf_quantized_source(

@@ -339,14 +339,19 @@ Result<QwenHybridConfig> read_qwen_hybrid_config(const std::string& model_dir) {
     if (t.contains("layer_types") && t["layer_types"].is_array()) {
         cfg.layer_types.reserve(t["layer_types"].size());
         for (const auto& lt : t["layer_types"]) {
-            if (!lt.is_string()) continue;
+            if (!lt.is_string())
+                return Status::invalid_argument(
+                    "read_qwen_hybrid_config: layer_types entry is not a string",
+                    __FILE__, __LINE__);
             const std::string s = lt.get<std::string>();
             if (s == "linear_attention") {
                 cfg.layer_types.push_back(0);
             } else if (s == "full_attention") {
                 cfg.layer_types.push_back(1);
             } else {
-                cfg.layer_types.push_back(-1);
+                const std::string msg =
+                    "read_qwen_hybrid_config: unsupported layer_type '" + s + "'";
+                return Status::unsupported(msg.c_str(), __FILE__, __LINE__);
             }
         }
     }

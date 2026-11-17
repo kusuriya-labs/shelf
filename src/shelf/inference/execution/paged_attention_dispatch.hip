@@ -903,11 +903,23 @@ Result<uint32_t> paged_attention_plan_signature(
 Result<OptimizedLaunchResult> try_launch_paged_attention(
     const ::shelf::runtime::Program& program, size_t dispatch_index, HostExecutionContext& ctx,
     hipStream_t stream) {
+    if (dispatch_index >= program.dispatches.size())
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
+    const auto& b = program.dispatches[dispatch_index];
+    const bool has_mask = b.input_count == 2u;
+    const bool has_tree = ctx.spec.tree_anc_offsets != nullptr ||
+                          ctx.spec.tree_anc_positions != nullptr ||
+                          ctx.spec.tree_committed_end != 0u;
+    const bool needs_optimized = has_mask || has_tree;
     PhysicalPagedAttentionPlan plan{};
     const Result<PhysicalResolveStatus> resolved =
         resolve_paged_attention_physical(program, dispatch_index, ctx, plan);
     if (!resolved.ok()) return resolved.status();
     if (resolved.value() == PhysicalResolveStatus::NotApplicable) {
+        if (needs_optimized)
+            return Status::unsupported(
+                "paged-attention: block mask or tree visibility requires optimized path",
+                __FILE__, __LINE__);
         static std::atomic<bool> warned{false};
         bool expected = false;
         if (warned.compare_exchange_strong(expected, true)) {
@@ -921,8 +933,13 @@ Result<OptimizedLaunchResult> try_launch_paged_attention(
     if (resolved.value() == PhysicalResolveStatus::Skipped)
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     const hipError_t herr = launch_paged_attention_physical(plan, stream);
-    if (herr == hipErrorNotSupported)
+    if (herr == hipErrorNotSupported) {
+        if (needs_optimized)
+            return Status::unsupported(
+                "paged-attention: optimized kernel does not support block mask or tree",
+                __FILE__, __LINE__);
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
+    }
     if (herr != hipSuccess)
         return Status::hip_error("paged-attention optimized launch", hipGetErrorString(herr),
                                  __FILE__, __LINE__);

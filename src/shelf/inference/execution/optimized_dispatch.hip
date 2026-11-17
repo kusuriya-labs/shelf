@@ -249,6 +249,10 @@ Result<OptimizedLaunchResult> try_launch_linear_fp8(
     if (out.feature_count != e.rows)
         return Status::invalid_state(
             "fp8 linear: output features != weight rows", __FILE__, __LINE__);
+    if (out.row_stride != out.feature_count || e.output_col_offset != 0u)
+        return Status::unsupported(
+            "fp8 linear: padded row stride or column offset requires optimized path",
+            __FILE__, __LINE__);
     const bool out_bf16 = out.dtype == ValueDType::BF16;
     const bool out_f32 = out.dtype == ValueDType::F32;
     if (!out_bf16 && !out_f32)
@@ -358,6 +362,10 @@ Result<OptimizedLaunchResult> try_launch_linear_mxfp4(
     if (out.feature_count != e.rows)
         return Status::invalid_state(
             "mxfp4 linear: output features != weight rows", __FILE__, __LINE__);
+    if (out.row_stride != out.feature_count || e.output_col_offset != 0u)
+        return Status::unsupported(
+            "mxfp4 linear: padded row stride or column offset requires optimized path",
+            __FILE__, __LINE__);
     const bool out_bf16 = out.dtype == ValueDType::BF16;
     const bool out_f32 = out.dtype == ValueDType::F32;
     if (!out_bf16 && !out_f32)
@@ -662,6 +670,9 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3(
         dense_done = herr == hipSuccess;
     }
     if (!dense_done) {
+        if (herr != hipSuccess && herr != hipErrorNotSupported)
+            return Status::hip_error("exl3 dense prefill", hipGetErrorString(herr),
+                                     __FILE__, __LINE__);
         herr = hipSuccess;
         if (use_pre) {
             herr = ::shelf::kernel::launch_rotate_exl3(args, ctx.exl3_xrot, stream);

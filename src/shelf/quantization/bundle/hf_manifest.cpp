@@ -646,6 +646,12 @@ bool is_hf_quantized_model_dir(const std::string& model_dir) {
     return supported_hf_quant_method_name(find_quantization_config(config.value()));
 }
 
+Result<bool> has_hf_quantization_config(const std::string& model_dir) {
+    auto config_result = read_config_json(model_dir);
+    if (!config_result.ok()) return config_result.status();
+    return find_quantization_config(config_result.value()) != nullptr;
+}
+
 Result<HfQuantMethod> detect_hf_quant_method(const std::string& model_dir) {
     auto config_result = read_config_json(model_dir);
     if (!config_result.ok()) return config_result.status();

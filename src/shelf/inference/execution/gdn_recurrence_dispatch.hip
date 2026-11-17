@@ -244,7 +244,7 @@ Result<PhysicalResolveStatus> resolve_gdn_recurrence_physical(
     PhysicalGdnRecurrenceLaunch& out) {
     out = PhysicalGdnRecurrenceLaunch{};
     const auto res = resolve_gdn_recurrence_args(program, b, ctx);
-    if (!res.ok()) return PhysicalResolveStatus::NotApplicable;
+    if (!res.ok()) return res.status();
     const GdnRecurrenceResolvedArgs ra = res.value();
 
     GdnRecurrenceSelectorInput si;
@@ -314,8 +314,16 @@ Result<OptimizedLaunchResult> try_launch_gdn_recurrence(
     const Result<PhysicalResolveStatus> resolved =
         resolve_gdn_recurrence_physical(program, b, ctx, launch);
     if (!resolved.ok()) return resolved.status();
-    if (resolved.value() != PhysicalResolveStatus::Applicable)
+    if (resolved.value() != PhysicalResolveStatus::Applicable) {
+        if (ctx.spec.tree_anc_offsets != nullptr || ctx.spec.tree_row_parent != nullptr ||
+            ctx.spec.gdn_spec_history.recurrent_history != nullptr ||
+            ctx.spec.gdn_compact.delta_layer_stride != 0u ||
+            ctx.spec.qsa_spec_history.partial != nullptr)
+            return Status::unsupported(
+                "gdn recurrence: tree or spec history requires optimized path",
+                __FILE__, __LINE__);
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
+    }
 
     bool ran_f32 = launch.variant == PhysicalGdnRecurrenceVariant::F32;
     hipError_t herr = hipSuccess;

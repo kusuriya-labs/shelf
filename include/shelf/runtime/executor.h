@@ -338,6 +338,8 @@ struct Executor {
     SequenceSlotPool* sequence_pool = nullptr;
     GdnStatePool* gdn_state_pool = nullptr;
     PagedKVPool* kv_pool = nullptr;
+    bool uses_qsa_state = false;
+    bool uses_ple_conv_state = false;
     std::unique_ptr<::shelf::state::QsaKeyStatePool> qsa_state_pool;
     std::unique_ptr<::shelf::state::PleConvStatePool> ple_conv_state_pool;
     ExternalInputPreparer external_input_preparer;

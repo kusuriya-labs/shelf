@@ -1334,6 +1334,8 @@ Executor::Executor(Executor&& other) noexcept
       sequence_pool(other.sequence_pool),
       gdn_state_pool(other.gdn_state_pool),
       kv_pool(other.kv_pool),
+      uses_qsa_state(other.uses_qsa_state),
+      uses_ple_conv_state(other.uses_ple_conv_state),
       qsa_state_pool(std::move(other.qsa_state_pool)),
       ple_conv_state_pool(std::move(other.ple_conv_state_pool)),
       external_input_preparer(std::move(other.external_input_preparer)),
@@ -1466,6 +1468,8 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         sequence_pool = other.sequence_pool;
         gdn_state_pool = other.gdn_state_pool;
         kv_pool = other.kv_pool;
+        uses_qsa_state = other.uses_qsa_state;
+        uses_ple_conv_state = other.uses_ple_conv_state;
         qsa_state_pool = std::move(other.qsa_state_pool);
         ple_conv_state_pool = std::move(other.ple_conv_state_pool);
         external_input_preparer = std::move(other.external_input_preparer);
@@ -1581,6 +1585,8 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         other.sequence_pool = nullptr;
         other.gdn_state_pool = nullptr;
         other.kv_pool = nullptr;
+        other.uses_qsa_state = false;
+        other.uses_ple_conv_state = false;
         other.qsa_state_pool.reset();
         other.ple_conv_state_pool.reset();
         other.external_input_preparer = nullptr;
@@ -1899,6 +1905,35 @@ bool program_needs_exl3_workspace(const ::shelf::runtime::Program& program) noex
     return false;
 }
 
+struct LoweredStateRequirements {
+    bool needs_qsa = false;
+    bool needs_ple_conv = false;
+    uint32_t qsa_layers = 0;
+    uint32_t ple_conv_layers = 0;
+};
+
+LoweredStateRequirements collect_lowered_state_requirements(
+    const ::shelf::runtime::ProgramSet& set) noexcept {
+    LoweredStateRequirements out{};
+    for (const auto& prog : set.programs) {
+        for (const auto& binding : prog.dispatches) {
+            if (binding.kernel_id == ::shelf::runtime::KernelId::QSA_KEY_CACHE ||
+                binding.kernel_id == ::shelf::runtime::KernelId::QSA_SELECT)
+                out.needs_qsa = true;
+            if (binding.kernel_id == ::shelf::runtime::KernelId::PLE_CONV)
+                out.needs_ple_conv = true;
+        }
+        for (const auto& state : prog.states) {
+            if (state.kind == ::shelf::runtime::PrimitiveStateKind::QSA_KEY_STATE)
+                out.qsa_layers = std::max(out.qsa_layers, state.state_index + 1u);
+            if (state.kind == ::shelf::runtime::PrimitiveStateKind::PLE_CONV_STATE)
+                out.ple_conv_layers =
+                    std::max(out.ple_conv_layers, state.state_index + 1u);
+        }
+    }
+    return out;
+}
+
 bool program_needs_qsa_workspace(const ::shelf::runtime::Program& program) noexcept {
     for (const ::shelf::runtime::DispatchBinding& binding : program.dispatches) {
         if (binding.kernel_id == ::shelf::runtime::KernelId::QSA_SELECT) return true;
@@ -2194,6 +2229,8 @@ Result<Executor> create_executor(
         ex.ple_conv_state_pool =
             std::make_unique<::shelf::state::PleConvStatePool>(pool.release());
     }
+    ex.uses_qsa_state = input.uses_qsa_state;
+    ex.uses_ple_conv_state = input.uses_ple_conv_state;
     {
         ::shelf::kernel::ModelDispatchStateView ms{};
         ms.block_table = sequence_pool.device_view();
@@ -2286,6 +2323,34 @@ Result<Executor> create_executor(
                 return set_res.status();
             }
             built_set = set_res.release();
+
+            const LoweredStateRequirements state_req =
+                collect_lowered_state_requirements(built_set);
+            if (state_req.needs_qsa && !input.uses_qsa_state)
+                return Status::invalid_state(
+                    "lowered program needs QSA state but the model did not declare it",
+                    __FILE__, __LINE__);
+            if (input.uses_qsa_state && !state_req.needs_qsa)
+                return Status::invalid_state(
+                    "model declares QSA state but the lowered program does not use it",
+                    __FILE__, __LINE__);
+            if (state_req.needs_qsa && state_req.qsa_layers != input.qsa_layers)
+                return Status::invalid_state(
+                    "QSA state layer count does not match the lowered program",
+                    __FILE__, __LINE__);
+            if (state_req.needs_ple_conv && !input.uses_ple_conv_state)
+                return Status::invalid_state(
+                    "lowered program needs PLE conv state but the model did not declare it",
+                    __FILE__, __LINE__);
+            if (input.uses_ple_conv_state && !state_req.needs_ple_conv)
+                return Status::invalid_state(
+                    "model declares PLE conv state but the lowered program does not use it",
+                    __FILE__, __LINE__);
+            if (state_req.needs_ple_conv &&
+                state_req.ple_conv_layers != input.ple_conv_layers)
+                return Status::invalid_state(
+                    "PLE conv state layer count does not match the lowered program",
+                    __FILE__, __LINE__);
 
             if (config.tp != nullptr && config.tp->tp_size > 1) {
                 ex.tp_schedules.reserve(::shelf::runtime::ProgramSet::kRowBucketCount);
@@ -2745,7 +2810,9 @@ Status replay_qsa_spec_state(Executor& executor, const QsaSpecReplayRequest& req
         }
         if (program != nullptr) break;
     }
-    if (program == nullptr) return Status::make_ok();
+    if (program == nullptr)
+        return Status::invalid_state(
+            "qsa state replay: program has no QSA_KEY_CACHE dispatch", __FILE__, __LINE__);
 
     ::shelf::execution::HostExecutionContext ctx{};
     ctx.model_state = executor.host_model_state;

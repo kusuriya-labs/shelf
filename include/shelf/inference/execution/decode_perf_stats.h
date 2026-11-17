@@ -4,17 +4,16 @@
 
 #include <hip/hip_runtime.h>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 
 namespace shelf::execution {
 
-// Correctness-path visibility. This is the only mechanism that reports which kernels run
-// the correctness interpreter: every dispatch passes the single decision point in
-// execute_program_range, and that point records the per-kernel counters below.
-//
-// Diagnostic-only (SHELF_QWEN35_PERF_STATS, dumped by perf_stats_dump). Not part of the
-// production dispatch contract.
+// Correctness-path visibility. Every dispatch passes the single decision point in
+// execute_program_range. A fallback is reported once per kernel on stderr in every build;
+// the per-kernel counters below are available with SHELF_QWEN35_PERF_STATS.
 
 constexpr uint32_t kKernelIdCount = static_cast<uint32_t>(::shelf::runtime::KernelId::COUNT);
 
@@ -69,7 +68,15 @@ inline void record_optimized_dispatch(::shelf::runtime::KernelId id) {
 
 inline void record_fallback_dispatch(::shelf::runtime::KernelId id, uint32_t rows) {
     const uint32_t slot = kernel_slot(id);
-    if (slot == kKernelIdCount || !perf_stats_enabled())
+    if (slot == kKernelIdCount)
+        return;
+    static std::atomic<bool> warned[kKernelIdCount];
+    bool expected = false;
+    if (warned[slot].compare_exchange_strong(expected, true))
+        std::fprintf(stderr,
+                     "correctness fallback: %s rows=%u (optimized path unavailable)\n",
+                     ::shelf::runtime::kernel_to_name(id), rows);
+    if (!perf_stats_enabled())
         return;
     DecodePerfStats& s = perf_stats_instance();
     KernelDispatchCounters& k = s.kernels[slot];

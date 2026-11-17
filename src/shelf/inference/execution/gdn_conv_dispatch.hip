@@ -185,7 +185,15 @@ Result<OptimizedLaunchResult> try_launch_gdn_conv1d(
     const Result<PhysicalResolveStatus> resolved =
         resolve_gdn_conv1d_physical(program, b, ctx, launch);
     if (!resolved.ok()) return resolved.status();
-    if (resolved.value() != PhysicalResolveStatus::Applicable) return kNone;
+    if (resolved.value() != PhysicalResolveStatus::Applicable) {
+        if (ctx.spec.tree_anc_offsets != nullptr || ctx.spec.tree_row_parent != nullptr ||
+            ctx.spec.gdn_spec_history.recurrent_history != nullptr ||
+            ctx.spec.gdn_compact.delta_layer_stride != 0u)
+            return Status::unsupported(
+                "gdn conv1d: tree or spec history requires optimized path",
+                __FILE__, __LINE__);
+        return kNone;
+    }
 
     const hipError_t herr =
         ::shelf::kernel::launch_gdn_conv1d_bf16_f32(launch.args, stream);

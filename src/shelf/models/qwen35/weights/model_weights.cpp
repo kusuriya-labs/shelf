@@ -485,6 +485,12 @@ Result<Qwen35ModelWeights> load_qwen35_weights_from_safetensors(
             "qwen35 single-GPU weight load path does not accept a tensor partition plan",
             __FILE__, __LINE__);
     }
+    auto hf_config = shelf::quantization::bundle::has_hf_quantization_config(model_dir);
+    if (!hf_config.ok()) return hf_config.status();
+    if (hf_config.value()) {
+        auto hf_method = shelf::quantization::bundle::detect_hf_quant_method(model_dir);
+        if (!hf_method.ok()) return hf_method.status();
+    }
     if (shelf::weights::is_quantized_model_dir(model_dir)) {
         return load_qwen35_weights_from_quantized_safetensors(model_dir, arena, stream, options);
     }

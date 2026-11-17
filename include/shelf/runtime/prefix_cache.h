@@ -20,6 +20,8 @@
 namespace shelf {
 namespace runtime {
 
+struct Executor;
+
 using ::shelf::inference::prefix::PrefixKVStore;
 using ::shelf::state::PageId;
 
@@ -125,8 +127,28 @@ struct PrefixCacheRankContext {
 
 class FamilyPrefixState;
 
+struct PrefixStateBindings {
+    PagedKVPool* kv = nullptr;
+    GdnStatePool* gdn = nullptr;
+    ::shelf::state::QsaKeyStatePool* qsa = nullptr;
+    ::shelf::state::PleConvStatePool* ple = nullptr;
+    bool model_uses_qsa = false;
+    bool model_uses_ple_conv = false;
+    bool needs_history_restore = false;
+};
+
+Result<PrefixStateBindings> make_prefix_state_bindings(const Executor& executor);
+
+Status validate_prefix_state(const PrefixStateBindings& bindings);
+
 class PrefixCache {
  public:
+    static Result<PrefixCache> create(
+        gpu::GpuArena& arena,
+        const PrefixStateBindings& bindings,
+        const PrefixCacheConfig& config,
+        const std::vector<PrefixCacheRankContext>& extra_ranks = {});
+
     static Result<PrefixCache> create(
         gpu::GpuArena& arena,
         PagedKVPool& active_kv_pool,

@@ -75,6 +75,8 @@ Result<OptimizedLaunchResult> try_launch_qsa_key_cache(
         ctx.spec.qsa_spec_history.partial_state_stride;
     args.history_count_state_stride = ctx.spec.qsa_spec_history.count_state_stride;
     args.max_sequences = view.max_sequences;
+    if (state->state_index >= view.num_qsa_states)
+        return bad("qsa state_index out of range");
     args.state_index = state->state_index;
     args.max_blocks = view.max_blocks;
     args.head_dim = view.head_dim;
@@ -205,6 +207,8 @@ Result<OptimizedLaunchResult> try_launch_qsa_select(
     args.n_heads = b.group_size;
     args.head_dim = b.rotary_dim;
     args.compress_ratio = static_cast<uint32_t>(b.scalar_b);
+    if (state->state_index >= view.num_qsa_states)
+        return bad("qsa state_index out of range");
     args.state_index = state->state_index;
     args.max_sequences = view.max_sequences;
     args.top_k = b.compute_spec;

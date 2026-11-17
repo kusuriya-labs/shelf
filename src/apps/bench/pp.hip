@@ -469,9 +469,13 @@ int run_pp(int argc, char** argv) {
         tp_cfg.max_scheduled_requests = 1;
         tp_cfg.max_seq_len = required_seq_len;
         tp_cfg.page_tokens = static_cast<uint32_t>(opts.page_tokens);
-        tp_cfg.kv_cache_dtype = opts.kv_cache_dtype == "fp8"
-                                    ? shelf::kernel::KVCacheDType::FP8_E4M3
-                                    : shelf::kernel::KVCacheDType::BF16;
+        const bool tp_octave = shelf::kernel::parse_octave_kv_cache_format(
+            opts.kv_cache_dtype, opts.octave_format);
+        tp_cfg.kv_cache_dtype = tp_octave
+                                    ? shelf::kernel::KVCacheDType::OCTAVE
+                                    : opts.kv_cache_dtype == "fp8"
+                                          ? shelf::kernel::KVCacheDType::FP8_E4M3
+                                          : shelf::kernel::KVCacheDType::BF16;
         tp_cfg.arena_bytes = arena_bytes;
         tp_cfg.working_set_reserve_bytes = 0;
         shelf::Status sel = shelf::models::select_tp_rank_model(tp_cfg);

@@ -109,10 +109,11 @@ int main(int argc, char** argv) {
     config.verify_weights = opt.verify_weights != 0;
     config.tp_combine_f32 = static_cast<uint32_t>(opt.tp_combine_f32);
     config.decode_backend = opt.decode_backend;
-    config.prefix_cache = opt.prefix_cache_enabled != 0 && opt.pipeline_parallel == 1;
     if (opt.pipeline_parallel > 1 && opt.prefix_cache_enabled != 0) {
-        fprintf(stderr, "WARN: --pipeline-parallel disables prefix cache\n");
+        fprintf(stderr, "error: --pipeline-parallel does not support prefix cache\n");
+        return 1;
     }
+    config.prefix_cache = opt.prefix_cache_enabled != 0 && opt.pipeline_parallel == 1;
     config.prefix_cache_checkpoints =
         static_cast<uint32_t>(opt.prefix_cache_checkpoints);
     config.prefix_cache_strategy = opt.prefix_cache_strategy == 1

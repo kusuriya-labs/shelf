@@ -87,6 +87,7 @@ GROUPS = OrderedDict([
         "test_server_stop.py",
         "test_server_stop_prefix.py",
         "test_compute_prefix_contract.py",
+        "test_feature_contract.py",
     ]),
     ("concurrency-cancel", [
         "test_compute_cancel.py",

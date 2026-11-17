@@ -448,7 +448,7 @@ target_include_directories(shelf_models PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/incl
 target_include_directories(shelf_models PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_include_directories(shelf_models SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
 target_link_libraries(shelf_models PUBLIC shelf_qwen35 shelf_qwen35_runtime shelf_qwen35moe shelf_qwen35qsa shelf_qwen4exp shelf_gpu)
-target_compile_options(shelf_models PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
+target_compile_options(shelf_models PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type -Werror=switch)
 
 add_library(shelf_qwen35_runtime STATIC
     src/shelf/models/qwen35/runtime/executor_model.cpp

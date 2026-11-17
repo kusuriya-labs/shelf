@@ -124,6 +124,11 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         return Status::unsupported(
             "pipeline parallel requires tp 1", __FILE__, __LINE__);
     }
+    if (config_.mtp &&
+        config_.kv_cache_dtype == kernel::KVCacheDType::OCTAVE)
+        std::fprintf(stderr,
+                     "MTP with octave KV: the drafter runs with BF16 KV "
+                     "(the target keeps octave)\n");
     {
         auto family = shelf::models::probe_model_dir(config_.model_dir);
         if (!family.ok()) return family.status();
@@ -463,16 +468,16 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         executor_, *slot_pool_, *gdn_pool_, *kv_pool_, batcher_config, stream_);
 
     if (config_.prefix_cache) {
+        auto bindings_res = qwen35::runtime::make_prefix_state_bindings(executor_);
+        if (!bindings_res.ok()) return bindings_res.status();
         auto prefix_result = qwen35::runtime::PrefixCache::create(
-            *arena_, *kv_pool_, *gdn_pool_, prefix_config);
-        if (prefix_result.ok()) {
-            prefix_cache_.emplace(prefix_result.release());
-            std::fprintf(stderr, "MEMORY_PLAN prefix cache host checkpoint: %s\n",
-                         gpu::format_gib(prefix_cache_->reserved_bytes()).c_str());
-            batcher_->set_prefix_cache(&prefix_cache_.value());
-        } else {
-            prefix_cache_error_ = prefix_result.status().message();
-        }
+            *arena_, bindings_res.value(), prefix_config);
+        if (!prefix_result.ok())
+            return prefix_result.status();
+        prefix_cache_.emplace(prefix_result.release());
+        std::fprintf(stderr, "MEMORY_PLAN prefix cache host checkpoint: %s\n",
+                     gpu::format_gib(prefix_cache_->reserved_bytes()).c_str());
+        batcher_->set_prefix_cache(&prefix_cache_.value());
     }
 
     if (std::getenv("SHELF_BATCH_TRACE") != nullptr) {
@@ -825,20 +830,19 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
                 rank.executor().ple_conv_state_pool.get()});
         }
         if (config_.prefix_cache) {
+            auto bindings_res =
+                qwen35::runtime::make_prefix_state_bindings(*tp_executor_);
+            if (!bindings_res.ok()) return bindings_res.status();
             auto prefix_result = qwen35::runtime::PrefixCache::create(
-                arena(), kv_pool(), gdn_pool(),
-                tp_executor_->qsa_state_pool.get(),
-                tp_executor_->ple_conv_state_pool.get(), prefix_config, extra_ranks);
-            if (prefix_result.ok()) {
-                prefix_cache_.emplace(prefix_result.release());
-                std::fprintf(stderr,
-                             "MEMORY_PLAN prefix cache host checkpoint: %s\n",
-                             gpu::format_gib(prefix_cache_->reserved_bytes()).c_str());
-                (void)prefix_cache_->set_tp_hook(tp_coordinator_);
-                batcher_->set_prefix_cache(&prefix_cache_.value());
-            } else {
-                prefix_cache_error_ = prefix_result.status().message();
-            }
+                arena(), bindings_res.value(), prefix_config, extra_ranks);
+            if (!prefix_result.ok())
+                return prefix_result.status();
+            prefix_cache_.emplace(prefix_result.release());
+            std::fprintf(stderr,
+                         "MEMORY_PLAN prefix cache host checkpoint: %s\n",
+                         gpu::format_gib(prefix_cache_->reserved_bytes()).c_str());
+            (void)prefix_cache_->set_tp_hook(tp_coordinator_);
+            batcher_->set_prefix_cache(&prefix_cache_.value());
         }
     }
 

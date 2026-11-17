@@ -276,7 +276,11 @@ hipError_t run_dense_gemm(bool int8, uint32_t rows, uint32_t out_features, uint3
     (void) hipblasLtMatrixLayoutDestroy(lb);
     (void) hipblasLtMatrixLayoutDestroy(lc);
     (void) hipblasLtMatmulDescDestroy(desc);
-    return status == HIPBLAS_STATUS_SUCCESS ? hipSuccess : hipErrorNotSupported;
+    if (status == HIPBLAS_STATUS_SUCCESS) return hipSuccess;
+    if (status == HIPBLAS_STATUS_NOT_SUPPORTED ||
+        status == HIPBLAS_STATUS_ARCH_MISMATCH)
+        return hipErrorNotSupported;
+    return hipErrorUnknown;
 }
 
 }  // namespace

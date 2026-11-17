@@ -1,4 +1,5 @@
 #include <shelf/runtime/prefix_cache.h>
+#include <shelf/runtime/executor.h>
 
 #include <algorithm>
 #include <cstring>
@@ -772,6 +773,49 @@ PrefixCache::~PrefixCache() = default;
 Status PrefixCache::set_tp_hook(TpBatchHook* hook) noexcept {
     tp_hook_ = hook;
     return Status::make_ok();
+}
+
+Result<PrefixStateBindings> make_prefix_state_bindings(const Executor& executor) {
+    PrefixStateBindings bindings{};
+    bindings.kv = executor.kv_pool;
+    bindings.gdn = executor.gdn_state_pool;
+    bindings.qsa = executor.qsa_state_pool.get();
+    bindings.ple = executor.ple_conv_state_pool.get();
+    bindings.model_uses_qsa = executor.uses_qsa_state;
+    bindings.model_uses_ple_conv = executor.uses_ple_conv_state;
+    bindings.needs_history_restore = executor.external_prefix_restore != nullptr;
+    return bindings;
+}
+
+Status validate_prefix_state(const PrefixStateBindings& bindings) {
+    if (bindings.kv == nullptr)
+        return Status::invalid_state("prefix cache: KV pool missing", __FILE__, __LINE__);
+    if (bindings.gdn == nullptr)
+        return Status::invalid_state("prefix cache: GDN state pool missing", __FILE__, __LINE__);
+    if (bindings.model_uses_qsa && bindings.qsa == nullptr)
+        return Status::unsupported(
+            "prefix cache: QSA state pool is required by the model but not bound",
+            __FILE__, __LINE__);
+    if (bindings.model_uses_ple_conv && bindings.ple == nullptr)
+        return Status::unsupported(
+            "prefix cache: PLE conv state pool is required by the model but not bound",
+            __FILE__, __LINE__);
+    if (bindings.model_uses_ple_conv && !bindings.needs_history_restore)
+        return Status::unsupported(
+            "prefix cache: PLE n-gram history restore hook is missing",
+            __FILE__, __LINE__);
+    return Status::make_ok();
+}
+
+Result<PrefixCache> PrefixCache::create(
+    gpu::GpuArena& arena,
+    const PrefixStateBindings& bindings,
+    const PrefixCacheConfig& config,
+    const std::vector<PrefixCacheRankContext>& extra_ranks) {
+    Status valid = validate_prefix_state(bindings);
+    if (!valid.ok()) return valid;
+    return create(arena, *bindings.kv, *bindings.gdn, bindings.qsa, bindings.ple,
+                  config, extra_ranks);
 }
 
 Result<PrefixCache> PrefixCache::create(

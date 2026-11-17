@@ -183,7 +183,12 @@ hipError_t run(const AlgoKey& key,
     const hipblasStatus_t status =
         hipblasLtMatmul(lt.handle, d.desc, &alpha, a, d.la, b, d.lb, &beta, c, d.lc, c,
                         d.lc, &algo, lt.workspace, workspace_size, stream);
-    if (status != HIPBLAS_STATUS_SUCCESS) return hipErrorNotSupported;
+    if (status != HIPBLAS_STATUS_SUCCESS) {
+        if (status == HIPBLAS_STATUS_NOT_SUPPORTED ||
+            status == HIPBLAS_STATUS_ARCH_MISMATCH)
+            return hipErrorNotSupported;
+        return hipErrorUnknown;
+    }
     return hipSuccess;
 }
 
