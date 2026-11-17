@@ -85,6 +85,10 @@ public:
         return total;
     }
 
+    std::uint64_t host_pinned_bytes() const override {
+        return model_.weights().pinned_host.used();
+    }
+
     std::size_t token_row_ffn_size() const override {
         return model_.text_config().ffn.intermediate_size;
     }

@@ -41,6 +41,8 @@ public:
     virtual const shelf::qwen_hybrid::QwenHybridConfig& hybrid_config() const = 0;
     // Resident GPU bytes of the weights this stage holds, for the memory plan.
     virtual std::uint64_t weight_bytes() const = 0;
+    // Page-locked host bytes this stage holds outside its arena: the embedding table today.
+    virtual std::uint64_t host_pinned_bytes() const { return 0u; }
     // The FFN width whose activations still sit at token rows: a dense model's intermediate
     // size, or a grouped-expert model's shared expert.
     virtual std::size_t token_row_ffn_size() const = 0;

@@ -331,6 +331,7 @@ Result<Qwen35ModelWeights> load_qwen35_weights_bf16(
 
     shelf::weights::WeightLoadOptions embed_load;
     embed_load.preshuffle = false;
+    if (!config.tie_word_embeddings) embed_load.pinned_host = &weights.pinned_host;
 
     if (load_embedding) {
         auto m = shelf::weights::load_bf16_matrix(

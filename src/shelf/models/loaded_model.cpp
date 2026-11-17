@@ -173,6 +173,7 @@ shelf::weights::Exl3LinearShape LoadedModel::exl3_linear_shape() const {
 }
 
 std::uint64_t LoadedModel::host_pinned_bytes() const noexcept {
+    if (qsa_ != nullptr) return qsa_->weights().backbone.pinned_host.used();
     if (moe_ != nullptr) return moe_->weights().pinned_host.used();
     if (dense_ != nullptr) return dense_->weights().pinned_host.used();
     return 0u;

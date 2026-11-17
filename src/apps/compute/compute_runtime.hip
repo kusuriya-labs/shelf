@@ -82,7 +82,8 @@ void print_memory_plan(const MemoryPlan& plan, const char* scope = "") {
 }
 
 void print_host_memory(const std::vector<std::size_t>& embeddings,
-                       std::size_t prefix_bytes, const char* scope = "") {
+                       std::size_t prefix_bytes, const char* scope = "",
+                       const char* unit = "rank") {
     std::size_t total = prefix_bytes;
     for (std::size_t bytes : embeddings) total += bytes;
     if (total == 0u) return;
@@ -92,13 +93,15 @@ void print_host_memory(const std::vector<std::size_t>& embeddings,
         fprintf(stderr, "  embedding (pinned)   %s\n",
                 gpu::format_gib(embedding).c_str());
     } else {
-        for (std::size_t rank = 0; rank < embeddings.size(); ++rank) {
-            fprintf(stderr, "  embedding rank %zu    %s\n", rank,
-                    gpu::format_gib(embeddings[rank]).c_str());
+        for (std::size_t index = 0; index < embeddings.size(); ++index) {
+            fprintf(stderr, "  embedding %s %zu     %s\n", unit, index,
+                    gpu::format_gib(embeddings[index]).c_str());
         }
     }
-    fprintf(stderr, "  prefix checkpoint    %s\n",
-            gpu::format_gib(prefix_bytes).c_str());
+    if (prefix_bytes != 0u) {
+        fprintf(stderr, "  prefix checkpoint    %s\n",
+                gpu::format_gib(prefix_bytes).c_str());
+    }
     fprintf(stderr, "  total                %s\n", gpu::format_gib(total).c_str());
     fflush(stderr);
 }
@@ -661,6 +664,16 @@ Status Qwen35ComputeRuntime::initialize_pipeline_parallel() {
             gpu::format_gib(startup_available_bytes_).c_str());
     fflush(stderr);
     std::fprintf(stderr, "%s", pp_coordinator_->debug_report().c_str());
+
+    std::vector<std::size_t> host_embeddings;
+    host_embeddings.reserve(pp_coordinator_->stage_count());
+    for (std::size_t index = 0; index < pp_coordinator_->stage_count(); ++index) {
+        host_embeddings.push_back(pp_coordinator_->stage(index).model().host_pinned_bytes());
+    }
+    char host_scope[32];
+    std::snprintf(host_scope, sizeof(host_scope), " pipeline=%u",
+                  static_cast<unsigned>(config_.pipeline_parallel));
+    print_host_memory(host_embeddings, 0u, host_scope, "stage");
 
     qwen35::runtime::ContinuousBatcherConfig batcher_config;
     batcher_config.max_num_batched_tokens = exec_max_tokens_;

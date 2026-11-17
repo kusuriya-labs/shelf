@@ -249,8 +249,10 @@ MEMORY_PLAN host memory tp=2
 ```
 
 `embedding` は rank ごとの語彙 shard を pinned host RAM に置いた量である
-（tied embedding のモデルでは 0）。`prefix checkpoint` は prefix cache が保持する
+（tied embedding のモデルでは 0。量子化 checkpoint と BF16 checkpoint のどちらも
+pinned host に置く）。`prefix checkpoint` は prefix cache が保持する
 checkpoint の全 rank 分で、`MEMORY_PLAN host memory` の `total` は両者の合計である。
+pipeline parallel では `MEMORY_PLAN host memory pipeline=N` の見出しで stage ごとに出す。
 
 ## Scheduler
 

@@ -196,7 +196,8 @@ Result<MatrixWeight> load_bf16_matrix_raw(
     const SafetensorsCollection& reader,
     const std::string& name,
     gpu::GpuArena& arena,
-    hipStream_t stream)
+    hipStream_t stream,
+    PinnedHostArena* pinned_host = nullptr)
 {
     auto spec_result = reader.tensor_spec(name);
     if (!spec_result.ok()) return spec_result.status();
@@ -220,9 +221,31 @@ Result<MatrixWeight> load_bf16_matrix_raw(
     w.cols = static_cast<uint32_t>(shape[1]);
     w.k_padded = w.cols;
 
+    const std::size_t want_bytes =
+        static_cast<std::size_t>(shape[0]) * shape[1] * sizeof(bf16_t);
+    if (pinned_host != nullptr) {
+        std::size_t source_bytes = 0;
+        auto data_result = reader.tensor_data(name, source_bytes);
+        if (!data_result.ok()) return data_result.status();
+        void* host = nullptr;
+        Status st = pinned_host->allocate(want_bytes, &host);
+        if (!st.ok()) return st;
+        if (spec.dtype == io::SType::F32) {
+            const std::size_t elements = static_cast<std::size_t>(shape[0]) * shape[1];
+            const float* src = static_cast<const float*>(data_result.value());
+            auto* dst = static_cast<bf16_t*>(host);
+            for (std::size_t i = 0; i < elements; ++i) dst[i].data = f32_to_bf16_rne(src[i]);
+        } else {
+            std::memcpy(host, data_result.value(), want_bytes);
+        }
+        w.host_resident = true;
+        w.host_payload = host;
+        apply_default_compute_spec(w);
+        return w;
+    }
+
     std::vector<std::size_t> strides = {shape[1], 1};
     const std::size_t arena_used_before = arena.used();
-    const std::size_t want_bytes = static_cast<std::size_t>(shape[0]) * shape[1] * sizeof(bf16_t);
     w.bf16 = alloc_tensor(shape, strides, arena);
     if (w.bf16.ndim() == 0) {
         return Status::insufficient_memory(
@@ -1057,11 +1080,11 @@ Result<MatrixWeight> load_bf16_matrix(
     const WeightLoadOptions& options)
 {
     if (options.partition_plan == nullptr) {
-        return load_bf16_matrix_raw(collection, name, arena, stream);
+        return load_bf16_matrix_raw(collection, name, arena, stream, options.pinned_host);
     }
     auto it = options.partition_plan->tensors.find(name);
     if (it == options.partition_plan->tensors.end()) {
-        return load_bf16_matrix_raw(collection, name, arena, stream);
+        return load_bf16_matrix_raw(collection, name, arena, stream, options.pinned_host);
     }
     const shelf::weights::TensorPartitionDesc& partition = it->second;
     auto spec_result = collection.tensor_spec(name);
