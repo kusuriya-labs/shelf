@@ -88,7 +88,8 @@ Status select_budget_tree(DFlash2SpecDecoder& decoder, int32_t pending_token,
                           DFlash2Tree& tree) {
     DFlash2SpecTiming* tm = decoder.timing;
     const uint32_t top_k = static_cast<uint32_t>(decoder.draft->config->selector_top_k);
-    const uint32_t vocab = static_cast<uint32_t>(decoder.draft->config->vocab_size);
+    const uint32_t vocab = decoder.draft->local_vocab;
+    const int32_t vocab_offset = static_cast<int32_t>(decoder.draft->vocab_offset);
     const uint32_t retained = std::min(top_k, shelf::kernel::kDflash2TreeRetained);
     using Probabilities = shelf::kernel::DFlash2TreeProbabilities;
     std::vector<Probabilities> probabilities(dflash_k);
@@ -138,7 +139,9 @@ Status select_budget_tree(DFlash2SpecDecoder& decoder, int32_t pending_token,
             for (uint32_t j = 0; j < vocab; ++j) sum += std::exp(static_cast<double>(row[j] - maximum));
             for (uint32_t j = 0; j < retained; ++j) {
                 const int32_t id = probabilities[i].ids[j];
-                reference[i].push_back({id, std::exp(static_cast<double>(row[id] - maximum)) / sum});
+                const uint32_t local_id = static_cast<uint32_t>(id - vocab_offset);
+                reference[i].push_back(
+                    {id, std::exp(static_cast<double>(row[local_id] - maximum)) / sum});
             }
         }
         DFlash2Tree expected;
@@ -207,7 +210,7 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
             "create_dflash2_spec_decoder: draft is missing target embed_tokens/lm_head",
             __FILE__, __LINE__);
     }
-    if (draft.target_lm_head->rows != dcfg.vocab_size ||
+    if (draft.target_lm_head->rows != draft.local_vocab ||
         draft.target_lm_head->cols != dcfg.hidden_size) {
         return Status::invalid_argument(
             "create_dflash2_spec_decoder: target lm_head shape mismatch", __FILE__, __LINE__);

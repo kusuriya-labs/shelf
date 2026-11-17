@@ -52,9 +52,10 @@ static DFlash2Config test_config() {
     return config;
 }
 
-static MatrixWeight make_head(const DFlash2Config& config, QuantSpecId spec) {
+static MatrixWeight make_head(const DFlash2Config& config, QuantSpecId spec,
+                              uint32_t rows) {
     MatrixWeight head;
-    head.rows = static_cast<uint32_t>(config.vocab_size);
+    head.rows = rows;
     head.cols = static_cast<uint32_t>(config.hidden_size);
     head.k_padded = static_cast<uint32_t>(config.hidden_size);
     head.quant_spec = spec;
@@ -67,9 +68,14 @@ struct AllocResult {
     std::size_t actual_bytes = 0;
     bool accum_present = false;
     std::size_t accum_bytes = 0;
+    std::size_t proposal_cols = 0;
+    uint32_t vocab_offset = 0;
+    uint32_t local_vocab = 0;
 };
 
-static AllocResult create_and_measure(const DFlash2Config& config, QuantSpecId spec) {
+static AllocResult create_and_measure(const DFlash2Config& config, QuantSpecId spec,
+                                      uint32_t local_vocab = 0, uint32_t vocab_offset = 0,
+                                      bool quiet = false, uint32_t head_rows = 0) {
     AllocResult result;
     auto arena_result = shelf::gpu::GpuArena::create(0, 64u * 1024u * 1024u);
     if (!arena_result.ok()) return result;
@@ -79,22 +85,33 @@ static AllocResult create_and_measure(const DFlash2Config& config, QuantSpecId s
     weights.present = true;
     weights.layers.resize(config.num_hidden_layers);
     weights.fc.encoding = shelf::weights::MatrixEncoding::Exl3;
-    MatrixWeight head = make_head(config, spec);
+    const uint32_t head_row_count = head_rows != 0u
+        ? head_rows
+        : (local_vocab != 0u ? local_vocab : static_cast<uint32_t>(config.vocab_size));
+    MatrixWeight head = make_head(config, spec, head_row_count);
 
     DFlash2ExecutorConfig exec_config;
     exec_config.max_rows = static_cast<uint32_t>(config.block_size);
     exec_config.max_context_rows = static_cast<uint32_t>(config.sliding_window);
     exec_config.target_lm_head = &head;
+    exec_config.vocab_offset = vocab_offset;
+    exec_config.local_vocab = local_vocab;
 
     auto exec_result = ::shelf::runtime::dflash2::create_dflash2_executor(
         config, weights, arena, exec_config);
     if (!exec_result.ok()) {
-        std::printf("create failed: %s\n", exec_result.status().message().c_str());
+        if (!quiet)
+            std::printf("create failed: %s\n", exec_result.status().message().c_str());
         (void)arena.shutdown();
         return result;
     }
     DFlash2Executor executor = exec_result.release();
     result.actual_bytes = arena.used();
+    result.proposal_cols = executor.proposal_logits.ndim() != 0
+        ? executor.proposal_logits.dim(1)
+        : 0u;
+    result.vocab_offset = executor.vocab_offset;
+    result.local_vocab = executor.local_vocab;
     result.accum_present = executor.exl3_lm_head_accum.ndim() != 0;
     if (result.accum_present) {
         std::size_t bytes = 0;
@@ -138,6 +155,27 @@ int main() {
               mul24.actual_bytes - bf16.actual_bytes <= logits_bytes + 127u,
           "mul24 minus bf16 is exactly the exl3_lm_head_accum allocation");
     check(bf16.actual_bytes == fp8.actual_bytes, "bf16 and fp8 allocate the same bytes");
+
+    const uint32_t shard_vocab = static_cast<uint32_t>(config.vocab_size / 2u);
+    const AllocResult shard = create_and_measure(
+        config, QuantSpecId::BF16_V1, shard_vocab, shard_vocab);
+    check(shard.ok, "sharded head executor created");
+    if (shard.ok) {
+        check(shard.local_vocab == shard_vocab, "executor records the local vocab");
+        check(shard.vocab_offset == shard_vocab, "executor records the vocab offset");
+        check(shard.proposal_cols == shard_vocab,
+              "proposal logits keep the shard width");
+        check(shard.actual_bytes + logits_bytes / 2u <= bf16.actual_bytes,
+              "sharded head releases at least half of the logits buffer");
+    }
+    const AllocResult out_of_range = create_and_measure(
+        config, QuantSpecId::BF16_V1, shard_vocab, static_cast<uint32_t>(config.vocab_size),
+         true);
+    check(!out_of_range.ok, "vocab shard beyond the checkpoint vocabulary is rejected");
+    const AllocResult shape_mismatch = create_and_measure(
+        config, QuantSpecId::BF16_V1, shard_vocab, 0u, true,
+        static_cast<uint32_t>(config.vocab_size));
+    check(!shape_mismatch.ok, "head rows must equal the local vocab");
 
     const std::size_t fp_mul24 =
         dflash2_draft_scratch_bytes(config, rows, config.hidden_size, 0u, true);

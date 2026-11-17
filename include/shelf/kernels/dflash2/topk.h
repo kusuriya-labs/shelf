@@ -29,6 +29,7 @@ hipError_t launch_dflash2_topk_f32(
     float* out_logits,
     int32_t* scratch_ids,
     float* scratch_logits,
+    int32_t id_offset,
     hipStream_t stream);
 
 hipError_t launch_dflash2_topk_f32_optimized(
@@ -41,6 +42,7 @@ hipError_t launch_dflash2_topk_f32_optimized(
     float* out_logits,
     int32_t* scratch_ids,
     float* scratch_logits,
+    int32_t id_offset,
     const DFlash2TopKPlan& plan,
     hipStream_t stream);
 

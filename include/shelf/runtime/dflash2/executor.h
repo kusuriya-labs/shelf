@@ -27,6 +27,11 @@ struct DFlash2ExecutorConfig {
     uint32_t max_prefill_feature_rows = 0;
     const shelf::weights::MatrixWeight* target_lm_head = nullptr;
     const shelf::weights::MatrixWeight* target_embed_tokens = nullptr;
+    // Vocabulary shard owned by this drafter. `target_lm_head` holds only `local_vocab`
+    // rows starting at `vocab_offset`, and the proposal logits keep that width.
+    // `local_vocab == 0` keeps the whole checkpoint vocabulary.
+    uint32_t vocab_offset = 0;
+    uint32_t local_vocab = 0;
 };
 
 struct DFlash2Executor {
@@ -34,6 +39,8 @@ struct DFlash2Executor {
     const DFlash2Weights* weights = nullptr;
     uint32_t max_rows = 0;
     uint32_t max_context_rows = 0;
+    uint32_t vocab_offset = 0;
+    uint32_t local_vocab = 0;
 
     gpu::Tensor target_concat;
     gpu::Tensor target_fc;

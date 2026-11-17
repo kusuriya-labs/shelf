@@ -77,7 +77,8 @@ __global__ void dflash2_topk_merge_kernel(
     float* scratch_logits,
     uint32_t k,
     int32_t* out_ids,
-    float* out_logits) {
+    float* out_logits,
+    int32_t id_offset) {
     const uint32_t row = blockIdx.x;
     if (threadIdx.x != 0u) return;
     const int32_t* row_ids =
@@ -104,7 +105,7 @@ __global__ void dflash2_topk_merge_kernel(
             out_logits[static_cast<std::size_t>(row) * k + slot] = -INFINITY;
             continue;
         }
-        out_ids[static_cast<std::size_t>(row) * k + slot] = best_id;
+        out_ids[static_cast<std::size_t>(row) * k + slot] = best_id + id_offset;
         out_logits[static_cast<std::size_t>(row) * k + slot] = best_logit;
         row_logits[best_index] = -INFINITY;
     }
@@ -122,6 +123,7 @@ hipError_t launch_dflash2_topk_f32(
     float* out_logits,
     int32_t* scratch_ids,
     float* scratch_logits,
+    int32_t id_offset,
     hipStream_t stream) {
     if (logits == nullptr || out_ids == nullptr || out_logits == nullptr ||
         scratch_ids == nullptr || scratch_logits == nullptr) {
@@ -136,7 +138,7 @@ hipError_t launch_dflash2_topk_f32(
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) return err;
     dflash2_topk_merge_kernel<<<rows, 1u, 0, stream>>>(
-        scratch_ids, scratch_logits, k, out_ids, out_logits);
+        scratch_ids, scratch_logits, k, out_ids, out_logits, id_offset);
     return hipGetLastError();
 }
 

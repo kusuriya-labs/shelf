@@ -45,6 +45,7 @@ int main() {
     config.hidden_size = k; config.vocab_size = n;
     ::shelf::runtime::dflash2::DFlash2Executor executor;
     executor.config = &config; executor.target_lm_head = &weight; executor.max_rows = rows;
+    executor.local_vocab = n;
     executor.draft_rows = rows; executor.initialized = true;
     auto layout = shelf::runtime::Int8ActivationWorkspaceLayout::make(k, rows);
     shelf::gpu::Tensor device_input, device_output;

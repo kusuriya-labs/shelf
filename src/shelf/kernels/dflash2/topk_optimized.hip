@@ -166,7 +166,8 @@ __global__ void dflash2_topk_merge_hier_kernel(
     uint32_t k,
     uint32_t scratch_row_stride,
     int32_t* out_ids,
-    float* out_logits) {
+    float* out_logits,
+    int32_t id_offset) {
     const uint32_t row = blockIdx.x;
     const uint32_t tid = threadIdx.x;
     const uint32_t count = partitions * k;
@@ -194,7 +195,7 @@ __global__ void dflash2_topk_merge_hier_kernel(
         b = topk_block_best<THREADS>(b, shared_value, shared_id, shared_index);
         if (tid == 0u) {
             const bool found = b.index >= 0;
-            out_ids[static_cast<std::size_t>(row) * k + o] = found ? b.id : 0;
+            out_ids[static_cast<std::size_t>(row) * k + o] = found ? b.id + id_offset : 0;
             out_logits[static_cast<std::size_t>(row) * k + o] =
                 found ? b.value : -INFINITY;
         }
@@ -216,6 +217,7 @@ hipError_t launch_optimized(
     int32_t* scratch_ids,
     float* scratch_logits,
     uint32_t partitions,
+    int32_t id_offset,
     hipStream_t stream) {
     const uint32_t partition_size = (vocab_size + partitions - 1u) / partitions;
     dflash2_topk_partition_hier_kernel<THREADS>
@@ -226,7 +228,7 @@ hipError_t launch_optimized(
     if (err != hipSuccess) return err;
     dflash2_topk_merge_hier_kernel<THREADS><<<rows, THREADS, 0, stream>>>(
         scratch_ids, scratch_logits, partitions, k, kDflash2TopKScratchPerRow, out_ids,
-        out_logits);
+        out_logits, id_offset);
     return hipGetLastError();
 }
 
@@ -249,6 +251,7 @@ hipError_t launch_dflash2_topk_f32_optimized(
     float* out_logits,
     int32_t* scratch_ids,
     float* scratch_logits,
+    int32_t id_offset,
     const DFlash2TopKPlan& plan,
     hipStream_t stream) {
     if (logits == nullptr || out_ids == nullptr || out_logits == nullptr ||
@@ -265,15 +268,15 @@ hipError_t launch_dflash2_topk_f32_optimized(
         case 64u:
             return launch_optimized<64u>(logits, rows, vocab_size, row_stride, k, out_ids,
                                          out_logits, scratch_ids, scratch_logits,
-                                         plan.partitions, stream);
+                                         plan.partitions, id_offset, stream);
         case 128u:
             return launch_optimized<128u>(logits, rows, vocab_size, row_stride, k, out_ids,
                                           out_logits, scratch_ids, scratch_logits,
-                                          plan.partitions, stream);
+                                          plan.partitions, id_offset, stream);
         case 256u:
             return launch_optimized<256u>(logits, rows, vocab_size, row_stride, k, out_ids,
                                           out_logits, scratch_ids, scratch_logits,
-                                          plan.partitions, stream);
+                                          plan.partitions, id_offset, stream);
         default:
             return hipErrorInvalidValue;
     }

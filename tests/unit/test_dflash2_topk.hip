@@ -101,7 +101,8 @@ static void run_case(
     const std::vector<float>& host_logits,
     uint32_t rows,
     uint32_t vocab,
-    uint32_t k) {
+    uint32_t k,
+    int32_t id_offset = 0) {
     shelf::gpu::Tensor logits;
     shelf::gpu::Tensor out_ids;
     shelf::gpu::Tensor out_logits;
@@ -122,7 +123,7 @@ static void run_case(
     const hipError_t err = shelf::kernel::launch_dflash2_topk_f32(
         logits.data<float>(), rows, vocab, vocab, k, out_ids.data<int32_t>(),
         out_logits.data<float>(), scratch_ids.data<int32_t>(),
-        scratch_logits.data<float>(), stream);
+        scratch_logits.data<float>(), id_offset, stream);
     check(err == hipSuccess, name + " launch");
     if (err != hipSuccess) return;
     check(hipStreamSynchronize(stream) == hipSuccess, name + " sync");
@@ -140,7 +141,7 @@ static void run_case(
     std::size_t id_mismatch = 0;
     std::size_t logit_mismatch = 0;
     for (std::size_t i = 0; i < ref.ids.size(); ++i) {
-        if (got_ids[i] != ref.ids[i]) ++id_mismatch;
+        if (got_ids[i] != ref.ids[i] + id_offset) ++id_mismatch;
         if (got_logits[i] != ref.logits[i]) ++logit_mismatch;
     }
     check(id_mismatch == 0, name + " ids mismatch " + std::to_string(id_mismatch));
@@ -218,6 +219,16 @@ int main() {
             logits[i] = static_cast<float>((i * 2654435761u) % 4093u);
         }
         run_case(arena, stream, "cross_partition", logits, rows, vocab, k);
+    }
+
+    {
+        const uint32_t rows = 2u;
+        const uint32_t vocab = 1024u;
+        std::vector<float> logits(static_cast<std::size_t>(rows) * vocab);
+        for (std::size_t i = 0; i < logits.size(); ++i) {
+            logits[i] = static_cast<float>((i * 40503u) % 1009u);
+        }
+        run_case(arena, stream, "vocab_offset", logits, rows, vocab, k, 124160);
     }
 
     {
