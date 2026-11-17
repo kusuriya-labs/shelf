@@ -1,49 +1,9 @@
 #pragma once
 
-#include <shelf/core/status.h>
-#include <shelf/models/qwen35/runtime/executor.h>
-#include <shelf/models/qwen35/runtime/scheduling_types.h>
-#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/runtime/tp/tp_batch_hook.h>
 
-namespace shelf {
-namespace qwen35 {
-namespace runtime {
+namespace shelf::qwen35::runtime {
 
-class TpBatchHook {
-public:
-    virtual ~TpBatchHook() = default;
+using ::shelf::runtime::TpBatchHook;
 
-    virtual Status on_sequence_created(const PagedSequenceState& source) = 0;
-
-    virtual Status on_sequence_restored(const PagedSequenceState& source) {
-        (void)source;
-        return Status::make_ok();
-    }
-
-    virtual Status on_prefix_restored(const PagedSequenceState& source,
-                                      std::span<const int32_t> tokens) {
-        (void)source;
-        (void)tokens;
-        return Status::make_ok();
-    }
-
-    virtual uint32_t on_prefix_rank_count() { return 1u; }
-
-    virtual PagedSequenceState* on_prefix_rank_sequence(
-        const PagedSequenceState& source, uint32_t rank) {
-        (void)source;
-        (void)rank;
-        return nullptr;
-    }
-
-    virtual Status on_sequence_released(const PagedSequenceState& source) = 0;
-
-    virtual Result<BatchExecutionOutput> on_execute(const ScheduledBatch& batch) = 0;
-
-    virtual Result<BatchExecutionOutput> on_execute(
-        const ScheduledBatch& batch, const ExecuteBatchOptions* per_rank) = 0;
-};
-
-}
-}
-}
+}  // namespace shelf::qwen35::runtime

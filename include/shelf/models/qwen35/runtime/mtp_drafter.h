@@ -12,6 +12,7 @@
 #include <shelf/models/qwen35/runtime/executor.h>
 #include <shelf/models/qwen35/runtime/gdn_spec_history.h>
 #include <shelf/models/qwen35/runtime/scheduling_types.h>
+#include <shelf/runtime/tp/tp_batch_hook.h>
 #include <shelf/weights/matrix_weight.h>
 #include <hip/hip_runtime.h>
 
@@ -77,7 +78,6 @@ struct MtpTiming {
     double round_ms = 0.0;
 };
 
-class TpBatchHook;
 
 struct MtpGdnRankBinding {
     const state::GdnStatePool* pool = nullptr;
@@ -144,7 +144,7 @@ struct MtpDrafter {
     hipStream_t target_stream = nullptr;
     int target_device = -1;
     std::vector<MtpGdnRankState> extra_ranks;
-    TpBatchHook* tp_hook = nullptr;
+    ::shelf::runtime::TpBatchHook* tp_hook = nullptr;
 
     // The target hidden of the tokens the drafter has committed, copied out of the target
     // batch so a request that sits out a round still has its input.
@@ -220,7 +220,7 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
     hipStream_t stream,
     const MtpDrafterConfig& options,
     const std::vector<MtpGdnRankBinding>* extra_ranks = nullptr,
-    TpBatchHook* tp_hook = nullptr);
+    ::shelf::runtime::TpBatchHook* tp_hook = nullptr);
 
 Status mtp_drafter_shutdown(MtpDrafter& drafter, hipStream_t stream) noexcept;
 
@@ -321,7 +321,7 @@ Result<MtpSpecBatchContext> create_mtp_spec_batch_context(
     const MtpDrafterConfig& options,
     uint32_t max_requests,
     const std::vector<MtpGdnRankBinding>* extra_ranks = nullptr,
-    TpBatchHook* tp_hook = nullptr);
+    ::shelf::runtime::TpBatchHook* tp_hook = nullptr);
 
 Status shutdown_mtp_spec_batch_context(MtpSpecBatchContext& context) noexcept;
 
