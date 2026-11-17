@@ -188,6 +188,7 @@ shelf_set_hip_archs(shelf_qwen35_kernels_optimized)
 add_library(shelf_runtime STATIC
     src/shelf/runtime/batch/device_batch_context.hip
     src/shelf/runtime/decode_backend.cpp
+    src/shelf/runtime/dflash2_config.cpp
     src/shelf/runtime/executor.hip
     src/shelf/runtime/executor_footprint.cpp
     src/shelf/runtime/prefix_cache.cpp
@@ -310,7 +311,6 @@ set(
     src/shelf/models/qwen35/model/tensor_parallel_context.cpp
     src/shelf/models/qwen35/model/qwen35_model.cpp
     src/shelf/models/qwen35/model/lower_to_primitives.cpp
-    src/shelf/models/qwen35/dflash2/config.cpp
     src/shelf/models/qwen35/dflash2/weights.cpp
     src/shelf/models/qwen35/dflash2/context_state.hip
 )
