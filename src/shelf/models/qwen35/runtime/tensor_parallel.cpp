@@ -239,7 +239,7 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
             : static_cast<std::size_t>(drafter_head->k_padded);
         const bool exl3_mul24_head = drafter_head->quant_spec ==
             quantization::QuantSpecId::EXL3_MUL24_INT8_V1;
-        const DFlash2Footprint footprint = dflash2_footprint(
+        const DFlash2Footprint footprint = config.drafter_footprint(
             *config.drafter_config, spec_config, *rank->gdn_pool_,
             config.drafter_weights_bytes, lm_head_k,
             config.drafter_sessions == 0u ? config.max_scheduled_requests
@@ -257,38 +257,14 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
                      static_cast<unsigned>(footprint.sessions));
     }
     if (config.mtp_batch.enabled && config.mtp_batch.max_requests != 0u) {
-        qwen35::runtime::MtpDrafterConfig mtp_options;
-        mtp_options.num_drafts = config.mtp_batch.num_drafts;
-        mtp_options.max_seq_len = config.mtp_batch.max_seq_len;
-        mtp_options.page_tokens = config.mtp_batch.page_tokens;
-        mtp_options.max_batch_rows = config.mtp_batch.max_batch_rows;
-        mtp_options.kv_dtype = config.mtp_batch.kv_dtype;
-        std::size_t drafter_bytes = 0u;
-        if (config.tp_rank == 0u) {
-            drafter_bytes = qwen35::runtime::mtp_drafter_reserve_bytes(
-                                tc, mtp_options, rank->model_->token_row_ffn_size(),
-                                rank->model_->mtp_grouped_reserve_bytes(
-                                    qwen35::runtime::mtp_drafter_rows(mtp_options),
-                                    mtp_options.max_seq_len + 1u),
-                                rank->model_->uses_exl3_linear(),
-                                rank->model_->mtp_exl3_linear_shape(),
-                                &gdn_layout_result) *
-                            config.mtp_batch.max_requests;
-        }
-        const std::size_t state_bytes =
-            qwen35::runtime::mtp_batch_rank_state_reserve_bytes(
-                gdn_layout_result,
-                qwen35::runtime::mtp_spec_rows(config.mtp_batch.max_requests,
-                                               mtp_options.num_drafts),
-                config.mtp_batch.max_requests);
-        const std::size_t batch_bytes = drafter_bytes + state_bytes;
+        const std::size_t batch_bytes = config.mtp_reserve(
+            *rank->model_, tc, config.mtp_batch, gdn_layout_result, config.tp_rank);
         reserved += batch_bytes;
         plan.drafter_runtime += batch_bytes;
         std::fprintf(stderr,
-                     "MEMORY_PLAN tp mtp batch reserve: %s (%u slots, drafter %s)\n",
+                     "MEMORY_PLAN tp mtp batch reserve: %s (%u slots)\n",
                      gpu::format_gib(batch_bytes).c_str(),
-                     static_cast<unsigned>(config.mtp_batch.max_requests),
-                     gpu::format_gib(drafter_bytes).c_str());
+                     static_cast<unsigned>(config.mtp_batch.max_requests));
     }
     if (arena_free_now <= reserved) {
         return Status::insufficient_memory(
@@ -561,6 +537,8 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
         rank_config.arena_bytes = config.arena_bytes;
         rank_config.working_set_reserve_bytes = config.working_set_reserve_bytes;
         rank_config.drafter_config = config.drafter_config;
+        rank_config.drafter_footprint = config.drafter_footprint;
+        rank_config.mtp_reserve = config.mtp_reserve;
         rank_config.drafter_weights_bytes = config.drafter_weights_bytes;
         rank_config.drafter_drafts = config.drafter_drafts;
         rank_config.drafter_sessions = config.drafter_sessions;

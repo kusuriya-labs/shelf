@@ -468,7 +468,7 @@ Result<std::unique_ptr<TpRankModel>> build_qwen4exp_tp_rank_model(
     if (!text_config.ok()) return text_config.status();
     const auto& cfg = text_config.value();
     qwen4exp::Qwen4ExpLoadOptions load_options;
-    load_options.load_mtp = config.load_options.load_mtp_layers;
+    load_options.load_mtp = config.load_mtp_layers;
     auto model = qwen4exp::Qwen4ExpModel::load_from_safetensors(
         config.model_dir, config.tp_size, config.tp_rank, arena, stream,
         load_options);
@@ -510,12 +510,12 @@ Result<std::unique_ptr<TpRankModel>> build_qwen4exp_tp_rank_model(
 
 Result<std::unique_ptr<TpRankModel>> build_moe_tp_rank_model(
     const q35r::TpRankRuntimeConfig& config, gpu::GpuArena& arena, hipStream_t stream) {
-    if (config.load_options.stage.enabled) {
+    if (config.pipeline_stage.enabled) {
         return Status::unsupported(
             "a model with grouped experts has no pipeline stage weight load", __FILE__,
             __LINE__);
     }
-    if (config.load_options.load_mtp_layers && config.tp_size > 1u) {
+    if (config.load_mtp_layers && config.tp_size > 1u) {
         return Status::unsupported(
             "an MTP block is not partitioned across tensor parallel ranks", __FILE__, __LINE__);
     }
@@ -530,7 +530,7 @@ Result<std::unique_ptr<TpRankModel>> build_moe_tp_rank_model(
     qmoe::Qwen35MoeLoadOptions load_options;
     static_cast<qhy::HybridLoadOptions&>(load_options) =
         static_cast<const qhy::HybridLoadOptions&>(config.load_options);
-    load_options.load_mtp_layers = config.load_options.load_mtp_layers;
+    load_options.load_mtp_layers = config.load_mtp_layers;
     // The plan outlives the load: the loader keeps a pointer to it, so it cannot be a
     // temporary inside the branch.
     std::optional<weights::TensorPartitionPlan> plan;

@@ -77,6 +77,10 @@ inline shelf::weights::Exl3LinearShape exl3_linear_shape(
 // Dense-only load options on top of the shared hybrid options: an MTP block and a
 // vocabulary-sharded LM head exist for the dense model only.
 struct Qwen35LoadOptions : shelf::qwen_hybrid::HybridLoadOptions {
+    Qwen35LoadOptions() = default;
+    Qwen35LoadOptions(const shelf::qwen_hybrid::HybridLoadOptions& base)
+        : shelf::qwen_hybrid::HybridLoadOptions(base) {}
+
     bool load_mtp_layers = false;
     bool vocab_parallel_lm_head = true;
     PipelineStage stage;

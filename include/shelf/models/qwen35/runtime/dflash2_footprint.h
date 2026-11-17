@@ -3,6 +3,7 @@
 #include <shelf/models/qwen35/dflash2/config.h>
 #include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
 #include <shelf/inference/state/gdn_state_pool.h>
+#include <shelf/runtime/dflash2_reserve.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -10,17 +11,7 @@
 namespace shelf::qwen35 {
 namespace runtime {
 
-struct DFlash2Footprint {
-    std::size_t draft_weights = 0u;
-    std::size_t draft_scratch = 0u;
-    std::size_t session_slot = 0u;
-    std::size_t spec_batch = 0u;
-    std::size_t sessions = 0u;
-
-    std::size_t total() const noexcept {
-        return draft_weights + draft_scratch + spec_batch + session_slot * sessions;
-    }
-};
+using ::shelf::runtime::DFlash2Footprint;
 
 bool dflash2_prefill_rows(const dflash2::DFlash2Config& config, uint32_t tp,
                           const char* value, uint32_t& rows) noexcept;

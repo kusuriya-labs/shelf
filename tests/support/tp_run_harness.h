@@ -7,6 +7,7 @@
 #include <shelf/models/qwen35/runtime/continuous_batcher.h>
 #include <shelf/inference/execution/program_executor.h>
 #include <shelf/models/qwen35/runtime/tensor_parallel.h>
+#include <shelf/models/tp_rank_model.h>
 #include <shelf/models/qwen35/state/state_types.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 
@@ -438,7 +439,7 @@ inline RunResult run_tp2(const RunOptions& opts) {
     TpRankRuntime& rank1 = coordinator->rank(1);
 
     {
-        const Qwen35ModelWeights& weights = rank0.dense_model()->weights();
+        const Qwen35ModelWeights& weights = rank0.rank_model()->dense_model()->weights();
         if (!weights.layers.empty()) {
             result.gate_rows = weights.layers[0].ffn.gate.rows;
             result.down_cols = weights.layers[0].ffn.down.cols;
@@ -455,7 +456,7 @@ inline RunResult run_tp2(const RunOptions& opts) {
 
     ContinuousBatcher batcher(rank0.executor(), rank0.sequence_pool(), rank0.gdn_pool(),
                               rank0.kv_pool(),
-                              batcher_config(rank0.dense_model()->text_config(), opts),
+                              batcher_config(rank0.rank_model()->dense_model()->text_config(), opts),
                               rank0.stream());
     batcher.set_tp_batch_hook(coordinator.get());
 

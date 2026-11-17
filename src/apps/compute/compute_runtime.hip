@@ -666,6 +666,16 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
     tp_config.prefix_save_interval = config_.prefix_cache_save_interval;
     if (config_.draft_config_ready) {
         tp_config.drafter_config = &config_.draft_config;
+        tp_config.drafter_footprint = [](const shelf::runtime::DFlash2Config& cfg,
+                                         const shelf::runtime::DFlash2SpecDecoderConfig& spec,
+                                         shelf::state::GdnStatePool& pool,
+                                         std::size_t weights, std::size_t lm_head_k,
+                                         uint32_t sessions, std::size_t prefill_rows,
+                                         bool exl3_mul24_head) {
+            return qwen35::runtime::dflash2_footprint(
+                cfg, spec, pool, weights, lm_head_k, sessions, prefill_rows,
+                exl3_mul24_head);
+        };
         tp_config.drafter_weights_bytes = config_.draft_bytes;
         tp_config.drafter_drafts = config_.dflash2_drafts == 0u ? 7u : config_.dflash2_drafts;
         tp_config.drafter_sessions = config_.dflash2_sessions();
@@ -689,7 +699,7 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
         tp_config.rope_profile = *config_.rope_profile;
     }
     tp_config.load_options.verify_quantized_payload_crc = config_.verify_weights;
-    tp_config.load_options.load_mtp_layers = config_.mtp;
+    tp_config.load_mtp_layers = config_.mtp;
     if (config_.mtp) {
         qwen35::runtime::MtpDrafterConfig mtp_options;
         mtp_options.num_drafts = config_.mtp_drafts == 0u ? 7u : config_.mtp_drafts;
@@ -710,6 +720,35 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
         tp_config.mtp_batch.kv_dtype = mtp_options.kv_dtype;
         tp_config.mtp_batch.max_requests =
             config_.mtp_serve ? mtp_batch_requests(mtp_options) : 1u;
+        tp_config.mtp_reserve = [](const shelf::models::TpRankModel& model,
+                                   const shelf::qwen_hybrid::QwenHybridConfig& tc,
+                                   const qwen35::runtime::MtpBatchReserveConfig& cfg,
+                                   const shelf::state::GdnStatePoolLayout& layout,
+                                   uint32_t tp_rank) {
+            qwen35::runtime::MtpDrafterConfig options;
+            options.num_drafts = cfg.num_drafts;
+            options.max_seq_len = cfg.max_seq_len;
+            options.page_tokens = cfg.page_tokens;
+            options.max_batch_rows = cfg.max_batch_rows;
+            options.kv_dtype = cfg.kv_dtype;
+            std::size_t drafter_bytes = 0u;
+            if (tp_rank == 0u) {
+                drafter_bytes = qwen35::runtime::mtp_drafter_reserve_bytes(
+                    tc, options, model.token_row_ffn_size(),
+                    model.mtp_grouped_reserve_bytes(
+                        qwen35::runtime::mtp_drafter_rows(options),
+                        options.max_seq_len + 1u),
+                    model.uses_exl3_linear(),
+                    model.mtp_exl3_linear_shape(),
+                    &layout) * cfg.max_requests;
+            }
+            const std::size_t state_bytes =
+                qwen35::runtime::mtp_batch_rank_state_reserve_bytes(
+                    layout,
+                    qwen35::runtime::mtp_spec_rows(cfg.max_requests, options.num_drafts),
+                    cfg.max_requests);
+            return drafter_bytes + state_bytes;
+        };
     }
 
     const auto t_load_start = std::chrono::steady_clock::now();

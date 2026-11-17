@@ -104,16 +104,16 @@ protected:
 
 // Builds one rank's model in the arena the rank runtime created. `config` states the model
 // directory, the rank and the load options.
-using TpRankModelBuilder = shelf::qwen35::runtime::TpRankModelBuilder;
+using TpRankModelBuilder = shelf::runtime::TpRankModelBuilder;
 
 // The grouped-expert family's builder. The dense family's is
 // shelf::qwen35::runtime::build_dense_tp_rank_model.
 shelf::Result<std::unique_ptr<TpRankModel>> build_qwen4exp_tp_rank_model(
-    const shelf::qwen35::runtime::TpRankRuntimeConfig& config, gpu::GpuArena& arena,
+    const shelf::runtime::TpRankRuntimeConfig& config, gpu::GpuArena& arena,
     hipStream_t stream);
 
 shelf::Result<std::unique_ptr<TpRankModel>> build_moe_tp_rank_model(
-    const shelf::qwen35::runtime::TpRankRuntimeConfig& config, gpu::GpuArena& arena,
+    const shelf::runtime::TpRankRuntimeConfig& config, gpu::GpuArena& arena,
     hipStream_t stream);
 
 void prefetch_qwen4exp_ple_table(const std::string& model_dir);

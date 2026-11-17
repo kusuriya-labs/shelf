@@ -1,4 +1,6 @@
 #pragma once
+
+#include <shelf/models/common/qwen_hybrid/stage_range.h>
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/status.h>
 #include <shelf/models/common/qwen_hybrid/config.h>
@@ -23,6 +25,7 @@ namespace qwen_hybrid {
 
 struct HybridLoadOptions {
     bool verify_quantized_payload_crc = false;
+    bool vocab_parallel_lm_head = true;
     bool load_embedding = true;
     bool load_lm_head = true;
     bool load_final_norm = true;

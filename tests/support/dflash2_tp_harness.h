@@ -279,7 +279,7 @@ inline RunResult run_dflash2_tp2(const DFlash2Options& opts) {
     std::unique_ptr<TpCoordinator> coordinator = coordinator_result.release();
     TpRankRuntime& rank0 = coordinator->rank(0);
 
-    const auto& model = *rank0.dense_model();
+    const auto& model = *rank0.rank_model()->dense_model();
     const hipStream_t stream = rank0.stream();
     gpu::GpuArena& arena = rank0.arena();
 

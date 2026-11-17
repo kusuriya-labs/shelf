@@ -10,6 +10,7 @@
 #include <shelf/models/qwen35/runtime/tp_batch_hook.h>
 #include <shelf/models/qwen35/state/state_types.h>
 #include <shelf/models/common/qwen_hybrid/stop_tokens.h>
+#include <shelf/runtime/dflash2_spec_config.h>
 #include <shelf/runtime/execution/execution_types.h>
 #include <hip/hip_runtime.h>
 
@@ -37,13 +38,7 @@ constexpr uint32_t kDFlash2NoSessionSlot = 0xFFFFFFFFu;
 
 constexpr uint32_t kDFlash2NoThinkingAllowance = 0xFFFFFFFFu;
 
-struct DFlash2SpecDecoderConfig {
-    uint32_t num_drafts = 7u;
-    bool tree = false;
-    uint32_t tree_extra = 0u;
-    uint32_t tree_budget = 0u;
-    qwen_hybrid::StopTokens eos_tokens;
-};
+using ::shelf::runtime::DFlash2SpecDecoderConfig;
 
 struct DFlash2SpecTiming;
 
