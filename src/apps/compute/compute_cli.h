@@ -1,7 +1,7 @@
 #pragma once
 
 #include <shelf/core/status.h>
-#include <shelf/models/qwen35/runtime/decode_backend.h>
+#include <shelf/runtime/decode_backend.h>
 #include <shelf/models/qwen35/runtime/mtp_drafter.h>
 #include <shelf/models/qwen35/runtime/scheduling_types.h>
 
@@ -26,8 +26,8 @@ struct ComputeOptions {
     unsigned long tp = 1;
     unsigned long pipeline_parallel = 1;
     std::string kv_cache_dtype = "bf16";
-    shelf::qwen35::runtime::DecodeBackend decode_backend =
-        shelf::qwen35::runtime::DecodeBackend::Hip;
+    shelf::runtime::DecodeBackend decode_backend =
+        shelf::runtime::DecodeBackend::Hip;
     int verify_weights = 0;
     std::string dump_logits_path;
     std::string hidden_taps;

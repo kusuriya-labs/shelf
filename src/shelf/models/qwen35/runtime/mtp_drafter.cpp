@@ -511,7 +511,7 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
     executor_config.emit_normed_token_hidden = drafter->wide_hidden;
     executor_config.normed_token_hidden_width = drafter->hidden_width;
     executor_config.rope_profile = options.rope_profile;
-    executor_config.backend = runtime::DecodeBackend::Hip;
+    executor_config.backend = ::shelf::runtime::DecodeBackend::Hip;
 
     auto executor = create_executor(std::move(model_input), *drafter->slot_pool,
                                     *drafter->gdn_pool, *drafter->kv_pool, arena,

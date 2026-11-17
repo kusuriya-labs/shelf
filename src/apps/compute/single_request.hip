@@ -7,7 +7,7 @@
 #include <shelf/models/qwen35/dflash2/executor.h>
 #include <shelf/models/qwen35/dflash2/weights.h>
 #include "private_target_weights.h"
-#include <shelf/models/qwen35/runtime/decode_backend.h>
+#include <shelf/runtime/decode_backend.h>
 #include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
 #include <shelf/models/qwen35/runtime/mtp_drafter.h>
 #include <shelf/models/qwen35/runtime/dflash2_session_pool.h>

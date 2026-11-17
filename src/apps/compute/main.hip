@@ -5,7 +5,7 @@
 #include <shelf/models/qwen35/dflash2/config.h>
 #include <shelf/models/plamo3/model/config.h>
 #include <shelf/models/qwen35/model/rope_profile.h>
-#include <shelf/models/qwen35/runtime/decode_backend.h>
+#include <shelf/runtime/decode_backend.h>
 #include <shelf/models/qwen35/runtime/dflash2_footprint.h>
 
 #include <algorithm>
@@ -315,7 +315,7 @@ int main(int argc, char** argv) {
         return shelf::app::run_serve_stdio(*runtime, dflash_serve);
     }
     printf("DECODE_BACKEND=%s\n",
-           shelf::qwen35::runtime::decode_backend_name(
+           shelf::runtime::decode_backend_name(
                runtime->config().decode_backend));
     if (opt.mtp) {
         return shelf::app::run_mtp_shot(*runtime, prompt_ids, opt.max_new_tokens,

@@ -1,12 +1,16 @@
-# Executor / TP ランタイムの共通化: 依存調査と保留判断
+# Executor / TP ランタイムの共通化: 依存調査と切り出し方針
 
 2026-11-17。
 
 ## 1. 動機
 
-hy_v4 で TP=2 を行う際、TP ランタイムが
-`src/shelf/models/qwen35/runtime/tensor_parallel.cpp` にあるため、qwen35 配下の
-ファイルを編集する必要が生じる。新しい family の実装作業としては直感に反する。
+plamo3 は `shelf::plamo3` として実装済みの別 family だが、独自の Executor を
+持たず、qwen35 の Executor と TP ランタイムを再利用している。
+`src/apps/compute/compute_runtime.hip:130-134` は plamo3 を TP=1 に制限しており、
+TP=2 を必要とした瞬間に qwen35 配下のファイルを編集しなければならない。
+
+これは将来の仮定ではなく、すでに存在する family についての問題である。
+モデルに依存しない機能は共通側へ切り出す必要がある。
 
 現行の契約は `docs/developer/tensor_parallel_execution.md` の
 「multi-rank runtime の family 境界」と `docs/developer/architecture.md` にあり、
@@ -87,17 +91,18 @@ Executor が必要とする `shelf_inference_*` / `shelf_kernels_correctness` /
 | 選択肢 | 内容 | 判断 |
 | --- | --- | --- |
 | `shelf_runtime` へ直接配置 | Executor を `shelf_runtime` に移す | REJECT。境界テストと循環依存で不可 |
-| `shelf_executor` を新設 | 兄弟ターゲットを作り、qwen35 固有部分を注入コールバックへ追い出す | 保留。境界テストの契約を緩和する設計判断が必要 |
-| 現状維持 | 依存の実態に合わせて qwen35 配置を維持 | 保留。hy_v4 の具体化を待つ |
-| 調査結果のみ記録 | 本ファイルのように依存マップと選択肢を残す | ACCEPT |
+| `shelf_executor` を新設 | 兄弟ターゲットを作り、qwen35 固有部分を注入コールバックへ追い出す | ACCEPT。境界テストの契約を更新する |
+| 現状維持 | 依存の実態に合わせて qwen35 配置を維持 | REJECT。plamo3 が別 family として存在する時点で共通化の必要性は確定している |
+| 調査結果のみ記録 | 依存マップと選択肢を残す | ACCEPT（本ファイル） |
 
 `docs/research/20261105/moe_pipeline_parallel.md:28-42` の採否判断と同じく、
 family をまたぐ層は `shelf::models` の interface 経由で注入する方式が
-既に採用されている。Executor 本体を動かすかどうかは、hy_v4 が
-qwen35 runtime を再利用するかどうかで決まる。
+既に採用されている。Executor 本体もこの方式に合わせ、
+qwen35 固有の lowering / layout / 文字列判定を注入コールバックへ追い出す。
 
-AGENTS.md は「仮定の将来機能を軸にアーキテクチャを再設計しない」と定めており、
-hy_v4 は現時点でリポジトリに存在しない。そのため今回は設計判断を保留する。
+plamo3 は TP=1 に制限されているが、それはランタイム側の制約であり、
+モデル側の要件ではない。TP ランタイムを共通層へ置くことで、
+plamo3 を含む複数 family から同じ TP 実装を利用できるようにする。
 
 ## 4. 今回の対応
 
@@ -105,5 +110,7 @@ TP prefix cache の VRAM reserve を capture slot に合わせる起動修正を
 分離してコミットした。これは Qwen4Exp の radix + 262144 起動を可能にする
 独立したバグ修正であり、Executor 共通化とは依存しない。
 
-Executor 共通化は hy_v4 の実装が具体化した時点で、本ファイルの
-選択肢から改めて選ぶ。
+Executor 共通化は `shelf_executor` ターゲットの新設と
+`shelf::runtime` namespace への移動として実行する。
+境界テスト (`test_architecture_boundaries.cpp`) の禁止エッジと文字列検査を
+新しい配置に合わせて更新する。

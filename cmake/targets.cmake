@@ -187,6 +187,7 @@ shelf_set_hip_archs(shelf_qwen35_kernels_optimized)
 # Qwen3.5 paged sequence state management.
 add_library(shelf_runtime STATIC
     src/shelf/runtime/batch/device_batch_context.hip
+    src/shelf/runtime/decode_backend.cpp
     src/shelf/runtime/graph/primitive_graph.cpp
     src/shelf/runtime/stream_bridge.cpp
     src/shelf/runtime/program/program.cpp
@@ -439,7 +440,6 @@ add_library(shelf_qwen35_runtime STATIC
     src/shelf/models/qwen35/runtime/dflash2_footprint.cpp
     src/shelf/models/qwen35/runtime/executor_footprint.cpp
     src/shelf/models/qwen35/runtime/gdn_spec_history.hip
-    src/shelf/models/qwen35/runtime/decode_backend.cpp
     src/shelf/models/qwen35/dflash2/executor.hip
     src/shelf/models/common/drafter/linear.hip
 )

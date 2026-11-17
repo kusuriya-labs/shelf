@@ -1,9 +1,8 @@
-#include <shelf/models/qwen35/runtime/decode_backend.h>
+#include <shelf/runtime/decode_backend.h>
 
 #include <strings.h>
 
 namespace shelf {
-namespace qwen35 {
 namespace runtime {
 
 const char* decode_backend_name(DecodeBackend backend) {
@@ -26,5 +25,4 @@ bool parse_decode_backend(const char* text, DecodeBackend* out) {
 }
 
 }  // namespace runtime
-}  // namespace qwen35
 }  // namespace shelf

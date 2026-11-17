@@ -192,7 +192,7 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
     auto& tp = opt.tp;
     auto& pipeline_parallel = opt.pipeline_parallel;
     auto& kv_cache_dtype = opt.kv_cache_dtype;
-    shelf::qwen35::runtime::DecodeBackend& decode_backend = opt.decode_backend;
+    shelf::runtime::DecodeBackend& decode_backend = opt.decode_backend;
     auto& verify_weights = opt.verify_weights;
     auto& dump_logits_path = opt.dump_logits_path;
     auto& hidden_taps = opt.hidden_taps;
@@ -286,7 +286,7 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
             }
         } else if (std::strcmp(argv[i], "--decode-backend") == 0 && i + 1 < argc) {
             const char* backend_text = argv[++i];
-            if (!shelf::qwen35::runtime::parse_decode_backend(backend_text,
+            if (!shelf::runtime::parse_decode_backend(backend_text,
                                                           &decode_backend)) {
                 fprintf(stderr, "bad --decode-backend: %s (expected hip)\n",
                         backend_text);
@@ -441,7 +441,7 @@ int validate_compute_options(const ComputeOptions& opt) {
     const auto& tp = opt.tp;
     const auto& pipeline_parallel = opt.pipeline_parallel;
     const auto& kv_cache_dtype = opt.kv_cache_dtype;
-    const shelf::qwen35::runtime::DecodeBackend& decode_backend = opt.decode_backend;
+    const shelf::runtime::DecodeBackend& decode_backend = opt.decode_backend;
     const auto& verify_weights = opt.verify_weights;
     const auto& dump_logits_path = opt.dump_logits_path;
     const auto& serve_stdio = opt.serve_stdio;

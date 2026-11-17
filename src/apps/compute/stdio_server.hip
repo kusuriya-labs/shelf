@@ -4,7 +4,7 @@
 #include "compute_common.h"
 
 #include <shelf/models/qwen35/dflash2/context_state.h>
-#include <shelf/models/qwen35/runtime/decode_backend.h>
+#include <shelf/runtime/decode_backend.h>
 #include <shelf/models/qwen35/runtime/mtp_drafter.h>
 #include <shelf/models/qwen35/runtime/runtime_request.h>
 #include <shelf/models/qwen35/state/state_types.h>

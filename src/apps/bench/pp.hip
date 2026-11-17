@@ -4,7 +4,7 @@
 #include <shelf/models/loaded_model.h>
 #include <shelf/models/tp_rank_model.h>
 #include <shelf/models/model_weights_factory.h>
-#include <shelf/models/qwen35/runtime/decode_backend.h>
+#include <shelf/runtime/decode_backend.h>
 #include <shelf/models/qwen35/runtime/executor.h>
 #include <shelf/models/qwen35/runtime/scheduling_types.h>
 #include <shelf/models/qwen35/runtime/tensor_parallel.h>
@@ -53,8 +53,8 @@ struct BenchOptions {
     int tokens_offset = 0;
     std::string output;
     std::string perf_stats_output;
-    shelf::qwen35::runtime::DecodeBackend decode_backend =
-        shelf::qwen35::runtime::DecodeBackend::Hip;
+    shelf::runtime::DecodeBackend decode_backend =
+        shelf::runtime::DecodeBackend::Hip;
 };
 
 void print_usage(FILE* out) {
@@ -189,7 +189,7 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
                 return false;
             }
         } else if (key == "--decode-backend") {
-            if (!shelf::qwen35::runtime::parse_decode_backend(
+            if (!shelf::runtime::parse_decode_backend(
                     need_value().c_str(), &opts.decode_backend)) {
                 fprintf(stderr, "invalid --decode-backend\n");
                 return false;

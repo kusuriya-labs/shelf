@@ -7,7 +7,7 @@
 #include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35/model/rope_profile.h>
 #include <shelf/models/qwen35/runtime/continuous_batcher.h>
-#include <shelf/models/qwen35/runtime/decode_backend.h>
+#include <shelf/runtime/decode_backend.h>
 #include <shelf/models/qwen35/runtime/executor.h>
 #include <shelf/models/qwen35/runtime/prefix_cache.h>
 #include <shelf/models/qwen35/runtime/pipeline_parallel.h>
@@ -78,8 +78,8 @@ struct Qwen35RuntimeConfig {
     std::array<uint32_t, qwen35::kMaxTargetHiddenTaps> target_hidden_taps{};
     uint32_t target_hidden_tap_count = 0;
     uint32_t tp_combine_f32 = 0;
-    qwen35::runtime::DecodeBackend decode_backend =
-        qwen35::runtime::DecodeBackend::Hip;
+    ::shelf::runtime::DecodeBackend decode_backend =
+        ::shelf::runtime::DecodeBackend::Hip;
     bool prefix_cache = true;
     uint32_t prefix_cache_checkpoints = 16;
     uint32_t prefix_cache_spec_ring_bytes = 0;

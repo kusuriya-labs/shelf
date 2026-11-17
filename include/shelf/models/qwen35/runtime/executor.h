@@ -27,7 +27,7 @@
 #include <memory>
 #include <span>
 #include <vector>
-#include <shelf/models/qwen35/runtime/decode_backend.h>
+#include <shelf/runtime/decode_backend.h>
 #include <shelf/runtime/stream_bridge.h>
 
 namespace shelf {
@@ -52,7 +52,7 @@ struct ExecutorConfig {
     // Maximum cached context the model-level graphs size their state from. Qwen4Exp uses
     // it for the QSA indexer capacity; the Qwen35 families ignore it.
     uint32_t max_context_tokens = 0;
-    runtime::DecodeBackend backend = runtime::DecodeBackend::Hip;
+    ::shelf::runtime::DecodeBackend backend = ::shelf::runtime::DecodeBackend::Hip;
     const Qwen35TensorParallelContext* tp = nullptr;
     EffectiveRopeProfile rope_profile;
     // Empty retains the legacy single-table profile and theta.
