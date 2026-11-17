@@ -67,6 +67,7 @@ template <>
 struct QsaKVReader<KVCacheDType::FP8_E4M3> {
     struct Block {
         float cell[kR][kDimsPerLane];
+        float scale[kR];
     };
 
     __device__ __forceinline__ static void load_k(const uint8_t* base, uint32_t stride,
@@ -82,17 +83,17 @@ struct QsaKVReader<KVCacheDType::FP8_E4M3> {
             }
             const uint8_t* codes =
                 base + static_cast<std::size_t>(c) * stride + lane * kDimsPerLane;
-            const float scale = scales[c * scale_stride];
+            raw.scale[c] = scales[c * scale_stride];
             const uint32_t p0 = *reinterpret_cast<const uint32_t*>(codes);
             const uint32_t p1 = *reinterpret_cast<const uint32_t*>(codes + 4);
-            raw.cell[c][0] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p0), 0) * scale;
-            raw.cell[c][1] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p0), 1) * scale;
-            raw.cell[c][2] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p0), 2) * scale;
-            raw.cell[c][3] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p0), 3) * scale;
-            raw.cell[c][4] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p1), 0) * scale;
-            raw.cell[c][5] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p1), 1) * scale;
-            raw.cell[c][6] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p1), 2) * scale;
-            raw.cell[c][7] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p1), 3) * scale;
+            raw.cell[c][0] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p0), 0);
+            raw.cell[c][1] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p0), 1);
+            raw.cell[c][2] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p0), 2);
+            raw.cell[c][3] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p0), 3);
+            raw.cell[c][4] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p1), 0);
+            raw.cell[c][5] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p1), 1);
+            raw.cell[c][6] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p1), 2);
+            raw.cell[c][7] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p1), 3);
         }
     }
 
@@ -346,7 +347,10 @@ __global__ __launch_bounds__(kThreads) void qsa_sparse_attention_kernel(
                         float sum = 0.0f;
 #pragma unroll
                         for (uint32_t d = 0; d < kDimsPerLane; ++d) sum += q[h][d] * kx[d];
-                        part[h][c] = sum;
+                        if constexpr (DType == KVCacheDType::FP8_E4M3)
+                            part[h][c] = sum * kr.scale[c];
+                        else
+                            part[h][c] = sum;
                     }
                 }
 #pragma unroll
@@ -391,7 +395,9 @@ __global__ __launch_bounds__(kThreads) void qsa_sparse_attention_kernel(
                     QsaKVReader<DType>::values(vr, c, vx);
 #pragma unroll
                     for (uint32_t h = 0; h < kHeadsPerWarp; ++h) {
-                        const float pc = __shfl_sync(0xFFFFFFFFULL, p, h * kR + c);
+                        float pc = __shfl_sync(0xFFFFFFFFULL, p, h * kR + c);
+                        if constexpr (DType == KVCacheDType::FP8_E4M3)
+                            pc *= vr.scale[c];
 #pragma unroll
                         for (uint32_t d = 0; d < kDimsPerLane; ++d) acc[h][d] += pc * vx[d];
                     }
