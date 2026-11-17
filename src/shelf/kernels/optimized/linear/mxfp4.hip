@@ -412,6 +412,157 @@ __global__ void __launch_bounds__(kThreadsPerBlock * kSplit) gemm_mxfp4_w4a8_spl
     }
 }
 
+constexpr uint32_t kGemvWarps = 8u;
+constexpr uint32_t kGemvThreads = 32u * kGemvWarps;
+constexpr uint32_t kGemvOutPerWarp = 32u;
+constexpr uint32_t kGemvSecondHalfBytes = 16u * 32u;
+
+// Decode GEMV: one lane owns one output row and keeps one accumulator per
+// activation row, so the weight row is streamed once for every activation row.
+// A 32-K native block is one 16-byte load whose eight nibble pairs expand to the
+// four E4M3 operand words of the FP8 dot4 unit; the matching activation fragment
+// is the lane's 16 bytes in the tile row block plus the 16 bytes of the tile row
+// block 16 rows below. K is divided across the warps of the block and reduced
+// through LDS in warp order, so the launch still fills the device on narrow
+// output widths where one wave per 16 outputs leaves the grid empty.
+template <uint32_t kRows, bool kExact, bool kFold>
+__global__ __launch_bounds__(kGemvThreads) void gemv_mxfp4_w4a8_kernel(
+    const uint8_t* __restrict__ weight_codes,
+    const uint8_t* __restrict__ weight_scales,
+    const uint8_t* __restrict__ weight_ref,
+    const uint8_t* __restrict__ activation_codes,
+    const float* __restrict__ activation_scales,
+    void* __restrict__ output,
+    const uint32_t output_dtype,
+    const uint32_t rows,
+    const uint32_t out_features,
+    const uint32_t k_padded,
+    const uint32_t weight_scale_stride,
+    const uint32_t activation_code_stride,
+    const uint32_t activation_scale_stride,
+    const uint32_t output_row_stride) {
+    const uint32_t tid = threadIdx.x;
+    const uint32_t warp = tid >> 5u;
+    const uint32_t lane = tid & 31u;
+    const uint32_t nb = k_padded >> 5;
+    const uint32_t ng = k_padded >> 7;
+    const uint32_t as_row_floats = activation_scale_stride >> 2u;
+
+    const uint32_t o_raw = blockIdx.x * kGemvOutPerWarp + lane;
+    const uint32_t o = o_raw < out_features ? o_raw : out_features - 1u;
+    const uint32_t row_loops = kExact ? kRows : (rows < kRows ? rows : kRows);
+
+    const uint8_t* wrow = weight_codes +
+        static_cast<size_t>(o >> 4) * (static_cast<size_t>(nb) * kWeightBlockBytes) +
+        static_cast<size_t>(o & 15u) * 16u;
+    const uint8_t* wsrow = weight_scales + static_cast<size_t>(o) * weight_scale_stride;
+
+    const uint8_t* arow[kRows];
+    #pragma unroll
+    for (uint32_t t = 0u; t < kRows; ++t)
+        arow[t] = activation_codes +
+            static_cast<size_t>(t) * (static_cast<size_t>(activation_code_stride) * 16u) +
+            static_cast<size_t>(o & 15u) * kFragLaneBytes;
+
+    __shared__ uint2 mag_lds[16];
+    int ref = 0;
+    float epi = 1.0f;
+    if constexpr (kFold) {
+        mxfp4_mag_lds(mag_lds, tid);
+        ref = static_cast<int>(weight_ref[o]);
+        epi = mxfp4_e8m0_f32(static_cast<uint8_t>(ref));
+        detail::lds_barrier();
+    }
+
+    float acc[kRows];
+    #pragma unroll
+    for (uint32_t t = 0u; t < kRows; ++t) acc[t] = 0.0f;
+
+    const uint32_t ag_start = (ng * warp) / kGemvWarps;
+    const uint32_t ag_stop = (ng * (warp + 1u)) / kGemvWarps;
+
+    for (uint32_t ag = ag_start; ag < ag_stop; ++ag) {
+        #pragma unroll
+        for (uint32_t u = 0u; u < 4u; ++u) {
+            const uint32_t ib = ag * 4u + u;
+            uint32_t t0 = kFoldMag[0][0];
+            uint32_t t1 = kFoldMag[0][1];
+            float ws = 0.0f;
+            if constexpr (kFold) {
+                const uint2 mg = mag_lds[mxfp4_fold_d(ref, wsrow[ib])];
+                t0 = mg.x;
+                t1 = mg.y;
+            } else {
+                ws = mxfp4_e8m0_f32(wsrow[ib]);
+            }
+
+            const uint4 w = *reinterpret_cast<const uint4*>(
+                wrow + static_cast<size_t>(ib) * kWeightBlockBytes);
+            const int32x2_t e0 = mxfp4_expand(w.x, t0, t1);
+            const int32x2_t e1 = mxfp4_expand(w.y, t0, t1);
+            const int32x2_t e2 = mxfp4_expand(w.z, t0, t1);
+            const int32x2_t e3 = mxfp4_expand(w.w, t0, t1);
+
+            const uint32_t aoff = (ib >> 1) * kFragBlockBytes + (ib & 1u) * 16u;
+            for (uint32_t t = 0u; t < row_loops; ++t) {
+                const uint8_t* ap = arow[t] + aoff;
+                const uint4 a = *reinterpret_cast<const uint4*>(ap);
+                const uint4 b = *reinterpret_cast<const uint4*>(ap + kGemvSecondHalfBytes);
+                float p0 = 0.0f;
+                float p1 = 0.0f;
+                p0 = __builtin_amdgcn_dot4_f32_fp8_fp8(
+                    static_cast<uint32_t>(e0[0]), a.x, p0);
+                p1 = __builtin_amdgcn_dot4_f32_fp8_fp8(
+                    static_cast<uint32_t>(e1[0]), a.y, p1);
+                p0 = __builtin_amdgcn_dot4_f32_fp8_fp8(
+                    static_cast<uint32_t>(e2[0]), b.x, p0);
+                p1 = __builtin_amdgcn_dot4_f32_fp8_fp8(
+                    static_cast<uint32_t>(e3[0]), b.y, p1);
+                p0 = __builtin_amdgcn_dot4_f32_fp8_fp8(
+                    static_cast<uint32_t>(e0[1]), a.z, p0);
+                p1 = __builtin_amdgcn_dot4_f32_fp8_fp8(
+                    static_cast<uint32_t>(e1[1]), a.w, p1);
+                p0 = __builtin_amdgcn_dot4_f32_fp8_fp8(
+                    static_cast<uint32_t>(e2[1]), b.z, p0);
+                p1 = __builtin_amdgcn_dot4_f32_fp8_fp8(
+                    static_cast<uint32_t>(e3[1]), b.w, p1);
+                if constexpr (kFold)
+                    acc[t] += p0 + p1;
+                else
+                    acc[t] = __builtin_fmaf(p0 + p1, ws, acc[t]);
+            }
+        }
+    }
+
+    __shared__ float red[kGemvWarps][kRows][32];
+    #pragma unroll
+    for (uint32_t t = 0u; t < kRows; ++t)
+        red[warp][t][lane] = t < row_loops ? acc[t] : 0.0f;
+    detail::lds_barrier();
+
+    if (warp == 0u) {
+        for (uint32_t t = 0u; t < row_loops; ++t) {
+            float s = 0.0f;
+            #pragma unroll
+            for (uint32_t w = 0u; w < kGemvWarps; ++w)
+                s += red[w][t][lane];
+            if (o_raw < out_features) {
+                float v = s;
+                if constexpr (kFold)
+                    v *= epi;
+                v *= activation_scales[static_cast<size_t>(t) * as_row_floats];
+                const size_t out_idx = static_cast<size_t>(t) * output_row_stride + o;
+                if (output_dtype == static_cast<uint32_t>(Mxfp4GemmOutputDType::BF16)) {
+                    static_cast<shelf::bf16_t*>(output)[out_idx] =
+                        shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(v))};
+                } else {
+                    static_cast<float*>(output)[out_idx] = v;
+                }
+            }
+        }
+    }
+}
+
 constexpr uint32_t k2dThreads = 256u;
 constexpr uint32_t k2dRowsPerBlock = kMxfp4GemmPrefill2dRowsPerBlock;
 constexpr uint32_t k2dKChunk = 128u;
@@ -786,6 +937,18 @@ hipError_t launch_rowblock(const LaunchArgs& a, hipStream_t stream) {
     return hipGetLastError();
 }
 
+template <uint32_t kRows, bool kExact>
+hipError_t launch_gemv(const LaunchArgs& a, hipStream_t stream) {
+    const dim3 grid((a.out_features + kGemvOutPerWarp - 1u) / kGemvOutPerWarp, 1, 1);
+    if (a.weight_ref != nullptr)
+        gemv_mxfp4_w4a8_kernel<kRows, kExact, true>
+            <<<grid, kGemvThreads, 0, stream>>>(MXFP4_ARGS(a));
+    else
+        gemv_mxfp4_w4a8_kernel<kRows, kExact, false>
+            <<<grid, kGemvThreads, 0, stream>>>(MXFP4_ARGS(a));
+    return hipGetLastError();
+}
+
 template <int MB, int SPLIT>
 hipError_t launch_splitk(const LaunchArgs& a, hipStream_t stream) {
     const dim3 grid((a.out_features + kTileOut - 1u) / kTileOut,
@@ -853,6 +1016,20 @@ hipError_t launch_gemm_mxfp4_w4a8_wmma(
                                          : launch_prefill_2d<true, false>(a, stream);
         return weight_ref != nullptr ? launch_prefill_2d<false, true>(a, stream)
                                      : launch_prefill_2d<false, false>(a, stream);
+    }
+    if (config.id == Mxfp4GemmConfigId::Gemv) {
+        if (rows > kMxfp4GemmGemvMaxRows)
+            return hipErrorNotSupported;
+        switch (rows) {
+            case 1u: return launch_gemv<1u, true>(a, stream);
+            case 2u: return launch_gemv<2u, true>(a, stream);
+            case 3u: return launch_gemv<4u, false>(a, stream);
+            case 4u: return launch_gemv<4u, true>(a, stream);
+            case 5u:
+            case 6u:
+            case 7u: return launch_gemv<8u, false>(a, stream);
+            default: return launch_gemv<8u, true>(a, stream);
+        }
     }
     switch (config.id) {
     case Mxfp4GemmConfigId::RowBlock4:

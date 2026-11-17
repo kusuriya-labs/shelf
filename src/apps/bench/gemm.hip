@@ -70,7 +70,7 @@ void usage(FILE* f) {
         "  --k N                          (default 5120)\n"
         "  --shapes N:K,N:K,...           (explicit shape list)\n"
         "  --impl auto|wmma|wide|splitk|exact|smallrows  (bf16 forced implementation)\n"
-        "  --impl auto|splitk|rowblock1|2|4|prefill2d  (mxfp4 / fp8 forced implementation)\n"
+        "  --impl auto|gemv|splitk|rowblock1|2|4|prefill2d  (mxfp4 / fp8 forced implementation)\n"
         "  --fp8-split N                    fp8 split-K ways (default 8)\n"
         "  --fp8-split-mb N                 fp8 split-K row tile 1|2 (default auto)\n"
         "  --mxfp4-split N                  mxfp4 split-K ways (default 8)\n"
@@ -694,7 +694,8 @@ shelf::kernel::Mxfp4GemmConfig mxfp4_config_for(const std::string& impl, uint32_
                                                 uint32_t unroll) {
     using Id = shelf::kernel::Mxfp4GemmConfigId;
     Id id = Id::RowBlock1;
-    if (impl == "splitk") id = Id::SplitK;
+    if (impl == "gemv") id = Id::Gemv;
+    else if (impl == "splitk") id = Id::SplitK;
     else if (impl == "prefill2d") id = Id::Prefill2D;
     else if (impl == "rowblock2") id = Id::RowBlock2;
     else if (impl == "rowblock4") id = Id::RowBlock4;
@@ -716,6 +717,7 @@ const char* fp8_config_name(shelf::kernel::Fp8FinegrainedGemmConfigId id) {
 
 const char* mxfp4_config_name(const shelf::kernel::Mxfp4GemmConfig& cfg) {
     switch (cfg.id) {
+    case shelf::kernel::Mxfp4GemmConfigId::Gemv: return "gemv";
     case shelf::kernel::Mxfp4GemmConfigId::SplitK: return "splitk";
     case shelf::kernel::Mxfp4GemmConfigId::Prefill2D: return "prefill2d";
     case shelf::kernel::Mxfp4GemmConfigId::RowBlock1: return "rowblock1";

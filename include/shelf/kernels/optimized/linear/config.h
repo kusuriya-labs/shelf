@@ -66,8 +66,10 @@ inline constexpr uint32_t kFp8FinegrainedGemmSplitKMinGroups = 4u;
 
 // MXFP4 W4A8 decode / verify row counts run on the WMMA row-block family:
 // SplitK (small out_features, K split across waves) or RowBlock (16 outputs per
-// wave, MB activation row tiles). rows == 1 has no dedicated variant: the FP8
-// linear path removed its decode1 kernel and MXFP4 follows the same contract.
+// wave, MB activation row tiles); the GEMV family covers the one-lane-per-output
+// decode shapes whose WMMA block wastes 15 of its 16 output lanes. The
+// row-count crossover is set from the measured kernel time and weight rate in
+// docs/research (Gemv vs RowBlock1 at the same weight bytes).
 inline constexpr uint32_t kMxfp4GemmRowTile = 16u;
 // Measured on R9700 with shelf-bench gemm --dtype mxfp4 (docs/research).
 inline constexpr uint32_t kMxfp4GemmSplitKMaxRows = 64u;
@@ -79,6 +81,12 @@ inline constexpr uint32_t kMxfp4GemmSplitKWays = 8u;
 inline constexpr uint32_t kMxfp4GemmRowBlock1MaxRows = 16u;
 inline constexpr uint32_t kMxfp4GemmRowBlock1MaxOutFeatures = 8192u;
 inline constexpr uint32_t kMxfp4GemmRowBlock2MaxRows = 192u;
+inline constexpr uint32_t kMxfp4GemmGemvMaxRows = 8u;
+// The GEMV streams the weight once per output row and holds one accumulator per
+// activation row, so its instruction count grows with the row count while the
+// WMMA block does not. Above this weight footprint the WMMA path already runs at
+// the DRAM ceiling (>= 590 GB/s measured), so the GEMV is not selected there.
+inline constexpr uint64_t kMxfp4GemmGemvMaxWeightBytes = 24000000ull;
 
 enum class Mxfp4GemmConfigId : uint8_t {
     Prefill2D,
@@ -86,6 +94,7 @@ enum class Mxfp4GemmConfigId : uint8_t {
     RowBlock1,
     RowBlock2,
     RowBlock4,
+    Gemv,
 };
 
 struct Mxfp4GemmConfig {

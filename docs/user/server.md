@@ -72,7 +72,7 @@ Ready.
 | `--host HOST` | listen address (default 127.0.0.1) |
 | `--port PORT` | listen port (default 8000) |
 | `--compute COMPUTE` | shelf-compute path |
-| `--max-seq-len MAX_SEQ_LEN` | max sequence length (default 32768) |
+| `--max-seq-len MAX_SEQ_LEN` | max sequence length (default 32768; PLaMo 3: 2048) |
 | `--max-num-batched-tokens MAX_NUM_BATCHED_TOKENS` | token budget per scheduled step; also sets the executor row bucket (default 2048) |
 | `--max-concurrent-requests MAX_CONCURRENT_REQUESTS` | max in-flight requests (default 4) |
 | `--inference-budget-tokens INFERENCE_BUDGET_TOKENS` | max generated tokens per request (default 32768) |
@@ -86,13 +86,14 @@ Ready.
 | `--working-set-reserve-gib WORKING_SET_RESERVE_GIB` | arena headroom kept free for the working set (0 = size it from the row bucket, default 0) |
 | `--rope-factor {auto,1,2,4}` | static YaRN rope factor forwarded to compute (default auto) |
 | `--prefix-cache {0,1}` | enable prefix cache (default 1) |
-| `--prefix-cache-checkpoints PREFIX_CACHE_CHECKPOINTS` | 保持する prefix checkpoint 数。pinned host memory を使う（default 16） |
+| `--prefix-cache-checkpoints PREFIX_CACHE_CHECKPOINTS` | stored prefix checkpoints in host memory (default 4) |
 | `--prefix-cache-strategy {radix,slot}` | prefix cache entry strategy (default radix) |
-| `--prefix-cache-save-interval PREFIX_CACHE_SAVE_INTERVAL` | 定期 prefix checkpoint の間隔 token（default 16384、`0` = 定期 checkpoint を無効化） |
+| `--prefix-cache-save-interval PREFIX_CACHE_SAVE_INTERVAL` | periodic prefix checkpoint spacing in tokens; 0 disables periodic checkpoints (default 16384) |
 | `--dflash2-model-dir DFLASH2_MODEL_DIR` | DFlash2 draft model directory (enables speculative decoding) |
 | `--dflash2-drafts DFLASH2_DRAFTS` | speculative draft tokens per round (default 7) |
-| `--dflash2-tree-budget N\|auto` | 木検証の request あたり行数。既定の `auto` はその round の生成中 request が 1 本だけで投機中なら 10 行、それ以外は chain の 8 行。`0` は木検証を無効化。auto は TP=1・draft 数 7 用 |
-| `--dflash2-max-sessions DFLASH2_MAX_SESSIONS` | requests that may speculate at once; the rest decode without speculation (0 = min(`--max-concurrent-requests`, 8)) |
+| `--dflash2-tree-budget N\|auto` | tree verify rows: auto uses 10 for one decoding request if speculative, 8 otherwise (default auto; 0 disables) |
+| `--dflash2-adaptive` | batch と受理数に応じて投機を制御する |
+| `--dflash2-max-sessions DFLASH2_MAX_SESSIONS` | requests that may speculate at once; the rest decode without speculation (0 = min(--max-concurrent- requests, 8)) |
 | `--mtp` | checkpoint の MTP block を drafter として使う（複数 request を同時に処理する） |
 | `--mtp-drafts MTP_DRAFTS` | MTP の draft tokens per round（default 4） |
 | `--verify-weights` | verify quantized payload CRC32 on load |
