@@ -16,7 +16,15 @@ family層
   qwen35 (Dense)   qwen35moe (Moe)   qwen35qsa (Qsa)   qwen4exp (Qwen4Exp, loadのみ)   plamo3
       ↓
 shelf_qwen35_runtime
-  Executor / ContinuousBatcher / DFlash2 / MTP / spec decode / TP / pipeline parallel
+  family固有の executor 生成 (dense) / tp_rank_model_dense / pipeline_stage_model_dense / MTP drafter
+      ↓
+shelf_runtime (共通 runtime)
+  Executor / ContinuousBatcher / DFlash2 spec decode / spec state / request / token budget /
+  prefix cache / decode backend / TP / pipeline parallel / graph / program / workspace layout
+      ↓
+shelf_dflash2 + shelf_kernels_dflash2
+  DFlash2 runtime (spec batch / session pool / tree / footprint / context state / executor / weights)
+  DFlash2 device kernels
       ↓
 inference共通層
   inference/state      (SequenceSlotPool / PagedKVPool / GdnStatePool / QsaStatePool /
@@ -29,10 +37,6 @@ kernel層
   kernels/optimized  (family per file; linear / attention / gdn / elementwise / ...)
   kernels/fused      (複数処理を 1 launch に統合; moe / exl3 / octave / ...)
   kernels/correctness (1 TU + detail/*.inc + standalone/)
-  kernels/dflash2    (speculative decode の drafter; shelf_kernels_dflash2)
-      ↓
-shelf_runtime
-  PrimitiveGraph / Program / ProgramSet / DeviceBatchContext / workspace layout / TP transport
       ↓
 shelf_weights
   safetensors / quantized safetensors → GPU MatrixWeight / Tensor
@@ -61,15 +65,15 @@ root namespace は `shelf`。`include/shelf/**` と `src/shelf/**` のディレ�
 | `shelf/io/**` | `shelf` |
 | `shelf/quantization/**` | `shelf::quantization`（下位: `manifest` / `bundle` / `codec` / `fp8` / `mxfp4` / `exl3`） |
 | `shelf/weights/**` | `shelf::weights` |
-| `shelf/runtime/**` | `shelf::runtime` |
-| `shelf/kernels/**` | `shelf::kernel` |
+| `shelf/runtime/**` | `shelf::runtime`（dflash2 の一部は `shelf::runtime::dflash2`） |
+| `shelf/kernels/**`（dflash2 を含む） | `shelf::kernel` |
 | `shelf/inference/state/**` | `shelf::state` |
 | `shelf/inference/scheduling/**` | `shelf::scheduling` |
 | `shelf/inference/execution/**` | `shelf::execution` |
 | `shelf/inference/prefix/**` | `shelf::inference::prefix` |
 | `shelf/models/common/qwen_hybrid/**` | `shelf::qwen_hybrid` |
 | `shelf/models/common/drafter/**` | `shelf::drafter` |
-| `shelf/models/qwen35/**`（model / weights / state / dflash2 / kernels） | `shelf::qwen35`（下位: `runtime` / `dflash2`） |
+| `shelf/models/qwen35/**` | `shelf::qwen35`（下位: `runtime` / `dflash2`） |
 | `shelf/models/qwen35moe/**` | `shelf::qwen35moe` |
 | `shelf/models/qwen35qsa/**` | `shelf::qwen35qsa` |
 | `shelf/models/qwen4exp/**` | `shelf::qwen4exp` |
@@ -77,9 +81,26 @@ root namespace は `shelf`。`include/shelf/**` と `src/shelf/**` のディレ�
 | `shelf/models/model_weights_factory.h` / `loaded_model.h` / `tp_rank_model.h` / `pipeline_stage_model.h` | `shelf::models` |
 | `src/apps/**` | `shelf::app` / `shelf::bench::quality` |
 
-generic 層（`shelf/kernels` / `shelf/inference` / `models/common`）は
-特定の family（`qwen35` / `qwen35moe` / `qwen35qsa` / `qwen4exp`）を参照できない。
+共通 runtime は `models/common/qwen_hybrid` の family 中立な部品（config /
+stop_tokens / lowered_primitives / stage_range / weight_loader /
+tensor_parallel_context）と `models/tp_rank_model.h` / `models/pipeline_stage_model.h`
+の family 中立 interface を参照できる。ただし具体 family は参照できない。
 これを `tests/unit/test_architecture_boundaries.cpp` が静的に検証する。
+
+### 型 alias ヘッダ
+
+実行編成が共通層へ移ったため、`models/qwen35/runtime/**` の一部は
+共通型を dense family の名前で再公開する alias ヘッダになっている。
+
+| alias ヘッダ | 実体 |
+| --- | --- |
+| `models/qwen35/runtime/executor.h` | `shelf::runtime::Executor` / `ExecutorConfig` / `RuntimeModelView` など |
+| `models/qwen35/runtime/tensor_parallel.h` | `shelf::runtime::TpCoordinator` / `TpRankRuntime` / `TpRankRuntimeConfig` など |
+| `models/qwen35/runtime/pipeline_parallel.h` | `shelf::runtime::PipelineStageRuntime` / `PipelineParallelCoordinator` など |
+| `models/qwen35/runtime/continuous_batcher.h` など | `shelf::runtime::ContinuousBatcher` など |
+
+apps と family 固有コードは alias 経由で共通型を扱う。
+実装そのものは `runtime/**` に置き、同じ型を 2 箇所で定義しない。
 
 ### ターゲットの対応
 
@@ -89,15 +110,21 @@ CMake target の詳細な一覧は `cmake/targets.cmake` を参照。
 - `shelf_gpu` / `shelf_io` / `shelf_quant_format` / `shelf_quant_bundle` /
   `shelf_quant_reference` は下位の共有基盤
 - `shelf_weights` は model 非依存の weight loader（safetensors → GPU MatrixWeight / Tensor）
-- `shelf_runtime` は model 非依存の runtime core（PrimitiveGraph / Program /
-  ProgramSet / DeviceBatchContext / workspace layout / TP transport）
-  (`shelf_core` / `shelf_gpu` / `shelf_kernels_fused` のみに依存)
+- `shelf_runtime` は model 非依存の共通 runtime。Executor / ContinuousBatcher /
+  DFlash2 spec decode / spec state 操作 / request 処理 / token budget / prefix cache /
+  decode backend / TP / pipeline parallel / graph / program / workspace layout /
+  TP transport を持つ（`shelf_core` / `shelf_gpu` / `shelf_kernels_fused` に依存）
+- `shelf_kernels_dflash2` は DFlash2 の device kernel（`shelf_kernels_optimized` に依存）
+- `shelf_dflash2` は DFlash2 の runtime（spec batch / session pool / tree /
+  footprint / context state / executor / weights）。
+  `shelf_runtime` / `shelf_kernels_dflash2` / `shelf_inference_state` に依存する
+- `shelf_qwen35_kernels_optimized` は INTERFACE target で、`shelf_dflash2` を
+  再公開するだけである
 - `shelf_inference_state` / `shelf_inference_scheduling` /
   `shelf_inference_execution` / `shelf_inference_prefix` は model 非依存の
   state / scheduling / execution / prefix cache 層
 - `shelf_kernels_optimized` / `shelf_kernels_fused` /
   `shelf_kernels_correctness` は model 非依存の kernel 層
-- `shelf_qwen35_kernels_optimized` は DFlash2 の model 固有 kernel
 - `shelf_qwen_hybrid` は Qwen hybrid backbone の共通部。FFN の形に依存しない config
   geometry（`QwenHybridConfig`）、layer / model-level weight 型
   （`HybridLayerWeights` / `HybridModelLevelWeights`）、FFN 非依存の checkpoint 読み取り
@@ -112,8 +139,8 @@ CMake target の詳細な一覧は `cmake/targets.cmake` を参照。
   層の位相（GDN か full attention か）を決める規則もここで持つ: `layer_is_gdn`
   （`layer_types` → `full_attention_interval` → `layer % 4 < 3`）と、同じ規則で層数を数える
   `count_layer_topology`。GDN state pool・KV pool・TP plan・apps は全部これを使う
-- `shelf_qwen35` は dense FFN を持つ Qwen35（config・weight・lowering・TP・MTP・DFlash2）。
-  `shelf_qwen_hybrid` に依存し、他の family には依存しない
+- `shelf_qwen35` は dense FFN を持つ Qwen35（config・weight・lowering・TP・MTP）。
+  `shelf_qwen_hybrid` と `shelf_dflash2` に依存し、他の family には依存しない
 - `shelf_qwen35moe` は routed expert を持つ Qwen35 MoE（config 契約・expert plan・
   rank-3 expert loader・MoE FFN の weight 保持）。`shelf_qwen_hybrid` に依存し、
   `shelf_qwen35` には依存しない
@@ -122,19 +149,16 @@ CMake target の詳細な一覧は `cmake/targets.cmake` を参照。
 - `shelf_qwen4exp` は Qwen3.8-Flash-Next（EXL3 body・PLE n-gram table・
   expert-axis の TP load path）。load contract のみを持ち、forward / executor の
   経路は後続の family port に委ねる
+- `shelf_qwen35_runtime` は family 固有の runtime 層だが、実行編成は共通層へ移した後、
+  残る責務は dense model から共通 Executor を生成する処理
+  （`executor_model.cpp`）、dense の `TpRankModel` / `PipelineStageModel` 実装、
+  および MTP drafter とその linear kernel だけである
 - `shelf_models` は family 選択と executor 生成の入口
   （`shelf::models::load_model_weights` / `LoadedModel` / `TpRankModel` /
   `PipelineStageModel`）。plamo3 の source もここに置く。
   全 family の loader を link する唯一の target で、`shelf_qwen35_runtime` も link する。
   family 選択は config の構造だけが決め、identity の判定は `shelf_qwen_hybrid` の
-  identity gate が担う（後述「Checkpoint識別」）。
-  tensor parallel の rank も同じ形で、rank が読む checkpoint の family は
-  `shelf::models::TpRankModel`（`models/tp_rank_model.h`）を介して注入する。
-  rank runtime 自身は `shelf_qwen35_runtime` にあり dense family を名乗るが、
-  family をまたぐ判断は持たない（契約は [tensor_parallel_execution.md](tensor_parallel_execution.md) §11-1）
-- `shelf_qwen35_runtime` は family 固有の runtime 層（Executor / ContinuousBatcher /
-  DFlash2 / MTP / spec decode / TP / pipeline parallel / prefix cache /
-  decode backend / token budget scheduler）。`shelf_qwen35` と全 inference 層を link する
+  identity gate が担う（後述「Checkpoint識別」）
 
 `shelf_kernels_correctness` は `shelf_runtime` に link する一方、
 `shelf_runtime` は `shelf_core` / `shelf_gpu` / `shelf_kernels_fused` だけを使う。
@@ -146,7 +170,7 @@ weights loader（`shelf_weights`）の依存は下方向のみ:
 ```text
 shelf_weights        -> shelf_quant_format / shelf_quant_bundle / shelf_quant_reference / shelf_io / shelf_core / shelf_gpu
 shelf_qwen_hybrid    -> shelf_weights + shelf_io + shelf_quant_bundle
-shelf_qwen35         -> shelf_qwen_hybrid (+ shelf_weights / shelf_io / shelf_quant_* / shelf_inference_state / shelf_runtime)
+shelf_qwen35         -> shelf_qwen_hybrid + shelf_dflash2 (+ shelf_weights / shelf_io / shelf_quant_* / shelf_inference_state / shelf_runtime)
 shelf_qwen35moe      -> shelf_qwen_hybrid (+ shelf_weights / shelf_io / shelf_quant_bundle / shelf_gpu)
 shelf_qwen35qsa      -> shelf_qwen35 + shelf_qwen_hybrid
 shelf_qwen4exp       -> shelf_qwen_hybrid (+ shelf_weights / shelf_io / shelf_quant_bundle / shelf_gpu)
@@ -161,10 +185,10 @@ shelf_models         -> 全 family + shelf_qwen35_runtime
                                       |
                                       v
                         shelf_weights / shelf_quant_* / shelf_io
+```
 
 plamo3 は `shelf_models` の source として配置し、identity で選択する。
 hybrid backbone は `shelf_models` が link する family target 経由で利用する。
-```
 
 各 family は互いに参照しない（qwen35qsa と qwen4exp は qwen35 / qwen_hybrid を
 介して dense backbone を再利用するが、兄弟 family の loader を直接呼ばない）。
@@ -195,23 +219,23 @@ config を読み、その family の loader で読み込み、その family の 
 executor 生成の family 分岐はここに置き、apps は family を知らない。
 
 `TpRankModel` と `PipelineStageModel` は仮想 interface で、family をまたぐ唯一の層
-（`shelf::models`）が実装と選択を担う。dense の実装は `models/qwen35/runtime` に
+（`shelf::models`）が実装と選択を担う。dense の実装は
+`shelf_qwen35_runtime` の `tp_rank_model_dense.cpp` / `pipeline_stage_model_dense.cpp` に
 置き、grouped-expert の実装と選択は `models/tp_rank_model.cpp` /
-`models/pipeline_stage_model.cpp` に置く。rank runtime と stage runtime 自身は
-特定 family を名乗らず、この interface 経由でモデルを扱う。
-`select_pipeline_stage_model` / `select_tp_rank_model` が checkpoint から
-builder を選ぶ。
+`models/pipeline_stage_model.cpp` に置く。
+共通 runtime 自身は具体 family を名乗らず、この interface 経由で model を扱う。
+`select_pipeline_stage_model` / `select_tp_rank_model` が checkpoint から builder を選ぶ。
 
 ## 依存ルール（enforced by `test_architecture_boundaries`）
 
 ```text
-runtime core -> Qwen35                 : forbidden
-generic (kernels / inference / common) -> 特定 family : forbidden
-weights / quantization -> Qwen35       : forbidden（models/ の include 不可）
-Qwen35 model -> Qwen35 runtime         : forbidden
-Qwen35 kernels -> Qwen35 runtime       : forbidden
-Qwen35 <-> Qwen35 MoE                  : forbidden（互いに名指ししない）
-common/qwen_hybrid -> 具体 family       : forbidden
+runtime core -> 具体 family                : forbidden
+generic (kernels / inference / common) -> 具体 family : forbidden
+weights / quantization -> 具体 family       : forbidden（models/ の include 不可）
+Qwen35 model -> Qwen35 runtime             : forbidden
+Qwen35 kernels -> Qwen35 runtime           : forbidden
+Qwen35 <-> Qwen35 MoE                      : forbidden（互いに名指ししない）
+common/qwen_hybrid -> 具体 family           : forbidden
 ```
 
 `cmake/targets.cmake` の `target_link_libraries` も同じ test が token 単位で読み、
@@ -220,11 +244,13 @@ dense / MoE の直接 link、`shelf_qwen_hybrid` の family link、`shelf_weight
 link することも固定する。
 
 - `include/shelf/runtime/**` と `src/shelf/runtime/**` は
-  特定 family を一切参照しない（`qwen35` / `Qwen35` / `shelf/models/` が存在しない）
+  具体 family を参照しない（`qwen35` / `Qwen35` / `shelf/models/qwen35` /
+  `shelf/models/qwen` が存在しない）。
+  `shelf/models/common/qwen_hybrid` と family 中立 interface は参照してよい
 - `include/shelf/kernels/**` / `inference/**` / `models/common/**` も
   同様に `qwen35` / `Qwen35` / `shelf/models/qwen` を含まない
 - `include/shelf/weights/**` と `src/shelf/weights/**` も
-  特定 family を一切参照しない（model 非依存の weight loader）
+  具体 family を一切参照しない（model 非依存の weight loader）
 - `quantization/manifest/**` / `bundle/**` / `codec/**` / `core/**` / `io/**` は
   `shelf/models/` を include しない
   （manifest schema 上の architecture 文字列は format 契約でありコード依存ではない）
@@ -249,7 +275,9 @@ link することも固定する。
 
 ## Tensor Parallel / Pipeline Parallel
 
-Tensor Parallel を使う場合の scheduler / rank runtime の関係（TP-Exec-1）:
+TP / pipeline の runtime は `shelf_runtime` の `src/shelf/runtime/tp/` に置く。
+family 選択は `shelf::models` の interface 経由で注入し、runtime 自身は family を
+知らない。scheduler と rank runtime の関係（TP-Exec-1）:
 
 ```text
 ContinuousBatcher (global 1個)
@@ -264,9 +292,8 @@ ContinuousBatcher (global 1個)
 詳細は [tensor_parallel_execution.md](tensor_parallel_execution.md) を参照。
 
 Pipeline parallel は layer range を stage に分割し、hidden を pinned host 経由で
-直列に hand-off する。stage の選択は `shelf::models` が担い、stage runtime は
-family を知らない。current contract は [pipeline_parallel.md](pipeline_parallel.md)
-を参照。
+直列に hand-off する。stage の選択は `shelf::models` が担う。
+current contract は [pipeline_parallel.md](pipeline_parallel.md) を参照。
 
 ## Checkpoint識別（config identity gate）
 
@@ -295,7 +322,7 @@ safetensors checkpoint をどの契約で読むかは、宣言と構造の別々
   2-D matrix は BF16 / F32（F32 は BF16 へ widen）、1-D vector は BF16 / F32
   （`load_bf16_or_f32_tensor` を使う norm は F32 のまま保持する）。
 - speculative decode の drafter は別の識別を持つ
-  （`architectures[0] == "DFlash2DraftModel"`、`qwen35/dflash2/config.cpp`）。
+  （`architectures[0] == "DFlash2DraftModel"`、`runtime/dflash2/config.cpp`）。
   target の identity gate とは独立である
 
 受理・拒否の境界は `tests/unit/test_model_identity.cpp` が固定する
@@ -363,9 +390,9 @@ ScheduledBatch
 GPU
 ```
 
-論理concurrency `N` (`--max-concurrent-requests`) とphysical KV budgetは別契約である。
-`SequenceSlotPool` / `GdnStatePool` / `max_scheduled_requests` はNに一致させ、
-physical KV pagesは起動時の arena の余りから決める。budget不足時はKV Bankerが
-Queued requestをActive完了後にadmissionする。
+論理 concurrency `N` (`--max-concurrent-requests`) と physical KV budget は別契約である。
+`SequenceSlotPool` / `GdnStatePool` / `max_scheduled_requests` は N に一致させ、
+physical KV pages は起動時の arena の余りから決める。budget 不足時は KV Banker が
+Queued request を Active 完了後に admission する。
 
-serverの対応surfaceは [../user/server.md](../user/server.md) を参照。
+server の対応 surface は [../user/server.md](../user/server.md) を参照。
