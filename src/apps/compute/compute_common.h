@@ -1,6 +1,6 @@
 #pragma once
 
-#include <shelf/models/qwen35/runtime/runtime_request.h>
+#include <shelf/runtime/runtime_request.h>
 #include <shelf/models/common/qwen_hybrid/config.h>
 
 #include <cstdint>

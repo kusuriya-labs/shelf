@@ -2,7 +2,7 @@
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/memory/tensor.h>
 #include <shelf/core/memory/types.h>
-#include <shelf/models/qwen35/kernels/dflash2/candidate_selector.h>
+#include <shelf/runtime/kernels/dflash2/candidate_selector.h>
 #include <shelf/models/qwen35/runtime/dflash2_tree_budget.h>
 #include <hip/hip_runtime.h>
 
@@ -54,7 +54,7 @@ static void test_tree_probabilities(hipStream_t stream) {
         std::vector<shelf::kernel::DFlash2TreeProbabilities> output(rows);
         check(hipStreamSynchronize(stream) == hipSuccess, "tree probability sync");
         check(hipMemcpy(output.data(), d_output, rows * sizeof(*d_output), hipMemcpyDeviceToHost) == hipSuccess, "tree probability download");
-        std::vector<std::vector<shelf::qwen35::runtime::DFlash2TreeCandidate>> gpu_choices(rows), cpu_choices(rows);
+        std::vector<std::vector<shelf::runtime::DFlash2TreeCandidate>> gpu_choices(rows), cpu_choices(rows);
         for (uint32_t r = 0; r < rows; ++r) {
             double sum = 0.0;
             for (uint32_t i = 0; i < vocab; ++i) sum += std::exp(static_cast<double>(logits[r * vocab + i]));
@@ -69,8 +69,8 @@ static void test_tree_probabilities(hipStream_t stream) {
             }
             check(std::abs(output[r].residual - (1.0 - mass)) < 1e-5, "tree residual probability");
         }
-        shelf::qwen35::runtime::DFlash2Tree gpu_tree, cpu_tree;
-        using shelf::qwen35::runtime::make_budgeted_dflash2_tree;
+        shelf::runtime::DFlash2Tree gpu_tree, cpu_tree;
+        using shelf::runtime::make_budgeted_dflash2_tree;
         check(make_budgeted_dflash2_tree(7, 3, rows, 12,
               [&](uint32_t depth, int32_t) { return gpu_choices[depth]; }, gpu_tree),
               "GPU probability tree selection");

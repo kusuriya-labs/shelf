@@ -3,10 +3,10 @@
 
 #include "compute_common.h"
 
-#include <shelf/models/qwen35/dflash2/context_state.h>
+#include <shelf/runtime/dflash2/context_state.h>
 #include <shelf/runtime/decode_backend.h>
 #include <shelf/models/qwen35/runtime/mtp_drafter.h>
-#include <shelf/models/qwen35/runtime/runtime_request.h>
+#include <shelf/runtime/runtime_request.h>
 #include <shelf/runtime/state_types.h>
 #include <shelf/core/memory/size_format.h>
 #include <nlohmann/json.hpp>
@@ -1333,7 +1333,7 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
             runtime.config().dflash2_sessions() * session_rows,
             shelf::qwen35::runtime::kDFlash2SpecMaxVerifyRows);
         const bool serve_tp_sharded = runtime.config().tp > 1;
-        shelf::qwen35::dflash2::DFlash2ExecutorConfig draft_config;
+        ::shelf::runtime::dflash2::DFlash2ExecutorConfig draft_config;
         draft_config.max_rows = static_cast<uint32_t>(dflash.config.block_size);
         draft_config.max_batch_rows = batch_max_rows;
         draft_config.max_context_rows = static_cast<uint32_t>(dflash.config.sliding_window);
@@ -1343,7 +1343,7 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
         draft_config.target_embed_tokens =
             serve_tp_sharded ? private_embed
                              : &runtime.model().embed_tokens();
-        auto draft_result = shelf::qwen35::dflash2::create_dflash2_executor(
+        auto draft_result = ::shelf::runtime::dflash2::create_dflash2_executor(
             dflash.config, dflash.weights, runtime.arena(), draft_config);
         if (!draft_result.ok()) {
             fprintf(stderr, "dflash2 executor create failed: %s\n",
@@ -1614,7 +1614,7 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
 
     if (dflash.executor_ready) {
         const shelf::Status draft_st =
-            shelf::qwen35::dflash2::dflash2_executor_shutdown(dflash.executor);
+            ::shelf::runtime::dflash2::dflash2_executor_shutdown(dflash.executor);
         dflash.executor_ready = false;
         if (!draft_st.ok()) {
             fprintf(stderr, "dflash2 executor shutdown failed: %s\n",

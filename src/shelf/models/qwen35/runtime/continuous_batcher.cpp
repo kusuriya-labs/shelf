@@ -1,11 +1,11 @@
-#include <shelf/models/qwen35/runtime/continuous_batcher.h>
+#include <shelf/runtime/continuous_batcher.h>
 #include <shelf/models/qwen35/runtime/dflash2_adaptive_batch.h>
 #include <shelf/models/qwen35/runtime/prefix_cache.h>
-#include <shelf/models/qwen35/runtime/runtime_request.h>
+#include <shelf/runtime/runtime_request.h>
 #include <shelf/models/qwen35/runtime/spec_decode.h>
 #include <shelf/core/gpu/scoped_device.h>
 #include <shelf/models/qwen35/runtime/executor.h>
-#include <shelf/models/qwen35/kernels/dflash2/feature_concat.h>
+#include <shelf/runtime/kernels/dflash2/feature_concat.h>
 #include <shelf/runtime/state_types.h>
 #include <algorithm>
 #include <chrono>

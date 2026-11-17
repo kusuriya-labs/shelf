@@ -1,24 +1,9 @@
 #pragma once
 
-#include <shelf/models/qwen35/runtime/runtime_request.h>
-#include <shelf/runtime/scheduling_types.h>
-#include <shelf/core/status.h>
-#include <cstddef>
-#include <cstdint>
-#include <span>
+#include <shelf/runtime/token_budget_scheduler.h>
 
-namespace shelf {
-namespace qwen35 {
+namespace shelf::qwen35::runtime {
 
-namespace runtime {
+using namespace ::shelf::runtime;
 
-Result<SchedulePlan> schedule_requests(
-    std::span<const RuntimeRequest*> active,
-    uint32_t max_num_batched_tokens,
-    uint32_t max_scheduled_requests,
-    uint32_t page_tokens,
-    KVBankerState* kv);
-
-}
-}
-}
+}  // namespace shelf::qwen35::runtime

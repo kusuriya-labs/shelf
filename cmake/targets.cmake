@@ -154,35 +154,9 @@ shelf_set_hip_archs(shelf_kernels_fused)
 
 # Qwen35 speculative-decode kernels (DFlash2). Model-specific drafter kernels
 # stay under models/qwen35 until a second model needs them.
-set(SHELF_QWEN35_SPEC_KERNEL_SOURCES
-    src/shelf/models/qwen35/kernels/dflash2/candidate_selector.hip
-    src/shelf/models/qwen35/kernels/dflash2/feature_concat.hip
-    src/shelf/models/qwen35/kernels/dflash2/grouped_dynamic_conv.hip
-    src/shelf/models/qwen35/kernels/dflash2/rope.hip
-    src/shelf/models/qwen35/kernels/dflash2/rmsnorm.hip
-    src/shelf/models/qwen35/kernels/dflash2/topk.hip
-    src/shelf/models/qwen35/kernels/dflash2/topk_optimized.hip
-    src/shelf/models/qwen35/kernels/dflash2/swiglu.hip
-    src/shelf/models/qwen35/kernels/dflash2/attention.hip
-    src/shelf/models/qwen35/kernels/dflash2/kv_ring.hip
-    src/shelf/models/qwen35/kernels/dflash2/noise_input.hip
-)
+add_library(shelf_qwen35_kernels_optimized INTERFACE)
+target_link_libraries(shelf_qwen35_kernels_optimized INTERFACE shelf_dflash2)
 
-add_library(shelf_kernels_optimized STATIC ${SHELF_OPTIMIZED_KERNEL_SOURCES})
-target_compile_features(shelf_kernels_optimized PRIVATE cxx_std_20)
-target_include_directories(shelf_kernels_optimized PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_include_directories(shelf_kernels_optimized PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(shelf_kernels_optimized PUBLIC shelf_gpu shelf_runtime shelf_inference_state shelf_kernels_fused)
-target_compile_options(shelf_kernels_optimized PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
-shelf_set_hip_archs(shelf_kernels_optimized)
-
-add_library(shelf_qwen35_kernels_optimized STATIC ${SHELF_QWEN35_SPEC_KERNEL_SOURCES})
-target_compile_features(shelf_qwen35_kernels_optimized PRIVATE cxx_std_20)
-target_include_directories(shelf_qwen35_kernels_optimized PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_include_directories(shelf_qwen35_kernels_optimized PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(shelf_qwen35_kernels_optimized PUBLIC shelf_gpu shelf_runtime shelf_kernels_optimized)
-target_compile_options(shelf_qwen35_kernels_optimized PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
-shelf_set_hip_archs(shelf_qwen35_kernels_optimized)
 
 # Qwen3.5 paged sequence state management.
 add_library(shelf_runtime STATIC
@@ -193,6 +167,10 @@ add_library(shelf_runtime STATIC
     src/shelf/runtime/executor_footprint.cpp
     src/shelf/runtime/gdn_spec_history.hip
     src/shelf/runtime/spec_decode.cpp
+    src/shelf/runtime/runtime_request.cpp
+    src/shelf/runtime/token_budget_scheduler.cpp
+    src/shelf/runtime/dflash2_spec_decoder.cpp
+    src/shelf/runtime/continuous_batcher.cpp
     src/shelf/runtime/prefix_cache.cpp
     src/shelf/runtime/graph/primitive_graph.cpp
     src/shelf/runtime/stream_bridge.cpp
@@ -209,6 +187,40 @@ target_include_directories(shelf_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/inc
 target_link_libraries(shelf_runtime PUBLIC shelf_core shelf_gpu shelf_kernels_fused)
 target_compile_options(shelf_runtime PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 shelf_set_hip_archs(shelf_runtime)
+
+add_library(shelf_kernels_optimized STATIC ${SHELF_OPTIMIZED_KERNEL_SOURCES})
+target_compile_features(shelf_kernels_optimized PRIVATE cxx_std_20)
+target_include_directories(shelf_kernels_optimized PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(shelf_kernels_optimized PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(shelf_kernels_optimized PUBLIC shelf_gpu shelf_runtime shelf_inference_state shelf_kernels_fused)
+target_compile_options(shelf_kernels_optimized PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
+shelf_set_hip_archs(shelf_kernels_optimized)
+
+add_library(shelf_dflash2 STATIC
+    src/shelf/runtime/dflash2/dflash2_footprint.cpp
+    src/shelf/runtime/dflash2/dflash2_spec_batch.cpp
+    src/shelf/runtime/dflash2/dflash2_session_pool.cpp
+    src/shelf/runtime/dflash2/context_state.hip
+    src/shelf/runtime/dflash2/executor.hip
+    src/shelf/runtime/dflash2/weights.cpp
+    src/shelf/runtime/kernels/dflash2/attention.hip
+    src/shelf/runtime/kernels/dflash2/candidate_selector.hip
+    src/shelf/runtime/kernels/dflash2/feature_concat.hip
+    src/shelf/runtime/kernels/dflash2/grouped_dynamic_conv.hip
+    src/shelf/runtime/kernels/dflash2/kv_ring.hip
+    src/shelf/runtime/kernels/dflash2/noise_input.hip
+    src/shelf/runtime/kernels/dflash2/rmsnorm.hip
+    src/shelf/runtime/kernels/dflash2/rope.hip
+    src/shelf/runtime/kernels/dflash2/swiglu.hip
+    src/shelf/runtime/kernels/dflash2/topk.hip
+    src/shelf/runtime/kernels/dflash2/topk_optimized.hip
+)
+target_compile_features(shelf_dflash2 PRIVATE cxx_std_20)
+target_include_directories(shelf_dflash2 PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(shelf_dflash2 PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(shelf_dflash2 PUBLIC shelf_runtime shelf_kernels_optimized shelf_inference_state shelf_gpu)
+target_compile_options(shelf_dflash2 PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
+shelf_set_hip_archs(shelf_dflash2)
 
 add_library(shelf_inference_state STATIC
     src/shelf/inference/state/paged_sequence_state.cpp
@@ -315,8 +327,6 @@ set(
     src/shelf/models/qwen35/model/tensor_parallel_context.cpp
     src/shelf/models/qwen35/model/qwen35_model.cpp
     src/shelf/models/qwen35/model/lower_to_primitives.cpp
-    src/shelf/models/qwen35/dflash2/weights.cpp
-    src/shelf/models/qwen35/dflash2/context_state.hip
 )
 
 # Qwen hybrid backbone: the model geometry and weight loading that a dense model and an
@@ -344,7 +354,7 @@ target_compile_features(shelf_qwen35 PRIVATE cxx_std_20)
 target_include_directories(shelf_qwen35 PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(shelf_qwen35 PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_include_directories(shelf_qwen35 SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
-target_link_libraries(shelf_qwen35 PUBLIC shelf_qwen_hybrid shelf_weights shelf_io shelf_inference_state shelf_quant_reference shelf_quant_format shelf_quant_bundle shelf_runtime)
+target_link_libraries(shelf_qwen35 PUBLIC shelf_dflash2 shelf_qwen_hybrid shelf_weights shelf_io shelf_inference_state shelf_quant_reference shelf_quant_format shelf_quant_bundle shelf_runtime)
 target_compile_options(shelf_qwen35 PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
 # Qwen3.5 QSA (model_type qwen3_5_qsa): the dense backbone plus the block-sparse indexer.
@@ -435,21 +445,13 @@ add_library(shelf_qwen35_runtime STATIC
     src/shelf/models/qwen35/runtime/executor_model.cpp
     src/shelf/models/qwen35/runtime/tp_rank_model_dense.cpp
     src/shelf/models/qwen35/runtime/pipeline_stage_model_dense.cpp
-    src/shelf/models/qwen35/runtime/runtime_request.cpp
-    src/shelf/models/qwen35/runtime/token_budget_scheduler.cpp
-    src/shelf/models/qwen35/runtime/continuous_batcher.cpp
     src/shelf/models/qwen35/runtime/mtp_drafter.cpp
-    src/shelf/models/qwen35/runtime/dflash2_spec_decoder.cpp
-    src/shelf/models/qwen35/runtime/dflash2_spec_batch.cpp
-    src/shelf/models/qwen35/runtime/dflash2_session_pool.cpp
-    src/shelf/models/qwen35/runtime/dflash2_footprint.cpp
-    src/shelf/models/qwen35/dflash2/executor.hip
     src/shelf/models/common/drafter/linear.hip
 )
 target_compile_features(shelf_qwen35_runtime PRIVATE cxx_std_20)
 target_include_directories(shelf_qwen35_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(shelf_qwen35_runtime PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(shelf_qwen35_runtime PUBLIC shelf_qwen35 shelf_inference_state shelf_inference_scheduling shelf_inference_execution shelf_inference_prefix shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_runtime shelf_gpu)
+target_link_libraries(shelf_qwen35_runtime PUBLIC shelf_dflash2 shelf_qwen35 shelf_inference_state shelf_inference_scheduling shelf_inference_execution shelf_inference_prefix shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_runtime shelf_gpu)
 target_compile_options(shelf_qwen35_runtime PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 shelf_set_hip_archs(shelf_qwen35_runtime)
 if(SHELF_HIP_GRAPH)

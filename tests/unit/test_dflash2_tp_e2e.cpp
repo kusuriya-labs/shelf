@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #include "support/dflash2_tp_harness.h"
 
@@ -56,7 +57,7 @@ int main() {
     }
 
     auto dflash_config_result =
-        shelf::qwen35::dflash2::read_dflash2_config(dflash2_dir);
+        ::shelf::runtime::read_dflash2_config(dflash2_dir);
     if (!dflash_config_result.ok()) {
         fail("dflash2 config: " + dflash_config_result.status().message());
         std::printf(g_fail == 0 ? "PASS\n" : "FAIL (%d)\n", g_fail);

@@ -1,8 +1,8 @@
 #include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/memory/arena.h>
 #include <shelf/io/safetensors_writer.h>
-#include <shelf/models/qwen35/dflash2/config.h>
-#include <shelf/models/qwen35/dflash2/weights.h>
+#include <shelf/runtime/dflash2_config.h>
+#include <shelf/runtime/dflash2/weights.h>
 #include <shelf/weights/weight_loader.h>
 #include <hip/hip_runtime.h>
 
@@ -18,12 +18,12 @@
 namespace fs = std::filesystem;
 
 using shelf::io::SType;
-using shelf::qwen35::dflash2::DFlash2Config;
-using shelf::qwen35::dflash2::DFlash2Weights;
-using shelf::qwen35::dflash2::dflash2_expected_tensors;
-using shelf::qwen35::dflash2::load_dflash2_weights;
-using shelf::qwen35::dflash2::read_dflash2_config;
-using shelf::qwen35::dflash2::validate_dflash2_tensor_contract;
+using ::shelf::runtime::DFlash2Config;
+using ::shelf::runtime::dflash2::DFlash2Weights;
+using ::shelf::runtime::dflash2::dflash2_expected_tensors;
+using ::shelf::runtime::dflash2::load_dflash2_weights;
+using ::shelf::runtime::read_dflash2_config;
+using ::shelf::runtime::dflash2::validate_dflash2_tensor_contract;
 
 static int g_fail = 0;
 

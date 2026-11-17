@@ -2,7 +2,7 @@
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/memory/tensor.h>
 #include <shelf/core/memory/types.h>
-#include <shelf/models/qwen35/kernels/dflash2/attention.h>
+#include <shelf/runtime/kernels/dflash2/attention.h>
 #include <hip/hip_runtime.h>
 
 #include <cmath>

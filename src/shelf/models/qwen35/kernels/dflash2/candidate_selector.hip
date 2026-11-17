@@ -1,4 +1,4 @@
-#include <shelf/models/qwen35/kernels/dflash2/candidate_selector.h>
+#include <shelf/runtime/kernels/dflash2/candidate_selector.h>
 #include <shelf/kernels/optimized/detail/vector_io.h>
 #include <hip/hip_runtime.h>
 

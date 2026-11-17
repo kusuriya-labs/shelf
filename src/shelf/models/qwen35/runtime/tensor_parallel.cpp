@@ -6,9 +6,9 @@
 #include <shelf/core/memory/size_format.h>
 #include <shelf/runtime/request_handle.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
-#include <shelf/models/qwen35/dflash2/config.h>
+#include <shelf/runtime/dflash2_config.h>
 #include <shelf/models/qwen35/runtime/dflash2_footprint.h>
-#include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
+#include <shelf/runtime/dflash2_spec_decoder.h>
 #include <shelf/models/qwen35/runtime/mtp_drafter.h>
 #include <shelf/models/qwen35/runtime/executor_footprint.h>
 #include <shelf/models/qwen35/runtime/prefix_cache.h>

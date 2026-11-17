@@ -1,14 +1,14 @@
 #include <shelf/models/qwen35/runtime/dflash2_footprint.h>
 
-#include <shelf/models/qwen35/dflash2/config.h>
-#include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
+#include <shelf/runtime/dflash2_config.h>
+#include <shelf/runtime/dflash2_spec_decoder.h>
 #include <shelf/models/qwen35/runtime/spec_decode.h>
 #include <shelf/inference/state/gdn_state_pool.h>
 #include <shelf/runtime/batch/device_batch_context.h>
 #include <shelf/runtime/program/int8_activation_workspace.h>
-#include <shelf/models/qwen35/kernels/dflash2/batch.h>
-#include <shelf/models/qwen35/kernels/dflash2/topk.h>
-#include <shelf/models/qwen35/kernels/dflash2/candidate_selector.h>
+#include <shelf/runtime/kernels/dflash2/batch.h>
+#include <shelf/runtime/kernels/dflash2/topk.h>
+#include <shelf/runtime/kernels/dflash2/candidate_selector.h>
 
 #include <algorithm>
 #include <cstring>

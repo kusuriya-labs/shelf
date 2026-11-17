@@ -19,8 +19,6 @@
 namespace shelf {
 namespace runtime {
 
-namespace runtime {
-
 using ::shelf::execution::DecodePerfStats;
 using ::shelf::execution::KernelDispatchCounters;
 using ::shelf::execution::GdnCompactLogDeviceView;
@@ -124,5 +122,4 @@ using ::shelf::execution::upload_host_weight_table;
 
 }
 
-}
 }

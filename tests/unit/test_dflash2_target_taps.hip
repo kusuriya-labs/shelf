@@ -1,6 +1,6 @@
 #include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/memory/arena.h>
-#include <shelf/models/qwen35/dflash2/config.h>
+#include <shelf/runtime/dflash2_config.h>
 #include <shelf/models/qwen35/model/lower_to_primitives.h>
 #include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35/runtime/executor.h>
@@ -95,7 +95,7 @@ int main() {
     {
         const char* dflash_dir = std::getenv("SHELF_MODEL_DIR_DFLASH2");
         if (dflash_dir != nullptr && dflash_dir[0] != '\0') {
-            auto cfg = shelf::qwen35::dflash2::read_dflash2_config(dflash_dir);
+            auto cfg = ::shelf::runtime::read_dflash2_config(dflash_dir);
             if (cfg.ok() && cfg.value().num_target_layer_ids <= taps.size()) {
                 for (std::size_t i = 0; i < cfg.value().num_target_layer_ids; ++i) {
                     taps[i] = static_cast<uint32_t>(cfg.value().target_layer_ids[i]);
@@ -284,7 +284,7 @@ int main() {
             shelf::state::PagedSequenceState seq = seq_result.release();
 
             std::unordered_map<uint32_t, Captured> captured;
-            shelf::qwen35::runtime::ValueTraceSink sink;
+            shelf::runtime::ValueTraceSink sink;
             sink.on_value = [&](uint32_t value_id, const void* device_ptr,
                                 uint32_t row_stride, uint32_t feature_count,
                                 shelf::runtime::ValueDType dtype, uint32_t rows,

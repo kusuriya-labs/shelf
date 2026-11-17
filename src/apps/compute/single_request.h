@@ -2,7 +2,7 @@
 
 #include "compute_runtime.h"
 
-#include <shelf/models/qwen35/dflash2/config.h>
+#include <shelf/runtime/dflash2_config.h>
 #include <shelf/runtime/scheduling_types.h>
 
 #include <cstdint>
@@ -29,7 +29,7 @@ int run_mtp_shot(Qwen35ComputeRuntime& runtime,
 int run_dflash2_shot(Qwen35ComputeRuntime& runtime,
                      const std::vector<int32_t>& prompt_ids,
                      unsigned long max_new_tokens,
-                     const shelf::qwen35::dflash2::DFlash2Config& dflash_config,
+                     const ::shelf::runtime::DFlash2Config& dflash_config,
                      const std::string& dflash2_model_dir,
                      unsigned long dflash2_drafts,
                      int dflash2_stats,

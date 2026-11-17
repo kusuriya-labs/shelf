@@ -1,4 +1,4 @@
-#include <shelf/models/qwen35/kernels/dflash2/noise_input.h>
+#include <shelf/runtime/kernels/dflash2/noise_input.h>
 #include <hip/hip_runtime.h>
 
 #include <cstdint>

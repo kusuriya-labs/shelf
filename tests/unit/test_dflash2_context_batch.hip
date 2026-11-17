@@ -1,9 +1,9 @@
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/memory/types.h>
-#include <shelf/models/qwen35/dflash2/config.h>
-#include <shelf/models/qwen35/dflash2/context_state.h>
-#include <shelf/models/qwen35/dflash2/executor.h>
-#include <shelf/models/qwen35/dflash2/weights.h>
+#include <shelf/runtime/dflash2_config.h>
+#include <shelf/runtime/dflash2/context_state.h>
+#include <shelf/runtime/dflash2/executor.h>
+#include <shelf/runtime/dflash2/weights.h>
 #include <hip/hip_runtime.h>
 
 #include <algorithm>

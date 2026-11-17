@@ -7,7 +7,7 @@
 
 int main(int argc, char** argv) {
     if (argc == 2 && std::strcmp(argv[1], "--check-cap-override") == 0)
-        return shelf::qwen35::runtime::dflash2_policy_max_sessions() == 4u ? 0 : 1;
+        return shelf::runtime::dflash2_policy_max_sessions() == 4u ? 0 : 1;
     int failures = 0;
     auto check = [&](bool condition, const char* name) {
         if (!condition) {

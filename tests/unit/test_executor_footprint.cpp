@@ -96,7 +96,7 @@ int main() {
     const std::size_t exl3_4096 = qwen35_executor_reserve_bytes(
         text, text.ffn.intermediate_size, exec_config(4096u, 4u, 0u), 1u, true);
     check(exl3_4096 - rows4096 ==
-              shelf::qwen35::runtime::exl3_workspace_bytes(
+              shelf::runtime::exl3_workspace_bytes(
                   qwen35_padded_row_count(4096u)).total(),
           "reserve adds the trellis staging term only when the model uses it");
 
@@ -112,7 +112,7 @@ int main() {
     shelf::weights::note_exl3_int8_decode_accum(head, exl3_shape);
     check(exl3_shape.max_int8_decode_accum_bytes == 16ull * 5u * 248320u * sizeof(float),
           "EXL3 INT8 decode scratch covers every split for sixteen head rows");
-    check(shelf::qwen35::runtime::exl3_workspace_bytes(16u, exl3_shape).accum >=
+    check(shelf::runtime::exl3_workspace_bytes(16u, exl3_shape).accum >=
               exl3_shape.max_int8_decode_accum_bytes,
           "EXL3 workspace preserves the decode split capacity");
     exl3_shape.max_int8_decode_accum_bytes = 0u;
@@ -122,9 +122,9 @@ int main() {
         text, text.ffn.intermediate_size, shaped_config, 1u, true);
     check(exl3_shaped <= exl3_4096, "a model-sized trellis shape does not grow the reserve");
     check(exl3_4096 - exl3_shaped ==
-              shelf::qwen35::runtime::exl3_workspace_bytes(
+              shelf::runtime::exl3_workspace_bytes(
                   qwen35_padded_row_count(4096u)).total() -
-                  shelf::qwen35::runtime::exl3_workspace_bytes(
+                  shelf::runtime::exl3_workspace_bytes(
                       qwen35_padded_row_count(4096u), exl3_shape).total(),
           "the trellis term follows the model shape");
 

@@ -2,7 +2,7 @@
 #include "single_request.h"
 #include "stdio_server.h"
 
-#include <shelf/models/qwen35/dflash2/config.h>
+#include <shelf/runtime/dflash2_config.h>
 #include <shelf/models/plamo3/model/config.h>
 #include <shelf/models/qwen35/model/rope_profile.h>
 #include <shelf/runtime/decode_backend.h>
@@ -135,10 +135,10 @@ int main(int argc, char** argv) {
             rope_profile.original_max_position_embeddings, rope_profile.attention_factor,
             rope_profile.beta_fast, rope_profile.beta_slow, rope_profile.truncate ? 1 : 0,
             rope_profile.from_cli ? "cli" : "config");
-    shelf::qwen35::dflash2::DFlash2Config dflash_config;
+    ::shelf::runtime::DFlash2Config dflash_config;
     if (shelf::app::compute_dflash_enabled(opt)) {
         auto dflash_config_result =
-            shelf::qwen35::dflash2::read_dflash2_config(opt.dflash2_model_dir);
+            ::shelf::runtime::read_dflash2_config(opt.dflash2_model_dir);
         if (!dflash_config_result.ok()) {
             fprintf(stderr, "dflash2 config read failed: %s\n",
                     dflash_config_result.status().message().c_str());

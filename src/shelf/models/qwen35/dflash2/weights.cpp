@@ -1,4 +1,4 @@
-#include <shelf/models/qwen35/dflash2/weights.h>
+#include <shelf/runtime/dflash2/weights.h>
 #include <shelf/io/safetensors_reader.h>
 #include <shelf/quantization/bundle/hf_manifest.h>
 #include <shelf/quantization/manifest/quantized_manifest.h>

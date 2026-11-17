@@ -3,15 +3,15 @@
 #include "compute_common.h"
 
 #include <shelf/core/gpu/scoped_device.h>
-#include <shelf/models/qwen35/dflash2/context_state.h>
-#include <shelf/models/qwen35/dflash2/executor.h>
-#include <shelf/models/qwen35/dflash2/weights.h>
+#include <shelf/runtime/dflash2/context_state.h>
+#include <shelf/runtime/dflash2/executor.h>
+#include <shelf/runtime/dflash2/weights.h>
 #include "private_target_weights.h"
 #include <shelf/runtime/decode_backend.h>
-#include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
+#include <shelf/runtime/dflash2_spec_decoder.h>
 #include <shelf/models/qwen35/runtime/mtp_drafter.h>
 #include <shelf/models/qwen35/runtime/dflash2_session_pool.h>
-#include <shelf/models/qwen35/runtime/runtime_request.h>
+#include <shelf/runtime/runtime_request.h>
 #include <shelf/runtime/state_types.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <hip/hip_runtime.h>
@@ -515,7 +515,7 @@ int run_single_shot(shelf::app::Qwen35ComputeRuntime& runtime,
 int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
                      const std::vector<int32_t>& prompt_ids,
                      unsigned long max_new_tokens,
-                     const shelf::qwen35::dflash2::DFlash2Config& dflash_config,
+                     const ::shelf::runtime::DFlash2Config& dflash_config,
                      const std::string& dflash2_model_dir,
                      unsigned long dflash2_drafts,
                      int dflash2_stats,
@@ -555,7 +555,7 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
                 dflash_weights_result.status().message().c_str());
         return 1;
     }
-    shelf::qwen35::dflash2::DFlash2Weights dflash_weights = dflash_weights_result.release();
+    ::shelf::runtime::dflash2::DFlash2Weights dflash_weights = dflash_weights_result.release();
 
     const uint32_t max_seq = runtime.config().max_seq_len;
 
@@ -582,28 +582,28 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
             private_embed = &rank0.private_embed_tokens();
         }
     }
-    shelf::qwen35::dflash2::DFlash2ExecutorConfig draft_config;
+    ::shelf::runtime::dflash2::DFlash2ExecutorConfig draft_config;
     draft_config.max_rows = static_cast<uint32_t>(dflash_config.block_size);
     draft_config.max_context_rows = static_cast<uint32_t>(dflash_config.sliding_window);
     draft_config.target_lm_head =
         tp_sharded ? private_lm_head : &model.lm_head();
     draft_config.target_embed_tokens =
         tp_sharded ? private_embed : &model.embed_tokens();
-    auto draft_result = shelf::qwen35::dflash2::create_dflash2_executor(
+    auto draft_result = ::shelf::runtime::dflash2::create_dflash2_executor(
         dflash_config, dflash_weights, arena, draft_config);
     if (!draft_result.ok()) {
         fprintf(stderr, "dflash2 executor create failed: %s\n",
                 draft_result.status().message().c_str());
         return 1;
     }
-    shelf::qwen35::dflash2::DFlash2Executor draft = draft_result.release();
+    ::shelf::runtime::dflash2::DFlash2Executor draft = draft_result.release();
 
     auto sequence_result = shelf::state::create_paged_sequence_state(
         slot_pool, gdn_pool, kv_pool, max_seq, stream);
     if (!sequence_result.ok()) {
         fprintf(stderr, "dflash2 sequence create failed: %s\n",
                 sequence_result.status().message().c_str());
-        (void)shelf::qwen35::dflash2::dflash2_executor_shutdown(draft);
+        (void)::shelf::runtime::dflash2::dflash2_executor_shutdown(draft);
         return 1;
     }
     shelf::state::PagedSequenceState sequence = sequence_result.release();
@@ -619,21 +619,21 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
             fprintf(stderr, "dflash2 tp mirror create failed: %s\n",
                     mirror_st.message().c_str());
             release_sequence();
-            (void)shelf::qwen35::dflash2::dflash2_executor_shutdown(draft);
+            (void)::shelf::runtime::dflash2::dflash2_executor_shutdown(draft);
             return 1;
         }
     }
 
     auto context_result =
-        shelf::qwen35::dflash2::create_dflash2_context_state(dflash_config, arena, 0u);
+        ::shelf::runtime::dflash2::create_dflash2_context_state(dflash_config, arena, 0u);
     if (!context_result.ok()) {
         fprintf(stderr, "dflash2 context create failed: %s\n",
                 context_result.status().message().c_str());
         release_sequence();
-        (void)shelf::qwen35::dflash2::dflash2_executor_shutdown(draft);
+        (void)::shelf::runtime::dflash2::dflash2_executor_shutdown(draft);
         return 1;
     }
-    shelf::qwen35::dflash2::DFlash2ContextState context = context_result.release();
+    ::shelf::runtime::dflash2::DFlash2ContextState context = context_result.release();
 
     shelf::qwen35::runtime::DFlash2SpecDecoderConfig decoder_config;
     decoder_config.num_drafts = static_cast<uint32_t>(dflash2_drafts);
@@ -647,9 +647,9 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
     if (!decoder_result.ok()) {
         fprintf(stderr, "dflash2 spec decoder create failed: %s\n",
                 decoder_result.status().message().c_str());
-        (void)shelf::qwen35::dflash2::dflash2_context_shutdown(context);
+        (void)::shelf::runtime::dflash2::dflash2_context_shutdown(context);
         release_sequence();
-        (void)shelf::qwen35::dflash2::dflash2_executor_shutdown(draft);
+        (void)::shelf::runtime::dflash2::dflash2_executor_shutdown(draft);
         return 1;
     }
     shelf::qwen35::runtime::DFlash2SpecDecoder decoder = decoder_result.release();
@@ -667,9 +667,9 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
         fprintf(stderr, "dflash2 prefill failed: %s\n",
                 prefill_result.status().message().c_str());
         (void)shelf::qwen35::runtime::dflash2_spec_decoder_shutdown(decoder);
-        (void)shelf::qwen35::dflash2::dflash2_context_shutdown(context);
+        (void)::shelf::runtime::dflash2::dflash2_context_shutdown(context);
         release_sequence();
-        (void)shelf::qwen35::dflash2::dflash2_executor_shutdown(draft);
+        (void)::shelf::runtime::dflash2::dflash2_executor_shutdown(draft);
         return 1;
     }
     int32_t pending = prefill_result.value().pending_token;
@@ -704,9 +704,9 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
             fprintf(stderr, "dflash2 step failed: %s\n",
                     step_result.status().message().c_str());
             (void)shelf::qwen35::runtime::dflash2_spec_decoder_shutdown(decoder);
-            (void)shelf::qwen35::dflash2::dflash2_context_shutdown(context);
+            (void)::shelf::runtime::dflash2::dflash2_context_shutdown(context);
             release_sequence();
-            (void)shelf::qwen35::dflash2::dflash2_executor_shutdown(draft);
+            (void)::shelf::runtime::dflash2::dflash2_executor_shutdown(draft);
             return 1;
         }
         auto step = step_result.release();
@@ -792,9 +792,9 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
     }
 
     (void)shelf::qwen35::runtime::dflash2_spec_decoder_shutdown(decoder);
-    (void)shelf::qwen35::dflash2::dflash2_context_shutdown(context);
+    (void)::shelf::runtime::dflash2::dflash2_context_shutdown(context);
     release_sequence();
-    (void)shelf::qwen35::dflash2::dflash2_executor_shutdown(draft);
+    (void)::shelf::runtime::dflash2::dflash2_executor_shutdown(draft);
 
     const auto prefill_ms =
         std::chrono::duration<double, std::milli>(t_prefill_end - t_prefill_start).count();

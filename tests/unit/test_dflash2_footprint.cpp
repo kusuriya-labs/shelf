@@ -1,14 +1,14 @@
-#include <shelf/models/qwen35/dflash2/config.h>
+#include <shelf/runtime/dflash2_config.h>
 #include <shelf/models/qwen35/runtime/dflash2_footprint.h>
 
 #include <cstdio>
 #include <string>
 
-using shelf::qwen35::dflash2::DFlash2Config;
-using shelf::qwen35::runtime::DFlash2Footprint;
-using shelf::qwen35::runtime::dflash2_context_state_bytes;
-using shelf::qwen35::runtime::dflash2_draft_scratch_bytes;
-using shelf::qwen35::runtime::dflash2_prefill_rows;
+using ::shelf::runtime::DFlash2Config;
+using shelf::runtime::DFlash2Footprint;
+using shelf::runtime::dflash2_context_state_bytes;
+using shelf::runtime::dflash2_draft_scratch_bytes;
+using shelf::runtime::dflash2_prefill_rows;
 
 static int g_fail = 0;
 
@@ -43,7 +43,7 @@ static DFlash2Config dflash2_reference_config() {
 
 int main() {
     const DFlash2Config config = dflash2_reference_config();
-    using shelf::qwen35::runtime::dflash2_session_rows;
+    using shelf::runtime::dflash2_session_rows;
     check(dflash2_session_rows(8u, 7u) == 8u, "default chain capacity");
     check(dflash2_session_rows(8u, 3u, 0u) == 4u, "zero budget retains chain capacity");
     check(dflash2_session_rows(8u, 7u, 10u) == 10u, "tree budget increases verify rows");
@@ -123,7 +123,7 @@ int main() {
               2u * (64u - 8u) * config.vocab_size * sizeof(float),
           "batched logits and EXL3 accumulator cover all rows");
 
-    using shelf::qwen35::runtime::dflash2_batch_tree_metadata_bytes;
+    using shelf::runtime::dflash2_batch_tree_metadata_bytes;
     check(dflash2_batch_tree_metadata_bytes(16u, 0u) == 0u,
           "zero tree budget adds no batch metadata");
     check(dflash2_batch_tree_metadata_bytes(16u, 10u) == 6u * 256u + 768u + 768u,

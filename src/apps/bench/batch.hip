@@ -3,7 +3,7 @@
 #include <shelf/models/model_weights_factory.h>
 #include <shelf/models/tp_rank_model.h>
 #include <shelf/models/qwen35/runtime/executor.h>
-#include <shelf/models/qwen35/runtime/continuous_batcher.h>
+#include <shelf/runtime/continuous_batcher.h>
 #include <shelf/models/qwen35/runtime/tensor_parallel.h>
 #include <shelf/runtime/state_types.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>

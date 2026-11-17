@@ -1,12 +1,12 @@
 #pragma once
 
-#include <shelf/models/qwen35/dflash2/config.h>
-#include <shelf/models/qwen35/dflash2/weights.h>
+#include <shelf/runtime/dflash2_config.h>
+#include <shelf/runtime/dflash2/weights.h>
 #include <shelf/models/loaded_model.h>
 #include <shelf/models/tp_rank_model.h>
 #include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35/model/rope_profile.h>
-#include <shelf/models/qwen35/runtime/continuous_batcher.h>
+#include <shelf/runtime/continuous_batcher.h>
 #include <shelf/runtime/decode_backend.h>
 #include <shelf/models/qwen35/runtime/executor.h>
 #include <shelf/models/qwen35/runtime/prefix_cache.h>
@@ -40,7 +40,7 @@ enum class ArenaBudgetMode {
 struct Qwen35RuntimeConfig {
     std::string model_dir;
     std::string dflash2_model_dir;
-    qwen35::dflash2::DFlash2Config draft_config;
+    ::shelf::runtime::DFlash2Config draft_config;
     bool draft_config_ready = false;
     uint32_t dflash2_drafts = 7;
     bool dflash2_tree = false;
@@ -180,8 +180,8 @@ class Qwen35ComputeRuntime {
 
     double model_load_ms() const noexcept { return model_load_ms_; }
 
-    Result<qwen35::dflash2::DFlash2Weights> load_dflash2_weights(
-        const qwen35::dflash2::DFlash2Config& config,
+    Result<::shelf::runtime::dflash2::DFlash2Weights> load_dflash2_weights(
+        const ::shelf::runtime::DFlash2Config& config,
         const shelf::weights::WeightLoadOptions& options = {});
 
     Status set_dflash2_batcher(const qwen35::runtime::DFlash2BatcherBinding& binding);

@@ -1,4 +1,4 @@
-#include <shelf/models/qwen35/runtime/token_budget_scheduler.h>
+#include <shelf/runtime/token_budget_scheduler.h>
 
 #include <algorithm>
 #include <span>

@@ -1,4 +1,4 @@
-#include <shelf/models/qwen35/runtime/runtime_request.h>
+#include <shelf/runtime/runtime_request.h>
 #include <shelf/runtime/state_types.h>
 
 namespace shelf {

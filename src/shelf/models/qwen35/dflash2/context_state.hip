@@ -1,4 +1,4 @@
-#include <shelf/models/qwen35/dflash2/context_state.h>
+#include <shelf/runtime/dflash2/context_state.h>
 
 #include <limits>
 #include <vector>

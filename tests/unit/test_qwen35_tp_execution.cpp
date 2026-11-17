@@ -2,7 +2,7 @@
 #include <shelf/core/gpu/scoped_device.h>
 #include <shelf/io/safetensors_writer.h>
 #include <shelf/models/qwen35/model/qwen35_model.h>
-#include <shelf/models/qwen35/runtime/continuous_batcher.h>
+#include <shelf/runtime/continuous_batcher.h>
 #include <shelf/models/qwen35/runtime/tensor_parallel.h>
 #include <shelf/runtime/state_types.h>
 #include <shelf/quantization/manifest/crc32.h>
@@ -46,13 +46,13 @@ using shelf::qwen35::ExecutorConfig;
 using shelf::qwen35::create_model_executor;
 using shelf::qwen35::executor_shutdown;
 using shelf::kernel::KVCacheDType;
-using shelf::qwen35::runtime::ContinuousBatcher;
-using shelf::qwen35::runtime::ContinuousBatcherConfig;
-using shelf::qwen35::runtime::RuntimeRequest;
-using shelf::qwen35::runtime::TpCoordinator;
-using shelf::qwen35::runtime::TpCoordinatorConfig;
-using shelf::qwen35::runtime::TpRankRuntime;
-using shelf::qwen35::runtime::ValueTraceSink;
+using shelf::runtime::ContinuousBatcher;
+using shelf::runtime::ContinuousBatcherConfig;
+using shelf::runtime::RuntimeRequest;
+using shelf::runtime::TpCoordinator;
+using shelf::runtime::TpCoordinatorConfig;
+using shelf::runtime::TpRankRuntime;
+using shelf::runtime::ValueTraceSink;
 
 static int g_fail = 0;
 

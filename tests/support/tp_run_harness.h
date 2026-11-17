@@ -4,7 +4,7 @@
 #include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/gpu/scoped_device.h>
 #include <shelf/models/qwen35/model/qwen35_model.h>
-#include <shelf/models/qwen35/runtime/continuous_batcher.h>
+#include <shelf/runtime/continuous_batcher.h>
 #include <shelf/inference/execution/program_executor.h>
 #include <shelf/models/qwen35/runtime/tensor_parallel.h>
 #include <shelf/models/tp_rank_model.h>
@@ -41,15 +41,15 @@ using shelf::qwen35::Qwen35TextConfig;
 using shelf::state::SequenceSlotPool;
 using shelf::qwen35::create_model_executor;
 using shelf::qwen35::executor_shutdown;
-using shelf::qwen35::runtime::ContinuousBatcher;
-using shelf::qwen35::runtime::ContinuousBatcherConfig;
-using shelf::qwen35::runtime::RuntimeRequest;
-using shelf::qwen35::runtime::TpCoordinator;
+using shelf::runtime::ContinuousBatcher;
+using shelf::runtime::ContinuousBatcherConfig;
+using shelf::runtime::RuntimeRequest;
+using shelf::runtime::TpCoordinator;
 using shelf::qwen35::runtime::build_dense_tp_rank_model;
-using shelf::qwen35::runtime::TpCoordinatorConfig;
-using shelf::qwen35::runtime::TpRankRuntime;
+using shelf::runtime::TpCoordinatorConfig;
+using shelf::runtime::TpRankRuntime;
 using shelf::qwen35::kMaxTargetHiddenTaps;
-using shelf::qwen35::runtime::ValueTraceSink;
+using shelf::runtime::ValueTraceSink;
 
 inline std::vector<int> tp_devices_from_env() {
     if (const char* env = std::getenv("SHELF_TP_DEVICES")) {

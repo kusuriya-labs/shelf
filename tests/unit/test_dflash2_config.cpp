@@ -1,4 +1,4 @@
-#include <shelf/models/qwen35/dflash2/config.h>
+#include <shelf/runtime/dflash2_config.h>
 
 #include <cstdio>
 #include <filesystem>
@@ -8,8 +8,8 @@
 
 namespace fs = std::filesystem;
 
-using shelf::qwen35::dflash2::DFlash2Config;
-using shelf::qwen35::dflash2::read_dflash2_config;
+using ::shelf::runtime::DFlash2Config;
+using ::shelf::runtime::read_dflash2_config;
 
 static int g_fail = 0;
 

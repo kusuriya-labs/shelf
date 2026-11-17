@@ -1,6 +1,6 @@
 #include <shelf/core/gpu/cleanup.h>
 #include <shelf/models/qwen35/model/qwen35_model.h>
-#include <shelf/models/qwen35/runtime/continuous_batcher.h>
+#include <shelf/runtime/continuous_batcher.h>
 #include <shelf/models/qwen35/runtime/executor.h>
 #include <shelf/models/qwen35/runtime/prefix_cache.h>
 #include <shelf/runtime/state_types.h>
@@ -32,12 +32,12 @@ using shelf::qwen35::Qwen35TextConfig;
 using shelf::state::SequenceSlotPool;
 using shelf::qwen35::create_model_executor;
 using shelf::qwen35::executor_shutdown;
-using shelf::qwen35::runtime::ContinuousBatcher;
-using shelf::qwen35::runtime::ContinuousBatcherConfig;
-using shelf::qwen35::runtime::PrefixCache;
-using shelf::qwen35::runtime::PrefixCacheConfig;
-using shelf::qwen35::runtime::PrefixCacheStats;
-using shelf::qwen35::runtime::RuntimeRequest;
+using shelf::runtime::ContinuousBatcher;
+using shelf::runtime::ContinuousBatcherConfig;
+using shelf::runtime::PrefixCache;
+using shelf::runtime::PrefixCacheConfig;
+using shelf::runtime::PrefixCacheStats;
+using shelf::runtime::RuntimeRequest;
 
 static int g_fail = 0;
 

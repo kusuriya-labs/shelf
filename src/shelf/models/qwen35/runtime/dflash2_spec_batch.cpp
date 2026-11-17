@@ -1,7 +1,7 @@
-#include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
+#include <shelf/runtime/dflash2_spec_decoder.h>
 
 #include <shelf/core/gpu/cleanup.h>
-#include <shelf/models/qwen35/kernels/dflash2/candidate_selector.h>
+#include <shelf/runtime/kernels/dflash2/candidate_selector.h>
 
 #include <vector>
 #include <type_traits>

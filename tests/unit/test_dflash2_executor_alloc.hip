@@ -1,7 +1,7 @@
 #include <shelf/core/memory/arena.h>
-#include <shelf/models/qwen35/dflash2/config.h>
-#include <shelf/models/qwen35/dflash2/executor.h>
-#include <shelf/models/qwen35/dflash2/weights.h>
+#include <shelf/runtime/dflash2_config.h>
+#include <shelf/runtime/dflash2/executor.h>
+#include <shelf/runtime/dflash2/weights.h>
 #include <shelf/models/qwen35/runtime/dflash2_footprint.h>
 #include <shelf/quantization/quantization_types.h>
 #include <shelf/weights/matrix_weight.h>
@@ -12,11 +12,11 @@
 #include <cstdio>
 #include <string>
 
-using shelf::qwen35::dflash2::DFlash2Config;
-using shelf::qwen35::dflash2::DFlash2Executor;
-using shelf::qwen35::dflash2::DFlash2ExecutorConfig;
-using shelf::qwen35::dflash2::DFlash2Weights;
-using shelf::qwen35::runtime::dflash2_draft_scratch_bytes;
+using ::shelf::runtime::DFlash2Config;
+using ::shelf::runtime::dflash2::DFlash2Executor;
+using ::shelf::runtime::dflash2::DFlash2ExecutorConfig;
+using ::shelf::runtime::dflash2::DFlash2Weights;
+using shelf::runtime::dflash2_draft_scratch_bytes;
 using shelf::quantization::QuantSpecId;
 using shelf::weights::MatrixWeight;
 
@@ -86,7 +86,7 @@ static AllocResult create_and_measure(const DFlash2Config& config, QuantSpecId s
     exec_config.max_context_rows = static_cast<uint32_t>(config.sliding_window);
     exec_config.target_lm_head = &head;
 
-    auto exec_result = shelf::qwen35::dflash2::create_dflash2_executor(
+    auto exec_result = ::shelf::runtime::dflash2::create_dflash2_executor(
         config, weights, arena, exec_config);
     if (!exec_result.ok()) {
         std::printf("create failed: %s\n", exec_result.status().message().c_str());
@@ -103,7 +103,7 @@ static AllocResult create_and_measure(const DFlash2Config& config, QuantSpecId s
         }
     }
     result.ok = true;
-    (void)shelf::qwen35::dflash2::dflash2_executor_shutdown(executor);
+    (void)::shelf::runtime::dflash2::dflash2_executor_shutdown(executor);
     (void)arena.shutdown();
     return result;
 }

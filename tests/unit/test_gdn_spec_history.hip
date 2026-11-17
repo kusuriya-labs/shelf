@@ -21,11 +21,11 @@ using shelf::fp16_t;
 using shelf::state::GdnStatePool;
 using shelf::state::GdnStatePoolDeviceView;
 using shelf::state::GdnStatePoolLayout;
-using shelf::qwen35::runtime::GdnSpecHistory;
-using shelf::qwen35::runtime::create_gdn_spec_history;
-using shelf::qwen35::runtime::gdn_spec_history_view;
-using shelf::qwen35::runtime::restore_gdn_spec_history;
-using shelf::qwen35::runtime::shutdown_gdn_spec_history;
+using shelf::runtime::GdnSpecHistory;
+using shelf::runtime::create_gdn_spec_history;
+using shelf::runtime::gdn_spec_history_view;
+using shelf::runtime::restore_gdn_spec_history;
+using shelf::runtime::shutdown_gdn_spec_history;
 
 static int g_fail = 0;
 

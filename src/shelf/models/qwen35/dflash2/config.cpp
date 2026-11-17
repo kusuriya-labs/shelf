@@ -1,4 +1,4 @@
-#include <shelf/models/qwen35/dflash2/config.h>
+#include <shelf/runtime/dflash2_config.h>
 #include <fstream>
 #include <nlohmann/json.hpp>
 

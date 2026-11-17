@@ -24,12 +24,12 @@ struct DFlash2Options {
     std::uint32_t drafts = 7;
 };
 
-inline bool dflash2_step_loop(::shelf::qwen35::runtime::DFlash2SpecDecoder& decoder,
+inline bool dflash2_step_loop(::shelf::runtime::DFlash2SpecDecoder& decoder,
                               const ::shelf::qwen35::Qwen35TextConfig& text_config,
                               const RunOptions& opts, RunResult& result,
                               std::string& loop_report) {
     const auto t0 = std::chrono::steady_clock::now();
-    auto prefill = ::shelf::qwen35::runtime::dflash2_spec_prefill(
+    auto prefill = ::shelf::runtime::dflash2_spec_prefill(
         decoder, opts.prompt.data(), static_cast<std::uint32_t>(opts.prompt.size()));
     const auto t_pre = std::chrono::steady_clock::now();
     if (!prefill.ok()) {
@@ -45,7 +45,7 @@ inline bool dflash2_step_loop(::shelf::qwen35::runtime::DFlash2SpecDecoder& deco
     while (!finished && result.tokens.size() < opts.max_new_tokens) {
         const std::uint32_t remaining =
             static_cast<std::uint32_t>(opts.max_new_tokens - result.tokens.size());
-        auto step = ::shelf::qwen35::runtime::dflash2_spec_step(decoder, pending, remaining);
+        auto step = ::shelf::runtime::dflash2_spec_step(decoder, pending, remaining);
         if (!step.ok()) {
             result.error = "dflash2 step: " + step.status().message();
             return false;
@@ -139,7 +139,7 @@ inline RunResult run_dflash2_tp1(const DFlash2Options& opts) {
     }
     PagedKVPool kv_pool = kv_result.release();
 
-    auto dflash_config_result = ::shelf::qwen35::dflash2::read_dflash2_config(
+    auto dflash_config_result = ::shelf::runtime::read_dflash2_config(
         opts.dflash2_model_dir);
     if (!dflash_config_result.ok()) {
         result.error = "dflash2 config: " + dflash_config_result.status().message();
@@ -167,7 +167,7 @@ inline RunResult run_dflash2_tp1(const DFlash2Options& opts) {
     }
     Executor executor = exec_result.release();
 
-    auto weights_result = ::shelf::qwen35::dflash2::load_dflash2_weights(
+    auto weights_result = ::shelf::runtime::dflash2::load_dflash2_weights(
         opts.dflash2_model_dir, dflash_config, arena, stream);
     if (!weights_result.ok()) {
         result.error = "dflash2 weights: " + weights_result.status().message();
@@ -175,12 +175,12 @@ inline RunResult run_dflash2_tp1(const DFlash2Options& opts) {
     }
     auto dflash_weights = weights_result.release();
 
-    ::shelf::qwen35::dflash2::DFlash2ExecutorConfig draft_config;
+    ::shelf::runtime::dflash2::DFlash2ExecutorConfig draft_config;
     draft_config.max_rows = static_cast<std::uint32_t>(dflash_config.block_size);
     draft_config.max_context_rows = static_cast<std::uint32_t>(dflash_config.sliding_window);
     draft_config.target_lm_head = &model.weights().lm_head;
     draft_config.target_embed_tokens = &model.weights().embed_tokens;
-    auto draft_result = ::shelf::qwen35::dflash2::create_dflash2_executor(
+    auto draft_result = ::shelf::runtime::dflash2::create_dflash2_executor(
         dflash_config, dflash_weights, arena, draft_config);
     if (!draft_result.ok()) {
         result.error = "dflash2 draft executor: " + draft_result.status().message();
@@ -196,7 +196,7 @@ inline RunResult run_dflash2_tp1(const DFlash2Options& opts) {
     }
     auto sequence = sequence_result.release();
 
-    auto context_result = ::shelf::qwen35::dflash2::create_dflash2_context_state(
+    auto context_result = ::shelf::runtime::dflash2::create_dflash2_context_state(
         dflash_config, arena, 0u);
     if (!context_result.ok()) {
         result.error = "dflash2 context: " + context_result.status().message();
@@ -204,17 +204,17 @@ inline RunResult run_dflash2_tp1(const DFlash2Options& opts) {
     }
     auto context = context_result.release();
 
-    ::shelf::qwen35::runtime::DFlash2SpecDecoderConfig decoder_config;
+    ::shelf::runtime::DFlash2SpecDecoderConfig decoder_config;
     decoder_config.num_drafts = opts.drafts;
     decoder_config.eos_tokens = model.text_config().stop_tokens;
-    auto decoder_result = ::shelf::qwen35::runtime::create_dflash2_spec_decoder(
+    auto decoder_result = ::shelf::runtime::create_dflash2_spec_decoder(
         executor, draft, context, sequence, gdn_pool, arena, decoder_config, stream);
     if (!decoder_result.ok()) {
         result.error = "dflash2 decoder: " + decoder_result.status().message();
         return result;
     }
     auto decoder = decoder_result.release();
-    ::shelf::qwen35::runtime::DFlash2SpecTiming timing;
+    ::shelf::runtime::DFlash2SpecTiming timing;
     decoder.timing = &timing;
 
     std::string loop_report;
@@ -226,10 +226,10 @@ inline RunResult run_dflash2_tp1(const DFlash2Options& opts) {
                         loop_report;
     }
 
-    (void)::shelf::qwen35::runtime::dflash2_spec_decoder_shutdown(decoder);
-    (void)::shelf::qwen35::dflash2::dflash2_context_shutdown(context);
+    (void)::shelf::runtime::dflash2_spec_decoder_shutdown(decoder);
+    (void)::shelf::runtime::dflash2::dflash2_context_shutdown(context);
     (void)::shelf::state::release_paged_sequence_state(sequence, stream);
-    (void)::shelf::qwen35::dflash2::dflash2_executor_shutdown(draft);
+    (void)::shelf::runtime::dflash2::dflash2_executor_shutdown(draft);
     executor_shutdown(executor);
     shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     arena.shutdown();
@@ -241,7 +241,7 @@ inline RunResult run_dflash2_tp2(const DFlash2Options& opts) {
     const RunOptions& o = opts.base;
     RunResult result;
 
-    auto dflash_config_result = ::shelf::qwen35::dflash2::read_dflash2_config(
+    auto dflash_config_result = ::shelf::runtime::read_dflash2_config(
         opts.dflash2_model_dir);
     if (!dflash_config_result.ok()) {
         result.error = "dflash2 config: " + dflash_config_result.status().message();
@@ -283,7 +283,7 @@ inline RunResult run_dflash2_tp2(const DFlash2Options& opts) {
     const hipStream_t stream = rank0.stream();
     gpu::GpuArena& arena = rank0.arena();
 
-    auto weights_result = ::shelf::qwen35::dflash2::load_dflash2_weights(
+    auto weights_result = ::shelf::runtime::dflash2::load_dflash2_weights(
         opts.dflash2_model_dir, dflash_config, arena, stream);
     if (!weights_result.ok()) {
         result.error = "dflash2 weights: " + weights_result.status().message();
@@ -291,12 +291,12 @@ inline RunResult run_dflash2_tp2(const DFlash2Options& opts) {
     }
     auto dflash_weights = weights_result.release();
 
-    ::shelf::qwen35::dflash2::DFlash2ExecutorConfig draft_config;
+    ::shelf::runtime::dflash2::DFlash2ExecutorConfig draft_config;
     draft_config.max_rows = static_cast<std::uint32_t>(dflash_config.block_size);
     draft_config.max_context_rows = static_cast<std::uint32_t>(dflash_config.sliding_window);
     draft_config.target_lm_head = &model.weights().lm_head;
     draft_config.target_embed_tokens = &model.weights().embed_tokens;
-    auto draft_result = ::shelf::qwen35::dflash2::create_dflash2_executor(
+    auto draft_result = ::shelf::runtime::dflash2::create_dflash2_executor(
         dflash_config, dflash_weights, arena, draft_config);
     if (!draft_result.ok()) {
         result.error = "dflash2 draft executor: " + draft_result.status().message();
@@ -318,7 +318,7 @@ inline RunResult run_dflash2_tp2(const DFlash2Options& opts) {
         return result;
     }
 
-    auto context_result = ::shelf::qwen35::dflash2::create_dflash2_context_state(
+    auto context_result = ::shelf::runtime::dflash2::create_dflash2_context_state(
         dflash_config, arena, 0u);
     if (!context_result.ok()) {
         result.error = "dflash2 context: " + context_result.status().message();
@@ -326,18 +326,18 @@ inline RunResult run_dflash2_tp2(const DFlash2Options& opts) {
     }
     auto context = context_result.release();
 
-    std::vector<::shelf::qwen35::runtime::DFlash2GdnRankBinding> bindings;
+    std::vector<::shelf::runtime::DFlash2GdnRankBinding> bindings;
     for (std::size_t r = 0; r < 2; ++r) {
         TpRankRuntime& rank = coordinator->rank(r);
-        bindings.push_back(::shelf::qwen35::runtime::DFlash2GdnRankBinding{
+        bindings.push_back(::shelf::runtime::DFlash2GdnRankBinding{
             &rank.gdn_pool(), &rank.arena(), rank.stream(), rank.device_id(), nullptr,
             &rank.executor()});
     }
 
-    ::shelf::qwen35::runtime::DFlash2SpecDecoderConfig decoder_config;
+    ::shelf::runtime::DFlash2SpecDecoderConfig decoder_config;
     decoder_config.num_drafts = opts.drafts;
     decoder_config.eos_tokens = model.text_config().stop_tokens;
-    auto decoder_result = ::shelf::qwen35::runtime::create_dflash2_spec_decoder(
+    auto decoder_result = ::shelf::runtime::create_dflash2_spec_decoder(
         rank0.executor(), draft, context, sequence, rank0.gdn_pool(), arena,
         decoder_config, stream, &bindings, coordinator.get());
     if (!decoder_result.ok()) {
@@ -345,7 +345,7 @@ inline RunResult run_dflash2_tp2(const DFlash2Options& opts) {
         return result;
     }
     auto decoder = decoder_result.release();
-    ::shelf::qwen35::runtime::DFlash2SpecTiming timing;
+    ::shelf::runtime::DFlash2SpecTiming timing;
     decoder.timing = &timing;
 
     std::string loop_report;
@@ -359,11 +359,11 @@ inline RunResult run_dflash2_tp2(const DFlash2Options& opts) {
             loop_report;
     }
 
-    (void)::shelf::qwen35::runtime::dflash2_spec_decoder_shutdown(decoder);
-    (void)::shelf::qwen35::dflash2::dflash2_context_shutdown(context);
+    (void)::shelf::runtime::dflash2_spec_decoder_shutdown(decoder);
+    (void)::shelf::runtime::dflash2::dflash2_context_shutdown(context);
     (void)coordinator->on_sequence_released(sequence);
     (void)::shelf::state::release_paged_sequence_state(sequence, stream);
-    (void)::shelf::qwen35::dflash2::dflash2_executor_shutdown(draft);
+    (void)::shelf::runtime::dflash2::dflash2_executor_shutdown(draft);
     result.ok = ran;
     return result;
 }

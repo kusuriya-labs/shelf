@@ -1,0 +1,470 @@
+#include <shelf/runtime/dflash2/weights.h>
+#include <shelf/io/safetensors_reader.h>
+#include <shelf/quantization/bundle/hf_manifest.h>
+#include <shelf/quantization/manifest/quantized_manifest.h>
+#include <shelf/quantization/exl3/exl3_int8.h>
+#include <cstring>
+#include <filesystem>
+#include <shelf/quantization/bundle/quantized_model_reader.h>
+#include <set>
+#include <string>
+#include <utility>
+
+namespace {
+constexpr const char* kDFlash2QuantizedArchitecture = "dflash2_draft";
+}
+
+namespace shelf {
+namespace runtime {
+namespace dflash2 {
+
+namespace {
+
+std::string layer_prefix(std::size_t layer) {
+    return "layers." + std::to_string(layer) + ".";
+}
+
+void push_tensor(
+    std::vector<DFlash2ExpectedTensor>& out,
+    std::string name,
+    std::vector<std::size_t> shape) {
+    out.push_back(DFlash2ExpectedTensor{std::move(name), std::move(shape)});
+}
+
+std::string shape_to_string(const std::vector<std::size_t>& shape) {
+    std::string s = "[";
+    for (std::size_t i = 0; i < shape.size(); ++i) {
+        if (i != 0) s += ",";
+        s += std::to_string(shape[i]);
+    }
+    s += "]";
+    return s;
+}
+
+Status load_matrix(
+    const shelf::weights::SafetensorsCollection& collection,
+    const std::string& name,
+    gpu::GpuArena& arena,
+    hipStream_t stream,
+    const shelf::weights::WeightLoadOptions& options,
+    shelf::weights::MatrixWeight& dst) {
+    auto m = shelf::weights::load_bf16_matrix(collection, name, arena, stream, options);
+    if (!m.ok()) return m.status();
+    dst = m.release();
+    return Status::make_ok();
+}
+
+Status load_vector(
+    const shelf::weights::SafetensorsCollection& collection,
+    const std::string& name,
+    gpu::GpuArena& arena,
+    hipStream_t stream,
+    gpu::Tensor& dst) {
+    auto t = shelf::weights::load_bf16_tensor(collection, name, arena, stream);
+    if (!t.ok()) return t.status();
+    dst = t.release();
+    return Status::make_ok();
+}
+
+struct WeightSource {
+    bool quantized = false;
+    const shelf::weights::SafetensorsCollection* collection = nullptr;
+    const shelf::quantization::bundle::QuantizedModelReader* reader = nullptr;
+    gpu::GpuArena* arena = nullptr;
+    hipStream_t stream = nullptr;
+    shelf::weights::WeightLoadOptions options;
+};
+
+Status source_load_matrix(
+    const WeightSource& src, const std::string& name, shelf::weights::MatrixWeight& dst) {
+    if (src.quantized) {
+        auto m = shelf::weights::load_quantized_matrix(*src.reader, name, *src.arena, src.stream,
+                                                    src.options);
+        if (!m.ok()) return m.status();
+        dst = m.release();
+        return Status::make_ok();
+    }
+    return load_matrix(*src.collection, name, *src.arena, src.stream, src.options, dst);
+}
+
+Status source_load_vector(const WeightSource& src, const std::string& name, gpu::Tensor& dst) {
+    if (src.quantized) {
+        auto t = shelf::weights::load_quantized_small(*src.reader, name, *src.arena, src.stream);
+        if (!t.ok()) return t.status();
+        dst = t.release();
+        return Status::make_ok();
+    }
+    return load_vector(*src.collection, name, *src.arena, src.stream, dst);
+}
+
+bool quantizable_linear(const std::string& name) {
+    if (name == "fc.weight") return true;
+    static const char* suffixes[] = {
+        ".self_attn.q_proj.weight", ".self_attn.k_proj.weight",
+        ".self_attn.v_proj.weight", ".self_attn.o_proj.weight",
+        ".mlp.gate_proj.weight", ".mlp.up_proj.weight", ".mlp.down_proj.weight"};
+    for (const char* suffix : suffixes) {
+        const std::string s(suffix);
+        if (name.size() >= s.size() && name.compare(name.size() - s.size(), s.size(), s) == 0)
+            return true;
+    }
+    return false;
+}
+
+Result<shelf::quantization::bundle::QuantizedModelReader> open_draft_reader(
+    const std::string& model_dir, const DFlash2Config& config, bool verify) {
+    namespace qb = shelf::quantization::bundle;
+    namespace qm = shelf::quantization::manifest;
+    if (std::filesystem::exists(std::filesystem::path(model_dir) / qm::kQuantizedMetadataFile))
+        return qb::QuantizedModelReader::open(model_dir, verify);
+    std::vector<std::string> logical;
+    std::set<std::string> allowed;
+    for (const auto& e : dflash2_expected_tensors(config)) {
+        logical.push_back(e.name);
+        allowed.insert(e.name);
+        if (quantizable_linear(e.name)) {
+            const std::string prefix = e.name.substr(0, e.name.size() - 7u);
+            for (const char* suffix : {".trellis", ".suh", ".svh", ".mul1"})
+                allowed.insert(prefix + suffix);
+            allowed.insert(e.name + "_scale_inv");
+        }
+    }
+    auto collection = shelf::weights::SafetensorsCollection::open(model_dir);
+    if (!collection.ok()) return collection.status();
+    auto names = collection.value().tensor_names();
+    if (!names.ok()) return names.status();
+    for (const auto& name : names.value()) {
+        if (!allowed.count(name)) return Status::invalid_argument(
+            ("DFlash2 checkpoint has unexpected tensor: " + name).c_str(), __FILE__, __LINE__);
+    }
+    auto source = qb::synthesize_hf_quantized_source(model_dir, logical, verify);
+    if (!source.ok()) return source.status();
+    for (const auto& name : names.value()) {
+        if (!source.value().shard_for_physical.count(name))
+            return Status::invalid_argument(
+                ("DFlash2 checkpoint has unused or ambiguous tensor: " + name).c_str(),
+                __FILE__, __LINE__);
+    }
+    source.value().manifest.architecture = kDFlash2QuantizedArchitecture;
+    return qb::QuantizedModelReader::open_hf_source(source.release(), verify);
+}
+
+Status validate_quantized_contract(
+    const shelf::quantization::bundle::QuantizedModelReader& reader,
+    const DFlash2Config& config) {
+    using shelf::quantization::manifest::QuantizedEncoding;
+
+    Status model_st = shelf::weights::validate_quantized_model(reader);
+    if (!model_st.ok()) return model_st;
+
+    const auto& manifest = reader.manifest();
+    if (manifest.architecture != kDFlash2QuantizedArchitecture) {
+        return Status::invalid_argument(
+            ("DFlash2 quantized manifest architecture is '" + manifest.architecture +
+             "', expected 'dflash2_draft'").c_str(),
+            __FILE__, __LINE__);
+    }
+
+    auto names_result = reader.list_logical_tensors();
+    if (!names_result.ok()) return names_result.status();
+    const std::vector<std::string> names = names_result.release();
+    const std::vector<DFlash2ExpectedTensor> expected = dflash2_expected_tensors(config);
+
+    std::set<std::string> expected_set;
+    for (const DFlash2ExpectedTensor& e : expected) expected_set.insert(e.name);
+    std::string unexpected;
+    for (const std::string& n : names) {
+        if (expected_set.find(n) == expected_set.end()) {
+            if (!unexpected.empty()) unexpected += ", ";
+            unexpected += n;
+        }
+    }
+    if (!unexpected.empty()) {
+        return Status::invalid_argument(
+            ("DFlash2 quantized bundle has unexpected tensors: " + unexpected).c_str(),
+            __FILE__, __LINE__);
+    }
+
+    for (const DFlash2ExpectedTensor& e : expected) {
+        auto view_result = reader.resolve(e.name);
+        if (!view_result.ok()) {
+            return Status::invalid_argument(
+                ("DFlash2 quantized bundle is missing tensor: " + e.name).c_str(),
+                __FILE__, __LINE__);
+        }
+        const auto& v = view_result.value();
+        if (v.encoding != QuantizedEncoding::Bf16 &&
+            !(quantizable_linear(e.name) && (v.encoding == QuantizedEncoding::Exl3 ||
+                                             v.encoding == QuantizedEncoding::Fp8))) {
+            return Status::invalid_argument(
+                ("DFlash2 quantized tensor '" + e.name + "' has unsupported encoding").c_str(),
+                __FILE__, __LINE__);
+        }
+        if (v.encoding == QuantizedEncoding::Exl3) {
+            uint32_t multiplier = 0;
+            if (v.marker.size != sizeof(multiplier) || !v.marker.data || v.exl3_half)
+                return Status::invalid_argument(
+                    ("DFlash2 EXL3-INT8 marker or bit rate invalid: " + e.name).c_str(),
+                    __FILE__, __LINE__);
+            std::memcpy(&multiplier, v.marker.data, sizeof(multiplier));
+            if (multiplier != shelf::quantization::exl3::kExl3Mul24Multiplier)
+                return Status::unsupported(
+                    ("DFlash2 EXL3 multiplier must be mul24: " + e.name).c_str(),
+                    __FILE__, __LINE__);
+        }
+        if (v.logical_shape.size() != e.shape.size()) {
+            return Status::invalid_argument(
+                ("DFlash2 quantized tensor '" + e.name + "' shape rank mismatch").c_str(),
+                __FILE__, __LINE__);
+        }
+        for (std::size_t d = 0; d < e.shape.size(); ++d) {
+            if (static_cast<std::size_t>(v.logical_shape[d]) != e.shape[d]) {
+                return Status::invalid_argument(
+                    ("DFlash2 quantized tensor '" + e.name + "' shape mismatch").c_str(),
+                    __FILE__, __LINE__);
+            }
+        }
+    }
+    return Status::make_ok();
+}
+
+Status load_dflash2_weights_from(
+    const WeightSource& src, const DFlash2Config& config, DFlash2Weights& weights) {
+    weights.layers.resize(config.num_hidden_layers);
+
+    Status st = source_load_vector(src, "hidden_norm.weight", weights.hidden_norm_weight);
+    if (!st.ok()) return st;
+    st = source_load_vector(src, "norm.weight", weights.final_norm_weight);
+    if (!st.ok()) return st;
+    st = source_load_matrix(src, "fc.weight", weights.fc);
+    if (!st.ok()) return st;
+
+    st = source_load_matrix(src, "candidate_selector.hidden_projection.weight",
+                            weights.selector.hidden_projection);
+    if (!st.ok()) return st;
+    st = source_load_vector(src, "candidate_selector.predecessor_codebook",
+                            weights.selector.predecessor_codebook);
+    if (!st.ok()) return st;
+    st = source_load_vector(src, "candidate_selector.successor_codebook",
+                            weights.selector.successor_codebook);
+    if (!st.ok()) return st;
+
+    for (std::size_t layer = 0; layer < config.num_hidden_layers; ++layer) {
+        const std::string pre = layer_prefix(layer);
+        DFlash2LayerWeights& lw = weights.layers[layer];
+
+        st = source_load_vector(src, pre + "input_layernorm.weight",
+                                lw.input_layernorm_weight);
+        if (!st.ok()) return st;
+        st = source_load_vector(src, pre + "post_attention_layernorm.weight",
+                                lw.post_attention_layernorm_weight);
+        if (!st.ok()) return st;
+
+        st = source_load_matrix(src, pre + "self_attn.q_proj.weight", lw.attn_q_proj);
+        if (!st.ok()) return st;
+        st = source_load_matrix(src, pre + "self_attn.k_proj.weight", lw.attn_k_proj);
+        if (!st.ok()) return st;
+        st = source_load_matrix(src, pre + "self_attn.v_proj.weight", lw.attn_v_proj);
+        if (!st.ok()) return st;
+        st = source_load_matrix(src, pre + "self_attn.o_proj.weight", lw.attn_o_proj);
+        if (!st.ok()) return st;
+        st = source_load_vector(src, pre + "self_attn.q_norm.weight", lw.attn_q_norm_weight);
+        if (!st.ok()) return st;
+        st = source_load_vector(src, pre + "self_attn.k_norm.weight", lw.attn_k_norm_weight);
+        if (!st.ok()) return st;
+
+        st = source_load_matrix(src, pre + "mlp.gate_proj.weight", lw.mlp_gate_proj);
+        if (!st.ok()) return st;
+        st = source_load_matrix(src, pre + "mlp.up_proj.weight", lw.mlp_up_proj);
+        if (!st.ok()) return st;
+        st = source_load_matrix(src, pre + "mlp.down_proj.weight", lw.mlp_down_proj);
+        if (!st.ok()) return st;
+
+        st = source_load_vector(src, pre + "attention_conv.base_kernel",
+                                lw.attention_conv_base_kernel);
+        if (!st.ok()) return st;
+        st = source_load_matrix(src, pre + "attention_conv.kernel_projection.weight",
+                                lw.attention_conv_kernel_projection);
+        if (!st.ok()) return st;
+        st = source_load_vector(src, pre + "mlp_conv.base_kernel", lw.mlp_conv_base_kernel);
+        if (!st.ok()) return st;
+        st = source_load_matrix(src, pre + "mlp_conv.kernel_projection.weight",
+                                lw.mlp_conv_kernel_projection);
+        if (!st.ok()) return st;
+    }
+    return Status::make_ok();
+}
+
+}  // namespace
+
+std::vector<DFlash2ExpectedTensor> dflash2_expected_tensors(const DFlash2Config& config) {
+    std::vector<DFlash2ExpectedTensor> out;
+    out.reserve(6 + 15 * config.num_hidden_layers);
+
+    const std::size_t h = config.hidden_size;
+    const std::size_t q = config.attention_q_rows();
+    const std::size_t kv = config.attention_kv_rows();
+    const std::size_t i = config.intermediate_size;
+    const std::size_t k = config.conv_kernel_size;
+    const std::size_t p = config.conv_projection_rows();
+
+    push_tensor(out, "fc.weight", {h, config.tap_feature_size()});
+    push_tensor(out, "hidden_norm.weight", {h});
+    push_tensor(out, "norm.weight", {h});
+    push_tensor(out, "candidate_selector.hidden_projection.weight",
+                {config.selector_rank, h});
+    push_tensor(out, "candidate_selector.predecessor_codebook",
+                {config.vocab_size, config.selector_rank});
+    push_tensor(out, "candidate_selector.successor_codebook",
+                {config.vocab_size, config.selector_rank});
+
+    for (std::size_t layer = 0; layer < config.num_hidden_layers; ++layer) {
+        const std::string pre = layer_prefix(layer);
+        push_tensor(out, pre + "input_layernorm.weight", {h});
+        push_tensor(out, pre + "post_attention_layernorm.weight", {h});
+        push_tensor(out, pre + "self_attn.q_proj.weight", {q, h});
+        push_tensor(out, pre + "self_attn.k_proj.weight", {kv, h});
+        push_tensor(out, pre + "self_attn.v_proj.weight", {kv, h});
+        push_tensor(out, pre + "self_attn.o_proj.weight", {h, q});
+        push_tensor(out, pre + "self_attn.q_norm.weight", {config.head_dim});
+        push_tensor(out, pre + "self_attn.k_norm.weight", {config.head_dim});
+        push_tensor(out, pre + "mlp.gate_proj.weight", {i, h});
+        push_tensor(out, pre + "mlp.up_proj.weight", {i, h});
+        push_tensor(out, pre + "mlp.down_proj.weight", {h, i});
+        push_tensor(out, pre + "attention_conv.base_kernel", {k, k, h});
+        push_tensor(out, pre + "attention_conv.kernel_projection.weight", {p, h});
+        push_tensor(out, pre + "mlp_conv.base_kernel", {k, k, h});
+        push_tensor(out, pre + "mlp_conv.kernel_projection.weight", {p, h});
+    }
+
+    return out;
+}
+
+Status validate_dflash2_tensor_contract(
+    const std::string& model_dir,
+    const DFlash2Config& config) {
+    if (shelf::weights::is_quantized_model_dir(model_dir)) {
+        auto reader_result = open_draft_reader(model_dir, config, false);
+        if (!reader_result.ok()) return reader_result.status();
+        shelf::quantization::bundle::QuantizedModelReader reader = reader_result.release();
+        return validate_quantized_contract(reader, config);
+    }
+
+    auto collection_result = shelf::weights::SafetensorsCollection::open(model_dir);
+    if (!collection_result.ok()) return collection_result.status();
+    shelf::weights::SafetensorsCollection collection = collection_result.release();
+
+    auto names_result = collection.tensor_names();
+    if (!names_result.ok()) return names_result.status();
+    const std::vector<std::string>& names = names_result.value();
+
+    const std::vector<DFlash2ExpectedTensor> expected = dflash2_expected_tensors(config);
+    std::set<std::string> expected_names;
+    for (const DFlash2ExpectedTensor& e : expected) expected_names.insert(e.name);
+    const std::set<std::string> actual_names(names.begin(), names.end());
+
+    std::string missing;
+    for (const DFlash2ExpectedTensor& e : expected) {
+        if (actual_names.find(e.name) == actual_names.end()) {
+            if (!missing.empty()) missing += ", ";
+            missing += e.name;
+        }
+    }
+    if (!missing.empty()) {
+        return Status::invalid_argument(
+            ("DFlash2 checkpoint is missing tensors: " + missing).c_str(),
+            __FILE__, __LINE__);
+    }
+
+    std::string unexpected;
+    for (const std::string& n : names) {
+        if (expected_names.find(n) == expected_names.end()) {
+            if (!unexpected.empty()) unexpected += ", ";
+            unexpected += n;
+        }
+    }
+    if (!unexpected.empty()) {
+        return Status::invalid_argument(
+            ("DFlash2 checkpoint has unexpected tensors: " + unexpected).c_str(),
+            __FILE__, __LINE__);
+    }
+
+    for (const DFlash2ExpectedTensor& e : expected) {
+        auto spec_result = collection.tensor_spec(e.name);
+        if (!spec_result.ok()) return spec_result.status();
+        const shelf::io::StTensorSpec& spec = spec_result.value();
+        if (spec.dtype != shelf::io::SType::BF16) {
+            return Status::invalid_argument(
+                ("DFlash2 tensor '" + e.name + "' must be BF16").c_str(),
+                __FILE__, __LINE__);
+        }
+        if (spec.shape != e.shape) {
+            return Status::invalid_argument(
+                ("DFlash2 tensor '" + e.name + "' has shape " + shape_to_string(spec.shape) +
+                 ", expected " + shape_to_string(e.shape)).c_str(),
+                __FILE__, __LINE__);
+        }
+    }
+
+    return Status::make_ok();
+}
+
+Result<DFlash2Weights> load_dflash2_weights(
+    const std::string& model_dir,
+    const DFlash2Config& config,
+    gpu::GpuArena& arena,
+    hipStream_t stream,
+    const shelf::weights::WeightLoadOptions& options) {
+    DFlash2Weights weights;
+
+    if (shelf::weights::is_quantized_model_dir(model_dir)) {
+        auto reader_result =
+            open_draft_reader(model_dir, config, true);
+        if (!reader_result.ok()) return reader_result.status();
+        shelf::quantization::bundle::QuantizedModelReader reader = reader_result.release();
+
+        Status contract = validate_quantized_contract(reader, config);
+        if (!contract.ok()) return contract;
+
+        WeightSource src;
+        src.quantized = true;
+        src.reader = &reader;
+        src.arena = &arena;
+        src.stream = stream;
+        src.options = options;
+
+        Status st = load_dflash2_weights_from(src, config, weights);
+        if (!st.ok()) return st;
+    } else {
+        Status contract = validate_dflash2_tensor_contract(model_dir, config);
+        if (!contract.ok()) return contract;
+
+        auto collection_result = shelf::weights::SafetensorsCollection::open(model_dir);
+        if (!collection_result.ok()) return collection_result.status();
+        shelf::weights::SafetensorsCollection collection = collection_result.release();
+
+        WeightSource src;
+        src.quantized = false;
+        src.collection = &collection;
+        src.arena = &arena;
+        src.stream = stream;
+        src.options = options;
+
+        Status st = load_dflash2_weights_from(src, config, weights);
+        if (!st.ok()) return st;
+    }
+
+    hipError_t sync_err = hipStreamSynchronize(stream);
+    if (sync_err != hipSuccess) {
+        return Status::hip_error(
+            "hipStreamSynchronize after DFlash2 weight load",
+            hipGetErrorString(sync_err), __FILE__, __LINE__);
+    }
+
+    weights.present = true;
+    return weights;
+}
+
+}  // namespace dflash2
+}  // namespace runtime
+}  // namespace shelf

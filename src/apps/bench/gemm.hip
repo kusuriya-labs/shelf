@@ -5,7 +5,7 @@
 #include <shelf/kernels/optimized/linear/bf16.h>
 #include <shelf/kernels/optimized/activation_quantize.h>
 #include <shelf/kernels/optimized/elementwise.h>
-#include <shelf/models/qwen35/kernels/dflash2/swiglu.h>
+#include <shelf/runtime/kernels/dflash2/swiglu.h>
 #include <shelf/kernels/correctness/model_dispatch_correctness.h>
 #include <shelf/inference/execution/selectors/linear_selector.h>
 #include <shelf/runtime/program/program.h>

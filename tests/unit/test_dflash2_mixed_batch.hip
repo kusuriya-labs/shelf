@@ -1,9 +1,9 @@
-#include <shelf/models/qwen35/dflash2/config.h>
-#include <shelf/models/qwen35/dflash2/context_state.h>
-#include <shelf/models/qwen35/dflash2/executor.h>
-#include <shelf/models/qwen35/dflash2/weights.h>
+#include <shelf/runtime/dflash2_config.h>
+#include <shelf/runtime/dflash2/context_state.h>
+#include <shelf/runtime/dflash2/executor.h>
+#include <shelf/runtime/dflash2/weights.h>
 #include <shelf/models/qwen35/model/qwen35_model.h>
-#include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
+#include <shelf/runtime/dflash2_spec_decoder.h>
 #include <shelf/models/qwen35/runtime/executor.h>
 #include <shelf/runtime/scheduling_types.h>
 #include <shelf/runtime/state_types.h>
@@ -19,14 +19,14 @@
 #include <string>
 #include <vector>
 
-using shelf::qwen35::dflash2::DFlash2Config;
-using shelf::qwen35::dflash2::DFlash2ContextState;
-using shelf::qwen35::dflash2::DFlash2Executor;
-using shelf::qwen35::dflash2::DFlash2ExecutorConfig;
-using shelf::qwen35::dflash2::DFlash2Weights;
+using ::shelf::runtime::DFlash2Config;
+using ::shelf::runtime::dflash2::DFlash2ContextState;
+using ::shelf::runtime::dflash2::DFlash2Executor;
+using ::shelf::runtime::dflash2::DFlash2ExecutorConfig;
+using ::shelf::runtime::dflash2::DFlash2Weights;
 using shelf::qwen35::SchedulePlan;
 using ::shelf::runtime::ScheduledBatch;
-using shelf::qwen35::runtime::DFlash2SpecBatchContext;
+using shelf::runtime::DFlash2SpecBatchContext;
 
 static int g_fail = 0;
 
@@ -50,7 +50,7 @@ static uint32_t count_attention_layers(const shelf::qwen35::Qwen35TextConfig& tc
 struct Bundle {
     std::unique_ptr<shelf::state::PagedSequenceState> seq;
     std::unique_ptr<DFlash2ContextState> context;
-    std::unique_ptr<shelf::qwen35::runtime::DFlash2SpecDecoder> decoder;
+    std::unique_ptr<shelf::runtime::DFlash2SpecDecoder> decoder;
     bool ok = false;
 };
 
@@ -70,29 +70,29 @@ static bool make_bundle(
         seq_pool, gdn_pool, kv_pool, seq_len, stream);
     if (!seq.ok()) return false;
     out.seq = std::make_unique<shelf::state::PagedSequenceState>(seq.release());
-    auto ctx = shelf::qwen35::dflash2::create_dflash2_context_state(config, arena, 0u);
+    auto ctx = ::shelf::runtime::dflash2::create_dflash2_context_state(config, arena, 0u);
     if (!ctx.ok()) return false;
     out.context = std::make_unique<DFlash2ContextState>(ctx.release());
-    shelf::qwen35::runtime::DFlash2SpecDecoderConfig dcfg;
+    shelf::runtime::DFlash2SpecDecoderConfig dcfg;
     dcfg.num_drafts = num_drafts;
-    auto dec = shelf::qwen35::runtime::create_dflash2_spec_decoder(
+    auto dec = shelf::runtime::create_dflash2_spec_decoder(
         ex, draft, *out.context, *out.seq, gdn_pool, arena, dcfg, stream);
     if (!dec.ok()) return false;
     out.decoder =
-        std::make_unique<shelf::qwen35::runtime::DFlash2SpecDecoder>(dec.release());
+        std::make_unique<shelf::runtime::DFlash2SpecDecoder>(dec.release());
     out.ok = true;
     return true;
 }
 
 struct Prefilled {
     int32_t anchor = -1;
-    std::array<int32_t, shelf::qwen35::dflash2::kMaxBlockSize - 1u> drafts{};
+    std::array<int32_t, ::shelf::runtime::dflash2::kMaxBlockSize - 1u> drafts{};
     uint32_t draft_count = 0;
 };
 
 static bool prefill_bundle(Bundle& b, const std::vector<int32_t>& prompt, uint32_t k,
                            hipStream_t stream, Prefilled& out) {
-    auto prefill = shelf::qwen35::runtime::dflash2_spec_prefill(
+    auto prefill = shelf::runtime::dflash2_spec_prefill(
         *b.decoder, prompt.data(), static_cast<uint32_t>(prompt.size()));
     if (!prefill.ok()) {
         std::printf("FAIL prefill: %s\n", prefill.status().message().c_str());
@@ -100,7 +100,7 @@ static bool prefill_bundle(Bundle& b, const std::vector<int32_t>& prompt, uint32
     }
     out.anchor = prefill.value().pending_token;
     int32_t* proposal_device = b.decoder->draft->proposal_tokens.data<int32_t>();
-    const shelf::Status st = shelf::qwen35::dflash2::dflash2_propose_cached(
+    const shelf::Status st = ::shelf::runtime::dflash2::dflash2_propose_cached(
         *b.decoder->draft, *b.decoder->context, out.anchor, k, proposal_device, stream);
     if (!st.ok()) {
         std::printf("FAIL propose: %s\n", st.message().c_str());
@@ -126,7 +126,7 @@ static bool run_plan(shelf::qwen35::Executor& ex, SchedulePlan& plan,
     }
     shelf::qwen35::ExecuteBatchOptions options;
     options.gdn_spec_history =
-        shelf::qwen35::runtime::gdn_spec_history_view(ctx.history[0], capture_rows);
+        shelf::runtime::gdn_spec_history_view(ctx.history[0], capture_rows);
     options.gdn_compact.delta = ctx.compact[0].delta;
     options.gdn_compact.k = ctx.compact[0].k;
     options.gdn_compact.a = ctx.compact[0].a;
@@ -162,7 +162,7 @@ int main() {
         return 77;
     }
 
-    auto config_result = shelf::qwen35::dflash2::read_dflash2_config(model_dir);
+    auto config_result = ::shelf::runtime::read_dflash2_config(model_dir);
     check(config_result.ok(), "dflash config");
     if (!config_result.ok()) return 1;
     const DFlash2Config config = config_result.value();
@@ -189,7 +189,7 @@ int main() {
     shelf::qwen35::Qwen35Model model = model_result.release();
     const shelf::qwen35::Qwen35TextConfig& tc = model.text_config();
 
-    auto weights_result = shelf::qwen35::dflash2::load_dflash2_weights(model_dir, config, arena,
+    auto weights_result = ::shelf::runtime::dflash2::load_dflash2_weights(model_dir, config, arena,
                                                                     stream);
     check(weights_result.ok(), "dflash weight load");
     if (!weights_result.ok()) return 1;
@@ -240,19 +240,19 @@ int main() {
     draft_cfg.target_lm_head = &model.weights().lm_head;
     draft_cfg.target_embed_tokens = &model.weights().embed_tokens;
     auto draft_result =
-        shelf::qwen35::dflash2::create_dflash2_executor(config, weights, arena, draft_cfg);
+        ::shelf::runtime::dflash2::create_dflash2_executor(config, weights, arena, draft_cfg);
     check(draft_result.ok(), "draft executor create");
     if (!draft_result.ok()) return 1;
     DFlash2Executor draft = draft_result.release();
 
-    std::vector<shelf::qwen35::runtime::DFlash2GdnRankBinding> bindings;
-    shelf::qwen35::runtime::DFlash2GdnRankBinding binding;
+    std::vector<shelf::runtime::DFlash2GdnRankBinding> bindings;
+    shelf::runtime::DFlash2GdnRankBinding binding;
     binding.pool = &gdn_pool;
     binding.arena = &arena;
     binding.stream = stream;
     binding.device = 0;
     bindings.push_back(binding);
-    auto batch_result = shelf::qwen35::runtime::create_dflash2_spec_batch_context(
+    auto batch_result = shelf::runtime::create_dflash2_spec_batch_context(
         bindings, max_rows);
     check(batch_result.ok(), "batch context create");
     if (!batch_result.ok()) return 1;
@@ -304,10 +304,10 @@ int main() {
     SchedulePlan mixed;
     shelf::Status st = mixed.append_decode(bundles[0].seq.get(), mixed_decode_token[0],
                                         bundles[0].seq->position, true, true,
-                                        shelf::qwen35::runtime::SamplingConfig{}, 0u);
+                                        shelf::runtime::SamplingConfig{}, 0u);
     check(st.ok(), "mixed append decode");
     st = mixed.append_verify(bundles[1].seq.get(), tokens_for(1), bundles[1].seq->position,
-                             k + 1u, shelf::qwen35::runtime::SamplingConfig{}, 0u);
+                             k + 1u, shelf::runtime::SamplingConfig{}, 0u);
     check(st.ok(), "mixed append verify");
     mixed.finalize();
     check(mixed.batch.num_decode_requests == 1u, "mixed decode count");
@@ -318,11 +318,11 @@ int main() {
 
     SchedulePlan ordering;
     st = ordering.append_verify(bundles[2].seq.get(), tokens_for(2), bundles[2].seq->position,
-                                k + 1u, shelf::qwen35::runtime::SamplingConfig{}, 0u);
+                                k + 1u, shelf::runtime::SamplingConfig{}, 0u);
     check(st.ok(), "ordering append verify");
     st = ordering.append_decode(bundles[3].seq.get(), pre[3].anchor,
                                 bundles[3].seq->position, true, true,
-                                shelf::qwen35::runtime::SamplingConfig{}, 0u);
+                                shelf::runtime::SamplingConfig{}, 0u);
     check(!st.ok() && st.code() == shelf::Status::Code::invalid_state,
           "decode after verify rejected");
 
@@ -337,7 +337,7 @@ int main() {
     SchedulePlan verify_only;
     st = verify_only.append_verify(bundles[3].seq.get(), tokens_for(3),
                                    bundles[3].seq->position, k + 1u,
-                                   shelf::qwen35::runtime::SamplingConfig{}, 0u);
+                                   shelf::runtime::SamplingConfig{}, 0u);
     check(st.ok(), "verify only append");
     std::vector<int32_t> verify_only_sampled;
     uint32_t verify_only_outputs = 0u;
@@ -348,7 +348,7 @@ int main() {
     SchedulePlan decode_only;
     st = decode_only.append_decode(bundles[2].seq.get(), decode_only_tokens[0],
                                    bundles[2].seq->position, true, true,
-                                   shelf::qwen35::runtime::SamplingConfig{}, 0u);
+                                   shelf::runtime::SamplingConfig{}, 0u);
     check(st.ok(), "decode only append");
     std::vector<int32_t> decode_only_sampled;
     uint32_t decode_only_outputs = 0u;
@@ -376,12 +376,12 @@ int main() {
                 mixed_outputs, verify_only_outputs, decode_only_outputs);
 
     for (std::size_t i = 0; i < bundles.size(); ++i) {
-        check(shelf::qwen35::runtime::dflash2_spec_decoder_shutdown(*bundles[i].decoder).ok(),
+        check(shelf::runtime::dflash2_spec_decoder_shutdown(*bundles[i].decoder).ok(),
               std::string("decoder shutdown ") + names[i]);
-        (void)shelf::qwen35::dflash2::dflash2_context_shutdown(*bundles[i].context);
+        (void)::shelf::runtime::dflash2::dflash2_context_shutdown(*bundles[i].context);
         (void)shelf::state::release_paged_sequence_state(*bundles[i].seq, stream);
     }
-    check(shelf::qwen35::runtime::shutdown_dflash2_spec_batch_context(batch_ctx).ok(),
+    check(shelf::runtime::shutdown_dflash2_spec_batch_context(batch_ctx).ok(),
           "batch context shutdown");
 
     std::printf("test_dflash2_mixed_batch: failed=%d\n", g_fail);

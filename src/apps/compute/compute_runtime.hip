@@ -951,13 +951,13 @@ Status Qwen35ComputeRuntime::retire(uint64_t id) {
     return batcher_->retire(id);
 }
 
-Result<qwen35::dflash2::DFlash2Weights> Qwen35ComputeRuntime::load_dflash2_weights(
-    const qwen35::dflash2::DFlash2Config& config,
+Result<::shelf::runtime::dflash2::DFlash2Weights> Qwen35ComputeRuntime::load_dflash2_weights(
+    const ::shelf::runtime::DFlash2Config& config,
     const shelf::weights::WeightLoadOptions& options) {
     if (config_.dflash2_model_dir.empty()) {
         return Status::invalid_state("dflash2 model dir missing", __FILE__, __LINE__);
     }
-    return qwen35::dflash2::load_dflash2_weights(
+    return ::shelf::runtime::dflash2::load_dflash2_weights(
         config_.dflash2_model_dir, config, arena(), stream(), options);
 }
 

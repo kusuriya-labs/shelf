@@ -28,12 +28,12 @@ using shelf::state::commit_sequence_append;
 using shelf::state::create_paged_sequence_state;
 using shelf::state::release_paged_sequence_state;
 using shelf::state::reserve_sequence_append;
-using shelf::qwen35::runtime::kInvalidReuseSlot;
-using shelf::qwen35::runtime::PrefixCache;
-using shelf::qwen35::runtime::PrefixCacheConfig;
-using shelf::qwen35::runtime::PrefixCacheStats;
-using shelf::qwen35::runtime::PrefixCacheStrategy;
-using shelf::qwen35::runtime::PrefixHit;
+using shelf::runtime::kInvalidReuseSlot;
+using shelf::runtime::PrefixCache;
+using shelf::runtime::PrefixCacheConfig;
+using shelf::runtime::PrefixCacheStats;
+using shelf::runtime::PrefixCacheStrategy;
+using shelf::runtime::PrefixHit;
 
 int g_pass = 0;
 int g_fail = 0;
@@ -797,10 +797,10 @@ void test_capture(Env& env) {
     if (!seq.has_value()) return;
 
     const auto capture = cache.begin_capture(*seq);
-    check(capture.ok() && capture.value() != shelf::qwen35::runtime::kInvalidCapture,
+    check(capture.ok() && capture.value() != shelf::runtime::kInvalidCapture,
           "capture begin");
     if (!capture.ok()) return;
-    const shelf::qwen35::runtime::CaptureId capture_id = capture.value();
+    const shelf::runtime::CaptureId capture_id = capture.value();
 
     const struct {
         uint32_t delta;
@@ -1231,7 +1231,7 @@ void test_spec_ring(Env& env) {
     check(seed_kv(*env.kv_bf16, *seq, 90, env.stream), "spec ring seed kv");
     check(seed_state(*env.gdn, seq->slot, 90, env.stream), "spec ring seed state");
 
-    shelf::qwen35::runtime::SpecRingRef ring_ref;
+    shelf::runtime::SpecRingRef ring_ref;
     ring_ref.k = ring_k;
     ring_ref.v = ring_v;
     ring_ref.length = 8;
@@ -1251,7 +1251,7 @@ void test_spec_ring(Env& env) {
         shelf::gpu::discard_cleanup_result(hipFree(ring_v));
         return;
     }
-    shelf::qwen35::runtime::SpecRingOut ring_out;
+    shelf::runtime::SpecRingOut ring_out;
     ring_out.k = out_k;
     ring_out.v = out_v;
 

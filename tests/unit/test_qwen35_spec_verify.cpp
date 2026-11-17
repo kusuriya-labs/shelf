@@ -1,4 +1,4 @@
-#include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
+#include <shelf/runtime/dflash2_spec_decoder.h>
 #include <shelf/models/qwen35/runtime/spec_decode.h>
 
 #include <algorithm>
@@ -21,8 +21,8 @@ void check(bool cond, const std::string& msg) {
     }
 }
 
-using shelf::qwen35::runtime::SpecPhase;
-using shelf::qwen35::runtime::SpecVerifyResult;
+using shelf::runtime::SpecPhase;
+using shelf::runtime::SpecVerifyResult;
 
 bool tokens_equal(const std::vector<int32_t>& a, const std::vector<int32_t>& b) {
     return a == b;
@@ -44,14 +44,14 @@ void expect_result(
     const char* expected_name) {
 
     SpecVerifyResult out;
-    auto st = shelf::qwen35::runtime::spec_greedy_accept(
+    auto st = shelf::runtime::spec_greedy_accept(
         drafts.empty() ? nullptr : drafts.data(),
         static_cast<uint32_t>(drafts.size()),
         target_tokens.data(),
         bonus_enabled,
         out);
     check(st.ok(), std::string(name) + ": accept ok");
-    check(std::string(shelf::qwen35::runtime::spec_phase_name(SpecPhase::IDLE)) == "IDLE",
+    check(std::string(shelf::runtime::spec_phase_name(SpecPhase::IDLE)) == "IDLE",
           std::string(name) + ": phase name IDLE");
     (void)expected_name;
     check(out.num_drafts == drafts.size(), std::string(name) + ": num_drafts");
@@ -73,11 +73,11 @@ void expect_result(
 }  // namespace
 
 int main() {
-    check(std::string(shelf::qwen35::runtime::spec_phase_name(SpecPhase::IDLE)) == "IDLE", "phase IDLE");
-    check(std::string(shelf::qwen35::runtime::spec_phase_name(SpecPhase::DRAFTING)) == "DRAFTING", "phase DRAFTING");
-    check(std::string(shelf::qwen35::runtime::spec_phase_name(SpecPhase::VERIFYING)) == "VERIFYING", "phase VERIFYING");
-    check(std::string(shelf::qwen35::runtime::spec_phase_name(SpecPhase::COMMITTING)) == "COMMITTING", "phase COMMITTING");
-    check(std::string(shelf::qwen35::runtime::spec_phase_name(SpecPhase::ROLLING_BACK)) == "ROLLING_BACK", "phase ROLLING_BACK");
+    check(std::string(shelf::runtime::spec_phase_name(SpecPhase::IDLE)) == "IDLE", "phase IDLE");
+    check(std::string(shelf::runtime::spec_phase_name(SpecPhase::DRAFTING)) == "DRAFTING", "phase DRAFTING");
+    check(std::string(shelf::runtime::spec_phase_name(SpecPhase::VERIFYING)) == "VERIFYING", "phase VERIFYING");
+    check(std::string(shelf::runtime::spec_phase_name(SpecPhase::COMMITTING)) == "COMMITTING", "phase COMMITTING");
+    check(std::string(shelf::runtime::spec_phase_name(SpecPhase::ROLLING_BACK)) == "ROLLING_BACK", "phase ROLLING_BACK");
 
     expect_result(
         "all_accept_bonus",
@@ -145,18 +145,18 @@ int main() {
 
     {
         SpecVerifyResult out;
-        auto st = shelf::qwen35::runtime::spec_greedy_accept(nullptr, 0u, nullptr, true, out);
+        auto st = shelf::runtime::spec_greedy_accept(nullptr, 0u, nullptr, true, out);
         check(!st.ok(), "null target_tokens rejected");
     }
     {
         SpecVerifyResult out;
-        auto st = shelf::qwen35::runtime::spec_greedy_accept(nullptr, 2u, nullptr, true, out);
+        auto st = shelf::runtime::spec_greedy_accept(nullptr, 2u, nullptr, true, out);
         check(!st.ok(), "null target_tokens with drafts rejected");
     }
     {
         const int32_t target[2] = {1, 2};
         SpecVerifyResult out;
-        auto st = shelf::qwen35::runtime::spec_greedy_accept(nullptr, 2u, target, true, out);
+        auto st = shelf::runtime::spec_greedy_accept(nullptr, 2u, target, true, out);
         check(!st.ok(), "null drafts with num_drafts>0 rejected");
     }
 
@@ -165,8 +165,8 @@ int main() {
         const int32_t target[] = {10, 11, 12, 13, 99};
         for (uint32_t stop = 0u; stop < 5u; ++stop) {
             SpecVerifyResult result;
-            auto st = shelf::qwen35::runtime::spec_greedy_accept(drafts, 4u, target, true, result);
-            const bool stopped = shelf::qwen35::runtime::spec_bound_result(
+            auto st = shelf::runtime::spec_greedy_accept(drafts, 4u, target, true, result);
+            const bool stopped = shelf::runtime::spec_bound_result(
                 result, 5u, {target[stop]});
             check(st.ok() && stopped, "stop detected");
             check(result.emitted_tokens.size() == stop + 1u, "stop emitted bound");
@@ -175,8 +175,8 @@ int main() {
         }
         for (uint32_t limit = 1u; limit <= 5u; ++limit) {
             SpecVerifyResult result;
-            auto st = shelf::qwen35::runtime::spec_greedy_accept(drafts, 4u, target, true, result);
-            const bool stopped = shelf::qwen35::runtime::spec_bound_result(result, limit, {});
+            auto st = shelf::runtime::spec_greedy_accept(drafts, 4u, target, true, result);
+            const bool stopped = shelf::runtime::spec_bound_result(result, limit, {});
             check(st.ok() && !stopped, "limit without stop");
             check(result.emitted_tokens.size() == limit, "limit emitted bound");
             check(result.num_committed_target_tokens == limit, "limit commit bound");
@@ -199,9 +199,9 @@ int main() {
                 std::vector<int32_t> draft(target.begin(), target.begin() + n);
                 if ((generated.size() % 2u) == 0u && n > 1u) draft[1] = -1;
                 SpecVerifyResult result;
-                auto st = shelf::qwen35::runtime::spec_greedy_accept(
+                auto st = shelf::runtime::spec_greedy_accept(
                     draft.data(), n, target.data(), true, result);
-                shelf::qwen35::runtime::spec_bound_result(result, remaining, {9});
+                shelf::runtime::spec_bound_result(result, remaining, {9});
                 check(st.ok(), "synthetic accept");
                 generated.insert(generated.end(), result.emitted_tokens.begin(), result.emitted_tokens.end());
             }
@@ -211,11 +211,11 @@ int main() {
 
     {
         // A stop token as the round input ends the request before any state or pointer is used.
-        shelf::qwen35::runtime::DFlash2SpecDecoder decoder;
+        shelf::runtime::DFlash2SpecDecoder decoder;
         decoder.initialized = true;
         decoder.config.eos_tokens = {7, 11};
         for (const int32_t stop : {7, 11}) {
-            auto step = shelf::qwen35::runtime::dflash2_spec_step(decoder, stop, 5u);
+            auto step = shelf::runtime::dflash2_spec_step(decoder, stop, 5u);
             check(step.ok(), "pending stop: step ok");
             if (!step.ok()) continue;
             check(step.value().finished, "pending stop: finished");
@@ -223,7 +223,7 @@ int main() {
             check(step.value().pending_token == stop, "pending stop: pending kept");
         }
         // A non-stop pending token still reaches the state validation.
-        auto not_stop = shelf::qwen35::runtime::dflash2_spec_step(decoder, 3, 5u);
+        auto not_stop = shelf::runtime::dflash2_spec_step(decoder, 3, 5u);
         check(!not_stop.ok(), "non-stop pending: null state is rejected");
     }
 

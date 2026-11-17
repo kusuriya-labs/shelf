@@ -1,15 +1,15 @@
-#include <shelf/models/qwen35/runtime/runtime_request.h>
+#include <shelf/runtime/runtime_request.h>
 
 #include <cstdio>
 #include <string>
 #include <vector>
 
-using shelf::qwen35::runtime::commit_sampled_token;
-using shelf::qwen35::runtime::CommitAction;
-using shelf::qwen35::runtime::FinishReason;
-using shelf::qwen35::runtime::RuntimeRequest;
-using shelf::qwen35::runtime::thinking_allowance;
-using shelf::qwen35::runtime::thinking_budget_enabled;
+using shelf::runtime::commit_sampled_token;
+using shelf::runtime::CommitAction;
+using shelf::runtime::FinishReason;
+using shelf::runtime::RuntimeRequest;
+using shelf::runtime::thinking_allowance;
+using shelf::runtime::thinking_budget_enabled;
 using shelf::qwen_hybrid::StopTokens;
 
 static int g_fail = 0;
@@ -74,7 +74,7 @@ static void natural_close_token_is_not_injected() {
 static void budget_zero_means_no_budget() {
     RuntimeRequest request = make_request(8, 0, 99);
     check(!thinking_budget_enabled(request), "tokens == 0 disables the budget");
-    check(thinking_allowance(request) == shelf::qwen35::runtime::kDFlash2NoThinkingAllowance,
+    check(thinking_allowance(request) == shelf::runtime::kDFlash2NoThinkingAllowance,
           "no allowance when the budget is off");
     for (int32_t token = 10; token < 18; ++token) {
         commit(request, token);

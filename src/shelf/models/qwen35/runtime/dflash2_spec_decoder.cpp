@@ -1,4 +1,4 @@
-#include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
+#include <shelf/runtime/dflash2_spec_decoder.h>
 
 #include <shelf/core/gpu/cleanup.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
@@ -6,8 +6,8 @@
 #include <shelf/models/qwen35/runtime/spec_decode.h>
 #include <shelf/models/qwen35/runtime/dflash2_tree.h>
 #include <shelf/models/qwen35/runtime/dflash2_tree_budget.h>
-#include <shelf/models/qwen35/kernels/dflash2/candidate_selector.h>
-#include <shelf/models/qwen35/kernels/dflash2/feature_concat.h>
+#include <shelf/runtime/kernels/dflash2/candidate_selector.h>
+#include <shelf/runtime/kernels/dflash2/feature_concat.h>
 
 #include <algorithm>
 #include <array>

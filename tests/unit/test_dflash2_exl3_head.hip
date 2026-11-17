@@ -1,6 +1,6 @@
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/memory/types.h>
-#include <shelf/models/qwen35/dflash2/executor.h>
+#include <shelf/runtime/dflash2/executor.h>
 #include <shelf/quantization/exl3/exl3_int8.h>
 #include <shelf/runtime/program/int8_activation_workspace.h>
 #include <hip/hip_runtime.h>
@@ -41,9 +41,9 @@ int main() {
     weight.encoding = shelf::weights::MatrixEncoding::Exl3;
     weight.quant_spec = shelf::quantization::QuantSpecId::EXL3_MUL24_INT8_V1;
     weight.rows = n; weight.cols = k; weight.k_padded = k; weight.exl3_ka = bits;
-    shelf::qwen35::dflash2::DFlash2Config config;
+    ::shelf::runtime::DFlash2Config config;
     config.hidden_size = k; config.vocab_size = n;
-    shelf::qwen35::dflash2::DFlash2Executor executor;
+    ::shelf::runtime::dflash2::DFlash2Executor executor;
     executor.config = &config; executor.target_lm_head = &weight; executor.max_rows = rows;
     executor.draft_rows = rows; executor.initialized = true;
     auto layout = shelf::runtime::Int8ActivationWorkspaceLayout::make(k, rows);
@@ -58,7 +58,7 @@ int main() {
         hipMemcpy(weight.exl3_suh.data<void>(), scales.data(), k * 2u, hipMemcpyHostToDevice) != hipSuccess ||
         hipMemcpy(weight.exl3_svh.data<void>(), scales.data(), n * 2u, hipMemcpyHostToDevice) != hipSuccess ||
         hipMemcpy(device_input.data<void>(), input.data(), input.size() * sizeof(shelf::bf16_t), hipMemcpyHostToDevice) != hipSuccess) return 1;
-    auto st = shelf::qwen35::dflash2::dflash2_compute_target_logits(executor, device_input.data<shelf::bf16_t>(), rows, device_output.data<float>(), stride, nullptr);
+    auto st = ::shelf::runtime::dflash2::dflash2_compute_target_logits(executor, device_input.data<shelf::bf16_t>(), rows, device_output.data<float>(), stride, nullptr);
     if (!st.ok()) { std::printf("head: %s\n", st.message().c_str()); return 1; }
     std::vector<float> output(rows * stride);
     if (hipMemcpy(output.data(), device_output.data<void>(), output.size() * sizeof(float), hipMemcpyDeviceToHost) != hipSuccess) return 1;

@@ -1,8 +1,8 @@
-#include <shelf/models/qwen35/runtime/token_budget_scheduler.h>
+#include <shelf/runtime/token_budget_scheduler.h>
 #include <cstdio>
 #include <vector>
 
-using namespace shelf::qwen35::runtime;
+using namespace shelf::runtime;
 
 int main() {
     RuntimeRequest waiting, free, prefill;
