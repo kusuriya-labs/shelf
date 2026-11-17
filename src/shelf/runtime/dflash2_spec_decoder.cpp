@@ -93,10 +93,22 @@ Status select_budget_tree(DFlash2SpecDecoder& decoder, int32_t pending_token,
     const uint32_t retained = std::min(top_k, shelf::kernel::kDflash2TreeRetained);
     using Probabilities = shelf::kernel::DFlash2TreeProbabilities;
     std::vector<Probabilities> probabilities(dflash_k);
-    hipError_t err = shelf::kernel::launch_dflash2_tree_probabilities(
-        decoder.draft->proposal_logits.data<float>() + static_cast<std::size_t>(proposal_row) * vocab, decoder.draft->proposal_topk_ids.data<int32_t>() + static_cast<std::size_t>(proposal_row) * top_k,
-        decoder.draft->proposal_topk_logits.data<float>() + static_cast<std::size_t>(proposal_row) * top_k, device_probabilities,
-        dflash_k, vocab, top_k, decoder.stream);
+    hipError_t err = hipSuccess;
+    if (decoder.draft->proposal_sharded) {
+        err = shelf::kernel::launch_dflash2_topk_probabilities(
+            decoder.draft->proposal_topk_ids.data<int32_t>() +
+                static_cast<std::size_t>(proposal_row) * top_k,
+            decoder.draft->proposal_topk_logits.data<float>() +
+                static_cast<std::size_t>(proposal_row) * top_k,
+            decoder.draft->proposal_vocab_stats.data<float>() +
+                static_cast<std::size_t>(proposal_row) * 2u,
+            device_probabilities, dflash_k, top_k, decoder.stream);
+    } else {
+        err = shelf::kernel::launch_dflash2_tree_probabilities(
+            decoder.draft->proposal_logits.data<float>() + static_cast<std::size_t>(proposal_row) * vocab, decoder.draft->proposal_topk_ids.data<int32_t>() + static_cast<std::size_t>(proposal_row) * top_k,
+            decoder.draft->proposal_topk_logits.data<float>() + static_cast<std::size_t>(proposal_row) * top_k, device_probabilities,
+            dflash_k, vocab, top_k, decoder.stream);
+    }
     if (err == hipSuccess) err = hipMemcpyAsync(probabilities.data(), device_probabilities,
         probabilities.size() * sizeof(Probabilities), hipMemcpyDeviceToHost, decoder.stream);
     if (err == hipSuccess) err = hipStreamSynchronize(decoder.stream);
@@ -126,7 +138,8 @@ Status select_budget_tree(DFlash2SpecDecoder& decoder, int32_t pending_token,
         tree = make_dflash2_tree(pending_token,
             std::span<const int32_t>(drafts.data(), dflash_k), {}, 0u, position);
     }
-    if (env_flag_enabled("SHELF_DFLASH2_TREE_CHECK_CPU", false)) {
+    if (env_flag_enabled("SHELF_DFLASH2_TREE_CHECK_CPU", false) &&
+        !decoder.draft->proposal_sharded) {
         std::vector<float> logits(static_cast<size_t>(dflash_k) * vocab);
         err = hipMemcpy(logits.data(), decoder.draft->proposal_logits.data<float>() + static_cast<std::size_t>(proposal_row) * vocab,
                 logits.size() * sizeof(float), hipMemcpyDeviceToHost);

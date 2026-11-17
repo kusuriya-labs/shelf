@@ -279,6 +279,39 @@ int main() {
     }
     check(probability_ok, "top-k probabilities use the full-vocabulary denominator");
 
+    shelf::gpu::Tensor full_probabilities;
+    if (!alloc<float>(
+            arena,
+            {rows, sizeof(shelf::kernel::DFlash2TreeProbabilities) / sizeof(float)},
+            full_probabilities)) {
+        std::printf("FAIL alloc full probabilities\n");
+        return 1;
+    }
+    check(shelf::kernel::launch_dflash2_tree_probabilities(
+              full.logits.data<float>(), full.topk_ids.data<int32_t>(),
+              full.topk_logits.data<float>(),
+              reinterpret_cast<shelf::kernel::DFlash2TreeProbabilities*>(
+                  full_probabilities.data<float>()),
+              rows, vocab, top_k, stream) == hipSuccess,
+          "full probability launch");
+    std::vector<shelf::kernel::DFlash2TreeProbabilities> host_full(rows);
+    (void)hipMemcpy(host_full.data(), full_probabilities.data<void>(),
+                    host_full.size() * sizeof(shelf::kernel::DFlash2TreeProbabilities),
+                    hipMemcpyDeviceToHost);
+    bool sharded_matches_full = true;
+    for (uint32_t r = 0; r < rows; ++r) {
+        for (uint32_t j = 0; j < shelf::kernel::kDflash2TreeRetained; ++j) {
+            if (host_probabilities[r].ids[j] != host_full[r].ids[j]) sharded_matches_full = false;
+            const float want = host_full[r].probabilities[j];
+            const float got = host_probabilities[r].probabilities[j];
+            if (std::fabs(got - want) > 1e-6f) sharded_matches_full = false;
+        }
+        if (std::fabs(host_probabilities[r].residual - host_full[r].residual) > 1e-6f)
+            sharded_matches_full = false;
+    }
+    check(sharded_matches_full,
+          "sharded probabilities match the full-vocabulary tree probabilities");
+
     (void)hipStreamSynchronize(stream);
     (void)hipStreamDestroy(stream);
     (void)arena.shutdown();

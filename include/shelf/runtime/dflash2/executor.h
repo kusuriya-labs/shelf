@@ -20,6 +20,23 @@ namespace shelf::runtime::dflash2 {
 
 struct DFlash2ContextState;
 
+// Computes the proposal distribution across vocabulary shards. The drafter calls
+// it with the row-major final hidden state; it must leave the global top-k in
+// `topk_ids` / `topk_logits` and the row normalizer (max, full-vocabulary
+// denominator) in `normalizers`. `rows * 2` floats are written.
+class DFlash2ProposalDistributor {
+public:
+    virtual ~DFlash2ProposalDistributor() = default;
+    virtual Status distribute(
+        const bf16_t* hidden,
+        uint32_t hidden_stride,
+        uint32_t rows,
+        int32_t* topk_ids,
+        float* topk_logits,
+        float* normalizers,
+        hipStream_t stream) = 0;
+};
+
 struct DFlash2ExecutorConfig {
     uint32_t max_rows = 0;
     uint32_t max_batch_rows = 0;
@@ -32,6 +49,7 @@ struct DFlash2ExecutorConfig {
     // `local_vocab == 0` keeps the whole checkpoint vocabulary.
     uint32_t vocab_offset = 0;
     uint32_t local_vocab = 0;
+    DFlash2ProposalDistributor* proposal_distributor = nullptr;
 };
 
 struct DFlash2Executor {
@@ -41,6 +59,8 @@ struct DFlash2Executor {
     uint32_t max_context_rows = 0;
     uint32_t vocab_offset = 0;
     uint32_t local_vocab = 0;
+    bool proposal_sharded = false;
+    DFlash2ProposalDistributor* proposal_distributor = nullptr;
 
     gpu::Tensor target_concat;
     gpu::Tensor target_fc;
@@ -88,6 +108,7 @@ struct DFlash2Executor {
 
     gpu::Tensor selector_hidden_proj;
     gpu::Tensor proposal_logits;
+    gpu::Tensor proposal_vocab_stats;
     gpu::Tensor proposal_topk_ids;
     gpu::Tensor proposal_topk_logits;
     gpu::Tensor proposal_tokens;

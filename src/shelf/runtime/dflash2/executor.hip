@@ -331,6 +331,8 @@ Result<DFlash2Executor> create_dflash2_executor(
         return Status::invalid_argument("dflash2 target lm_head does not match the vocab shard",
                                         __FILE__, __LINE__);
     }
+    ex.proposal_distributor = exec_config.proposal_distributor;
+    ex.proposal_sharded = exec_config.proposal_distributor != nullptr;
 
     const std::size_t rows = ex.max_rows;
     const std::size_t ctx_rows = ex.max_context_rows;
@@ -427,6 +429,8 @@ Result<DFlash2Executor> create_dflash2_executor(
     if (!st.ok()) return st;
     st = allocate_contiguous_tensor<float>(arena, {draft, ex.local_vocab},
                                            ex.proposal_logits);
+    if (!st.ok()) return st;
+    st = allocate_contiguous_tensor<float>(arena, {draft, 2u}, ex.proposal_vocab_stats);
     if (!st.ok()) return st;
     st = allocate_contiguous_tensor<int32_t>(arena, {draft, config.selector_top_k},
                                              ex.proposal_topk_ids);
@@ -543,11 +547,14 @@ Status dflash2_executor_shutdown(DFlash2Executor& executor) noexcept {
     executor.target_embed_tokens = nullptr;
     executor.vocab_offset = 0;
     executor.local_vocab = 0;
+    executor.proposal_sharded = false;
+    executor.proposal_distributor = nullptr;
     executor.draft_rows = 0;
     executor.noise_token_ids = gpu::Tensor{};
     executor.noise_embedding = gpu::Tensor{};
     executor.selector_hidden_proj = gpu::Tensor{};
     executor.proposal_logits = gpu::Tensor{};
+    executor.proposal_vocab_stats = gpu::Tensor{};
     executor.proposal_topk_ids = gpu::Tensor{};
     executor.proposal_topk_logits = gpu::Tensor{};
     executor.proposal_tokens = gpu::Tensor{};
@@ -1405,8 +1412,22 @@ Status dflash2_select_draft_tokens(
                                  hipGetErrorString(err), __FILE__, __LINE__);
     }
 
-    Status st = lm_head_logits(executor, draft_head, draft_hidden, draft,
-                               executor.proposal_logits.data<float>(), vocab, stream);
+    Status st = Status::make_ok();
+    if (executor.proposal_distributor != nullptr) {
+        st = executor.proposal_distributor->distribute(
+            draft_hidden, static_cast<uint32_t>(hidden), draft,
+            executor.proposal_topk_ids.data<int32_t>(),
+            executor.proposal_topk_logits.data<float>(),
+            executor.proposal_vocab_stats.data<float>(), stream);
+        if (!st.ok()) return st;
+        return dflash2_run_candidate_selector(
+            executor, executor.selector_hidden_proj.data<bf16_t>(),
+            executor.proposal_topk_ids.data<int32_t>(),
+            executor.proposal_topk_logits.data<float>(), draft, anchor_token,
+            output_draft_tokens, stream);
+    }
+    st = lm_head_logits(executor, draft_head, draft_hidden, draft,
+                        executor.proposal_logits.data<float>(), vocab, stream);
     if (!st.ok()) return st;
 
     const bool use_reference =
@@ -1949,9 +1970,18 @@ Status dflash2_select_draft_tokens_batch(
                                  hipGetErrorString(err), __FILE__, __LINE__);
     }
 
-    Status st = lm_head_logits(executor, *executor.target_lm_head, final_hidden, total_rows,
-                               executor.proposal_logits.data<float>(), local_vocab, stream);
-    if (!st.ok()) return st;
+    Status st = Status::make_ok();
+    if (executor.proposal_distributor != nullptr) {
+        st = executor.proposal_distributor->distribute(
+            final_hidden, hidden, total_rows, executor.proposal_topk_ids.data<int32_t>(),
+            executor.proposal_topk_logits.data<float>(),
+            executor.proposal_vocab_stats.data<float>(), stream);
+        if (!st.ok()) return st;
+    } else {
+        st = lm_head_logits(executor, *executor.target_lm_head, final_hidden, total_rows,
+                            executor.proposal_logits.data<float>(), local_vocab, stream);
+        if (!st.ok()) return st;
+    }
 
     const bool use_reference =
         topk_reference_enabled() || top_k != shelf::kernel::kDflash2TopKMaxK;
