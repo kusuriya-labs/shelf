@@ -18,6 +18,20 @@ constexpr uint32_t kThreads = kWarps * 32u;
 constexpr uint32_t kMaxRows = 16u;
 constexpr float kE4M3Max = 448.0f;
 
+using f16x8_t = _Float16 __attribute__((ext_vector_type(8)));
+using f16x2_t = _Float16 __attribute__((ext_vector_type(2)));
+using f32x8_t = float __attribute__((ext_vector_type(8)));
+
+constexpr uint32_t kWmmaVocabTile = 16u;
+constexpr uint32_t kWmmaWarps = 8u;
+constexpr uint32_t kWmmaThreads = kWmmaWarps * 32u;
+constexpr uint32_t kWmmaKc = 256u;
+constexpr uint32_t kWmmaPitch = kWmmaKc + 8u;
+constexpr uint32_t kWmmaPrefetch = 8u;
+constexpr uint32_t kWmmaBlocksPerChunk = kWmmaKc / kBlock;
+constexpr uint32_t kWmmaBlockVocab = kWmmaVocabTile * kWmmaWarps;
+constexpr uint32_t kWmmaMinRows = 5u;
+
 // Smallest positive FP16 subnormal. A scale below it rounds to zero and would make
 // the whole block unrepresentable, so it is the floor for a stored scale.
 constexpr float kMinHalfSubnormal = 0x1p-24f;
@@ -101,6 +115,121 @@ __global__ __launch_bounds__(kThreads) void lm_head_fp8_w32_kernel(
                                     rows, row, k, lane);
 }
 
+__device__ __forceinline__ f16x8_t w32_codes_to_f16x8(const uint2 raw) {
+    const auto lo0 = __builtin_amdgcn_cvt_pk_f32_fp8(static_cast<int>(raw.x), false);
+    const auto lo1 = __builtin_amdgcn_cvt_pk_f32_fp8(static_cast<int>(raw.x), true);
+    const auto hi0 = __builtin_amdgcn_cvt_pk_f32_fp8(static_cast<int>(raw.y), false);
+    const auto hi1 = __builtin_amdgcn_cvt_pk_f32_fp8(static_cast<int>(raw.y), true);
+    f16x8_t out;
+    out[0] = static_cast<_Float16>(lo0[0]);
+    out[1] = static_cast<_Float16>(lo0[1]);
+    out[2] = static_cast<_Float16>(lo1[0]);
+    out[3] = static_cast<_Float16>(lo1[1]);
+    out[4] = static_cast<_Float16>(hi0[0]);
+    out[5] = static_cast<_Float16>(hi0[1]);
+    out[6] = static_cast<_Float16>(hi1[0]);
+    out[7] = static_cast<_Float16>(hi1[1]);
+    return out;
+}
+
+__device__ __forceinline__ void w32_scales_to_floats(const uint4 raw, float* out) {
+#pragma unroll
+    for (uint32_t q = 0u; q < 4u; ++q) {
+        const uint32_t bits =
+            (q == 0u) ? raw.x : (q == 1u) ? raw.y : (q == 2u) ? raw.z : raw.w;
+        const f16x2_t pair = __builtin_bit_cast(f16x2_t, bits);
+        out[2u * q] = static_cast<float>(pair[0]);
+        out[2u * q + 1u] = static_cast<float>(pair[1]);
+    }
+}
+
+__global__ __launch_bounds__(kWmmaThreads) void lm_head_fp8_w32_wmma_kernel(
+    const bf16_t* __restrict__ hidden, uint32_t hidden_row_stride,
+    const uint8_t* __restrict__ codes, const fp16_t* __restrict__ scales,
+    float* __restrict__ logits, uint32_t logits_row_stride,
+    uint32_t rows, uint32_t vocab, uint32_t k) {
+    if (blockIdx.x * kWmmaBlockVocab >= vocab) return;
+
+    __shared__ _Float16 stage[kWmmaVocabTile * kWmmaPitch];
+
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t warp = threadIdx.x >> 5u;
+    const uint32_t lane16 = lane & 15u;
+    const uint32_t a_shift = (lane >> 4u) * 8u;
+    const uint32_t code_shift = (lane >> 4u) * 16u;
+    const uint32_t vocab_base = blockIdx.x * kWmmaBlockVocab + warp * kWmmaVocabTile;
+    const uint32_t vrow = vocab_base + lane16;
+    const uint32_t vrow_safe = vrow < vocab ? vrow : vocab - 1u;
+    const uint8_t* __restrict__ code_row = codes + static_cast<std::size_t>(vrow_safe) * k;
+    const fp16_t* __restrict__ scale_row =
+        scales + static_cast<std::size_t>(vrow_safe) * (k / kBlock);
+
+    f32x8_t acc = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+
+    for (uint32_t k0 = 0u; k0 < k; k0 += kWmmaKc) {
+        __syncthreads();
+        for (uint32_t i = threadIdx.x; i < kWmmaVocabTile * kWmmaBlocksPerChunk * 4u;
+             i += kWmmaThreads) {
+            const uint32_t slot = i & 3u;
+            const uint32_t block = (i >> 2u) % kWmmaBlocksPerChunk;
+            const uint32_t r = (i >> 2u) / kWmmaBlocksPerChunk;
+            _Float16* dst = stage + r * kWmmaPitch + (2u * block + (slot & 1u)) * 16u +
+                            (slot >> 1u) * 8u;
+            if (r < rows) {
+                const bf16_t* src = hidden + static_cast<std::size_t>(r) * hidden_row_stride +
+                                    k0 + block * kBlock + slot * 8u;
+                dst[0] = static_cast<_Float16>(bf16_value(src + 0));
+                dst[1] = static_cast<_Float16>(bf16_value(src + 1));
+                dst[2] = static_cast<_Float16>(bf16_value(src + 2));
+                dst[3] = static_cast<_Float16>(bf16_value(src + 3));
+                dst[4] = static_cast<_Float16>(bf16_value(src + 4));
+                dst[5] = static_cast<_Float16>(bf16_value(src + 5));
+                dst[6] = static_cast<_Float16>(bf16_value(src + 6));
+                dst[7] = static_cast<_Float16>(bf16_value(src + 7));
+            } else {
+                *reinterpret_cast<uint4*>(dst) = uint4{0u, 0u, 0u, 0u};
+            }
+        }
+        __syncthreads();
+
+        float scale[kWmmaBlocksPerChunk];
+        w32_scales_to_floats(
+            *reinterpret_cast<const uint4*>(scale_row + k0 / kBlock), scale);
+
+        for (uint32_t group = 0u; group < kWmmaBlocksPerChunk; group += kWmmaPrefetch) {
+            uint4 raw[kWmmaPrefetch];
+#pragma unroll
+            for (uint32_t u = 0u; u < kWmmaPrefetch; ++u)
+                raw[u] = *reinterpret_cast<const uint4*>(
+                    code_row + k0 + (group + u) * kBlock + code_shift);
+#pragma unroll
+            for (uint32_t u = 0u; u < kWmmaPrefetch; ++u) {
+                const uint32_t base = (group + u) * kBlock + a_shift;
+                const f16x8_t a0 =
+                    *reinterpret_cast<const f16x8_t*>(stage + lane16 * kWmmaPitch + base);
+                const f16x8_t a1 =
+                    *reinterpret_cast<const f16x8_t*>(stage + lane16 * kWmmaPitch + base + 16u);
+                const f32x8_t zero = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+                f32x8_t step = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(
+                    a0, w32_codes_to_f16x8(uint2{raw[u].x, raw[u].y}), zero);
+                step = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(
+                    a1, w32_codes_to_f16x8(uint2{raw[u].z, raw[u].w}), step);
+                const float s = scale[group + u];
+#pragma unroll
+                for (uint32_t j = 0u; j < 8u; ++j) acc[j] = __builtin_fmaf(step[j], s, acc[j]);
+            }
+        }
+    }
+
+    const uint32_t row_base = (lane >> 4u) * 8u;
+#pragma unroll
+    for (uint32_t j = 0u; j < 8u; ++j) {
+        const uint32_t row = row_base + j;
+        if (row < rows && vrow < vocab)
+            logits[static_cast<std::size_t>(row) * logits_row_stride + vrow] = acc[j];
+    }
+}
+
 __global__ __launch_bounds__(256) void quantize_bf16_to_fp8_w32_kernel(
     const bf16_t* __restrict__ src, uint32_t src_row_stride,
     uint8_t* __restrict__ codes, fp16_t* __restrict__ scales,
@@ -157,6 +286,18 @@ inline hipError_t launch_lm_head_rows(
     return hipGetLastError();
 }
 
+inline hipError_t launch_lm_head_wmma(
+    const bf16_t* hidden, uint32_t hidden_row_stride,
+    const uint8_t* weight_codes, const fp16_t* weight_scales,
+    float* logits, uint32_t logits_row_stride,
+    uint32_t rows, uint32_t vocab, uint32_t k, hipStream_t stream) {
+    const uint32_t grid = (vocab + kWmmaBlockVocab - 1u) / kWmmaBlockVocab;
+    lm_head_fp8_w32_wmma_kernel<<<grid, kWmmaThreads, 0, stream>>>(
+        hidden, hidden_row_stride, weight_codes, weight_scales, logits,
+        logits_row_stride, rows, vocab, k);
+    return hipGetLastError();
+}
+
 }  // namespace
 
 hipError_t launch_lm_head_fp8_w32(
@@ -170,6 +311,9 @@ hipError_t launch_lm_head_fp8_w32(
     if (rows == 0u || rows > kMaxRows || vocab == 0u || k == 0u) return hipErrorInvalidValue;
     if ((k % kChunk) != 0u || hidden_row_stride < k || logits_row_stride < vocab)
         return hipErrorInvalidValue;
+    if (rows >= kWmmaMinRows && (k % kWmmaKc) == 0u)
+        return launch_lm_head_wmma(hidden, hidden_row_stride, weight_codes, weight_scales,
+                                   logits, logits_row_stride, rows, vocab, k, stream);
     switch (rows) {
         case 1u: return launch_lm_head_rows<1u, true>(hidden, hidden_row_stride,
                       weight_codes, weight_scales, logits, logits_row_stride,

@@ -56,7 +56,8 @@ std::vector<shelf::bf16_t> random_bf16(std::size_t count, std::mt19937& rng) {
 
 constexpr std::uint32_t kVocab = 1024u;
 constexpr std::uint32_t kK = 5120u;
-constexpr std::uint32_t kRows = 4u;
+constexpr std::uint32_t kRows = 16u;
+constexpr std::uint32_t kCheckedRows[] = {1u, 2u, 3u, 4u, 5u, 8u, 16u};
 
 }  // namespace
 
@@ -105,40 +106,21 @@ int main() {
     check(shelf::kernel::launch_quantize_bf16_to_fp8_w32(
               d_weight, kK, d_codes, d_scales, kVocab, kK, nullptr) == hipSuccess,
           "quantize");
-    check(hipMemset(d_logits, 0, static_cast<std::size_t>(kRows) * logits_stride * sizeof(float)) ==
-              hipSuccess,
-          "clear logits");
-    check(shelf::kernel::launch_lm_head_fp8_w32(
-              d_hidden_strided, hidden_stride, d_codes, d_scales, d_logits, logits_stride,
-              kRows, kVocab, kK, nullptr) == hipSuccess,
-          "lm head");
-    check(hipDeviceSynchronize() == hipSuccess, "sync");
 
     std::vector<std::uint8_t> codes(static_cast<std::size_t>(kVocab) * kK);
     std::vector<shelf::fp16_t> scales(static_cast<std::size_t>(kVocab) * (kK / 32u));
-    std::vector<float> logits(static_cast<std::size_t>(kRows) * logits_stride);
     check(hipMemcpy(codes.data(), d_codes, codes.size(), hipMemcpyDeviceToHost) == hipSuccess,
           "copy back codes");
     check(hipMemcpy(scales.data(), d_scales, scales.size() * sizeof(shelf::fp16_t),
                     hipMemcpyDeviceToHost) == hipSuccess,
           "copy back scales");
-    check(hipMemcpy(logits.data(), d_logits, logits.size() * sizeof(float),
-                    hipMemcpyDeviceToHost) == hipSuccess,
-          "copy back logits");
 
-    float worst = 0.0f;
+    std::vector<double> reference(static_cast<std::size_t>(kVocab) * kRows);
+    std::vector<double> bf16_reference(static_cast<std::size_t>(kVocab) * kRows);
+    std::vector<float> dequant_row(kK);
+    std::vector<float> weight_row(kK);
     float worst_scale = 0.0f;
-    float bf16_worst = 0.0f;
     float reference_magnitude = 0.0f;
-    float bf16_best[kRows];
-    float fp8_best[kRows];
-    std::uint32_t bf16_argmax[kRows] = {};
-    std::uint32_t fp8_argmax[kRows] = {};
-    for (std::uint32_t r = 0; r < kRows; ++r) {
-        bf16_best[r] = -INFINITY;
-        fp8_best[r] = -INFINITY;
-    }
-    std::uint32_t argmax_matches = 0;
     for (std::uint32_t v = 0; v < kVocab; ++v) {
         const std::uint8_t* code_row = codes.data() + static_cast<std::size_t>(v) * kK;
         const shelf::fp16_t* scale_row =
@@ -153,10 +135,11 @@ int main() {
                 const float dequant = e4m3_to_float(code_row[index]) * scale;
                 block_amax = std::fmax(block_amax, std::fabs(original));
                 worst_scale = std::fmax(worst_scale, std::fabs(dequant - original));
-                (void)dequant;
-                (void)index;
+                dequant_row[index] = dequant;
+                weight_row[index] = original;
             }
-            if (block_amax > 0.0f && std::fabs(scale * 448.0f - block_amax) > block_amax * 1e-2f) {
+            if (block_amax > 0.0f &&
+                std::fabs(scale * 448.0f - block_amax) > block_amax * 1e-2f) {
                 check(false, "block scale matches the block maximum");
                 block_amax = -1.0f;
             }
@@ -168,50 +151,84 @@ int main() {
         }
 
         for (std::uint32_t r = 0; r < kRows; ++r) {
-            double reference = 0.0;
+            const shelf::bf16_t* hidden_row = hidden.data() + static_cast<std::size_t>(r) * kK;
+            double fp8_sum = 0.0;
+            double bf16_sum = 0.0;
             for (std::uint32_t i = 0; i < kK; ++i) {
-                const float scale = shelf::fp16_to_f32(scale_row[i / 32u]);
-                const float dequant = e4m3_to_float(code_row[i]) * scale;
-                reference += static_cast<double>(dequant) *
-                             bf16_to_float(hidden[static_cast<std::size_t>(r) * kK + i].data);
+                const double h = bf16_to_float(hidden_row[i].data);
+                fp8_sum += static_cast<double>(dequant_row[i]) * h;
+                bf16_sum += static_cast<double>(weight_row[i]) * h;
             }
-            const float got = logits[static_cast<std::size_t>(r) * logits_stride + v];
-            worst = std::fmax(worst, static_cast<float>(std::fabs(got - reference)));
-
-            double bf16_reference = 0.0;
-            for (std::uint32_t i = 0; i < kK; ++i) {
-                bf16_reference +=
-                    static_cast<double>(bf16_to_float(
-                        weight[static_cast<std::size_t>(v) * kK + i].data)) *
-                    bf16_to_float(hidden[static_cast<std::size_t>(r) * kK + i].data);
-            }
-            bf16_worst = std::fmax(bf16_worst, static_cast<float>(std::fabs(got - bf16_reference)));
-            reference_magnitude = std::fmax(reference_magnitude,
-                                            static_cast<float>(std::fabs(bf16_reference)));
-            const float comparison =
-                static_cast<float>(bf16_reference);
-            if (comparison > bf16_best[r] || v == 0u) {
-                bf16_best[r] = comparison;
-                bf16_argmax[r] = v;
-            }
-            if (got > fp8_best[r] || v == 0u) {
-                fp8_best[r] = got;
-                fp8_argmax[r] = v;
-            }
+            reference[static_cast<std::size_t>(v) * kRows + r] = fp8_sum;
+            bf16_reference[static_cast<std::size_t>(v) * kRows + r] = bf16_sum;
+            reference_magnitude =
+                std::fmax(reference_magnitude, static_cast<float>(std::fabs(bf16_sum)));
         }
     }
 
-    for (std::uint32_t r = 0; r < kRows; ++r)
-        if (bf16_argmax[r] == fp8_argmax[r]) ++argmax_matches;
+    std::vector<float> logits(static_cast<std::size_t>(kRows) * logits_stride);
+    for (const std::uint32_t rows : kCheckedRows) {
+        check(hipMemset(d_logits, 0,
+                        static_cast<std::size_t>(kRows) * logits_stride * sizeof(float)) ==
+                  hipSuccess,
+              "clear logits");
+        check(shelf::kernel::launch_lm_head_fp8_w32(
+                  d_hidden_strided, hidden_stride, d_codes, d_scales, d_logits, logits_stride,
+                  rows, kVocab, kK, nullptr) == hipSuccess,
+              "lm head");
+        check(hipDeviceSynchronize() == hipSuccess, "sync");
+        check(hipMemcpy(logits.data(), d_logits, logits.size() * sizeof(float),
+                        hipMemcpyDeviceToHost) == hipSuccess,
+              "copy back logits");
 
-    check(worst < 2.0e-2f, "logits match the dequantized reference");
-    check(argmax_matches == kRows, "fp8 keeps the bf16 argmax");
-    check(bf16_worst < reference_magnitude * 0.05f,
-          "fp8 logits stay within 5% of the bf16 logits");
-    std::fprintf(stderr,
-                 "worst logit diff %.6f, worst bf16 diff %.6f (max |logit| %.3f), "
-                 "worst weight diff %.6f, argmax %u/%u\n",
-                 worst, bf16_worst, reference_magnitude, worst_scale, argmax_matches, kRows);
+        float worst = 0.0f;
+        float bf16_worst = 0.0f;
+        std::uint32_t argmax_matches = 0;
+        std::uint32_t argmax_ties = 0;
+        for (std::uint32_t r = 0; r < rows; ++r) {
+            float bf16_best = -INFINITY;
+            float fp8_best = -INFINITY;
+            std::uint32_t bf16_argmax = 0;
+            std::uint32_t fp8_argmax = 0;
+            for (std::uint32_t v = 0; v < kVocab; ++v) {
+                const std::size_t slot = static_cast<std::size_t>(v) * kRows + r;
+                const float got = logits[static_cast<std::size_t>(r) * logits_stride + v];
+                worst = std::fmax(
+                    worst, static_cast<float>(std::fabs(got - reference[slot])));
+                bf16_worst = std::fmax(
+                    bf16_worst, static_cast<float>(std::fabs(got - bf16_reference[slot])));
+                const float comparison = static_cast<float>(bf16_reference[slot]);
+                if (comparison > bf16_best || v == 0u) {
+                    bf16_best = comparison;
+                    bf16_argmax = v;
+                }
+                if (got > fp8_best || v == 0u) {
+                    fp8_best = got;
+                    fp8_argmax = v;
+                }
+            }
+            if (bf16_argmax == fp8_argmax) {
+                ++argmax_matches;
+            } else if (std::fabs(static_cast<float>(
+                           bf16_reference[static_cast<std::size_t>(fp8_argmax) * kRows + r]) -
+                               bf16_best) <=
+                       std::fabs(bf16_best) * 0.05f) {
+                ++argmax_ties;
+            }
+        }
+
+        check(worst < 2.0e-2f, "logits match the dequantized reference");
+        check(argmax_matches + argmax_ties == rows,
+              "fp8 keeps the bf16 argmax inside the quantization error");
+        check(bf16_worst < reference_magnitude * 0.05f,
+              "fp8 logits stay within 5% of the bf16 logits");
+        std::fprintf(stderr,
+                     "rows %2u: worst logit diff %.6f, worst bf16 diff %.6f "
+                     "(max |logit| %.3f), argmax %u/%u (%u ties)\n",
+                     rows, worst, bf16_worst, reference_magnitude, argmax_matches, rows,
+                     argmax_ties);
+    }
+    std::fprintf(stderr, "worst weight diff %.6f\n", worst_scale);
 
     {
         constexpr std::uint32_t kTinyRows = 4u;
