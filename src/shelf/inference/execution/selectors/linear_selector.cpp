@@ -302,6 +302,18 @@ select_mxfp4_gemm_config(const Mxfp4GemmSelectorInput& input) {
         return std::nullopt;
     }
     const bool tile_aligned = (input.out_features & 15u) == 0u;
+    // The GEMV replaces the WMMA row block while the weight stream is not the
+    // limiting resource: below L3 the WMMA path is instruction bound and the
+    // GEMV is faster, above L3 both sit at the DRAM ceiling. The row-count
+    // crossover and the measured rates are in docs/research/20261118/mxfp4_gemv.md.
+    const uint64_t weight_bytes =
+        static_cast<uint64_t>(input.out_features) * input.k_padded / 2u;
+    const bool gemv_rows =
+        input.rows <= shelf::kernel::kMxfp4GemmGemvMaxRows &&
+        (input.rows <= shelf::kernel::kMxfp4GemmGemvWideMaxRows ||
+         input.out_features <= shelf::kernel::kMxfp4GemmGemvNarrowMaxOutFeatures);
+    if (gemv_rows && weight_bytes <= shelf::kernel::kMxfp4GemmGemvMaxWeightBytes)
+        return shelf::kernel::Mxfp4GemmConfig{Id::Gemv, 0u};
     // Split-K wins only while the 16-output blocks cannot fill the device; the
     // measured crossover on R9700 is between 2560 and 5120 output features.
     // The 2D staged kernel pays off once the weight tile is reused across enough

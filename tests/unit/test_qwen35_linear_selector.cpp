@@ -313,8 +313,22 @@ void test_moe_tp2_shapes() {
 void test_mxfp4() {
     check(!sel_mxfp4(1, 123, 456, 512).has_value(),
           "mxfp4 unknown geometry -> no config");
-    check(is_mxfp4(sel_mxfp4(1, 48, 5120, 5120), Mxfp4GemmConfigId::SplitK),
-          "mxfp4 rows=1 narrow out -> SplitK");
+    check(is_mxfp4(sel_mxfp4(1, 5120, 5120, 5120), Mxfp4GemmConfigId::Gemv),
+          "mxfp4 rows=1 fits L3 -> Gemv");
+    check(is_mxfp4(sel_mxfp4(4, 17408, 5120, 5120), Mxfp4GemmConfigId::Gemv),
+          "mxfp4 rows=4 widest allowlisted shape -> Gemv");
+    check(is_mxfp4(sel_mxfp4(5, 5120, 5120, 5120), Mxfp4GemmConfigId::RowBlock1),
+          "mxfp4 rows=5 wide -> RowBlock1");
+    check(is_mxfp4(sel_mxfp4(8, 512, 5120, 5120), Mxfp4GemmConfigId::Gemv),
+          "mxfp4 rows=8 narrow out -> Gemv");
+    check(is_mxfp4(sel_mxfp4(8, 2560, 640, 640), Mxfp4GemmConfigId::Gemv),
+          "mxfp4 rows=8 out=2560 -> Gemv");
+    check(is_mxfp4(sel_mxfp4(8, 3072, 5120, 5120), Mxfp4GemmConfigId::RowBlock1),
+          "mxfp4 rows=8 out=3072 -> RowBlock1");
+    check(is_mxfp4(sel_mxfp4(9, 512, 5120, 5120), Mxfp4GemmConfigId::SplitK),
+          "mxfp4 rows=9 narrow out -> SplitK");
+    check(is_mxfp4(sel_mxfp4(1, 48, 5120, 5120), Mxfp4GemmConfigId::Gemv),
+          "mxfp4 rows=1 narrow out -> Gemv");
     check(is_mxfp4(sel_mxfp4(64, 48, 5120, 5120), Mxfp4GemmConfigId::SplitK),
           "mxfp4 rows=64 narrow out -> SplitK");
     check(is_mxfp4(sel_mxfp4(64, 640, 2560, 2560), Mxfp4GemmConfigId::SplitK),
@@ -327,12 +341,10 @@ void test_mxfp4() {
           "mxfp4 rows=32 -> split MB1");
     check(is_mxfp4_mb(sel_mxfp4(64, 640, 2560, 2560), 1u),
           "mxfp4 rows=64 640x2560 -> split MB1");
-    check(is_mxfp4(sel_mxfp4(1, 1024, 5120, 5120), Mxfp4GemmConfigId::SplitK),
-          "mxfp4 rows=1 1024x5120 -> SplitK");
-    check(is_mxfp4(sel_mxfp4(1, 2560, 640, 640), Mxfp4GemmConfigId::SplitK),
-          "mxfp4 short K rows=1 -> SplitK");
-    check(is_mxfp4_mb(sel_mxfp4(1, 2560, 640, 640), 1u),
-          "mxfp4 short K rows=1 -> split MB1");
+    check(is_mxfp4(sel_mxfp4(1, 1024, 5120, 5120), Mxfp4GemmConfigId::Gemv),
+          "mxfp4 rows=1 1024x5120 -> Gemv");
+    check(is_mxfp4(sel_mxfp4(1, 2560, 640, 640), Mxfp4GemmConfigId::Gemv),
+          "mxfp4 short K rows=1 -> Gemv");
     check(is_mxfp4(sel_mxfp4(64, 2560, 640, 640), Mxfp4GemmConfigId::RowBlock2),
           "mxfp4 short K rows=64 -> RowBlock2");
     check(is_mxfp4(sel_mxfp4(32, 6144, 5120, 5120), Mxfp4GemmConfigId::RowBlock1),

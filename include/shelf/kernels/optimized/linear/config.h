@@ -82,11 +82,21 @@ inline constexpr uint32_t kMxfp4GemmRowBlock1MaxRows = 16u;
 inline constexpr uint32_t kMxfp4GemmRowBlock1MaxOutFeatures = 8192u;
 inline constexpr uint32_t kMxfp4GemmRowBlock2MaxRows = 192u;
 inline constexpr uint32_t kMxfp4GemmGemvMaxRows = 8u;
-// The GEMV streams the weight once per output row and holds one accumulator per
-// activation row, so its instruction count grows with the row count while the
-// WMMA block does not. Above this weight footprint the WMMA path already runs at
-// the DRAM ceiling (>= 590 GB/s measured), so the GEMV is not selected there.
-inline constexpr uint64_t kMxfp4GemmGemvMaxWeightBytes = 24000000ull;
+// The GEMV holds one accumulator per activation row, so its instruction count
+// grows with the row count while the WMMA block does not. Measured crossover on
+// R9700 is 4 rows for the wide shapes. Narrow outputs stay launch bound up to 8
+// rows: at rows == 8 the GEMV wins up to out_features 2560 (1.39x at 2048x5120,
+// 1.41x at 2560x5120) and loses from 3072 (0.92x at 3072x5120).
+inline constexpr uint32_t kMxfp4GemmGemvWideMaxRows = 4u;
+inline constexpr uint32_t kMxfp4GemmGemvNarrowMaxOutFeatures = 2560u;
+// The decision is the weight stream rate, not the geometry alone. Below the L3
+// size the WMMA row block reaches 650-1400 GB/s (above the 636 GB/s DRAM
+// ceiling), i.e. it is instruction bound (or block starved on narrow outputs),
+// and the GEMV wins by 1.03x to 9.4x. At and above L3 the WMMA path drops to
+// 570-740 GB/s == the DRAM ceiling and the GEMV is equal or slightly slower
+// (0.93x to 0.99x), so the WMMA path keeps the shape. Measured in
+// docs/research/20261118/mxfp4_gemv.md.
+inline constexpr uint64_t kMxfp4GemmGemvMaxWeightBytes = 64ull * 1024ull * 1024ull;
 
 enum class Mxfp4GemmConfigId : uint8_t {
     Prefill2D,

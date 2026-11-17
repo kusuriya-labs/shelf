@@ -70,7 +70,8 @@ void usage(FILE* f) {
         "  --k N                          (default 5120)\n"
         "  --shapes N:K,N:K,...           (explicit shape list)\n"
         "  --impl auto|wmma|wide|splitk|exact|smallrows  (bf16 forced implementation)\n"
-        "  --impl auto|gemv|splitk|rowblock1|2|4|prefill2d  (mxfp4 / fp8 forced implementation)\n"
+        "  --impl auto|gemv|splitk|rowblock1|2|4|prefill2d  (mxfp4 / fp8 forced implementation,\n"
+        "                                                 gemv is mxfp4 only)\n"
         "  --fp8-split N                    fp8 split-K ways (default 8)\n"
         "  --fp8-split-mb N                 fp8 split-K row tile 1|2 (default auto)\n"
         "  --mxfp4-split N                  mxfp4 split-K ways (default 8)\n"
@@ -1231,12 +1232,12 @@ int run_gemm_fp8(Options& o) {
                 mean /= (double)per_launch_us.size();
                 std::printf("fp8 %-12s rows=%-4u n=%-6u k=%-6u requested=%s selected=%-8s min=%.3f p50=%.3f p95=%.3f mean=%.3f us\n",
                             shape.name.c_str(), rows, shape.n, shape.k,
-                            o.variant.c_str(), fp8_selected, mn, p50, p95, mean);
+                            o.impl.c_str(), fp8_selected, mn, p50, p95, mean);
                 if (!o.out.empty()) {
                     FILE* f = std::fopen(o.out.c_str(), "a");
                     if (f) {
                         std::fprintf(f, "fp8,%s,%s,%s,%u,%u,%u,%d,%d,%d,%.3f,%.3f,%.3f,%.3f\n",
-                                     o.variant.c_str(), fp8_selected, shape.name.c_str(),
+                                     o.impl.c_str(), fp8_selected, shape.name.c_str(),
                                      rows, shape.n, shape.k,
                                      o.warmup, o.samples, o.launches, mn, p50, p95, mean);
                         std::fclose(f);

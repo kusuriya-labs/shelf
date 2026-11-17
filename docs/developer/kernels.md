@@ -151,16 +151,26 @@ activation scale は 128 K ごとの行 scale である。
   rows > 32 かつ out_features >= 1024 のとき MB2、それ以外は MB1）、
   `RowBlock1 / 2 / 4`（activation 行 tile の数）、
   `Prefill2D`（rows >= 512 の prefill。1 block が 256 行 x 64 output、8 wave。
-  128 K chunk ごとに weight fragment を展開して LDS へ stage し、4 行 tile で再利用する）。
-  `rows == 1` の専用 variant は持たない（FP8 linear で decode1 経路を削除した方針に従う。
-  rows == 1 は SplitK または RowBlock1 が担当し、DRAM 律速 shape では 590 GB/s 出る）。
+  128 K chunk ごとに weight fragment を展開して LDS へ stage し、4 行 tile で再利用する）、
+  `Gemv`（rows <= 8 の decode / verify。1 lane = 1 output row、warp = 32 output row、
+  block = 8 warp。native layout の 32 K block を `uint4` 1 回で読み、E2M1 -> E4M3
+  展開を `dot4_f32_fp8_fp8` で畳む。K は block 内の 8 warp で分担し LDS で
+  warp 昇順に reduce する。activation 行 tile は `kRows` 個の accumulator を持ち、
+  weight 16 byte を全 row で共有する）。
 - selector は rows <= 16 で RowBlock1、rows 17〜32 で out_features <= 8192 なら
   RowBlock1、それ以外は RowBlock2、rows > 192 は RowBlock4 を選ぶ。
   1 warp/block の RowBlock1 が、狭い N では MB2/4 の重み再利用より速い。
+  この判定より前に `Gemv` を選ぶ条件が 2 つある。weight byte が L3
+  （`kMxfp4GemmGemvMaxWeightBytes` = 64 MiB）以下で、かつ rows <= 4
+  （rows 5〜8 は out_features <= 2560 のときだけ）であること。WMMA 経路が
+  650〜1400 GB/s を出す帯（= 命令律速）では GEMV が 1.03x〜9.37x 速く、
+  DRAM 天井 568〜595 GB/s に張り付く帯では GEMV が 0.93x〜0.98x で勝てない。
   variant 選択と geometry allowlist は `selectors/linear_selector.cpp` が hold する。
 - out_features が 16 の倍数でないとき、RowBlock 系は最後の partial tile を
   column guard で処理する。guard が止めてよいのは out_features を超える
   weight fragment の load だけで、activation fragment は全 lane で読む。
+  `Gemv` は out_features を超える lane の output row を最後の行へ clamp し、
+  store だけを止める。全 lane が barrier に参加する必要があるためである。
   activation まで止めると valid な column が 0 になる
   （`test_mxfp4_linear` の `out=17/24/100` case）。SplitK と Prefill2D は
   元から activation load を column guard から分離している。
@@ -169,8 +179,8 @@ activation scale は 128 K ごとの行 scale である。
   scale 平面は column 0 の行基準だけを使う。
 - **E8M0 の行基準 fold**（`d = ref[row] - e8m0[row][blk]` で E2M1 仮数を 2^-d 下げて
   E4M3 operand に畳み、`2^(ref-127)` を epilogue で 1 回適用する）は **Prefill2D のみ**
-  で使う。RowBlock / SplitK は rows == 1 で遅くなった（表参照コストが per-block rescale
-  の削減を上回る）ため unfold のまま。variant 別の判定は
+  で使う。RowBlock / SplitK / Gemv は rows == 1 で遅くなった（表参照コストが per-block
+  rescale の削減を上回る）ため unfold のまま。variant 別の判定は
   `mxfp4_gemm_folds_row_ref(config.id)`。rows == 1 では fold の損得はほぼゼロに変わった
   （group 平面で観測した fold 損は行基準形では消える）が、採用は Prefill2D のまま据え置く。
 - fold は `d <= 8` で E2M1 仮数を厳密に表現する（`d >= 9` は E4M3 subnormal の

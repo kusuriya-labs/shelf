@@ -49,6 +49,57 @@ date・build・GPU 割り当て・生成結果の一致アンカーとともに�
 | カテゴリ別 serving | `vendor/BetterBench`（methodology §9） | decode t/s、TTFT p50 |
 | fp8 KV の数値品質 | `tools/quality_gate.py` / `shelf-bench quality` | ppl 差、mean KL、top-1 一致率 |
 
+## 2026-11-18 Qwen3.8-27B MXFP4 decode GEMV
+
+`models/Qwen3.8-27B-Quark-AWQ-MXFP4` の decode linear に GEMV variant を足し、
+WMMA と使い分けたときの値である。判定規則と採否は
+[../research/20261118/mxfp4_gemv.md](../research/20261118/mxfp4_gemv.md) が正本。
+
+- measurement revision: 2026-11-18 の working tree（`Mxfp4GemmConfigId::Gemv` 追加後）
+- GPU: Radeon AI PRO R9700 × 1（`HIP_VISIBLE_DEVICES=1`、`--device 0`）
+- command: `shelf-bench gemm --dtype mxfp4 --impl auto|gemv --rows 1,2,4,8
+  --warmup 30 --samples 15 --launches 15 --device 0`
+
+| shape | rows | WMMA us | WMMA GB/s | GEMV us | GEMV GB/s | 比 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 24:5120 | 1 | 47.8 | 2 | 5.1 | 16 | 9.37x |
+| 48:5120 | 1 | 10.5 | 12 | 5.1 | 24 | 2.07x |
+| 512:5120 | 1 | 10.9 | 120 | 5.2 | 254 | 2.12x |
+| 1024:5120 | 1 | 11.6 | 227 | 5.6 | 468 | 2.07x |
+| 2560:640 | 1 | 5.8 | 141 | 4.3 | 190 | 1.35x |
+| 3072:5120 | 1 | 12.1 | 650 | 7.8 | 1008 | 1.55x |
+| 5120:3072 | 1 | 10.9 | 722 | 7.8 | 1007 | 1.39x |
+| 5120:5120 | 1 | 15.5 | 845 | 10.6 | 1241 | 1.47x |
+| 5120:6144 | 1 | 18.3 | 859 | 11.8 | 1336 | 1.56x |
+| 6144:5120 | 1 | 18.2 | 864 | 11.9 | 1327 | 1.54x |
+| 10240:5120 | 1 | 24.5 | 1069 | 17.6 | 1493 | 1.40x |
+| 12288:5120 | 1 | 27.0 | 1165 | 20.3 | 1553 | 1.33x |
+| 17408:5120 | 1 | 35.3 | 1261 | 26.1 | 1710 | 1.36x |
+| 34816:5120 | 1 | 150.5 | 592 | 152.8 | 583 | 0.98x |
+| 5120:5120 | 4 | 16.1 | 812 | 14.2 | 924 | 1.14x |
+| 17408:5120 | 4 | 34.6 | 1287 | 33.5 | 1329 | 1.03x |
+| 5120:5120 | 8 | 16.7 | 785 | 22.5 | 582 | 0.74x |
+
+- 判定は重みのロード速度である。WMMA が DRAM 天井（636 GB/s）を超えて
+  650〜1400 GB/s を出す帯は命令律速で GEMV が勝ち、L3 を超えて 568〜595 GB/s に
+  張り付く帯（`34816:5120`）では GEMV も 536〜583 GB/s で差がなくなる。
+- L3 64 MiB の前後（rows 1）: `24576:5120`（60 MiB）は WMMA 45.1 us /
+  GEMV 34.9 us（1.29x）、`28672:5120`（70 MiB）は WMMA 100.9 us /
+  GEMV 108.1 us（0.93x）、`32768:5120`（80 MiB）は 136.0 us / 141.0 us（0.97x）。
+- 判定規則: 重み byte が 64 MiB 以下で、rows <= 4（rows 5〜8 は
+  out_features <= 2560）なら GEMV。それ以外は WMMA（SplitK / RowBlock / Prefill2D）。
+
+E2E（`shelf-bench tg`、ctx 128、tokens 32、prefill-chunk 128、`--warmup 1`、同じ build で
+selector の GEMV 選択だけを無効化した A/B）:
+
+| 条件 | gpu_tokens_per_sec_p50 | wall tok/s |
+| --- | ---: | ---: |
+| SplitK / RowBlock1（GEMV 選択なし） | 28.91 | 28.51 |
+| GEMV | 31.11 | 30.71 |
+
+`SHELF_QWEN35_PERF_STATS=1` の `LINEAR_MXFP4_W4A8` は 496 dispatch /
+496 optimized / fallback 0。
+
 ## 2026-11-16 Qwen3.8-27B-QSA DFlash2 reference
 
 QSA target の spec decode で、reject された draft の QSA key state を

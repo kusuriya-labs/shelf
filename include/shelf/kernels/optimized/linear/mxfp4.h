@@ -25,6 +25,15 @@ enum class Mxfp4GemmOutputDType : uint8_t {
 //     the epilogue.
 // MXFP4 W4A8 linear on the gfx1201 FP8 WMMA unit.
 //
+// The launcher family has two compute shapes. The GEMM variants read the weight
+// as 16-output x 32-K native blocks into WMMA fragments; the GEMV variant gives
+// one lane one output row instead, expands a 32-K block with a single 16-byte
+// load and folds it with the FP8 dot4 unit, and splits K across the warps of the
+// block. The selector picks the GEMV while the weight stream stays inside L3
+// (the WMMA path is instruction bound there) and keeps the WMMA variants once
+// the weight stream reaches the DRAM ceiling; the measured crossover is in
+// docs/research/20261118/mxfp4_gemv.md.
+//
 // Weight codes are consumed in the native MXFP4 layout (16-output x 32-K blocks,
 // byte b of an output row holding code[k = b] in the low nibble and
 // code[k = 16 + b] in the high nibble; see quantization/mxfp4/mxfp4_native.h)

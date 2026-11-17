@@ -544,6 +544,14 @@ int main() {
                       tag);
     };
 
+    run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::Gemv, 0u}, 1u, "gemv", kRows, false);
+    run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::Gemv, 0u}, 1u, "gemv-n24", 24u, false);
+    run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::Gemv, 0u}, 1u, "gemv-n100", 100u, false);
+    run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::Gemv, 0u}, 1u, "gemv-n17", 17u, false);
+    run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::Gemv, 0u}, 2u, "gemv2-n24", 24u, false);
+    run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::Gemv, 0u}, 3u, "gemv3-n100", 100u, false);
+    run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::Gemv, 0u}, 4u, "gemv4", kRows, false);
+    run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::Gemv, 0u}, 4u, "gemv4-n24-fold", 24u, true);
     run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::RowBlock1, 0u}, 1u, "rowblock1", kRows, false);
     run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::RowBlock1, 0u}, 1u, "rowblock1-n24", 24u, false);
     run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::RowBlock1, 0u}, 1u, "rowblock1-n100", 100u, false);

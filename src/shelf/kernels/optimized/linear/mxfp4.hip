@@ -420,11 +420,12 @@ constexpr uint32_t kGemvSecondHalfBytes = 16u * 32u;
 // Decode GEMV: one lane owns one output row and keeps one accumulator per
 // activation row, so the weight row is streamed once for every activation row.
 // A 32-K native block is one 16-byte load whose eight nibble pairs expand to the
-// four E4M3 operand words of the FP8 dot4 unit; the matching activation fragment
-// is the lane's 16 bytes in the tile row block plus the 16 bytes of the tile row
-// block 16 rows below. K is divided across the warps of the block and reduced
-// through LDS in warp order, so the launch still fills the device on narrow
-// output widths where one wave per 16 outputs leaves the grid empty.
+// four E4M3 operand words of the FP8 dot4 unit. The matching activation fragment
+// of an activation row is its 16 bytes in the row's lane slot plus the 16 bytes
+// of the slot 16 rows below, so every lane of the warp reads the same 32 bytes
+// and the load broadcasts. K is divided across the warps of the block and
+// reduced through LDS in warp order, so the launch still fills the device on
+// narrow output widths where one wave per 16 outputs leaves the grid empty.
 template <uint32_t kRows, bool kExact, bool kFold>
 __global__ __launch_bounds__(kGemvThreads) void gemv_mxfp4_w4a8_kernel(
     const uint8_t* __restrict__ weight_codes,
@@ -450,7 +451,6 @@ __global__ __launch_bounds__(kGemvThreads) void gemv_mxfp4_w4a8_kernel(
 
     const uint32_t o_raw = blockIdx.x * kGemvOutPerWarp + lane;
     const uint32_t o = o_raw < out_features ? o_raw : out_features - 1u;
-    const uint32_t row_loops = kExact ? kRows : (rows < kRows ? rows : kRows);
 
     const uint8_t* wrow = weight_codes +
         static_cast<size_t>(o >> 4) * (static_cast<size_t>(nb) * kWeightBlockBytes) +
@@ -461,8 +461,8 @@ __global__ __launch_bounds__(kGemvThreads) void gemv_mxfp4_w4a8_kernel(
     #pragma unroll
     for (uint32_t t = 0u; t < kRows; ++t)
         arow[t] = activation_codes +
-            static_cast<size_t>(t) * (static_cast<size_t>(activation_code_stride) * 16u) +
-            static_cast<size_t>(o & 15u) * kFragLaneBytes;
+            static_cast<size_t>(t >> 4u) * (static_cast<size_t>(activation_code_stride) * 16u) +
+            static_cast<size_t>(t & 15u) * kFragLaneBytes;
 
     __shared__ uint2 mag_lds[16];
     int ref = 0;
@@ -504,7 +504,8 @@ __global__ __launch_bounds__(kGemvThreads) void gemv_mxfp4_w4a8_kernel(
             const int32x2_t e3 = mxfp4_expand(w.w, t0, t1);
 
             const uint32_t aoff = (ib >> 1) * kFragBlockBytes + (ib & 1u) * 16u;
-            for (uint32_t t = 0u; t < row_loops; ++t) {
+            #pragma unroll
+            for (uint32_t t = 0u; t < kRows; ++t) {
                 const uint8_t* ap = arow[t] + aoff;
                 const uint4 a = *reinterpret_cast<const uint4*>(ap);
                 const uint4 b = *reinterpret_cast<const uint4*>(ap + kGemvSecondHalfBytes);
@@ -537,16 +538,17 @@ __global__ __launch_bounds__(kGemvThreads) void gemv_mxfp4_w4a8_kernel(
     __shared__ float red[kGemvWarps][kRows][32];
     #pragma unroll
     for (uint32_t t = 0u; t < kRows; ++t)
-        red[warp][t][lane] = t < row_loops ? acc[t] : 0.0f;
+        red[warp][t][lane] = acc[t];
     detail::lds_barrier();
 
     if (warp == 0u) {
-        for (uint32_t t = 0u; t < row_loops; ++t) {
+        #pragma unroll
+        for (uint32_t t = 0u; t < kRows; ++t) {
             float s = 0.0f;
             #pragma unroll
             for (uint32_t w = 0u; w < kGemvWarps; ++w)
                 s += red[w][t][lane];
-            if (o_raw < out_features) {
+            if ((kExact || t < rows) && o_raw < out_features) {
                 float v = s;
                 if constexpr (kFold)
                     v *= epi;
