@@ -35,24 +35,29 @@ struct QsaKVReader<KVCacheDType::BF16> {
         uint4 cell[kR];
     };
 
+    template <bool kFull>
     __device__ __forceinline__ static void load_k(const uint8_t* base, uint32_t stride,
                                                   uint32_t lane, uint32_t cells,
                                                   Block& raw) {
 #pragma unroll
         for (uint32_t c = 0; c < kR; ++c) {
-            if (c < cells)
-                raw.cell[c] = *reinterpret_cast<const uint4*>(
-                    base + static_cast<std::size_t>(c) * stride +
-                    lane * kDimsPerLane * sizeof(bf16));
-            else
-                raw.cell[c] = uint4{0u, 0u, 0u, 0u};
+            if constexpr (!kFull) {
+                if (c >= cells) {
+                    raw.cell[c] = uint4{0u, 0u, 0u, 0u};
+                    continue;
+                }
+            }
+            raw.cell[c] = *reinterpret_cast<const uint4*>(
+                base + static_cast<std::size_t>(c) * stride +
+                lane * kDimsPerLane * sizeof(bf16));
         }
     }
 
+    template <bool kFull>
     __device__ __forceinline__ static void load_v(const uint8_t* base, uint32_t stride,
                                                   uint32_t lane, uint32_t cells,
                                                   Block& raw) {
-        load_k(base, stride, lane, cells, raw);
+        load_k<kFull>(base, stride, lane, cells, raw);
     }
 
     __device__ __forceinline__ static void values(const Block& raw, uint32_t c,
@@ -70,16 +75,19 @@ struct QsaKVReader<KVCacheDType::FP8_E4M3> {
         float scale[kR];
     };
 
+    template <bool kFull>
     __device__ __forceinline__ static void load_k(const uint8_t* base, uint32_t stride,
                                                   uint32_t lane, uint32_t cells,
                                                   uint32_t scale_stride,
                                                   const float* scales, Block& raw) {
 #pragma unroll
         for (uint32_t c = 0; c < kR; ++c) {
-            if (c >= cells) {
+            if constexpr (!kFull) {
+                if (c >= cells) {
 #pragma unroll
-                for (uint32_t d = 0; d < kDimsPerLane; ++d) raw.cell[c][d] = 0.0f;
-                continue;
+                    for (uint32_t d = 0; d < kDimsPerLane; ++d) raw.cell[c][d] = 0.0f;
+                    continue;
+                }
             }
             const uint8_t* codes =
                 base + static_cast<std::size_t>(c) * stride + lane * kDimsPerLane;
@@ -97,11 +105,12 @@ struct QsaKVReader<KVCacheDType::FP8_E4M3> {
         }
     }
 
+    template <bool kFull>
     __device__ __forceinline__ static void load_v(const uint8_t* base, uint32_t stride,
                                                   uint32_t lane, uint32_t cells,
                                                   uint32_t scale_stride,
                                                   const float* scales, Block& raw) {
-        load_k(base, stride, lane, cells, scale_stride, scales, raw);
+        load_k<kFull>(base, stride, lane, cells, scale_stride, scales, raw);
     }
 
     __device__ __forceinline__ static void values(const Block& raw, uint32_t c,
@@ -117,6 +126,7 @@ struct QsaKVReader<KVCacheDType::OCTAVE> {
         float cell[kR][kDimsPerLane];
     };
 
+    template <bool kFull>
     __device__ __forceinline__ static void load_k(const uint8_t* base, uint32_t stride,
                                                   uint32_t lane, uint32_t cells,
                                                   OctaveKVCacheFormat format,
@@ -137,10 +147,12 @@ struct QsaKVReader<KVCacheDType::OCTAVE> {
         const uint32_t scale_count = compact ? 1u : 4u;
 #pragma unroll
         for (uint32_t c = 0; c < kR; ++c) {
-            if (c >= cells) {
+            if constexpr (!kFull) {
+                if (c >= cells) {
 #pragma unroll
-                for (uint32_t d = 0; d < kDimsPerLane; ++d) raw.cell[c][d] = 0.0f;
-                continue;
+                    for (uint32_t d = 0; d < kDimsPerLane; ++d) raw.cell[c][d] = 0.0f;
+                    continue;
+                }
             }
             const uint8_t* token = base + static_cast<std::size_t>(c) * stride;
             const float scale = oct::half_at(
@@ -159,6 +171,7 @@ struct QsaKVReader<KVCacheDType::OCTAVE> {
         }
     }
 
+    template <bool kFull>
     __device__ __forceinline__ static void load_v(const uint8_t* base, uint32_t stride,
                                                   uint32_t lane, uint32_t cells,
                                                   OctaveKVCacheFormat format,
@@ -167,10 +180,12 @@ struct QsaKVReader<KVCacheDType::OCTAVE> {
         const uint32_t dim = lane * kDimsPerLane;
 #pragma unroll
         for (uint32_t c = 0; c < kR; ++c) {
-            if (c >= cells) {
+            if constexpr (!kFull) {
+                if (c >= cells) {
 #pragma unroll
-                for (uint32_t d = 0; d < kDimsPerLane; ++d) raw.cell[c][d] = 0.0f;
-                continue;
+                    for (uint32_t d = 0; d < kDimsPerLane; ++d) raw.cell[c][d] = 0.0f;
+                    continue;
+                }
             }
             const uint8_t* token = base + static_cast<std::size_t>(c) * stride;
             const float scale = oct::half_at(token + slot_bytes - 2u);
@@ -310,98 +325,111 @@ __global__ __launch_bounds__(kThreads) void qsa_sparse_attention_kernel(
                 const std::size_t scale_index =
                     (static_cast<std::size_t>(phys) * a.page_tokens + off) *
                         a.kv_heads + h_kv;
-                typename QsaKVReader<DType>::Block kr;
-                typename QsaKVReader<DType>::Block vr;
-                if constexpr (DType == KVCacheDType::OCTAVE) {
-                    const std::size_t token_head = elem / a.head_dim;
-                    QsaKVReader<DType>::load_k(
-                        k_layer + token_head * k_slot_bytes, k_slot_bytes, lane, cells,
-                        octave_format, octave_levels, kr);
-                    QsaKVReader<DType>::load_v(
-                        v_layer + token_head * v_slot_bytes, v_slot_bytes, lane, cells,
-                        octave_format, octave_levels, vr);
-                } else if constexpr (DType == KVCacheDType::FP8_E4M3) {
-                    const uint32_t byte_stride = a.elems_per_token * elem_bytes;
-                    const float* k_ptr = k_scale_layer + scale_index;
-                    const float* v_ptr = v_scale_layer + scale_index;
-                    QsaKVReader<DType>::load_k(k_layer + elem * elem_bytes, byte_stride,
-                                               lane, cells, a.kv_heads, k_ptr, kr);
-                    QsaKVReader<DType>::load_v(v_layer + elem * elem_bytes, byte_stride,
-                                               lane, cells, a.kv_heads, v_ptr, vr);
-                } else {
-                    const uint32_t byte_stride = a.elems_per_token * elem_bytes;
-                    QsaKVReader<DType>::load_k(k_layer + elem * elem_bytes, byte_stride,
-                                               lane, cells, kr);
-                    QsaKVReader<DType>::load_v(v_layer + elem * elem_bytes, byte_stride,
-                                               lane, cells, vr);
-                }
+                auto run_block = [&]<bool kFull>() {
+                    typename QsaKVReader<DType>::Block kr;
+                    typename QsaKVReader<DType>::Block vr;
+                    if constexpr (DType == KVCacheDType::OCTAVE) {
+                        const std::size_t token_head = elem / a.head_dim;
+                        QsaKVReader<DType>::template load_k<kFull>(
+                            k_layer + token_head * k_slot_bytes, k_slot_bytes, lane,
+                            cells, octave_format, octave_levels, kr);
+                        QsaKVReader<DType>::template load_v<kFull>(
+                            v_layer + token_head * v_slot_bytes, v_slot_bytes, lane,
+                            cells, octave_format, octave_levels, vr);
+                    } else if constexpr (DType == KVCacheDType::FP8_E4M3) {
+                        const uint32_t byte_stride = a.elems_per_token * elem_bytes;
+                        const float* k_ptr = k_scale_layer + scale_index;
+                        const float* v_ptr = v_scale_layer + scale_index;
+                        QsaKVReader<DType>::template load_k<kFull>(
+                            k_layer + elem * elem_bytes, byte_stride, lane, cells,
+                            a.kv_heads, k_ptr, kr);
+                        QsaKVReader<DType>::template load_v<kFull>(
+                            v_layer + elem * elem_bytes, byte_stride, lane, cells,
+                            a.kv_heads, v_ptr, vr);
+                    } else {
+                        const uint32_t byte_stride = a.elems_per_token * elem_bytes;
+                        QsaKVReader<DType>::template load_k<kFull>(
+                            k_layer + elem * elem_bytes, byte_stride, lane, cells, kr);
+                        QsaKVReader<DType>::template load_v<kFull>(
+                            v_layer + elem * elem_bytes, byte_stride, lane, cells, vr);
+                    }
 
-
-                float part[kHeadsPerWarp][kR];
+                    float part[kHeadsPerWarp][kR];
 #pragma unroll
-                for (uint32_t c = 0; c < kR; ++c) {
-                    float kx[kDimsPerLane];
-                    QsaKVReader<DType>::values(kr, c, kx);
+                    for (uint32_t c = 0; c < kR; ++c) {
+                        float kx[kDimsPerLane];
+                        QsaKVReader<DType>::values(kr, c, kx);
+#pragma unroll
+                        for (uint32_t h = 0; h < kHeadsPerWarp; ++h) {
+                            float sum = 0.0f;
+#pragma unroll
+                            for (uint32_t d = 0; d < kDimsPerLane; ++d) sum += q[h][d] * kx[d];
+                            if constexpr (DType == KVCacheDType::FP8_E4M3)
+                                part[h][c] = sum * kr.scale[c];
+                            else
+                                part[h][c] = sum;
+                        }
+                    }
 #pragma unroll
                     for (uint32_t h = 0; h < kHeadsPerWarp; ++h) {
+#pragma unroll
+                        for (uint32_t c = 0; c < kR; ++c) red[warp][lane][h * kR + c] = part[h][c];
+                    }
+                    detail::lds_barrier();
+                    float s = -INFINITY;
+                    if (scorer) {
                         float sum = 0.0f;
 #pragma unroll
-                        for (uint32_t d = 0; d < kDimsPerLane; ++d) sum += q[h][d] * kx[d];
-                        if constexpr (DType == KVCacheDType::FP8_E4M3)
-                            part[h][c] = sum * kr.scale[c];
+                        for (uint32_t i = 0; i < 32u; ++i) sum += red[warp][i][lane];
+                        if constexpr (kFull)
+                            s = sum;
                         else
-                            part[h][c] = sum;
+                            s = my_c < cells ? sum : -INFINITY;
                     }
-                }
-#pragma unroll
-                for (uint32_t h = 0; h < kHeadsPerWarp; ++h) {
-#pragma unroll
-                    for (uint32_t c = 0; c < kR; ++c) red[warp][lane][h * kR + c] = part[h][c];
-                }
-                detail::lds_barrier();
-                float s = -INFINITY;
-                if (scorer) {
-                    float sum = 0.0f;
-#pragma unroll
-                    for (uint32_t i = 0; i < 32u; ++i) sum += red[warp][i][lane];
-                    s = my_c < cells ? sum : -INFINITY;
-                }
-                detail::lds_barrier();
+                    detail::lds_barrier();
 
-                float bmax = s;
+                    float bmax = s;
 #pragma unroll
-                for (uint32_t offset = 1u; offset < kR; offset <<= 1u)
-                    bmax = fmaxf(bmax, __shfl_xor(bmax, offset, 32));
-                const float m_new = fmaxf(m_run, bmax);
-                const float alpha = m_new == -INFINITY ? 1.0f : __expf(m_run - m_new);
-                const float p = s == -INFINITY ? 0.0f : __expf(s - m_new);
-                float psum = p;
+                    for (uint32_t offset = 1u; offset < kR; offset <<= 1u)
+                        bmax = fmaxf(bmax, __shfl_xor(bmax, offset, 32));
+                    const float m_new = fmaxf(m_run, bmax);
+                    const float alpha = m_new == -INFINITY ? 1.0f : __expf(m_run - m_new);
+                    const float p = s == -INFINITY ? 0.0f : __expf(s - m_new);
+                    float psum = p;
 #pragma unroll
-                for (uint32_t offset = 1u; offset < kR; offset <<= 1u)
-                    psum += __shfl_xor(psum, offset, 32);
-                m_run = m_new;
-                l_run = l_run * alpha + psum;
+                    for (uint32_t offset = 1u; offset < kR; offset <<= 1u)
+                        psum += __shfl_xor(psum, offset, 32);
+                    m_run = m_new;
+                    l_run = l_run * alpha + psum;
 
-#pragma unroll
-                for (uint32_t h = 0; h < kHeadsPerWarp; ++h) {
-                    const float al = __shfl_sync(0xFFFFFFFFULL, alpha, h * kR);
-#pragma unroll
-                    for (uint32_t d = 0; d < kDimsPerLane; ++d) acc[h][d] *= al;
-                }
-#pragma unroll
-                for (uint32_t c = 0; c < kR; ++c) {
-                    if (c >= cells) continue;
-                    float vx[kDimsPerLane];
-                    QsaKVReader<DType>::values(vr, c, vx);
 #pragma unroll
                     for (uint32_t h = 0; h < kHeadsPerWarp; ++h) {
-                        float pc = __shfl_sync(0xFFFFFFFFULL, p, h * kR + c);
-                        if constexpr (DType == KVCacheDType::FP8_E4M3)
-                            pc *= vr.scale[c];
+                        const float al = __shfl_sync(0xFFFFFFFFULL, alpha, h * kR);
 #pragma unroll
-                        for (uint32_t d = 0; d < kDimsPerLane; ++d) acc[h][d] += pc * vx[d];
+                        for (uint32_t d = 0; d < kDimsPerLane; ++d) acc[h][d] *= al;
                     }
-                }
+#pragma unroll
+                    for (uint32_t c = 0; c < kR; ++c) {
+                        if constexpr (!kFull) {
+                            if (c >= cells) continue;
+                        }
+                        float vx[kDimsPerLane];
+                        QsaKVReader<DType>::values(vr, c, vx);
+#pragma unroll
+                        for (uint32_t h = 0; h < kHeadsPerWarp; ++h) {
+                            float pc = __shfl_sync(0xFFFFFFFFULL, p, h * kR + c);
+                            if constexpr (DType == KVCacheDType::FP8_E4M3)
+                                pc *= vr.scale[c];
+#pragma unroll
+                            for (uint32_t d = 0; d < kDimsPerLane; ++d) acc[h][d] += pc * vx[d];
+                        }
+                    }
+                };
+
+                if (cells == kR)
+                    run_block.template operator()<true>();
+                else
+                    run_block.template operator()<false>();
             }
         }
     }
