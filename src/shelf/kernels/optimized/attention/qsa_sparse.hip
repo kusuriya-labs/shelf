@@ -72,8 +72,7 @@ struct QsaKVReader<KVCacheDType::FP8_E4M3> {
     __device__ __forceinline__ static void load_k(const uint8_t* base, uint32_t stride,
                                                   uint32_t lane, uint32_t cells,
                                                   uint32_t scale_stride,
-                                                  const float* scales,
-                                                  const unsigned short* lut, Block& raw) {
+                                                  const float* scales, Block& raw) {
 #pragma unroll
         for (uint32_t c = 0; c < kR; ++c) {
             if (c >= cells) {
@@ -84,20 +83,24 @@ struct QsaKVReader<KVCacheDType::FP8_E4M3> {
             const uint8_t* codes =
                 base + static_cast<std::size_t>(c) * stride + lane * kDimsPerLane;
             const float scale = scales[c * scale_stride];
-#pragma unroll
-            for (uint32_t d = 0; d < kDimsPerLane; ++d) {
-                const unsigned short bits = lut[codes[d]];
-                raw.cell[c][d] = __bfloat162float(__ushort_as_bfloat16(bits)) * scale;
-            }
+            const uint32_t p0 = *reinterpret_cast<const uint32_t*>(codes);
+            const uint32_t p1 = *reinterpret_cast<const uint32_t*>(codes + 4);
+            raw.cell[c][0] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p0), 0) * scale;
+            raw.cell[c][1] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p0), 1) * scale;
+            raw.cell[c][2] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p0), 2) * scale;
+            raw.cell[c][3] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p0), 3) * scale;
+            raw.cell[c][4] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p1), 0) * scale;
+            raw.cell[c][5] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p1), 1) * scale;
+            raw.cell[c][6] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p1), 2) * scale;
+            raw.cell[c][7] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p1), 3) * scale;
         }
     }
 
     __device__ __forceinline__ static void load_v(const uint8_t* base, uint32_t stride,
                                                   uint32_t lane, uint32_t cells,
                                                   uint32_t scale_stride,
-                                                  const float* scales,
-                                                  const unsigned short* lut, Block& raw) {
-        load_k(base, stride, lane, cells, scale_stride, scales, lut, raw);
+                                                  const float* scales, Block& raw) {
+        load_k(base, stride, lane, cells, scale_stride, scales, raw);
     }
 
     __device__ __forceinline__ static void values(const Block& raw, uint32_t c,
@@ -216,15 +219,6 @@ __global__ __launch_bounds__(kThreads) void qsa_sparse_attention_kernel(
     const uint32_t h0 = h_kv * kQsaSparseQPerKv + warp * kHeadsPerWarp;
 
     __shared__ float red[kWarps][32][kScorerLanes + 1u];
-    __shared__ unsigned short fp8_lut[DType == KVCacheDType::FP8_E4M3 ? 256u : 1u];
-    if constexpr (DType == KVCacheDType::FP8_E4M3) {
-        for (uint32_t i = threadIdx.y * 32u + lane; i < 256u; i += kThreads)
-            fp8_lut[i] = static_cast<unsigned short>(
-                (__builtin_bit_cast(unsigned,
-                    ::shelf::quantization::codec::device::e4m3_decode_f32(
-                        static_cast<uint8_t>(i))) + 0x8000u) >> 16u);
-        __syncthreads();
-    }
 
     if (row >= a.rows) return;
     const uint32_t slot = a.row_sequence_slots[row];
@@ -330,9 +324,9 @@ __global__ __launch_bounds__(kThreads) void qsa_sparse_attention_kernel(
                     const float* k_ptr = k_scale_layer + scale_index;
                     const float* v_ptr = v_scale_layer + scale_index;
                     QsaKVReader<DType>::load_k(k_layer + elem * elem_bytes, byte_stride,
-                                               lane, cells, a.kv_heads, k_ptr, fp8_lut, kr);
+                                               lane, cells, a.kv_heads, k_ptr, kr);
                     QsaKVReader<DType>::load_v(v_layer + elem * elem_bytes, byte_stride,
-                                               lane, cells, a.kv_heads, v_ptr, fp8_lut, vr);
+                                               lane, cells, a.kv_heads, v_ptr, vr);
                 } else {
                     const uint32_t byte_stride = a.elems_per_token * elem_bytes;
                     QsaKVReader<DType>::load_k(k_layer + elem * elem_bytes, byte_stride,
@@ -578,7 +572,7 @@ hipError_t launch_qsa_sparse_reduce(const PagedAttentionCommonArgs& common,
                                     const float* partials, uint32_t splits,
                                     hipStream_t stream) {
     if (common.output == nullptr || partials == nullptr || common.rows == 0u ||
-        common.q_heads == 0u || splits <= 1u)
+        common.q_heads == 0u || splits == 0u)
         return hipErrorInvalidValue;
     const uint32_t grid = common.rows * common.q_heads;
     if (grid == 0u) return hipErrorInvalidValue;
