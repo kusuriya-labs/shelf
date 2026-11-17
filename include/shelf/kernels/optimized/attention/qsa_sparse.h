@@ -21,6 +21,12 @@ hipError_t launch_qsa_sparse_attention(const PagedAttentionCommonArgs& common,
                                        float* partials, uint32_t splits,
                                        hipStream_t stream);
 
+hipError_t launch_qsa_sparse_attention_fp8(
+    const PagedAttentionCommonArgs& common,
+    const uint8_t* k_pool, const uint8_t* v_pool,
+    const float* k_scales, const float* v_scales,
+    float* partials, uint32_t splits, hipStream_t stream);
+
 hipError_t launch_qsa_sparse_reduce(const PagedAttentionCommonArgs& common,
                                     const float* partials, uint32_t splits,
                                     hipStream_t stream);

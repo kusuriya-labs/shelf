@@ -194,6 +194,8 @@ __device__ __forceinline__ ProgramStatus exec_paged_attention(
     ModelDispatchEnv& env, const DispatchBinding& b) {
     if (env.context == nullptr || env.qwen_state == nullptr)
         return ProgramStatus::INVALID_PROGRAM;
+    if (b.input_count == 2u)
+        return ProgramStatus::INVALID_OPCODE;
     const auto* sb = find_state(env, b.descriptor_slot);
     if (sb == nullptr ||
         sb->kind != static_cast<uint8_t>(shelf::runtime::PrimitiveStateKind::KV_CACHE))

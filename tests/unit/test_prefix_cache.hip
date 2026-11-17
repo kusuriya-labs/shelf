@@ -30,6 +30,7 @@ using shelf::state::release_paged_sequence_state;
 using shelf::state::reserve_sequence_append;
 using shelf::runtime::kInvalidReuseSlot;
 using shelf::runtime::PrefixCache;
+using shelf::runtime::PrefixStateBindings;
 using shelf::runtime::PrefixCacheConfig;
 using shelf::runtime::PrefixCacheStats;
 using shelf::runtime::PrefixCacheStrategy;
@@ -79,7 +80,10 @@ std::optional<PrefixCache> make_cache(
     Env& env,
     PagedKVPool& kv,
     const PrefixCacheConfig& config) {
-    auto result = PrefixCache::create(*env.arena, kv, *env.gdn, config);
+    PrefixStateBindings bindings{};
+    bindings.kv = &kv;
+    bindings.gdn = env.gdn;
+    auto result = PrefixCache::create(*env.arena, bindings, config);
     if (!result.ok()) {
         std::printf("PrefixCache::create failed: %s\n",
                     result.status().message().c_str());
@@ -438,8 +442,15 @@ void test_qsa_ple(Env& env) {
     shelf::state::QsaKeyStatePool qsa = qsa_result.release();
     shelf::state::PleConvStatePool ple = ple_result.release();
 
-    auto cache_result = PrefixCache::create(*env.arena, *env.kv_bf16, *env.gdn, &qsa, &ple,
-                                            config);
+    PrefixStateBindings bindings{};
+    bindings.kv = env.kv_bf16;
+    bindings.gdn = env.gdn;
+    bindings.qsa = &qsa;
+    bindings.ple = &ple;
+    bindings.model_uses_qsa = true;
+    bindings.model_uses_ple_conv = true;
+    bindings.needs_history_restore = true;
+    auto cache_result = PrefixCache::create(*env.arena, bindings, config);
     check(cache_result.ok(), "extra cache create");
     if (!cache_result.ok()) return;
     PrefixCache cache = cache_result.release();

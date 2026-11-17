@@ -149,22 +149,6 @@ class PrefixCache {
         const PrefixCacheConfig& config,
         const std::vector<PrefixCacheRankContext>& extra_ranks = {});
 
-    static Result<PrefixCache> create(
-        gpu::GpuArena& arena,
-        PagedKVPool& active_kv_pool,
-        GdnStatePool& active_state_pool,
-        const PrefixCacheConfig& config,
-        const std::vector<PrefixCacheRankContext>& extra_ranks = {});
-
-    static Result<PrefixCache> create(
-        gpu::GpuArena& arena,
-        PagedKVPool& active_kv_pool,
-        GdnStatePool& active_state_pool,
-        ::shelf::state::QsaKeyStatePool* active_qsa_pool,
-        ::shelf::state::PleConvStatePool* active_ple_conv_pool,
-        const PrefixCacheConfig& config,
-        const std::vector<PrefixCacheRankContext>& extra_ranks = {});
-
     PrefixCache(PrefixCache&&) noexcept;
     PrefixCache& operator=(PrefixCache&&) noexcept;
     PrefixCache(const PrefixCache&) = delete;

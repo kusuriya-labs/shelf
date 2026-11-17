@@ -277,6 +277,68 @@ int main() {
         std::fprintf(stderr, "split attention max abs diff %.6f\n", diff);
     }
 
+    // 最終ブロックに無効トークンがあるケース (visible = 1, 2, 3)。
+    // 未使用スロットの K/V を NaN で埋めても、出力が NaN に汚染されないことを確認する。
+    {
+        const std::uint32_t short_positions[kRows] = {1u, 2u, 3u, 0u};
+        check(hipMemcpyAsync(d_positions, short_positions, sizeof(short_positions),
+                             hipMemcpyHostToDevice, stream) == hipSuccess,
+              "copy short positions");
+        std::vector<shelf::bf16_t> nan_k = k_pool;
+        std::vector<shelf::bf16_t> nan_v = v_pool;
+        const std::uint32_t nan_bits = 0x7FC0u;
+        for (std::size_t i = 0; i < nan_k.size(); ++i) {
+            nan_k[i].data = static_cast<unsigned short>(nan_bits);
+            nan_v[i].data = static_cast<unsigned short>(nan_bits);
+        }
+        // visible トークンだけ元の値に戻す (行 0..2、block 0、各ページ先頭)。
+        for (std::uint32_t row = 0; row < 3u; ++row) {
+            const std::uint32_t phys = kBlockTables[kSlots[row] * kBlockTableStride];
+            for (std::uint32_t t = 0; t <= short_positions[row]; ++t) {
+                const std::size_t base =
+                    static_cast<std::size_t>(kLayers - 1u) * elems_per_layer +
+                    static_cast<std::size_t>(phys) * elems_per_page + t * elems_per_token;
+                for (std::size_t e = 0; e < elems_per_token; ++e) {
+                    nan_k[base + e] = k_pool[base + e];
+                    nan_v[base + e] = v_pool[base + e];
+                }
+            }
+        }
+        check(hipMemcpyAsync(d_k, nan_k.data(), nan_k.size() * sizeof(shelf::bf16_t),
+                             hipMemcpyHostToDevice, stream) == hipSuccess, "copy nan k");
+        check(hipMemcpyAsync(d_v, nan_v.data(), nan_v.size() * sizeof(shelf::bf16_t),
+                             hipMemcpyHostToDevice, stream) == hipSuccess, "copy nan v");
+        check(hipMemsetAsync(d_out, 0, got.size() * sizeof(float), stream) == hipSuccess,
+              "clear out short");
+        check(shelf::kernel::launch_qsa_sparse_attention(args, d_k, d_v, nullptr, 1u,
+                                                         stream) == hipSuccess,
+              "launch short block");
+        check(hipMemcpyAsync(got.data(), d_out, got.size() * sizeof(float),
+                             hipMemcpyDeviceToHost, stream) == hipSuccess, "copy short out");
+        check(hipStreamSynchronize(stream) == hipSuccess, "sync short");
+        bool finite = true;
+        for (std::uint32_t row = 0; row < 3u; ++row) {
+            for (std::uint32_t h = 0; h < kQHeads * kHeadDim; ++h) {
+                const float value = got[static_cast<std::size_t>(row) * kQHeads * kHeadDim + h];
+                if (!std::isfinite(value)) finite = false;
+            }
+        }
+        check(finite, "partial final block does not leak NaN");
+        // 元のデータに戻す。
+        check(hipMemcpyAsync(d_positions, kPositions, sizeof(kPositions),
+                             hipMemcpyHostToDevice, stream) == hipSuccess, "restore positions");
+        check(hipMemcpyAsync(d_k, k_pool.data(), k_pool.size() * sizeof(shelf::bf16_t),
+                             hipMemcpyHostToDevice, stream) == hipSuccess, "restore k");
+        check(hipMemcpyAsync(d_v, v_pool.data(), v_pool.size() * sizeof(shelf::bf16_t),
+                             hipMemcpyHostToDevice, stream) == hipSuccess, "restore v");
+    }
+
+    check(shelf::kernel::launch_qsa_sparse_attention_fp8(
+              args, reinterpret_cast<const std::uint8_t*>(d_k),
+              reinterpret_cast<const std::uint8_t*>(d_v), nullptr, nullptr,
+              nullptr, 1u, stream) == hipErrorInvalidValue,
+          "fp8 sparse rejects null scales");
+
     check(shelf::kernel::qsa_sparse_splits(1u, kKvHeads, 4u * 1024u * 1024u) > 1u,
           "decode-sized rows split the block list");
     check(shelf::kernel::qsa_sparse_splits(256u, kKvHeads, 4u * 1024u * 1024u) == 1u,

@@ -814,28 +814,10 @@ Result<PrefixCache> PrefixCache::create(
     const std::vector<PrefixCacheRankContext>& extra_ranks) {
     Status valid = validate_prefix_state(bindings);
     if (!valid.ok()) return valid;
-    return create(arena, *bindings.kv, *bindings.gdn, bindings.qsa, bindings.ple,
-                  config, extra_ranks);
-}
-
-Result<PrefixCache> PrefixCache::create(
-    gpu::GpuArena& arena,
-    PagedKVPool& active_kv_pool,
-    GdnStatePool& active_state_pool,
-    const PrefixCacheConfig& config,
-    const std::vector<PrefixCacheRankContext>& extra_ranks) {
-    return create(arena, active_kv_pool, active_state_pool, nullptr, nullptr, config,
-                  extra_ranks);
-}
-
-Result<PrefixCache> PrefixCache::create(
-    gpu::GpuArena& arena,
-    PagedKVPool& active_kv_pool,
-    GdnStatePool& active_state_pool,
-    ::shelf::state::QsaKeyStatePool* active_qsa_pool,
-    ::shelf::state::PleConvStatePool* active_ple_conv_pool,
-    const PrefixCacheConfig& config,
-    const std::vector<PrefixCacheRankContext>& extra_ranks) {
+    PagedKVPool& active_kv_pool = *bindings.kv;
+    GdnStatePool& active_state_pool = *bindings.gdn;
+    ::shelf::state::QsaKeyStatePool* active_qsa_pool = bindings.qsa;
+    ::shelf::state::PleConvStatePool* active_ple_conv_pool = bindings.ple;
     if (config.checkpoints == 0u) {
         return Status::invalid_argument("prefix checkpoints must be > 0", __FILE__,
                                         __LINE__);

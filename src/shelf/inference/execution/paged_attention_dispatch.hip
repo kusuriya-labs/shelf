@@ -49,7 +49,10 @@ constexpr uint32_t kQsaSparsePrefillMinTokens = 12288u;
 bool qsa_sparse_supported(const PagedAttentionResolvedArgs& args,
                           const HostExecutionContext& ctx) {
     const auto& c = args.common;
-    return args.kv_dtype == ::shelf::kernel::KVCacheDType::BF16 &&
+    const bool dtype_ok =
+        args.kv_dtype == ::shelf::kernel::KVCacheDType::BF16 ||
+        args.kv_dtype == ::shelf::kernel::KVCacheDType::FP8_E4M3;
+    return dtype_ok &&
            args.output_dtype == ::shelf::runtime::ValueDType::F32 && c.block_mask != nullptr &&
            c.tree_anc_offsets == nullptr &&
            c.head_dim == ::shelf::kernel::kQsaSparseHeadDim &&
@@ -570,9 +573,17 @@ PhysicalResolveStatus append_qsa_region(const PagedAttentionResolvedArgs& a,
         return PhysicalResolveStatus::NotApplicable;
     PhysicalPagedAttentionKernel& k = out.kernels[out.physical_count++];
     k.common = region;
-    k.variant = PhysicalPagedAttentionVariant::QsaSparse;
-    k.k_pool = reinterpret_cast<uint64_t>(a.k_bf16_pool);
-    k.v_pool = reinterpret_cast<uint64_t>(a.v_bf16_pool);
+    if (a.kv_dtype == ::shelf::kernel::KVCacheDType::FP8_E4M3) {
+        k.variant = PhysicalPagedAttentionVariant::QsaSparseFp8;
+        k.k_pool = reinterpret_cast<uint64_t>(a.k_fp8_pool);
+        k.v_pool = reinterpret_cast<uint64_t>(a.v_fp8_pool);
+        k.k_scale_pool = reinterpret_cast<uint64_t>(a.k_scale_pool);
+        k.v_scale_pool = reinterpret_cast<uint64_t>(a.v_scale_pool);
+    } else {
+        k.variant = PhysicalPagedAttentionVariant::QsaSparse;
+        k.k_pool = reinterpret_cast<uint64_t>(a.k_bf16_pool);
+        k.v_pool = reinterpret_cast<uint64_t>(a.v_bf16_pool);
+    }
     k.splits = splits;
     k.grid = region.rows * region.kv_heads * splits;
     k.workgroup = 64u;
@@ -865,6 +876,14 @@ hipError_t launch_paged_attention_physical(const PhysicalPagedAttentionPlan& pla
                 herr = ::shelf::kernel::launch_qsa_sparse_attention(
                     k.common, reinterpret_cast<const ::shelf::bf16_t*>(k.k_pool),
                     reinterpret_cast<const ::shelf::bf16_t*>(k.v_pool),
+                    reinterpret_cast<float*>(k.partials), k.splits, stream);
+                break;
+            case PhysicalPagedAttentionVariant::QsaSparseFp8:
+                herr = ::shelf::kernel::launch_qsa_sparse_attention_fp8(
+                    k.common, reinterpret_cast<const uint8_t*>(k.k_pool),
+                    reinterpret_cast<const uint8_t*>(k.v_pool),
+                    reinterpret_cast<const float*>(k.k_scale_pool),
+                    reinterpret_cast<const float*>(k.v_scale_pool),
                     reinterpret_cast<float*>(k.partials), k.splits, stream);
                 break;
             case PhysicalPagedAttentionVariant::QsaReduce:

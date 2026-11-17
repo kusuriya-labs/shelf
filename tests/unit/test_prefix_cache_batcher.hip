@@ -224,7 +224,15 @@ int main() {
 
     PrefixCacheConfig prefix_config;
     prefix_config.capture_slots = max_scheduled_requests;
-    auto cache_result = PrefixCache::create(arena, kv_pool, gdn_pool, prefix_config);
+    auto bindings = shelf::runtime::make_prefix_state_bindings(executor);
+    check(bindings.ok(), "prefix state bindings");
+    if (!bindings.ok()) {
+        executor_shutdown(executor);
+        (void)arena.shutdown();
+        fs::remove_all(dir, ec);
+        return g_fail == 0 ? 0 : 1;
+    }
+    auto cache_result = PrefixCache::create(arena, bindings.value(), prefix_config);
     check(cache_result.ok(), "prefix cache create");
     if (!cache_result.ok()) {
         std::printf("cache create: %s\n", cache_result.status().message().c_str());

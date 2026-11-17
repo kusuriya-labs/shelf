@@ -1,5 +1,6 @@
 #include <shelf/kernels/optimized/attention/qsa_sparse.h>
 #include <shelf/kernels/optimized/detail/lds_barrier_device.h>
+#include <shelf/quantization/codec/e4m3_detail.h>
 
 #include <hip/hip_bf16.h>
 #include <hip/hip_runtime.h>
@@ -22,25 +23,71 @@ constexpr uint32_t kDimsPerLane = kD / 32u;
 constexpr uint32_t kScorerLanes = kHeadsPerWarp * kR;
 constexpr uint32_t kPartialStride = kQsaSparseQPerKv * (2u + kD);
 
-struct RawBlock {
-    uint4 cell[kR];
+template <KVCacheDType DType>
+struct QsaKVReader;
+
+template <>
+struct QsaKVReader<KVCacheDType::BF16> {
+    struct Block {
+        uint4 cell[kR];
+    };
+
+    __device__ __forceinline__ static void load(const uint8_t* base, uint32_t stride,
+                                                uint32_t lane, uint32_t cells, uint32_t,
+                                                const float*,
+                                                Block& raw) {
+#pragma unroll
+        for (uint32_t c = 0; c < kR; ++c) {
+            if (c < cells)
+                raw.cell[c] = *reinterpret_cast<const uint4*>(
+                    base + static_cast<std::size_t>(c) * stride +
+                    lane * kDimsPerLane * sizeof(bf16));
+            else
+                raw.cell[c] = uint4{0u, 0u, 0u, 0u};
+        }
+    }
+
+    __device__ __forceinline__ static void values(const Block& raw, uint32_t c,
+                                                  float (&x)[kDimsPerLane]) {
+        const bf16* v = reinterpret_cast<const bf16*>(&raw.cell[c]);
+#pragma unroll
+        for (uint32_t d = 0; d < kDimsPerLane; ++d) x[d] = __bfloat162float(v[d]);
+    }
 };
 
-__device__ __forceinline__ void load_block(const bf16* base, uint32_t stride, uint32_t lane,
-                                           RawBlock& raw) {
-#pragma unroll
-    for (uint32_t c = 0; c < kR; ++c) {
-        raw.cell[c] = *reinterpret_cast<const uint4*>(
-            base + static_cast<std::size_t>(c) * stride + lane * kDimsPerLane);
-    }
-}
+template <>
+struct QsaKVReader<KVCacheDType::FP8_E4M3> {
+    struct Block {
+        float cell[kR][kDimsPerLane];
+    };
 
-__device__ __forceinline__ void cell_values(const RawBlock& raw, uint32_t c,
-                                            float (&x)[kDimsPerLane]) {
-    const bf16* values = reinterpret_cast<const bf16*>(&raw.cell[c]);
+    __device__ __forceinline__ static void load(const uint8_t* base, uint32_t stride,
+                                                uint32_t lane, uint32_t cells,
+                                                uint32_t scale_stride,
+                                                const float* scales, Block& raw) {
 #pragma unroll
-    for (uint32_t d = 0; d < kDimsPerLane; ++d) x[d] = __bfloat162float(values[d]);
-}
+        for (uint32_t c = 0; c < kR; ++c) {
+            if (c >= cells) {
+#pragma unroll
+                for (uint32_t d = 0; d < kDimsPerLane; ++d) raw.cell[c][d] = 0.0f;
+                continue;
+            }
+            const uint8_t* codes =
+                base + static_cast<std::size_t>(c) * stride + lane * kDimsPerLane;
+            const float scale = scales[c * scale_stride];
+#pragma unroll
+            for (uint32_t d = 0; d < kDimsPerLane; ++d)
+                raw.cell[c][d] =
+                    ::shelf::quantization::codec::device::e4m3_decode_f32(codes[d]) * scale;
+        }
+    }
+
+    __device__ __forceinline__ static void values(const Block& raw, uint32_t c,
+                                                  float (&x)[kDimsPerLane]) {
+#pragma unroll
+        for (uint32_t d = 0; d < kDimsPerLane; ++d) x[d] = raw.cell[c][d];
+    }
+};
 
 __device__ __forceinline__ void load_q(const bf16* src, uint32_t lane,
                                        float (&q)[kDimsPerLane], float scale) {
@@ -51,10 +98,13 @@ __device__ __forceinline__ void load_q(const bf16* src, uint32_t lane,
         q[d] = __bfloat162float(values[d]) * scale;
 }
 
-template <bool kSplit>
+template <KVCacheDType DType, bool kSplit>
 __global__ __launch_bounds__(kThreads) void qsa_sparse_attention_kernel(
-    const PagedAttentionCommonArgs a, const bf16* __restrict__ k_pool,
-    const bf16* __restrict__ v_pool, float* __restrict__ partials, uint32_t splits) {
+    const PagedAttentionCommonArgs a, const uint8_t* __restrict__ k_pool,
+    const uint8_t* __restrict__ v_pool, const float* __restrict__ k_scales,
+    const float* __restrict__ v_scales, float* __restrict__ partials, uint32_t splits) {
+    static_assert(DType == KVCacheDType::BF16 || DType == KVCacheDType::FP8_E4M3,
+                  "Unsupported QSA Sparse KV dtype");
     const uint32_t lane = threadIdx.x;
     const uint32_t warp = threadIdx.y;
     const uint32_t split = kSplit ? blockIdx.x : 0u;
@@ -105,8 +155,20 @@ __global__ __launch_bounds__(kThreads) void qsa_sparse_attention_kernel(
             a.block_tables + static_cast<std::size_t>(slot) * a.block_table_stride;
         const uint32_t* words = reinterpret_cast<const uint32_t*>(
             a.block_mask + static_cast<std::size_t>(row) * a.mask_stride);
-        const bf16* k_layer = k_pool + static_cast<std::size_t>(a.layer) * a.elems_per_layer;
-        const bf16* v_layer = v_pool + static_cast<std::size_t>(a.layer) * a.elems_per_layer;
+        const uint32_t elem_bytes =
+            DType == KVCacheDType::FP8_E4M3 ? 1u : static_cast<uint32_t>(sizeof(bf16));
+        const uint8_t* k_layer = k_pool +
+            static_cast<std::size_t>(a.layer) * a.elems_per_layer * elem_bytes;
+        const uint8_t* v_layer = v_pool +
+            static_cast<std::size_t>(a.layer) * a.elems_per_layer * elem_bytes;
+        const float* k_scale_layer = k_scales != nullptr
+            ? k_scales + static_cast<std::size_t>(a.layer) * a.num_pages *
+                             a.page_tokens * a.kv_heads
+            : nullptr;
+        const float* v_scale_layer = v_scales != nullptr
+            ? v_scales + static_cast<std::size_t>(a.layer) * a.num_pages *
+                             a.page_tokens * a.kv_heads
+            : nullptr;
         const uint32_t blocks_per_page = a.page_tokens / kR;
         const uint32_t last_word = (j1 - 1u) >> 5u;
 
@@ -129,16 +191,28 @@ __global__ __launch_bounds__(kThreads) void qsa_sparse_attention_kernel(
                 const std::size_t elem = static_cast<std::size_t>(phys) * a.elems_per_page +
                                          static_cast<std::size_t>(off) * a.elems_per_token +
                                          static_cast<std::size_t>(h_kv) * kD;
-                RawBlock kr;
-                RawBlock vr;
-                load_block(k_layer + elem, a.elems_per_token, lane, kr);
-                load_block(v_layer + elem, a.elems_per_token, lane, vr);
+                const std::size_t scale_index =
+                    (static_cast<std::size_t>(phys) * a.page_tokens + off) *
+                        a.kv_heads + h_kv;
+                const float* k_ptr = nullptr;
+                const float* v_ptr = nullptr;
+                if constexpr (DType == KVCacheDType::FP8_E4M3) {
+                    k_ptr = k_scale_layer + scale_index;
+                    v_ptr = v_scale_layer + scale_index;
+                }
+                typename QsaKVReader<DType>::Block kr;
+                typename QsaKVReader<DType>::Block vr;
+                const uint32_t byte_stride = a.elems_per_token * elem_bytes;
+                QsaKVReader<DType>::load(k_layer + elem * elem_bytes, byte_stride,
+                                         lane, cells, a.kv_heads, k_ptr, kr);
+                QsaKVReader<DType>::load(v_layer + elem * elem_bytes, byte_stride,
+                                         lane, cells, a.kv_heads, v_ptr, vr);
 
                 float part[kHeadsPerWarp][kR];
 #pragma unroll
                 for (uint32_t c = 0; c < kR; ++c) {
                     float kx[kDimsPerLane];
-                    cell_values(kr, c, kx);
+                    QsaKVReader<DType>::values(kr, c, kx);
 #pragma unroll
                     for (uint32_t h = 0; h < kHeadsPerWarp; ++h) {
                         float sum = 0.0f;
@@ -184,8 +258,9 @@ __global__ __launch_bounds__(kThreads) void qsa_sparse_attention_kernel(
                 }
 #pragma unroll
                 for (uint32_t c = 0; c < kR; ++c) {
+                    if (c >= cells) continue;
                     float vx[kDimsPerLane];
-                    cell_values(vr, c, vx);
+                    QsaKVReader<DType>::values(vr, c, vx);
 #pragma unroll
                     for (uint32_t h = 0; h < kHeadsPerWarp; ++h) {
                         const float pc = __shfl_sync(0xFFFFFFFFULL, p, h * kR + c);
@@ -292,13 +367,18 @@ uint32_t qsa_sparse_splits(uint32_t rows, uint32_t kv_heads, uint64_t workspace_
     return splits;
 }
 
-hipError_t launch_qsa_sparse_attention(const PagedAttentionCommonArgs& common,
-                                       const bf16_t* k_pool, const bf16_t* v_pool,
-                                       float* partials, uint32_t splits,
-                                       hipStream_t stream) {
+template <KVCacheDType DType>
+hipError_t launch_qsa_sparse_attention_typed(
+    const PagedAttentionCommonArgs& common,
+    const uint8_t* k_pool, const uint8_t* v_pool,
+    const float* k_scales, const float* v_scales,
+    float* partials, uint32_t splits, hipStream_t stream) {
     if (common.q == nullptr || common.output == nullptr || common.block_mask == nullptr ||
         common.row_positions == nullptr || common.row_sequence_slots == nullptr ||
         common.block_tables == nullptr || k_pool == nullptr || v_pool == nullptr)
+        return hipErrorInvalidValue;
+    if (DType == KVCacheDType::FP8_E4M3 &&
+        (k_scales == nullptr || v_scales == nullptr))
         return hipErrorInvalidValue;
     if (common.rows == 0u || common.kv_heads == 0u || splits == 0u) return hipErrorInvalidValue;
     if (common.head_dim != kD || common.q_heads != common.kv_heads * kQsaSparseQPerKv ||
@@ -315,15 +395,32 @@ hipError_t launch_qsa_sparse_attention(const PagedAttentionCommonArgs& common,
     const dim3 grid(splits > 1u ? splits : 1u, common.kv_heads, common.rows);
     const dim3 block(32u, kWarps);
     if (splits > 1u) {
-        qsa_sparse_attention_kernel<true><<<grid, block, 0, stream>>>(
-            common, reinterpret_cast<const bf16*>(k_pool),
-            reinterpret_cast<const bf16*>(v_pool), partials, splits);
+        qsa_sparse_attention_kernel<DType, true><<<grid, block, 0, stream>>>(
+            common, k_pool, v_pool, k_scales, v_scales, partials, splits);
     } else {
-        qsa_sparse_attention_kernel<false><<<grid, block, 0, stream>>>(
-            common, reinterpret_cast<const bf16*>(k_pool),
-            reinterpret_cast<const bf16*>(v_pool), partials, splits);
+        qsa_sparse_attention_kernel<DType, false><<<grid, block, 0, stream>>>(
+            common, k_pool, v_pool, k_scales, v_scales, partials, splits);
     }
     return hipGetLastError();
+}
+
+hipError_t launch_qsa_sparse_attention(const PagedAttentionCommonArgs& common,
+                                       const bf16_t* k_pool, const bf16_t* v_pool,
+                                       float* partials, uint32_t splits,
+                                       hipStream_t stream) {
+    return launch_qsa_sparse_attention_typed<KVCacheDType::BF16>(
+        common, reinterpret_cast<const uint8_t*>(k_pool),
+        reinterpret_cast<const uint8_t*>(v_pool), nullptr, nullptr,
+        partials, splits, stream);
+}
+
+hipError_t launch_qsa_sparse_attention_fp8(
+    const PagedAttentionCommonArgs& common,
+    const uint8_t* k_pool, const uint8_t* v_pool,
+    const float* k_scales, const float* v_scales,
+    float* partials, uint32_t splits, hipStream_t stream) {
+    return launch_qsa_sparse_attention_typed<KVCacheDType::FP8_E4M3>(
+        common, k_pool, v_pool, k_scales, v_scales, partials, splits, stream);
 }
 
 hipError_t launch_qsa_sparse_reduce(const PagedAttentionCommonArgs& common,
