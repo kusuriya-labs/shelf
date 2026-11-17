@@ -190,6 +190,7 @@ add_library(shelf_runtime STATIC
     src/shelf/runtime/decode_backend.cpp
     src/shelf/runtime/executor.hip
     src/shelf/runtime/executor_footprint.cpp
+    src/shelf/runtime/prefix_cache.cpp
     src/shelf/runtime/graph/primitive_graph.cpp
     src/shelf/runtime/stream_bridge.cpp
     src/shelf/runtime/program/program.cpp
@@ -431,7 +432,6 @@ add_library(shelf_qwen35_runtime STATIC
     src/shelf/models/qwen35/runtime/runtime_request.cpp
     src/shelf/models/qwen35/runtime/token_budget_scheduler.cpp
     src/shelf/models/qwen35/runtime/continuous_batcher.cpp
-    src/shelf/models/qwen35/runtime/prefix_cache.cpp
     src/shelf/models/qwen35/runtime/tensor_parallel.cpp
     src/shelf/models/qwen35/runtime/pipeline_parallel.cpp
     src/shelf/models/qwen35/runtime/spec_decode.cpp

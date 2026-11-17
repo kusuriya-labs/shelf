@@ -1,0 +1,1280 @@
+#include <shelf/runtime/prefix_cache.h>
+
+#include <algorithm>
+#include <cstring>
+#include <memory>
+#include <optional>
+#include <tuple>
+#include <vector>
+
+namespace shelf {
+namespace runtime {
+
+using ::shelf::inference::prefix::PrefixKVConfig;
+using ::shelf::inference::prefix::PrefixKVHit;
+using ::shelf::inference::prefix::PrefixSequence;
+using ::shelf::inference::prefix::PrefixSequenceSet;
+using ::shelf::kernel::fp8e4m3_storage_t;
+
+namespace {
+
+std::size_t align_host(std::size_t bytes) {
+    return (bytes + 255u) & ~static_cast<std::size_t>(255u);
+}
+
+std::size_t gdn_conv_slot_bytes(const GdnStatePool& pool) {
+    const GdnStatePoolLayout& layout = pool.layout();
+    return static_cast<std::size_t>(layout.num_gdn_states) * layout.conv_history *
+           layout.conv_history_stride * sizeof(bf16_t);
+}
+
+std::size_t gdn_recurrent_slot_bytes(const GdnStatePool& pool) {
+    const GdnStatePoolLayout& layout = pool.layout();
+    return static_cast<std::size_t>(layout.num_gdn_states) * layout.num_v_heads *
+           layout.head_k * layout.head_v * sizeof(fp16_t);
+}
+
+std::size_t qsa_pooled_slot_bytes(const ::shelf::state::QsaKeyStatePool& pool) {
+    return static_cast<std::size_t>(pool.num_qsa_states()) * pool.max_blocks() *
+           pool.head_dim() * sizeof(bf16_t);
+}
+
+std::size_t qsa_partial_slot_bytes(const ::shelf::state::QsaKeyStatePool& pool) {
+    return static_cast<std::size_t>(pool.num_qsa_states()) * pool.compress_ratio() *
+           pool.head_dim() * sizeof(bf16_t);
+}
+
+std::size_t qsa_count_slot_bytes(const ::shelf::state::QsaKeyStatePool& pool) {
+    return static_cast<std::size_t>(pool.num_qsa_states()) * 2u * sizeof(uint32_t);
+}
+
+std::size_t ple_slot_bytes(const ::shelf::state::PleConvStatePool& pool) {
+    return static_cast<std::size_t>(pool.num_ple_states()) *
+           pool.layout().history * pool.channels() * sizeof(bf16_t);
+}
+
+struct HostRankRegion {
+    std::size_t conv = 0;
+    std::size_t rec = 0;
+    std::size_t qsa_pooled = 0;
+    std::size_t qsa_partial = 0;
+    std::size_t qsa_counts = 0;
+    std::size_t ple = 0;
+
+    std::size_t conv_bytes = 0;
+    std::size_t rec_bytes = 0;
+    std::size_t qsa_pooled_bytes = 0;
+    std::size_t qsa_partial_bytes = 0;
+    std::size_t qsa_counts_bytes = 0;
+    std::size_t ple_bytes = 0;
+};
+
+struct HostLayout {
+    std::vector<HostRankRegion> ranks;
+    std::size_t ring = 0;
+    std::size_t ring_bytes = 0;
+    std::size_t slot_bytes = 0;
+};
+
+struct PrefixRank {
+    GdnStatePool* active = nullptr;
+    std::optional<GdnStatePool> capture;
+    hipStream_t stream = nullptr;
+    int device = -1;
+    ::shelf::state::QsaKeyStatePool* active_qsa = nullptr;
+    std::optional<::shelf::state::QsaKeyStatePool> capture_qsa;
+    ::shelf::state::PleConvStatePool* active_ple_conv = nullptr;
+    std::optional<::shelf::state::PleConvStatePool> capture_ple_conv;
+};
+
+HostLayout make_host_layout(const std::vector<PrefixRank>& ranks,
+                            std::size_t ring_bytes) {
+    HostLayout layout;
+    layout.ranks.resize(ranks.size());
+    std::size_t offset = 0;
+    for (std::size_t r = 0; r < ranks.size(); ++r) {
+        const PrefixRank& rank = ranks[r];
+        HostRankRegion& region = layout.ranks[r];
+        region.conv_bytes = gdn_conv_slot_bytes(*rank.active);
+        region.rec_bytes = gdn_recurrent_slot_bytes(*rank.active);
+        if (rank.active_qsa != nullptr) {
+            region.qsa_pooled_bytes = qsa_pooled_slot_bytes(*rank.active_qsa);
+            region.qsa_partial_bytes = qsa_partial_slot_bytes(*rank.active_qsa);
+            region.qsa_counts_bytes = qsa_count_slot_bytes(*rank.active_qsa);
+        }
+        if (rank.active_ple_conv != nullptr) {
+            region.ple_bytes = ple_slot_bytes(*rank.active_ple_conv);
+        }
+        region.conv = offset;
+        offset += align_host(region.conv_bytes);
+        region.rec = offset;
+        offset += align_host(region.rec_bytes);
+        region.qsa_pooled = offset;
+        offset += align_host(region.qsa_pooled_bytes);
+        region.qsa_partial = offset;
+        offset += align_host(region.qsa_partial_bytes);
+        region.qsa_counts = offset;
+        offset += align_host(region.qsa_counts_bytes);
+        region.ple = offset;
+        offset += align_host(region.ple_bytes);
+    }
+    layout.ring = offset;
+    offset += align_host(ring_bytes);
+    layout.ring_bytes = ring_bytes;
+    layout.slot_bytes = offset == 0u ? 1u : offset;
+    return layout;
+}
+
+Result<PrefixRank> make_rank(gpu::GpuArena& arena, GdnStatePool& active,
+                             ::shelf::state::QsaKeyStatePool* qsa,
+                             ::shelf::state::PleConvStatePool* ple,
+                             uint32_t capture_slots, hipStream_t stream,
+                             int device) {
+    PrefixRank rank;
+    rank.active = &active;
+    rank.active_qsa = qsa;
+    rank.active_ple_conv = ple;
+    rank.stream = stream;
+    rank.device = device;
+    if (capture_slots == 0u) return rank;
+    auto capture = GdnStatePool::create(arena, capture_slots, active.layout());
+    if (!capture.ok()) return capture.status();
+    rank.capture.emplace(capture.release());
+    if (qsa != nullptr) {
+        auto pool = ::shelf::state::QsaKeyStatePool::create(arena, capture_slots,
+                                                            qsa->layout());
+        if (!pool.ok()) return pool.status();
+        rank.capture_qsa.emplace(pool.release());
+    }
+    if (ple != nullptr) {
+        auto pool = ::shelf::state::PleConvStatePool::create(arena, capture_slots,
+                                                             ple->layout());
+        if (!pool.ok()) return pool.status();
+        rank.capture_ple_conv.emplace(pool.release());
+    }
+    return rank;
+}
+
+class HostCheckpointBlock {
+ public:
+    HostCheckpointBlock() = default;
+    ~HostCheckpointBlock() { (void)shutdown(); }
+    HostCheckpointBlock(const HostCheckpointBlock&) = delete;
+    HostCheckpointBlock& operator=(const HostCheckpointBlock&) = delete;
+
+    Status allocate(std::size_t bytes) {
+        if (bytes == 0u) return Status::make_ok();
+        void* base = nullptr;
+        const hipError_t err = hipHostMalloc(&base, bytes, hipHostMallocDefault);
+        if (err != hipSuccess || base == nullptr) {
+            return Status::hip_error("prefix cache host checkpoint allocation",
+                                     hipGetErrorString(err), __FILE__, __LINE__);
+        }
+        std::memset(base, 0, bytes);
+        base_ = base;
+        bytes_ = bytes;
+        return Status::make_ok();
+    }
+
+    Status shutdown() noexcept {
+        if (base_ == nullptr) return Status::make_ok();
+        void* base = base_;
+        base_ = nullptr;
+        bytes_ = 0;
+        const hipError_t err = hipHostFree(base);
+        if (err != hipSuccess) {
+            return Status::hip_error("prefix cache host checkpoint release",
+                                     hipGetErrorString(err), __FILE__, __LINE__);
+        }
+        return Status::make_ok();
+    }
+
+    std::byte* data() const noexcept { return static_cast<std::byte*>(base_); }
+
+    std::size_t bytes() const noexcept { return bytes_; }
+
+ private:
+    void* base_ = nullptr;
+    std::size_t bytes_ = 0;
+};
+
+Status gdn_slot_to_host(const GdnStatePool& pool, SequenceSlotId slot,
+                        std::byte* base, const HostRankRegion& region,
+                        hipStream_t stream) {
+    const ::shelf::state::GdnStatePoolDeviceView view = pool.device_view();
+    if (view.num_gdn_states == 0u) return Status::make_ok();
+    const std::byte* conv = reinterpret_cast<const std::byte*>(view.conv_base) +
+        static_cast<std::size_t>(slot) * view.conv_slot_stride * sizeof(bf16_t);
+    hipError_t err = hipMemcpyAsync(base + region.conv, conv, region.conv_bytes,
+                                    hipMemcpyDeviceToHost, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("prefix cache GDN conv to host",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    const std::byte* rec =
+        reinterpret_cast<const std::byte*>(view.recurrent_base) +
+        static_cast<std::size_t>(slot) * view.recurrent_slot_stride * sizeof(fp16_t);
+    err = hipMemcpyAsync(base + region.rec, rec, region.rec_bytes,
+                         hipMemcpyDeviceToHost, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("prefix cache GDN recurrent to host",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+Status gdn_slot_from_host(const GdnStatePool& pool, SequenceSlotId slot,
+                          const std::byte* base, const HostRankRegion& region,
+                          hipStream_t stream) {
+    const ::shelf::state::GdnStatePoolDeviceView view = pool.device_view();
+    if (view.num_gdn_states == 0u) return Status::make_ok();
+    std::byte* conv = reinterpret_cast<std::byte*>(view.conv_base) +
+        static_cast<std::size_t>(slot) * view.conv_slot_stride * sizeof(bf16_t);
+    hipError_t err = hipMemcpyAsync(conv, base + region.conv, region.conv_bytes,
+                                    hipMemcpyHostToDevice, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("prefix cache GDN conv from host",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    std::byte* rec = reinterpret_cast<std::byte*>(view.recurrent_base) +
+        static_cast<std::size_t>(slot) * view.recurrent_slot_stride * sizeof(fp16_t);
+    err = hipMemcpyAsync(rec, base + region.rec, region.rec_bytes,
+                         hipMemcpyHostToDevice, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("prefix cache GDN recurrent from host",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+Status qsa_slot_to_host(const ::shelf::state::QsaKeyStatePool& pool,
+                        SequenceSlotId slot, std::byte* base,
+                        const HostRankRegion& region, hipStream_t stream) {
+    const ::shelf::state::QsaKeyStatePoolDeviceView view = pool.device_view();
+    const std::byte* pooled = reinterpret_cast<const std::byte*>(view.pooled_base) +
+        static_cast<std::size_t>(slot) * view.pooled_slot_stride * sizeof(bf16_t);
+    hipError_t err = hipMemcpyAsync(base + region.qsa_pooled, pooled,
+                                    region.qsa_pooled_bytes, hipMemcpyDeviceToHost,
+                                    stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("prefix cache QSA pooled to host",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    const std::byte* partial =
+        reinterpret_cast<const std::byte*>(view.partial_base) +
+        static_cast<std::size_t>(slot) * view.partial_slot_stride * sizeof(bf16_t);
+    err = hipMemcpyAsync(base + region.qsa_partial, partial,
+                         region.qsa_partial_bytes, hipMemcpyDeviceToHost, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("prefix cache QSA partial to host",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    const std::byte* counts =
+        reinterpret_cast<const std::byte*>(view.pool_count_base) +
+        static_cast<std::size_t>(slot) * view.count_slot_stride * sizeof(uint32_t);
+    err = hipMemcpyAsync(base + region.qsa_counts, counts, region.qsa_counts_bytes,
+                         hipMemcpyDeviceToHost, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("prefix cache QSA counts to host",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+Status qsa_slot_from_host(const ::shelf::state::QsaKeyStatePool& pool,
+                          SequenceSlotId slot, const std::byte* base,
+                          const HostRankRegion& region, hipStream_t stream) {
+    const ::shelf::state::QsaKeyStatePoolDeviceView view = pool.device_view();
+    std::byte* pooled = reinterpret_cast<std::byte*>(view.pooled_base) +
+        static_cast<std::size_t>(slot) * view.pooled_slot_stride * sizeof(bf16_t);
+    hipError_t err = hipMemcpyAsync(pooled, base + region.qsa_pooled,
+                                    region.qsa_pooled_bytes, hipMemcpyHostToDevice,
+                                    stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("prefix cache QSA pooled from host",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    std::byte* partial = reinterpret_cast<std::byte*>(view.partial_base) +
+        static_cast<std::size_t>(slot) * view.partial_slot_stride * sizeof(bf16_t);
+    err = hipMemcpyAsync(partial, base + region.qsa_partial,
+                         region.qsa_partial_bytes, hipMemcpyHostToDevice, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("prefix cache QSA partial from host",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    std::byte* counts = reinterpret_cast<std::byte*>(view.pool_count_base) +
+        static_cast<std::size_t>(slot) * view.count_slot_stride * sizeof(uint32_t);
+    err = hipMemcpyAsync(counts, base + region.qsa_counts, region.qsa_counts_bytes,
+                         hipMemcpyHostToDevice, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("prefix cache QSA counts from host",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+Status ple_slot_to_host(const ::shelf::state::PleConvStatePool& pool,
+                        SequenceSlotId slot, std::byte* base,
+                        const HostRankRegion& region, hipStream_t stream) {
+    const ::shelf::state::PleConvStatePoolDeviceView view = pool.device_view();
+    const std::byte* from = reinterpret_cast<const std::byte*>(view.base) +
+        static_cast<std::size_t>(slot) * view.slot_stride * sizeof(bf16_t);
+    const hipError_t err = hipMemcpyAsync(base + region.ple, from, region.ple_bytes,
+                                          hipMemcpyDeviceToHost, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("prefix cache PLE conv to host",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+Status ple_slot_from_host(const ::shelf::state::PleConvStatePool& pool,
+                          SequenceSlotId slot, const std::byte* base,
+                          const HostRankRegion& region, hipStream_t stream) {
+    const ::shelf::state::PleConvStatePoolDeviceView view = pool.device_view();
+    std::byte* to = reinterpret_cast<std::byte*>(view.base) +
+        static_cast<std::size_t>(slot) * view.slot_stride * sizeof(bf16_t);
+    const hipError_t err = hipMemcpyAsync(to, base + region.ple, region.ple_bytes,
+                                          hipMemcpyHostToDevice, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("prefix cache PLE conv from host",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+}  // namespace
+
+class PrefixSequenceAdapter final : public PrefixSequence {
+ public:
+    explicit PrefixSequenceAdapter(PagedSequenceState& state) : state_(state) {}
+
+    PagedKVPool& kv_pool() override { return *state_.kv_pool(); }
+    uint32_t position() const override { return state_.position; }
+    std::span<const PageId> block_table() const override {
+        return std::span<const PageId>(state_.block_table.data(),
+                                       state_.block_table.size());
+    }
+    Status append_pages(std::span<const PageId> pages,
+                        std::span<const uint8_t> owned,
+                        hipStream_t stream) override {
+        return state_.append_pages(pages, owned, stream);
+    }
+    Status commit_prefix(uint32_t tokens) override {
+        return commit_sequence_append(state_, state_.request_handle(), tokens);
+    }
+    Status rollback_pages(uint32_t page_count, hipStream_t stream) override {
+        return rollback_sequence_append(state_, page_count, stream);
+    }
+
+ private:
+    PagedSequenceState& state_;
+};
+
+class PrefixSequenceSetAdapter final : public PrefixSequenceSet {
+ public:
+    PrefixSequenceSetAdapter(const PagedSequenceState& source, TpBatchHook* hook) {
+        const uint32_t count = hook != nullptr ? hook->on_prefix_rank_count() : 1u;
+        ranks_.reserve(count);
+        for (uint32_t r = 0; r < count; ++r) {
+            PagedSequenceState* seq = r == 0u
+                ? const_cast<PagedSequenceState*>(&source)
+                : hook->on_prefix_rank_sequence(source, r);
+            if (seq == nullptr) {
+                ranks_.clear();
+                wrappers_.clear();
+                return;
+            }
+            ranks_.push_back(seq);
+            wrappers_.push_back(std::make_unique<PrefixSequenceAdapter>(*seq));
+        }
+    }
+
+    uint32_t rank_count() const override {
+        return static_cast<uint32_t>(ranks_.size());
+    }
+
+    PrefixSequence& rank(uint32_t index) override { return *wrappers_.at(index); }
+
+    bool valid() const noexcept { return !ranks_.empty(); }
+
+    SequenceSlotId state_slot(uint32_t index) const {
+        return ranks_.at(index)->slot;
+    }
+
+ private:
+    std::vector<PagedSequenceState*> ranks_;
+    std::vector<std::unique_ptr<PrefixSequenceAdapter>> wrappers_;
+};
+
+class FamilyPrefixState {
+ public:
+    static Result<std::unique_ptr<FamilyPrefixState>> create(
+        gpu::GpuArena& arena,
+        GdnStatePool& active_state,
+        ::shelf::state::QsaKeyStatePool* active_qsa,
+        ::shelf::state::PleConvStatePool* active_ple_conv,
+        const std::vector<PrefixCacheRankContext>& extra_ranks,
+        const PrefixCacheConfig& config) {
+        auto state = std::unique_ptr<FamilyPrefixState>(new FamilyPrefixState());
+        state->checkpoints_ = config.checkpoints;
+        state->capture_slots_ = config.capture_slots;
+        {
+            auto rank = make_rank(arena, active_state, active_qsa, active_ple_conv,
+                                  config.capture_slots, nullptr, -1);
+            if (!rank.ok()) return rank.status();
+            state->ranks_.push_back(rank.release());
+        }
+        for (const PrefixCacheRankContext& ctx : extra_ranks) {
+            if (ctx.active_state == nullptr || ctx.arena == nullptr ||
+                ctx.stream == nullptr) {
+                return Status::invalid_argument(
+                    "prefix cache rank context is incomplete", __FILE__, __LINE__);
+            }
+            auto scope = shelf::gpu::ScopedDevice::create(ctx.device);
+            if (!scope.ok()) return scope.status();
+            auto rank = make_rank(*ctx.arena, *ctx.active_state, ctx.active_qsa,
+                                  ctx.active_ple_conv, config.capture_slots,
+                                  ctx.stream, ctx.device);
+            if (!rank.ok()) return rank.status();
+            state->ranks_.push_back(rank.release());
+        }
+        state->layout_ = make_host_layout(state->ranks_, config.spec_ring_bytes);
+        const Status allocate_st =
+            state->host_.allocate(state->layout_.slot_bytes * config.checkpoints);
+        if (!allocate_st.ok()) return allocate_st;
+        state->ring_length_.assign(config.checkpoints, 0u);
+        state->ring_next_.assign(config.checkpoints, 0u);
+        state->ring_saved_.assign(config.checkpoints, 0u);
+        for (uint32_t i = config.capture_slots; i-- > 0;) {
+            state->capture_free_.push_back(i);
+        }
+        for (uint32_t i = config.checkpoints; i-- > 0;) {
+            state->check_free_.push_back(i);
+        }
+        return state;
+    }
+
+    Status shutdown() noexcept {
+        Status first_error = host_.shutdown();
+        ranks_.clear();
+        if (!first_error.ok()) return first_error;
+        return Status::make_ok();
+    }
+
+    Result<uint32_t> acquire_capture_slot() {
+        if (capture_free_.empty()) {
+            return Status::insufficient_memory("prefix capture slots exhausted",
+                                               __FILE__, __LINE__);
+        }
+        const uint32_t slot = capture_free_.back();
+        capture_free_.pop_back();
+        return slot;
+    }
+
+    void release_capture_slot(uint32_t slot) {
+        if (slot < capture_slots_) capture_free_.push_back(slot);
+    }
+
+    Result<uint32_t> acquire_checkpoint_slot() {
+        if (check_free_.empty()) {
+            return Status::insufficient_memory("prefix checkpoint slots exhausted",
+                                               __FILE__, __LINE__);
+        }
+        const uint32_t slot = check_free_.back();
+        check_free_.pop_back();
+        return slot;
+    }
+
+    void release_checkpoint_slot(uint32_t slot) {
+        if (slot >= checkpoints_) return;
+        ring_length_[slot] = 0u;
+        ring_next_[slot] = 0u;
+        ring_saved_[slot] = 0u;
+        check_free_.push_back(slot);
+    }
+
+    uint32_t ring_length(uint32_t slot) const noexcept {
+        return slot < ring_length_.size() && ring_saved_[slot] != 0u
+            ? ring_length_[slot]
+            : 0u;
+    }
+
+    uint32_t ring_next(uint32_t slot) const noexcept {
+        return slot < ring_next_.size() && ring_saved_[slot] != 0u
+            ? ring_next_[slot]
+            : 0u;
+    }
+
+    Status capture_gdn(uint32_t capture_slot, const PrefixSequenceSetAdapter& seqs,
+                       hipStream_t stream) {
+        for (uint32_t r = 0; r < ranks_.size(); ++r) {
+            PrefixRank& rank = ranks_[r];
+            hipStream_t use = stream;
+            std::optional<gpu::ScopedDevice> scope;
+            if (rank.device >= 0) {
+                auto created = gpu::ScopedDevice::create(rank.device);
+                if (!created.ok()) return created.status();
+                scope.emplace(created.release());
+                use = rank.stream;
+            }
+            if (!rank.capture.has_value()) {
+                return Status::invalid_state("prefix capture pool missing", __FILE__,
+                                             __LINE__);
+            }
+            Status st = rank.capture->copy_slot_from(capture_slot, *rank.active,
+                                                     seqs.state_slot(r), use);
+            if (!st.ok()) return st;
+            if (rank.active_qsa != nullptr && rank.capture_qsa.has_value()) {
+                st = rank.capture_qsa->copy_slot_from(capture_slot, *rank.active_qsa,
+                                                      seqs.state_slot(r), use);
+                if (!st.ok()) return st;
+            }
+            if (rank.active_ple_conv != nullptr &&
+                rank.capture_ple_conv.has_value()) {
+                st = rank.capture_ple_conv->copy_slot_from(
+                    capture_slot, *rank.active_ple_conv, seqs.state_slot(r), use);
+                if (!st.ok()) return st;
+            }
+        }
+        return Status::make_ok();
+    }
+
+    Status save_active(uint32_t check_slot, const PrefixSequenceSetAdapter& seqs,
+                       hipStream_t stream) {
+        std::byte* base = host_slot(check_slot);
+        if (base == nullptr) {
+            return Status::invalid_argument("prefix checkpoint slot out of range",
+                                            __FILE__, __LINE__);
+        }
+        for (uint32_t r = 0; r < ranks_.size(); ++r) {
+            PrefixRank& rank = ranks_[r];
+            hipStream_t use = stream;
+            std::optional<gpu::ScopedDevice> scope;
+            if (rank.device >= 0) {
+                auto created = gpu::ScopedDevice::create(rank.device);
+                if (!created.ok()) return created.status();
+                scope.emplace(created.release());
+                use = rank.stream;
+            }
+            const HostRankRegion& region = layout_.ranks[r];
+            Status st = gdn_slot_to_host(*rank.active, seqs.state_slot(r), base,
+                                         region, use);
+            if (!st.ok()) return st;
+            if (rank.active_qsa != nullptr) {
+                st = qsa_slot_to_host(*rank.active_qsa, seqs.state_slot(r), base,
+                                      region, use);
+                if (!st.ok()) return st;
+            }
+            if (rank.active_ple_conv != nullptr) {
+                st = ple_slot_to_host(*rank.active_ple_conv, seqs.state_slot(r),
+                                      base, region, use);
+                if (!st.ok()) return st;
+            }
+        }
+        return Status::make_ok();
+    }
+
+    Status copy_capture(uint32_t check_slot, uint32_t capture_slot,
+                        hipStream_t stream) {
+        std::byte* base = host_slot(check_slot);
+        if (base == nullptr) {
+            return Status::invalid_argument("prefix checkpoint slot out of range",
+                                            __FILE__, __LINE__);
+        }
+        for (uint32_t r = 0; r < ranks_.size(); ++r) {
+            PrefixRank& rank = ranks_[r];
+            hipStream_t use = stream;
+            std::optional<gpu::ScopedDevice> scope;
+            if (rank.device >= 0) {
+                auto created = gpu::ScopedDevice::create(rank.device);
+                if (!created.ok()) return created.status();
+                scope.emplace(created.release());
+                use = rank.stream;
+            }
+            if (!rank.capture.has_value()) {
+                return Status::invalid_state("prefix capture pool missing", __FILE__,
+                                             __LINE__);
+            }
+            const HostRankRegion& region = layout_.ranks[r];
+            Status st = gdn_slot_to_host(*rank.capture, capture_slot, base, region,
+                                         use);
+            if (!st.ok()) return st;
+            if (rank.capture_qsa.has_value()) {
+                st = qsa_slot_to_host(*rank.capture_qsa, capture_slot, base, region,
+                                      use);
+                if (!st.ok()) return st;
+            }
+            if (rank.capture_ple_conv.has_value()) {
+                st = ple_slot_to_host(*rank.capture_ple_conv, capture_slot, base,
+                                      region, use);
+                if (!st.ok()) return st;
+            }
+        }
+        return Status::make_ok();
+    }
+
+    Status restore_active(uint32_t check_slot, const PrefixSequenceSetAdapter& seqs,
+                          hipStream_t stream) {
+        const std::byte* base = host_slot(check_slot);
+        if (base == nullptr) {
+            return Status::invalid_argument("prefix checkpoint slot out of range",
+                                            __FILE__, __LINE__);
+        }
+        for (uint32_t r = 0; r < ranks_.size(); ++r) {
+            PrefixRank& rank = ranks_[r];
+            hipStream_t use = stream;
+            std::optional<gpu::ScopedDevice> scope;
+            if (rank.device >= 0) {
+                auto created = gpu::ScopedDevice::create(rank.device);
+                if (!created.ok()) return created.status();
+                scope.emplace(created.release());
+                use = rank.stream;
+            }
+            const HostRankRegion& region = layout_.ranks[r];
+            Status st = gdn_slot_from_host(*rank.active, seqs.state_slot(r), base,
+                                           region, use);
+            if (!st.ok()) return st;
+            if (rank.active_qsa != nullptr) {
+                st = qsa_slot_from_host(*rank.active_qsa, seqs.state_slot(r), base,
+                                        region, use);
+                if (!st.ok()) return st;
+            }
+            if (rank.active_ple_conv != nullptr) {
+                st = ple_slot_from_host(*rank.active_ple_conv, seqs.state_slot(r),
+                                        base, region, use);
+                if (!st.ok()) return st;
+            }
+        }
+        return Status::make_ok();
+    }
+
+    Status save_ring(uint32_t check_slot, const SpecRingRef& ring,
+                     uint32_t position, hipStream_t stream) {
+        std::byte* base = host_slot(check_slot);
+        if (base == nullptr || layout_.ring_bytes == 0u || !ring.valid()) {
+            return Status::invalid_argument("prefix ring slot unavailable", __FILE__,
+                                            __LINE__);
+        }
+        ring_saved_[check_slot] = 0u;
+        const uint32_t next = std::min(ring.next_position, position);
+        const uint32_t length = std::min(ring.length, next);
+        const std::size_t half = layout_.ring_bytes / 2u;
+        hipError_t err = hipMemcpyAsync(base + layout_.ring, ring.k, half,
+                                        hipMemcpyDeviceToHost, stream);
+        if (err != hipSuccess) {
+            return Status::hip_error("prefix ring save K", hipGetErrorString(err),
+                                     __FILE__, __LINE__);
+        }
+        err = hipMemcpyAsync(base + layout_.ring + half, ring.v, half,
+                             hipMemcpyDeviceToHost, stream);
+        if (err != hipSuccess) {
+            return Status::hip_error("prefix ring save V", hipGetErrorString(err),
+                                     __FILE__, __LINE__);
+        }
+        ring_length_[check_slot] = length;
+        ring_next_[check_slot] = next;
+        ring_saved_[check_slot] = 1u;
+        return Status::make_ok();
+    }
+
+    Status load_ring(uint32_t check_slot, SpecRingOut* ring, hipStream_t stream) {
+        if (ring == nullptr || !ring->valid()) return Status::make_ok();
+        ring->length = 0u;
+        ring->next_position = 0u;
+        if (check_slot >= ring_saved_.size() || ring_saved_[check_slot] == 0u ||
+            layout_.ring_bytes == 0u) {
+            return Status::make_ok();
+        }
+        const std::byte* base = host_slot(check_slot);
+        if (base == nullptr) {
+            return Status::invalid_argument("prefix checkpoint slot out of range",
+                                            __FILE__, __LINE__);
+        }
+        const std::size_t half = layout_.ring_bytes / 2u;
+        hipError_t err = hipMemcpyAsync(ring->k, base + layout_.ring, half,
+                                        hipMemcpyHostToDevice, stream);
+        if (err != hipSuccess) {
+            return Status::hip_error("prefix ring load K", hipGetErrorString(err),
+                                     __FILE__, __LINE__);
+        }
+        err = hipMemcpyAsync(ring->v, base + layout_.ring + half, half,
+                             hipMemcpyHostToDevice, stream);
+        if (err != hipSuccess) {
+            return Status::hip_error("prefix ring load V", hipGetErrorString(err),
+                                     __FILE__, __LINE__);
+        }
+        ring->length = ring_length_[check_slot];
+        ring->next_position = ring_next_[check_slot];
+        return Status::make_ok();
+    }
+
+    uint32_t capture_slots() const noexcept { return capture_slots_; }
+
+    std::size_t host_bytes() const noexcept { return host_.bytes(); }
+
+ private:
+    FamilyPrefixState() = default;
+
+    std::byte* host_slot(uint32_t slot) noexcept {
+        if (slot >= checkpoints_ || layout_.slot_bytes == 0u) return nullptr;
+        return host_.data() + static_cast<std::size_t>(slot) * layout_.slot_bytes;
+    }
+
+    const std::byte* host_slot(uint32_t slot) const noexcept {
+        if (slot >= checkpoints_ || layout_.slot_bytes == 0u) return nullptr;
+        return host_.data() + static_cast<std::size_t>(slot) * layout_.slot_bytes;
+    }
+
+    std::vector<PrefixRank> ranks_;
+    HostLayout layout_;
+    HostCheckpointBlock host_;
+    uint32_t checkpoints_ = 0;
+    uint32_t capture_slots_ = 0;
+    std::vector<uint32_t> capture_free_;
+    std::vector<uint32_t> check_free_;
+    std::vector<uint32_t> ring_length_;
+    std::vector<uint32_t> ring_next_;
+    std::vector<uint8_t> ring_saved_;
+};
+
+PrefixCacheBytes prefix_cache_bytes(
+    const PrefixCacheConfig& config,
+    const GdnStatePoolLayout& layout,
+    const ::shelf::state::QsaKeyStatePoolLayout* qsa,
+    const ::shelf::state::PleConvStatePoolLayout* ple_conv) noexcept {
+    PrefixCacheBytes bytes;
+    if (config.capture_slots == 0u) return bytes;
+    bytes.state_slot =
+        static_cast<std::size_t>(layout.num_gdn_states) * layout.conv_history *
+            layout.conv_history_stride * sizeof(bf16_t) +
+        static_cast<std::size_t>(layout.num_gdn_states) * layout.num_v_heads *
+            layout.head_k * layout.head_v * sizeof(fp16_t);
+    bytes.state =
+        bytes.state_slot * static_cast<std::size_t>(config.capture_slots);
+    if (config.capture_slots != 0u && qsa != nullptr) {
+        bytes.extra_state +=
+            ::shelf::state::qsa_key_state_pool_bytes(config.capture_slots, *qsa)
+                .total();
+    }
+    if (config.capture_slots != 0u && ple_conv != nullptr) {
+        bytes.extra_state +=
+            ::shelf::state::ple_conv_state_pool_bytes(config.capture_slots,
+                                                      *ple_conv);
+    }
+    return bytes;
+}
+
+PrefixCache::PrefixCache(PrefixCache&&) noexcept = default;
+PrefixCache& PrefixCache::operator=(PrefixCache&&) noexcept = default;
+PrefixCache::~PrefixCache() = default;
+
+Status PrefixCache::set_tp_hook(TpBatchHook* hook) noexcept {
+    tp_hook_ = hook;
+    return Status::make_ok();
+}
+
+Result<PrefixCache> PrefixCache::create(
+    gpu::GpuArena& arena,
+    PagedKVPool& active_kv_pool,
+    GdnStatePool& active_state_pool,
+    const PrefixCacheConfig& config,
+    const std::vector<PrefixCacheRankContext>& extra_ranks) {
+    return create(arena, active_kv_pool, active_state_pool, nullptr, nullptr, config,
+                  extra_ranks);
+}
+
+Result<PrefixCache> PrefixCache::create(
+    gpu::GpuArena& arena,
+    PagedKVPool& active_kv_pool,
+    GdnStatePool& active_state_pool,
+    ::shelf::state::QsaKeyStatePool* active_qsa_pool,
+    ::shelf::state::PleConvStatePool* active_ple_conv_pool,
+    const PrefixCacheConfig& config,
+    const std::vector<PrefixCacheRankContext>& extra_ranks) {
+    if (config.checkpoints == 0u) {
+        return Status::invalid_argument("prefix checkpoints must be > 0", __FILE__,
+                                        __LINE__);
+    }
+    uint32_t reuse_slots = 0u;
+    if (config.strategy == PrefixCacheStrategy::Slot) {
+        reuse_slots = config.slot_count != 0u
+            ? config.slot_count
+            : config.checkpoints - 1u;
+        if (reuse_slots == 0u || reuse_slots + 1u > config.checkpoints) {
+            return Status::invalid_argument(
+                "slot strategy needs slot_count + 1 checkpoints", __FILE__,
+                __LINE__);
+        }
+    }
+    auto state = FamilyPrefixState::create(arena, active_state_pool, active_qsa_pool,
+                                           active_ple_conv_pool, extra_ranks, config);
+    if (!state.ok()) return state.status();
+
+    std::vector<PagedKVPool*> extra_kv;
+    extra_kv.reserve(extra_ranks.size());
+    for (const PrefixCacheRankContext& ctx : extra_ranks) {
+        if (ctx.active_kv == nullptr) {
+            return Status::invalid_argument("prefix rank KV pool is null", __FILE__,
+                                            __LINE__);
+        }
+        extra_kv.push_back(ctx.active_kv);
+    }
+    PrefixKVConfig kv_config;
+    kv_config.min_prefix_tokens = config.min_prefix_tokens;
+    kv_config.entry_capacity = config.checkpoints;
+    auto kv = PrefixKVStore::create(arena, active_kv_pool, extra_kv, kv_config);
+    if (!kv.ok()) return kv.status();
+
+    PrefixCache cache;
+    cache.config_ = config;
+    cache.page_tokens_ = active_kv_pool.page_tokens();
+    cache.state_ = state.release();
+    cache.kv_ = std::make_unique<PrefixKVStore>(kv.release());
+    cache.aux_ = std::make_shared<AuxTable>();
+    cache.captures_.resize(config.capture_slots);
+    std::shared_ptr<SlotTable> slots;
+    if (reuse_slots != 0u) {
+        slots = std::make_shared<SlotTable>();
+        slots->slots.resize(reuse_slots);
+    }
+    cache.slots_ = slots;
+    FamilyPrefixState* state_ptr = cache.state_.get();
+    std::shared_ptr<AuxTable> aux = cache.aux_;
+    cache.kv_->set_evict_callback([state_ptr, aux, slots](uint64_t payload) {
+        if (slots) {
+            for (ReuseSlot& slot : slots->slots) {
+                if (slot.payload == payload) {
+                    slot.entry_id = 0;
+                    slot.payload = 0;
+                    break;
+                }
+            }
+        }
+        auto it = aux->slots.find(payload);
+        if (it == aux->slots.end()) return;
+        state_ptr->release_checkpoint_slot(it->second.check_slot);
+        aux->slots.erase(it);
+    });
+    return cache;
+}
+
+Status PrefixCache::shutdown() noexcept {
+    if (kv_) {
+        kv_->set_evict_callback({});
+        (void)kv_->shutdown();
+    }
+    Status state_st = Status::make_ok();
+    if (state_) state_st = state_->shutdown();
+    kv_.reset();
+    state_.reset();
+    aux_.reset();
+    return state_st;
+}
+
+PrefixCache::CaptureState* PrefixCache::resolve_capture(
+    CaptureId capture,
+    const PagedSequenceState* seq) {
+    const uint32_t index = capture & 0xFFFFu;
+    const uint32_t generation = capture >> 16;
+    if (index >= captures_.size()) return nullptr;
+    CaptureState& state = captures_[index];
+    if (!state.active || state.generation != generation) return nullptr;
+    if (seq != nullptr &&
+        (state.seq_slot != seq->slot || state.seq_generation != seq->generation)) {
+        return nullptr;
+    }
+    return &state;
+}
+
+Result<uint32_t> PrefixCache::acquire_state_slot(hipStream_t) {
+    auto checkpoint = state_->acquire_checkpoint_slot();
+    if (checkpoint.ok()) return checkpoint;
+    auto evicted = kv_->evict_lru();
+    if (!evicted.ok()) return checkpoint;
+    return state_->acquire_checkpoint_slot();
+}
+
+PrefixHit PrefixCache::lookup(const std::vector<uint32_t>& tokens,
+                             uint32_t max_position) {
+    PrefixHit out;
+    if (!kv_ || !state_ || !aux_) return out;
+    const PrefixKVHit hit = kv_->lookup(tokens, max_position);
+    out.match_tokens = hit.match_tokens;
+    if (!hit.hit()) return out;
+    const auto it = aux_->slots.find(hit.payload);
+    if (it == aux_->slots.end()) return out;
+    out.entry_id = hit.entry_id;
+    out.state_position = hit.position;
+    out.match_tokens = hit.match_tokens;
+    out.ring_length = state_->ring_length(it->second.check_slot);
+    out.ring_next_position = state_->ring_next(it->second.check_slot);
+    out.slot = it->second.reuse_slot;
+    return out;
+}
+
+uint32_t PrefixCache::reserve_reuse_slot(uint64_t owner, const PrefixHit& hit) noexcept {
+    if (!slots_ || slots_->slots.empty()) return kInvalidReuseSlot;
+    std::vector<ReuseSlot>& slots = slots_->slots;
+    for (uint32_t i = 0; i < slots.size(); ++i) {
+        if (slots[i].reserved && slots[i].owner == owner) return i;
+    }
+    if (hit.hit() && hit.slot != kInvalidReuseSlot && hit.slot < slots.size() &&
+        !slots[hit.slot].reserved) {
+        ReuseSlot& slot = slots[hit.slot];
+        slot.reserved = true;
+        slot.owner = owner;
+        slot.last_used = ++slots_->clock;
+        return hit.slot;
+    }
+    uint32_t best = kInvalidReuseSlot;
+    uint64_t best_used = 0;
+    for (uint32_t i = 0; i < slots.size(); ++i) {
+        if (slots[i].reserved) continue;
+        if (best == kInvalidReuseSlot || slots[i].last_used < best_used) {
+            best = i;
+            best_used = slots[i].last_used;
+        }
+    }
+    if (best == kInvalidReuseSlot) return kInvalidReuseSlot;
+    slots[best].reserved = true;
+    slots[best].owner = owner;
+    slots[best].last_used = ++slots_->clock;
+    return best;
+}
+
+void PrefixCache::release_reuse_slot(uint64_t owner) noexcept {
+    if (!slots_) return;
+    for (ReuseSlot& slot : slots_->slots) {
+        if (slot.reserved && slot.owner == owner) {
+            slot.reserved = false;
+            slot.owner = 0;
+        }
+    }
+}
+
+Status PrefixCache::save_slot_boundary(uint64_t owner,
+                                       const PagedSequenceState& seq,
+                                       const std::vector<uint32_t>& tokens,
+                                       uint32_t input_len,
+                                       hipStream_t stream,
+                                       const SpecRingRef* ring) {
+    if (!slots_) return Status::make_ok();
+    std::vector<ReuseSlot>& slots = slots_->slots;
+    uint32_t index = kInvalidReuseSlot;
+    for (uint32_t i = 0; i < slots.size(); ++i) {
+        if (slots[i].reserved && slots[i].owner == owner) {
+            index = i;
+            break;
+        }
+    }
+    if (index == kInvalidReuseSlot) return Status::make_ok();
+    auto fail = [&](const Status& st) {
+        slots[index].reserved = false;
+        slots[index].owner = 0;
+        return st;
+    };
+    if (!kv_ || !state_ || !aux_) {
+        return fail(Status::invalid_state("prefix cache is not ready", __FILE__,
+                                          __LINE__));
+    }
+    if (input_len != tokens.size()) {
+        return fail(Status::invalid_argument("save position must equal token count",
+                                             __FILE__, __LINE__));
+    }
+    if ((input_len / page_tokens_) * page_tokens_ != seq.position) {
+        return fail(Status::invalid_argument(
+            "slot save requires a page-aligned sequence position", __FILE__,
+            __LINE__));
+    }
+    PrefixSequenceSetAdapter seqs(seq, tp_hook_);
+    if (!seqs.valid()) {
+        return fail(Status::invalid_state("prefix cache rank sequence missing",
+                                          __FILE__, __LINE__));
+    }
+    auto checkpoint = acquire_state_slot(stream);
+    if (!checkpoint.ok()) return fail(checkpoint.status());
+    const uint32_t check_slot = checkpoint.value();
+    Status st = state_->save_active(check_slot, seqs, stream);
+    if (st.ok() && ring != nullptr && ring->valid()) {
+        (void)state_->save_ring(check_slot, *ring, input_len, stream);
+    }
+    if (!st.ok()) {
+        state_->release_checkpoint_slot(check_slot);
+        return fail(st);
+    }
+    const uint64_t payload = aux_->next++;
+    auto saved = kv_->save(seqs, tokens, input_len, payload, stream);
+    if (!saved.ok()) {
+        state_->release_checkpoint_slot(check_slot);
+        if (saved.status().code() == Status::Code::out_of_range) {
+            ++stats_.skipped_too_short;
+            return fail(Status::make_ok());
+        }
+        return fail(saved.status());
+    }
+    aux_->slots.emplace(payload, AuxSlot{check_slot, index});
+    ReuseSlot& slot = slots[index];
+    const uint64_t old_entry = slot.entry_id;
+    slot.entry_id = saved.value();
+    slot.payload = payload;
+    slot.last_used = ++slots_->clock;
+    slot.reserved = false;
+    slot.owner = 0;
+    if (old_entry != 0u && old_entry != saved.value()) {
+        (void)kv_->erase(old_entry);
+    }
+    ++stats_.saves;
+    ++stats_.input_boundary_saves;
+    return Status::make_ok();
+}
+
+Status PrefixCache::save_input_boundary(
+    const PagedSequenceState& seq,
+    const std::vector<uint32_t>& tokens,
+    uint32_t input_len,
+    hipStream_t stream,
+    const SpecRingRef* ring) {
+    if (!kv_ || !state_ || !aux_) {
+        return Status::invalid_state("prefix cache is not ready", __FILE__, __LINE__);
+    }
+    if (input_len != tokens.size()) {
+        return Status::invalid_argument("save position must equal token count",
+                                        __FILE__, __LINE__);
+    }
+    if ((input_len / page_tokens_) * page_tokens_ != seq.position) {
+        return Status::invalid_argument(
+            "save_input_boundary requires a page-aligned sequence position",
+            __FILE__, __LINE__);
+    }
+    PrefixSequenceSetAdapter seqs(seq, tp_hook_);
+    if (!seqs.valid()) {
+        return Status::invalid_state("prefix cache rank sequence missing", __FILE__,
+                                     __LINE__);
+    }
+    auto checkpoint = acquire_state_slot(stream);
+    if (!checkpoint.ok()) return checkpoint.status();
+    const uint32_t check_slot = checkpoint.value();
+    Status st = state_->save_active(check_slot, seqs, stream);
+    if (st.ok() && ring != nullptr && ring->valid()) {
+        (void)state_->save_ring(check_slot, *ring, input_len, stream);
+    }
+    if (!st.ok()) {
+        state_->release_checkpoint_slot(check_slot);
+        return st;
+    }
+    const uint64_t payload = aux_->next++;
+    auto saved = kv_->save(seqs, tokens, input_len, payload, stream);
+    if (!saved.ok()) {
+        state_->release_checkpoint_slot(check_slot);
+        if (saved.status().code() == Status::Code::out_of_range) {
+            ++stats_.skipped_too_short;
+            return Status::make_ok();
+        }
+        return saved.status();
+    }
+    aux_->slots.emplace(payload, AuxSlot{check_slot});
+    ++stats_.input_boundary_saves;
+    ++stats_.saves;
+    return Status::make_ok();
+}
+
+Result<CaptureId> PrefixCache::begin_capture(const PagedSequenceState& seq) {
+    if (!state_) {
+        return Status::invalid_state("prefix cache is not ready", __FILE__, __LINE__);
+    }
+    auto slot = state_->acquire_capture_slot();
+    if (!slot.ok()) return slot.status();
+    uint32_t index = 0xFFFFFFFFu;
+    for (uint32_t i = 0; i < static_cast<uint32_t>(captures_.size()); ++i) {
+        if (!captures_[i].active) {
+            index = i;
+            break;
+        }
+    }
+    if (index == 0xFFFFFFFFu) {
+        state_->release_capture_slot(slot.value());
+        return Status::insufficient_memory("no free capture slots", __FILE__,
+                                           __LINE__);
+    }
+    CaptureState& state = captures_[index];
+    state.generation = (state.generation % 0xFFFFu) + 1u;
+    state.active = true;
+    state.seq_slot = seq.slot;
+    state.seq_generation = seq.generation;
+    state.state_slot = slot.value();
+    state.last_boundary = 0;
+    ++stats_.captures_started;
+    const CaptureId id = static_cast<CaptureId>((state.generation << 16) | index);
+    if (seq.position != 0u && seq.position % page_tokens_ == 0u) {
+        (void)capture_boundary(id, seq, 0);
+    }
+    return id;
+}
+
+Status PrefixCache::capture_boundary(
+    CaptureId capture,
+    const PagedSequenceState& seq,
+    hipStream_t stream) {
+    CaptureState* state = resolve_capture(capture, &seq);
+    if (state == nullptr) {
+        return Status::invalid_argument("capture handle mismatch", __FILE__,
+                                        __LINE__);
+    }
+    const uint32_t boundary = (seq.position / page_tokens_) * page_tokens_;
+    if (boundary <= state->last_boundary) return Status::make_ok();
+    PrefixSequenceSetAdapter seqs(seq, tp_hook_);
+    if (!seqs.valid()) {
+        return Status::invalid_state("prefix cache rank sequence missing", __FILE__,
+                                     __LINE__);
+    }
+    const Status st = state_->capture_gdn(state->state_slot, seqs, stream);
+    if (!st.ok()) return st;
+    state->last_boundary = boundary;
+    return Status::make_ok();
+}
+
+Status PrefixCache::cancel_capture(CaptureId capture) {
+    CaptureState* state = resolve_capture(capture, nullptr);
+    if (state == nullptr) {
+        return Status::invalid_argument("invalid capture handle", __FILE__,
+                                        __LINE__);
+    }
+    state_->release_capture_slot(state->state_slot);
+    state->active = false;
+    ++stats_.captures_cancelled;
+    return Status::make_ok();
+}
+
+Status PrefixCache::save_output_tail(
+    CaptureId capture,
+    const PagedSequenceState& seq,
+    const std::vector<uint32_t>& tokens,
+    uint32_t position,
+    hipStream_t stream,
+    const SpecRingRef* ring) {
+    CaptureState* state = resolve_capture(capture, &seq);
+    if (state == nullptr) {
+        return Status::invalid_argument("capture handle mismatch", __FILE__,
+                                        __LINE__);
+    }
+    if (position != tokens.size()) {
+        return Status::invalid_argument("save position must equal token count",
+                                        __FILE__, __LINE__);
+    }
+    PrefixSequenceSetAdapter seqs(seq, tp_hook_);
+    if (!seqs.valid()) {
+        return Status::invalid_state("prefix cache rank sequence missing", __FILE__,
+                                     __LINE__);
+    }
+    const uint32_t boundary = position - (position % page_tokens_);
+    if (state->last_boundary != boundary) {
+        return Status::invalid_argument("save position does not match capture boundary",
+                                        __FILE__, __LINE__);
+    }
+    const std::span<const uint32_t> saved_tokens(tokens.data(), boundary);
+    auto checkpoint = acquire_state_slot(stream);
+    if (!checkpoint.ok()) {
+        return checkpoint.status();
+    }
+    const uint32_t check_slot = checkpoint.value();
+    Status st = state_->copy_capture(check_slot, state->state_slot, stream);
+    if (st.ok() && ring != nullptr && ring->valid()) {
+        (void)state_->save_ring(check_slot, *ring, boundary, stream);
+    }
+    if (!st.ok()) {
+        state_->release_checkpoint_slot(check_slot);
+        return st;
+    }
+    const uint64_t payload = aux_->next++;
+    auto saved = kv_->save(seqs, saved_tokens, boundary, payload, stream);
+    if (!saved.ok()) {
+        state_->release_checkpoint_slot(check_slot);
+        return saved.status();
+    }
+    aux_->slots.emplace(payload, AuxSlot{check_slot});
+    state_->release_capture_slot(state->state_slot);
+    state->active = false;
+    ++stats_.output_tail_saves;
+    ++stats_.saves;
+    return Status::make_ok();
+}
+
+Status PrefixCache::restore(
+    uint64_t entry_id,
+    PagedSequenceState& dst,
+    hipStream_t stream,
+    SpecRingOut* ring) {
+    if (!kv_ || !state_ || !aux_) {
+        return Status::invalid_state("prefix cache is not ready", __FILE__, __LINE__);
+    }
+    auto payload = kv_->payload_for(entry_id);
+    if (!payload.ok()) return payload.status();
+    auto position = kv_->position_for(entry_id);
+    if (!position.ok()) return position.status();
+    const auto it = aux_->slots.find(payload.value());
+    if (it == aux_->slots.end()) {
+        return Status::invalid_state("prefix aux slot missing", __FILE__, __LINE__);
+    }
+    PrefixSequenceSetAdapter seqs(dst, tp_hook_);
+    if (!seqs.valid()) {
+        return Status::invalid_state("prefix cache rank sequence missing", __FILE__,
+                                     __LINE__);
+    }
+    PrefixKVHit hit;
+    hit.entry_id = entry_id;
+    hit.position = position.value();
+    hit.payload = payload.value();
+    Status st = kv_->restore_pages(hit, seqs, stream);
+    if (!st.ok()) return st;
+    const AuxSlot slot = it->second;
+    st = state_->restore_active(slot.check_slot, seqs, stream);
+    if (st.ok()) st = state_->load_ring(slot.check_slot, ring, stream);
+    if (!st.ok()) {
+        for (uint32_t r = 0; r < seqs.rank_count(); ++r) {
+            (void)seqs.rank(r).rollback_pages(0u, stream);
+        }
+        return st;
+    }
+    for (uint32_t r = 0; r < seqs.rank_count(); ++r) {
+        st = seqs.rank(r).commit_prefix(position.value());
+        if (!st.ok()) {
+            for (uint32_t j = 0; j < seqs.rank_count(); ++j) {
+                (void)seqs.rank(j).rollback_pages(0u, stream);
+            }
+            return st;
+        }
+    }
+    ++stats_.restores;
+    return Status::make_ok();
+}
+
+PrefixCacheStats PrefixCache::stats() const noexcept {
+    PrefixCacheStats out = stats_;
+    if (kv_) {
+        const auto kv_stats = kv_->stats();
+        out.lookups = kv_stats.lookups;
+        out.hits = kv_stats.hits;
+        out.misses = kv_stats.misses;
+        out.restores = kv_stats.restores;
+        out.entries_evicted = kv_stats.entries_evicted;
+        out.pages_evicted = kv_stats.pages_evicted;
+        out.entries = kv_stats.entries;
+        out.used_pages = kv_stats.hot_pages;
+        out.radix_nodes = kv_stats.radix_nodes;
+        out.skipped_too_short = kv_stats.skipped_too_short;
+    }
+    uint32_t active = 0;
+    for (const CaptureState& capture : captures_) {
+        if (capture.active) ++active;
+    }
+    out.captures_active = active;
+    return out;
+}
+
+std::size_t PrefixCache::reserved_bytes() const noexcept {
+    return state_ != nullptr ? state_->host_bytes() : 0u;
+}
+
+}  // namespace runtime
+}  // namespace shelf

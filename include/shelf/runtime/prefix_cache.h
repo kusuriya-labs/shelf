@@ -1,0 +1,265 @@
+#pragma once
+
+#include <shelf/inference/prefix/prefix_kv_cache.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/core/status.h>
+#include <shelf/inference/state/ple_conv_state_pool.h>
+#include <shelf/inference/state/qsa_state_pool.h>
+#include <shelf/runtime/tp/tp_batch_hook.h>
+#include <shelf/inference/state/gdn_state_pool.h>
+#include <shelf/inference/state/paged_kv_pool.h>
+#include <shelf/inference/state/sequence_slot_pool.h>
+#include <hip/hip_runtime.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <unordered_map>
+#include <vector>
+
+namespace shelf {
+namespace runtime {
+
+using ::shelf::inference::prefix::PrefixKVStore;
+using ::shelf::state::PageId;
+
+enum class PrefixCacheStrategy : uint8_t {
+    Radix = 0,
+    Slot = 1,
+};
+
+struct PrefixCacheConfig {
+    uint32_t checkpoints = 16;
+    uint32_t capture_slots = 0;
+    uint32_t min_prefix_tokens = 64;
+    uint32_t save_interval = 16384;
+    uint32_t spec_ring_bytes = 0;
+    PrefixCacheStrategy strategy = PrefixCacheStrategy::Radix;
+    uint32_t slot_count = 0;
+};
+
+inline constexpr uint32_t kInvalidReuseSlot = 0xFFFFFFFFu;
+
+struct PrefixCacheBytes {
+    std::size_t state = 0;
+    std::size_t extra_state = 0;
+    std::size_t state_slot = 0;
+
+    std::size_t total() const noexcept { return state + extra_state; }
+};
+
+PrefixCacheBytes prefix_cache_bytes(
+    const PrefixCacheConfig& config,
+    const GdnStatePoolLayout& layout,
+    const ::shelf::state::QsaKeyStatePoolLayout* qsa = nullptr,
+    const ::shelf::state::PleConvStatePoolLayout* ple_conv = nullptr) noexcept;
+
+struct SpecRingRef {
+    const bf16_t* k = nullptr;
+    const bf16_t* v = nullptr;
+    uint32_t length = 0;
+    uint32_t next_position = 0;
+
+    bool valid() const noexcept { return k != nullptr && v != nullptr; }
+};
+
+struct SpecRingOut {
+    bf16_t* k = nullptr;
+    bf16_t* v = nullptr;
+    uint32_t length = 0;
+    uint32_t next_position = 0;
+
+    bool valid() const noexcept { return k != nullptr && v != nullptr; }
+};
+
+struct PrefixHit {
+    uint64_t entry_id = 0;
+    uint32_t state_position = 0;
+    uint32_t match_tokens = 0;
+    uint32_t ring_length = 0;
+    uint32_t ring_next_position = 0;
+    uint32_t slot = kInvalidReuseSlot;
+
+    bool hit() const noexcept { return entry_id != 0; }
+
+    bool ring_covers_state() const noexcept {
+        return ring_length != 0 && ring_next_position == state_position;
+    }
+};
+
+struct PrefixCacheStats {
+    uint64_t saves = 0;
+    uint64_t input_boundary_saves = 0;
+    uint64_t output_tail_saves = 0;
+    uint64_t skipped_too_short = 0;
+    uint64_t skipped_too_large = 0;
+    uint64_t lookups = 0;
+    uint64_t hits = 0;
+    uint64_t misses = 0;
+    uint64_t restores = 0;
+    uint64_t captures_started = 0;
+    uint64_t captures_cancelled = 0;
+    uint64_t entries_evicted = 0;
+    uint64_t pages_evicted = 0;
+    uint32_t entries = 0;
+    uint32_t used_pages = 0;
+    uint32_t radix_nodes = 0;
+    uint32_t captures_active = 0;
+};
+
+using CaptureId = uint32_t;
+
+inline constexpr CaptureId kInvalidCapture = 0;
+
+class PrefixCache;
+
+struct PrefixCacheRankContext {
+    PagedKVPool* active_kv = nullptr;
+    GdnStatePool* active_state = nullptr;
+    gpu::GpuArena* arena = nullptr;
+    hipStream_t stream = nullptr;
+    int device = 0;
+    ::shelf::state::QsaKeyStatePool* active_qsa = nullptr;
+    ::shelf::state::PleConvStatePool* active_ple_conv = nullptr;
+};
+
+class FamilyPrefixState;
+
+class PrefixCache {
+ public:
+    static Result<PrefixCache> create(
+        gpu::GpuArena& arena,
+        PagedKVPool& active_kv_pool,
+        GdnStatePool& active_state_pool,
+        const PrefixCacheConfig& config,
+        const std::vector<PrefixCacheRankContext>& extra_ranks = {});
+
+    static Result<PrefixCache> create(
+        gpu::GpuArena& arena,
+        PagedKVPool& active_kv_pool,
+        GdnStatePool& active_state_pool,
+        ::shelf::state::QsaKeyStatePool* active_qsa_pool,
+        ::shelf::state::PleConvStatePool* active_ple_conv_pool,
+        const PrefixCacheConfig& config,
+        const std::vector<PrefixCacheRankContext>& extra_ranks = {});
+
+    PrefixCache(PrefixCache&&) noexcept;
+    PrefixCache& operator=(PrefixCache&&) noexcept;
+    PrefixCache(const PrefixCache&) = delete;
+    PrefixCache& operator=(const PrefixCache&) = delete;
+    ~PrefixCache();
+
+    Status set_tp_hook(TpBatchHook* hook) noexcept;
+
+    Status shutdown() noexcept;
+
+    PrefixHit lookup(const std::vector<uint32_t>& tokens,
+                     uint32_t max_position = 0xFFFFFFFFu);
+
+    PrefixCacheStrategy strategy() const noexcept { return config_.strategy; }
+
+    uint32_t save_interval() const noexcept { return config_.save_interval; }
+
+    uint32_t reuse_slot_count() const noexcept {
+        return slots_ ? static_cast<uint32_t>(slots_->slots.size()) : 0u;
+    }
+
+    uint32_t reserve_reuse_slot(uint64_t owner, const PrefixHit& hit) noexcept;
+
+    void release_reuse_slot(uint64_t owner) noexcept;
+
+    Status save_slot_boundary(uint64_t owner,
+                              const PagedSequenceState& seq,
+                              const std::vector<uint32_t>& tokens,
+                              uint32_t input_len,
+                              hipStream_t stream,
+                              const SpecRingRef* ring = nullptr);
+
+    Status save_input_boundary(
+        const PagedSequenceState& seq,
+        const std::vector<uint32_t>& tokens,
+        uint32_t input_len,
+        hipStream_t stream,
+        const SpecRingRef* ring = nullptr);
+
+    Result<CaptureId> begin_capture(const PagedSequenceState& seq);
+
+    Status capture_boundary(
+        CaptureId capture,
+        const PagedSequenceState& seq,
+        hipStream_t stream);
+
+    Status cancel_capture(CaptureId capture);
+
+    Status save_output_tail(
+        CaptureId capture,
+        const PagedSequenceState& seq,
+        const std::vector<uint32_t>& tokens,
+        uint32_t position,
+        hipStream_t stream,
+        const SpecRingRef* ring = nullptr);
+
+    Status restore(
+        uint64_t entry_id,
+        PagedSequenceState& dst,
+        hipStream_t stream,
+        SpecRingOut* ring = nullptr);
+
+    PrefixCacheStats stats() const noexcept;
+
+    std::size_t reserved_bytes() const noexcept;
+
+ private:
+    PrefixCache() = default;
+
+    struct CaptureState {
+        bool active = false;
+        uint32_t generation = 0;
+        SequenceSlotId seq_slot = ::shelf::state::kInvalidSlot;
+        uint32_t seq_generation = 0;
+        uint32_t state_slot = 0;
+        uint32_t last_boundary = 0;
+    };
+
+    CaptureState* resolve_capture(CaptureId capture,
+                                  const PagedSequenceState* seq);
+
+    Result<uint32_t> acquire_state_slot(hipStream_t stream);
+
+    struct AuxSlot {
+        uint32_t check_slot = 0;
+        uint32_t reuse_slot = kInvalidReuseSlot;
+    };
+
+    struct ReuseSlot {
+        uint64_t entry_id = 0;
+        uint64_t payload = 0;
+        uint64_t last_used = 0;
+        uint64_t owner = 0;
+        bool reserved = false;
+    };
+
+    struct SlotTable {
+        std::vector<ReuseSlot> slots;
+        uint64_t clock = 0;
+    };
+
+    std::shared_ptr<SlotTable> slots_;
+
+    struct AuxTable {
+        std::unordered_map<uint64_t, AuxSlot> slots;
+        uint64_t next = 1;
+    };
+
+    std::unique_ptr<FamilyPrefixState> state_;
+    std::unique_ptr<PrefixKVStore> kv_;
+    std::shared_ptr<AuxTable> aux_;
+    TpBatchHook* tp_hook_ = nullptr;
+    PrefixCacheConfig config_;
+    uint32_t page_tokens_ = 16;
+    std::vector<CaptureState> captures_;
+    PrefixCacheStats stats_;
+};
+
+}  // namespace runtime
+}  // namespace shelf

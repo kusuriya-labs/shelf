@@ -7,6 +7,7 @@
 #include <shelf/models/qwen35/runtime/executor.h>
 #include <shelf/models/qwen35/runtime/tp_batch_hook.h>
 #include <shelf/models/common/qwen_hybrid/stop_tokens.h>
+#include <shelf/runtime/prefix_cache.h>
 #include <shelf/core/status.h>
 #include <hip/hip_runtime.h>
 #include <cstddef>
@@ -20,6 +21,8 @@ namespace qwen35 {
 
 namespace runtime {
 
+using ::shelf::runtime::PrefixCache;
+
 struct ContinuousBatcherConfig {
     uint32_t max_num_batched_tokens = 0;
     uint32_t max_scheduled_requests = 0;
@@ -29,7 +32,6 @@ struct ContinuousBatcherConfig {
     KVAdmissionPolicy admission_policy = KVAdmissionPolicy::BankerSafe;
 };
 
-class PrefixCache;
 
 constexpr uint32_t kDFlash2PositionBuckets = 32u;
 constexpr uint32_t kDFlash2PositionBucketTokens = 256u;
