@@ -71,7 +71,7 @@ struct QsaKVReader<KVCacheDType::BF16> {
 template <>
 struct QsaKVReader<KVCacheDType::FP8_E4M3> {
     struct Block {
-        float cell[kR][kDimsPerLane];
+        uint2 code[kR];
         float scale[kR];
     };
 
@@ -84,24 +84,14 @@ struct QsaKVReader<KVCacheDType::FP8_E4M3> {
         for (uint32_t c = 0; c < kR; ++c) {
             if constexpr (!kFull) {
                 if (c >= cells) {
-#pragma unroll
-                    for (uint32_t d = 0; d < kDimsPerLane; ++d) raw.cell[c][d] = 0.0f;
+                    raw.code[c] = uint2{0u, 0u};
+                    raw.scale[c] = 0.0f;
                     continue;
                 }
             }
-            const uint8_t* codes =
-                base + static_cast<std::size_t>(c) * stride + lane * kDimsPerLane;
+            raw.code[c] = *reinterpret_cast<const uint2*>(
+                base + static_cast<std::size_t>(c) * stride + lane * kDimsPerLane);
             raw.scale[c] = scales[c * scale_stride];
-            const uint32_t p0 = *reinterpret_cast<const uint32_t*>(codes);
-            const uint32_t p1 = *reinterpret_cast<const uint32_t*>(codes + 4);
-            raw.cell[c][0] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p0), 0);
-            raw.cell[c][1] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p0), 1);
-            raw.cell[c][2] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p0), 2);
-            raw.cell[c][3] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p0), 3);
-            raw.cell[c][4] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p1), 0);
-            raw.cell[c][5] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p1), 1);
-            raw.cell[c][6] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p1), 2);
-            raw.cell[c][7] = __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(p1), 3);
         }
     }
 
@@ -115,8 +105,19 @@ struct QsaKVReader<KVCacheDType::FP8_E4M3> {
 
     __device__ __forceinline__ static void values(const Block& raw, uint32_t c,
                                                   float (&x)[kDimsPerLane]) {
-#pragma unroll
-        for (uint32_t d = 0; d < kDimsPerLane; ++d) x[d] = raw.cell[c][d];
+        const uint2 packed = raw.code[c];
+        const auto lo0 = __builtin_amdgcn_cvt_pk_f32_fp8(static_cast<int>(packed.x), false);
+        const auto hi0 = __builtin_amdgcn_cvt_pk_f32_fp8(static_cast<int>(packed.x), true);
+        const auto lo1 = __builtin_amdgcn_cvt_pk_f32_fp8(static_cast<int>(packed.y), false);
+        const auto hi1 = __builtin_amdgcn_cvt_pk_f32_fp8(static_cast<int>(packed.y), true);
+        x[0] = lo0[0];
+        x[1] = lo0[1];
+        x[2] = hi0[0];
+        x[3] = hi0[1];
+        x[4] = lo1[0];
+        x[5] = lo1[1];
+        x[6] = hi1[0];
+        x[7] = hi1[1];
     }
 };
 
