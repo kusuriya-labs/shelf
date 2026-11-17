@@ -33,8 +33,7 @@ struct QsaKVReader<KVCacheDType::BF16> {
     };
 
     __device__ __forceinline__ static void load(const uint8_t* base, uint32_t stride,
-                                                uint32_t lane, uint32_t cells, uint32_t,
-                                                const float*,
+                                                uint32_t lane, uint32_t cells,
                                                 Block& raw) {
 #pragma unroll
         for (uint32_t c = 0; c < kR; ++c) {
@@ -64,7 +63,8 @@ struct QsaKVReader<KVCacheDType::FP8_E4M3> {
     __device__ __forceinline__ static void load(const uint8_t* base, uint32_t stride,
                                                 uint32_t lane, uint32_t cells,
                                                 uint32_t scale_stride,
-                                                const float* scales, Block& raw) {
+                                                const float* scales,
+                                                const unsigned short* lut, Block& raw) {
 #pragma unroll
         for (uint32_t c = 0; c < kR; ++c) {
             if (c >= cells) {
@@ -76,9 +76,10 @@ struct QsaKVReader<KVCacheDType::FP8_E4M3> {
                 base + static_cast<std::size_t>(c) * stride + lane * kDimsPerLane;
             const float scale = scales[c * scale_stride];
 #pragma unroll
-            for (uint32_t d = 0; d < kDimsPerLane; ++d)
-                raw.cell[c][d] =
-                    ::shelf::quantization::codec::device::e4m3_decode_f32(codes[d]) * scale;
+            for (uint32_t d = 0; d < kDimsPerLane; ++d) {
+                const unsigned short bits = lut[codes[d]];
+                raw.cell[c][d] = __bfloat162float(__ushort_as_bfloat16(bits)) * scale;
+            }
         }
     }
 
@@ -113,6 +114,15 @@ __global__ __launch_bounds__(kThreads) void qsa_sparse_attention_kernel(
     const uint32_t h0 = h_kv * kQsaSparseQPerKv + warp * kHeadsPerWarp;
 
     __shared__ float red[kWarps][32][kScorerLanes + 1u];
+    __shared__ unsigned short fp8_lut[DType == KVCacheDType::FP8_E4M3 ? 256u : 1u];
+    if constexpr (DType == KVCacheDType::FP8_E4M3) {
+        for (uint32_t i = threadIdx.y * 32u + lane; i < 256u; i += kThreads)
+            fp8_lut[i] = static_cast<unsigned short>(
+                (__builtin_bit_cast(unsigned,
+                    ::shelf::quantization::codec::device::e4m3_decode_f32(
+                        static_cast<uint8_t>(i))) + 0x8000u) >> 16u);
+        __syncthreads();
+    }
 
     if (row >= a.rows) return;
     const uint32_t slot = a.row_sequence_slots[row];
@@ -194,19 +204,22 @@ __global__ __launch_bounds__(kThreads) void qsa_sparse_attention_kernel(
                 const std::size_t scale_index =
                     (static_cast<std::size_t>(phys) * a.page_tokens + off) *
                         a.kv_heads + h_kv;
-                const float* k_ptr = nullptr;
-                const float* v_ptr = nullptr;
-                if constexpr (DType == KVCacheDType::FP8_E4M3) {
-                    k_ptr = k_scale_layer + scale_index;
-                    v_ptr = v_scale_layer + scale_index;
-                }
                 typename QsaKVReader<DType>::Block kr;
                 typename QsaKVReader<DType>::Block vr;
                 const uint32_t byte_stride = a.elems_per_token * elem_bytes;
-                QsaKVReader<DType>::load(k_layer + elem * elem_bytes, byte_stride,
-                                         lane, cells, a.kv_heads, k_ptr, kr);
-                QsaKVReader<DType>::load(v_layer + elem * elem_bytes, byte_stride,
-                                         lane, cells, a.kv_heads, v_ptr, vr);
+                if constexpr (DType == KVCacheDType::FP8_E4M3) {
+                    const float* k_ptr = k_scale_layer + scale_index;
+                    const float* v_ptr = v_scale_layer + scale_index;
+                    QsaKVReader<DType>::load(k_layer + elem * elem_bytes, byte_stride,
+                                             lane, cells, a.kv_heads, k_ptr, fp8_lut, kr);
+                    QsaKVReader<DType>::load(v_layer + elem * elem_bytes, byte_stride,
+                                             lane, cells, a.kv_heads, v_ptr, fp8_lut, vr);
+                } else {
+                    QsaKVReader<DType>::load(k_layer + elem * elem_bytes, byte_stride,
+                                             lane, cells, kr);
+                    QsaKVReader<DType>::load(v_layer + elem * elem_bytes, byte_stride,
+                                             lane, cells, vr);
+                }
 
                 float part[kHeadsPerWarp][kR];
 #pragma unroll
