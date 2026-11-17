@@ -401,12 +401,11 @@ static void test_bf16_payload_dtype_guard(gpu::GpuArena& arena, hipStream_t stre
 
     auto matrix = weights::load_bf16_matrix(coll, "f32.weight", arena, stream,
                                            weights::WeightLoadOptions{});
-    check(!matrix.ok(), "an F32 matrix is not read by the bf16 matrix path");
-    if (!matrix.ok()) {
-        check(message_has(matrix.status(), "must be BF16"),
-              "the matrix guard states the payload rule");
-        check(message_has(matrix.status(), "f32.weight is F32"),
-              "the matrix guard names the tensor and its dtype");
+    check(matrix.ok(), "an F32 matrix is converted while loading");
+    if (matrix.ok()) {
+        const auto got = d2h(matrix.value().bf16.data<void>(), 16u * 16u * 2u);
+        check(bf16_convert_matches(got, t[1].bytes),
+              "the F32 matrix converts to bf16 with round to nearest even");
     }
 
     auto f16_norm = weights::load_bf16_or_f32_tensor(coll, "f16.weight", arena, stream);
