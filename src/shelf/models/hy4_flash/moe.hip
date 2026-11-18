@@ -118,6 +118,7 @@ Mat moe(Ops &op, int layer, Mat x) {
             op.gpu.transfer(input.p, r, latent.p, 0, latent.bytes());
         }
         int count = routes[r].size();
+        op.gpu.routed_rows[r] += count;
         static const bool batch_rows = [] {
             auto v = std::getenv("SHELF_HY4_GROUP_ROWS");
             return v && std::string_view(v) == "1";

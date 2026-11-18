@@ -114,6 +114,8 @@ struct Target {
             target_probs = static_cast<float *>(op.arena.next(6 * 120832 * 4));
             draft_probs = static_cast<float *>(op.arena.next(5 * 120832 * 4));
         }
+        gpu.routed_rows = {};
+        gpu.transfer_bytes = {};
         state = op.mat(6, 3072);
         base = op.arena.cursor;
     }
@@ -147,6 +149,8 @@ struct Target {
         std::vector<int> result(hidden.rows);
         op.copy(result.data(), device_ids, result.size() * 4, hipMemcpyDeviceToHost);
         op.arena.cursor = mark;
+        if (std::find(result.begin(), result.end(), -1) != result.end())
+            throw std::runtime_error("有効な出力 logit がありません");
         return result;
     }
     std::vector<int> forward(const std::vector<int> &ids, bool verify, bool need_head = true,
@@ -217,36 +221,6 @@ struct Target {
         }
         return draft;
     }
-    int verify_tokens(const std::vector<int> &draft, std::vector<int> &actual) {
-        if (!target_probs) {
-            int keep = 1;
-            while (keep < 6 && actual[keep - 1] == draft[keep - 1])
-                ++keep;
-            return keep;
-        }
-        int position = history.size() - 5;
-        auto ids = op.indices(draft);
-        auto out = static_cast<int *>(op.arena.next(5 * sizeof(int)));
-        test_drafts<<<1, 5>>>(target_probs, draft_probs, ids, position, seed, out);
-        checked(hipGetLastError());
-        int accepted[5];
-        op.copy(accepted, out, sizeof(accepted), hipMemcpyDeviceToHost);
-        for (int i = 0; i < 5; ++i) {
-            if (accepted[i]) {
-                actual[i] = draft[i];
-                continue;
-            }
-            best_ids<<<1, 256>>>(target_probs + i * 120832, out, position + i, seed ^ 0xc1f8efb6703ull, 1.f,
-                                 draft_probs + i * 120832);
-            checked(hipGetLastError());
-            int replacement;
-            op.copy(&replacement, out, sizeof(int), hipMemcpyDeviceToHost);
-            if (replacement >= 0)
-                actual[i] = replacement;
-            return i + 1;
-        }
-        return 6;
-    }
     void accept(int keep, int submitted) {
         history.resize(history.size() - submitted + keep);
         if (keep > 1)
@@ -255,6 +229,36 @@ struct Target {
             s = Selection{std::move(s[keep - 1])};
     }
 };
+}
+int verify_speculation(Ops &op, const float *target_probs, const float *draft_probs, int position,
+                       uint64_t seed, const std::vector<int> &draft, std::vector<int> &actual) {
+    if (!target_probs) {
+        int keep = 1;
+        while (keep < 6 && actual[keep - 1] == draft[keep - 1])
+            ++keep;
+        return keep;
+    }
+    auto ids = op.indices(draft);
+    auto out = static_cast<int *>(op.arena.next(5 * sizeof(int)));
+    test_drafts<<<1, 5>>>(target_probs, draft_probs, ids, position, seed, out);
+    checked(hipGetLastError());
+    int accepted[5];
+    op.copy(accepted, out, sizeof(accepted), hipMemcpyDeviceToHost);
+    for (int i = 0; i < 5; ++i) {
+        if (accepted[i]) {
+            actual[i] = draft[i];
+            continue;
+        }
+        best_ids<<<1, 256>>>(target_probs + i * 120832, out, position + i, seed ^ 0xc1f8efb6703ull, 1.f,
+                             draft_probs + i * 120832);
+        checked(hipGetLastError());
+        int replacement;
+        op.copy(&replacement, out, sizeof(int), hipMemcpyDeviceToHost);
+        if (replacement >= 0)
+            actual[i] = replacement;
+        return i + 1;
+    }
+    return 6;
 }
 void decoder_layer(Ops &op, int layer, int start, Mat x, const std::vector<int> &history,
                    const std::vector<int> &ids, Selection &selection) {
@@ -296,6 +300,8 @@ void generate(Residency &gpu, const std::vector<int> &ids, int count, int chunk,
             next = output.back();
     }
     auto prefill = now();
+    auto pp_routes = gpu.routed_rows;
+    auto pp_bytes = gpu.transfer_bytes;
     std::vector<int> generated{next};
     int rounds = 0, accepted = 0;
     std::array<int, 6> histogram{};
@@ -310,7 +316,8 @@ void generate(Residency &gpu, const std::vector<int> &ids, int count, int chunk,
         std::vector<int> block{anchor};
         block.insert(block.end(), draft.begin(), draft.end());
         auto actual = target.forward(block, true);
-        int keep = target.verify_tokens(draft, actual);
+        int keep = verify_speculation(target.op, target.target_probs, target.draft_probs,
+                                      target.history.size() - 5, seed, draft, actual);
         ++rounds;
         accepted += keep - 1;
         ++histogram[keep - 1];
@@ -328,6 +335,17 @@ void generate(Residency &gpu, const std::vector<int> &ids, int count, int chunk,
             ids.size(), pp, generated.size() - 1, tg, rounds, accepted);
     fprintf(stderr, "accepted_histogram=%d,%d,%d,%d,%d,%d\n", histogram[0], histogram[1], histogram[2],
             histogram[3], histogram[4], histogram[5]);
+    for (int r = 0; r < 3; ++r) {
+        fprintf(stderr, "rank=%d prefill_choices=%llu decode_choices=%llu", r,
+                static_cast<unsigned long long>(pp_routes[r]),
+                static_cast<unsigned long long>(gpu.routed_rows[r] - pp_routes[r]));
+        if (r)
+            fprintf(stderr, " prefill_pcie_bytes=%llu decode_pcie_bytes=%llu",
+                    static_cast<unsigned long long>(pp_bytes[0][r] + pp_bytes[r][0]),
+                    static_cast<unsigned long long>(gpu.transfer_bytes[0][r] + gpu.transfer_bytes[r][0] -
+                                                    pp_bytes[0][r] - pp_bytes[r][0]));
+        fputc('\n', stderr);
+    }
     printf("GENERATED_IDS=");
     for (size_t i = 0; i < generated.size(); ++i)
         printf("%s%d", i ? "," : "", generated[i]);

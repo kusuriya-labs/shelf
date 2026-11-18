@@ -34,19 +34,22 @@ void Residency::reserve() {
     check(hipGetDeviceCount(&count));
     if (count != 3)
         throw std::runtime_error("R9700 と V620 2 台を指定してください");
-    int primary=0,worker=1;
-    for(int device=0;device<count;++device) {
+    int primary = 0, worker = 1;
+    for (int device = 0; device < count; ++device) {
         hipDeviceProp_t props{};
-        check(hipGetDeviceProperties(&props,device));
-        std::string_view isa=props.gcnArchName;
+        check(hipGetDeviceProperties(&props, device));
+        std::string_view isa = props.gcnArchName;
         int rank;
-        if(isa.starts_with("gfx1201") && primary++==0) rank=0;
-        else if(isa.starts_with("gfx1030") && worker<3) rank=worker++;
-        else throw std::runtime_error("R9700 と V620 2 台の構成が必要です");
-        physical[rank]=device;
+        if (isa.starts_with("gfx1201") && primary++ == 0)
+            rank = 0;
+        else if (isa.starts_with("gfx1030") && worker < 3)
+            rank = worker++;
+        else
+            throw std::runtime_error("R9700 と V620 2 台の構成が必要です");
+        physical[rank] = device;
         char bus[32]{};
-        check(hipDeviceGetPCIBusId(bus,sizeof(bus),device));
-        fprintf(stderr,"rank=%d device=%d isa=%s pci=%s\n",rank,device,props.gcnArchName,bus);
+        check(hipDeviceGetPCIBusId(bus, sizeof(bus), device));
+        fprintf(stderr, "rank=%d device=%d isa=%s pci=%s\n", rank, device, props.gcnArchName, bus);
     }
     std::array<size_t, 3> available{}, overhead{};
     std::array<int, 3> used{}, limit{};
@@ -130,6 +133,8 @@ void Residency::reserve() {
                 ptr = buffer.next(size_t(model.shape.at(name)[1]) * 512 * 2);
         matrices[r] = static_cast<Hy4ExpertProjection *>(buffer.next(matrix_bytes));
         workspace[r] = {static_cast<uint8_t *>(buffer.next(work)), work};
+        check(hipMemGetInfo(&free, &total));
+        fprintf(stderr, "rank=%d committed=%zu free_after=%zu\n", r, arenas.back().committed(), free);
     }
     check(hipSetDevice(physical[0]));
 }
@@ -182,6 +187,7 @@ void Residency::upload() {
         fold_kv_weights(*this);
 }
 void Residency::transfer(void *dst, int destination, const void *src, int source, size_t bytes) {
+    transfer_bytes[source][destination] += bytes;
     if (peer[destination][source]) {
         check(hipMemcpyPeer(dst, physical[destination], src, physical[source], bytes));
         return;

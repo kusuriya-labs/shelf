@@ -49,7 +49,7 @@ const Weight &Checkpoint::at(const std::string &key) const {
 Checkpoint::Checkpoint(const Path &model, const Path &engram, const Path &draft, const Owners &layout)
     : owners(layout), has_draft(!draft.empty()) {
     const auto cfg = read_json(model / "config.json");
-    require(cfg.at("model_type") == "hy_v4_flash" && cfg.at("exl3_text_only") == true &&
+    require(cfg.value("model_type", std::string{}) == "hy_v4_flash" && cfg.value("exl3_text_only", false) &&
                 cfg.at("num_hidden_layers") == 42 && cfg.at("hc_mult") == 4 &&
                 cfg.at("n_routed_experts") == 512 && cfg.at("num_experts_per_tok") == 16 &&
                 cfg.at("hidden_size") == 3072 && cfg.at("routed_expert_hidden_size") == 1536 &&

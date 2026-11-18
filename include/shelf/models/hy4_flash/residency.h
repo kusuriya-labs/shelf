@@ -15,10 +15,12 @@ struct Region {
 struct Residency {
     Checkpoint &model;
     size_t tokens;
-    std::array<int,3> physical{0,1,2};
+    std::array<int, 3> physical{0, 1, 2};
     std::vector<gpu::GpuArena> arenas;
     std::array<uint8_t *, 3> weight_base{};
     std::array<Region, 3> workspace{};
+    std::array<uint64_t, 3> routed_rows{};
+    std::array<std::array<uint64_t, 3>, 3> transfer_bytes{};
     std::map<std::string, void *> folded;
     std::array<uint8_t *, 42> cache{};
     std::array<uint16_t *, 42> index_keys{};

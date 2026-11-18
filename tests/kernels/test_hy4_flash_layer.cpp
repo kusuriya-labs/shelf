@@ -1,5 +1,6 @@
 #include <shelf/models/hy4_flash/absorbed.h>
 #include <shelf/models/hy4_flash/decoder.h>
+#include <shelf/models/hy4_flash/generate.h>
 #include <nlohmann/json.hpp>
 #include <bit>
 #include <chrono>
@@ -28,6 +29,29 @@ void compare(const std::vector<uint16_t> &output, const uint16_t *expected, int 
     printf("chunk=%d relative_l2=%.8f\n", chunk, error);
     if (!(error < 0.04))
         throw std::runtime_error("CPU の層出力との誤差が大きすぎます");
+}
+void check_rejection(Ops &op) {
+    std::vector<int> proposals{11, 22, 33, 44, 55};
+    for (int agree = 0; agree <= 5; ++agree) {
+        op.arena.cursor = 0;
+        std::vector<float> q(5 * 120832), p(5 * 120832);
+        for (int i = 0; i < 5; ++i) {
+            q[i * 120832 + proposals[i]] = 1;
+            p[i * 120832 + (i < agree ? proposals[i] : 900 + i)] = 1;
+        }
+        auto copy = [&](const std::vector<float> &values) {
+            auto ptr = static_cast<float *>(op.arena.next(values.size() * 4));
+            op.copy(ptr, values.data(), values.size() * 4, hipMemcpyHostToDevice);
+            return ptr;
+        };
+        auto draft = copy(q), target = copy(p);
+        std::vector<int> actual{90, 90, 90, 90, 90, 91};
+        int keep = verify_speculation(op, target, draft, 2047, 42, proposals, actual);
+        if (keep != agree + 1 || !std::equal(proposals.begin(), proposals.begin() + agree, actual.begin()) ||
+            actual[agree] != (agree < 5 ? 900 + agree : 91))
+            throw std::runtime_error("DFly 確率的棄却の結果が一致しません");
+    }
+    op.arena.cursor = 0;
 }
 int run(const Path &dir, int repeats) {
     Checkpoint model;
@@ -92,6 +116,8 @@ int run(const Path &dir, int repeats) {
         if (!gpu.folded.empty())
             fold_kv_weights(gpu);
         Ops op(gpu);
+        if (!layer)
+            check_rejection(op);
         for (int chunk : {int(ids.size()), 1}) {
             std::vector<double> samples;
             for (int pass = 0; pass < repeats; ++pass) {
