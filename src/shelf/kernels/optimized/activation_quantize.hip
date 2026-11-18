@@ -14,6 +14,8 @@ namespace shelf::kernel {
 namespace {
 
 constexpr uint32_t kThreadsPerRow = 256u;
+constexpr uint32_t kMxfp4ThreadsPerRow = 256u;
+constexpr uint32_t kMxfp4DecodeThreadsPerRow = 1024u;
 
 __global__ void __launch_bounds__(kThreadsPerRow) activation_quantize_fp8_finegrained_kernel(
     const ::shelf::bf16_t* __restrict__ input,
@@ -105,7 +107,8 @@ __global__ void __launch_bounds__(kThreadsPerRow) activation_quantize_fp8_finegr
 // staged in LDS between the two sweeps, so global traffic stays one BF16 read and
 // one code write per element, the same as the group quantizer. Design and
 // measurements: docs/research/20261103/mxfp4_gate_a_prime.md sec.15-17.
-__global__ void __launch_bounds__(kThreadsPerRow) activation_quantize_mxfp4_rowref_kernel(
+template <uint32_t kThreads>
+__global__ void __launch_bounds__(kThreads) activation_quantize_mxfp4_rowref_kernel(
     const ::shelf::bf16_t* __restrict__ input,
     uint8_t* __restrict__ codes,
     float* __restrict__ scales,
@@ -116,7 +119,7 @@ __global__ void __launch_bounds__(kThreadsPerRow) activation_quantize_mxfp4_rowr
     const uint32_t scale_row_stride,
     const int32_t* __restrict__ row_index) {
     constexpr uint32_t kGroup = 128u;
-    constexpr uint32_t kWaves = kThreadsPerRow / 32u;
+    constexpr uint32_t kWaves = kThreads / 32u;
     constexpr uint32_t kElemsPerLane = kGroup / 32u;
     const uint32_t m = blockIdx.x;
     const int32_t src_row = row_index != nullptr ? row_index[m] : static_cast<int32_t>(m);
@@ -345,9 +348,17 @@ hipError_t launch_activation_quantize_mxfp4_rowref(
     if (groups > 256u)
         return hipErrorNotSupported;
     const uint32_t lds_bytes = groups * 128u + groups * 4u + 8u * 4u;
-    activation_quantize_mxfp4_rowref_kernel<<<rows, kThreadsPerRow, lds_bytes, stream>>>(
-        input, codes, scales, k, k_padded, input_row_stride, code_row_stride,
-        scale_row_stride, row_index);
+    if (rows <= 32u) {
+        activation_quantize_mxfp4_rowref_kernel<kMxfp4DecodeThreadsPerRow>
+            <<<rows, kMxfp4DecodeThreadsPerRow, lds_bytes, stream>>>(
+                input, codes, scales, k, k_padded, input_row_stride, code_row_stride,
+                scale_row_stride, row_index);
+    } else {
+        activation_quantize_mxfp4_rowref_kernel<kMxfp4ThreadsPerRow>
+            <<<rows, kMxfp4ThreadsPerRow, lds_bytes, stream>>>(
+                input, codes, scales, k, k_padded, input_row_stride, code_row_stride,
+                scale_row_stride, row_index);
+    }
     return hipGetLastError();
 }
 
