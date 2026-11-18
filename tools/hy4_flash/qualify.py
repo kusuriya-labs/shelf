@@ -48,6 +48,9 @@ def main():
                     draft_report=checksum(args.draft/"conversion_report.json"),placement=checksum(args.placement),
                     engine=checksum(args.executable),prompt_sha256=prompt_hash,
                     options={k:v for k,v in os.environ.items() if k.startswith("SHELF_HY4_")})
+    settings["reference_logits_sha256"] = checksum(args.reference/"logits.safetensors")
+    if args.control_reference:
+        settings["control_logits_sha256"] = checksum(args.control_reference/"logits.safetensors")
     (output/"settings.json").write_text(json.dumps(settings,indent=2))
     common = ["--model-dir", args.body, "--engram-dir", args.engram, "--placement", args.placement]
     def run(mode, name, options, dfly):

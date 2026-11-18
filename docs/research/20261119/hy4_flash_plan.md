@@ -57,8 +57,7 @@ engram="$pilot/engram-e4m3fn"
 Engram の新規生成には `python3 tools/hy4_flash/convert_engram.py "$original" "$engram"` を使う。このホストでは 4 表を作成済み。本体完了後は配置表を新しい出力名で生成する。CPU 連続照合の再開には、その照合を始めた時点と同じ配置表が必要である。
 
 ```bash
-python3 tools/hy4_flash/placement.py "$original" "$work" --output build-hy4/final-owners.json
-options=(--model-dir "$body" --engram-dir "$engram" --placement build-hy4/final-owners.json)
+options=(--model-dir "$body" --engram-dir "$engram" --placement "$pilot/shelf-placement/owners-4bpw.json")
 build-hy4/shelf-compute hy4 inspect "${options[@]}" --dfly-dir "$draft"
 python3 tools/hy4_flash/locked.py ep3 build-hy4/shelf-compute hy4 reserve \
   "${options[@]}" --dfly-dir "$draft" --max-seq-len 2097152
@@ -67,4 +66,4 @@ python3 tools/hy4_flash/locked.py ep3 build-hy4/shelf-compute hy4 generate \
   --input-ids-file prompt-ids.txt --max-new-tokens 128
 ```
 
-入力は空白区切りの token ID または既存の PSKLDTOK 形式。専用構成では shelf-compute に直接オプションを渡すと generate を実行する。本体単独との比較は --dfly-dir を省く。速度比較の候補は SHELF_HY4_WMMA、SHELF_HY4_DOT4、SHELF_HY4_ABSORB、SHELF_HY4_GROUP_ROWS を個別に 1 にして検査する。GROUP_ROWS は同じ expert を選んだ行を GPU ごとにまとめ、復号した重みを共有する候補。層 2 の校正先頭 128 行では 2048 選択が 411 expert に集中した。
+入力は空白区切りの token ID または既存の PSKLDTOK 形式。専用構成では shelf-compute に直接オプションを渡すと generate を実行する。本体単独との比較は --dfly-dir を省く。採用版は R9700 の WMMA、worker の dot4、短い query の吸収形 MLA、8 行以上の expert 集約を自動選択する。推論時の比較フラグは不要。測定時は --chunk 1024 を指定する。候補ごとの採否・生成列・測定条件は進捗記録の P5 に残す。

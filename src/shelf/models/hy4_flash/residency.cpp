@@ -23,11 +23,9 @@ void *Region::next(size_t length) {
     return base + start;
 }
 Residency::Residency(Checkpoint &model, size_t tokens) : model(model), tokens(tokens) {
-    auto mode = std::getenv("SHELF_HY4_ABSORB");
-    if (mode && std::string_view(mode) == "1")
-        for (const auto &[name, dims] : model.shape)
-            if (name.ends_with(".self_attn.kv_b_proj"))
-                folded[name] = nullptr;
+    for (const auto &[name, dims] : model.shape)
+        if (name.ends_with(".self_attn.kv_b_proj"))
+            folded[name] = nullptr;
     if (!tokens || tokens > 2097152)
         throw std::runtime_error("KV の予約長が範囲外です");
 }

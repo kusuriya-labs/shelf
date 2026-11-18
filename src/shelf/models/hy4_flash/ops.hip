@@ -166,12 +166,8 @@ Mat Ops::linear(const std::string &name, Mat x) {
     int pk = it->second.spec.shape[0] * 16, pn = it->second.spec.shape[1] * 16;
     auto codes = static_cast<int8_t *>(arena.next(size_t(x.rows) * pk));
     auto scales = static_cast<float *>(arena.next(size_t(x.rows) * pk / 128 * 4));
-    static const bool wmma = [] {
-        auto v = std::getenv("SHELF_HY4_WMMA");
-        return v && std::string_view(v) == "1";
-    }();
     int splits = 1;
-    if (!rank && wmma && x.rows <= 16)
+    if (x.rows <= 16)
         while (splits < 16 && (pn / 64) * splits < 128 && (pk / 128) % (2 * splits) == 0)
             splits *= 2;
     auto partial = static_cast<float *>(arena.next(size_t(x.rows) * pn * 4 * splits));
@@ -179,7 +175,7 @@ Mat Ops::linear(const std::string &name, Mat x) {
                              static_cast<const uint16_t *>(param(name + ".svh").p),
                              static_cast<const uint32_t *>(param(name + ".trellis").p), codes, scales, partial,
                              y.p, x.rows, x.cols, y.cols, pk, pn, it->second.spec.shape[2] / 16, nullptr,
-                             rank == 0 && wmma, splits));
+                             splits));
     arena.cursor = save;
     return y;
 }

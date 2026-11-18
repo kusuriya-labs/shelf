@@ -120,18 +120,10 @@ Mat moe(Ops &op, int layer, Mat x) {
         }
         int count = routes[r].size();
         op.gpu.routed_rows[r] += count;
-        static const bool batch_rows = [] {
-            auto v = std::getenv("SHELF_HY4_GROUP_ROWS");
-            return v && std::string_view(v) == "1";
-        }();
-        static const bool wmma = [] {
-            auto v = std::getenv("SHELF_HY4_WMMA");
-            return v && std::string_view(v) == "1";
-        }();
         std::vector<Hy4ExpertBatch> groups;
         std::vector<int> undo;
-        bool use_wmma = !r && wmma;
-        if (batch_rows && x.rows >= 8) {
+        bool use_wmma = r == 0;
+        if (x.rows >= 8) {
             auto &route = routes[r];
             std::vector<int> order(count);
             undo.resize(count);

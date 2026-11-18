@@ -72,11 +72,10 @@ class Projection:
 
 
 class HipLinear:
-    def __init__(self, library, wmma=False):
-        self.wmma = wmma
+    def __init__(self, library):
         self.library = ctypes.CDLL(str(library))
         self.launch = self.library.shelf_hy4_linear
-        self.launch.argtypes = [ctypes.c_void_p] * 8 + [ctypes.c_int] * 6 + [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+        self.launch.argtypes = [ctypes.c_void_p] * 8 + [ctypes.c_int] * 6 + [ctypes.c_void_p, ctypes.c_int]
         self.launch.restype = ctypes.c_int
 
     def __call__(self, w, x):
@@ -92,7 +91,7 @@ class HipLinear:
             y = torch.empty(rows, w.width, device=x.device, dtype=torch.bfloat16)
             tensors = (x, w.suh, w.svh, w.trellis, codes, scales, partial, y)
             result = self.launch(*(t.data_ptr() for t in tensors), rows, width, w.width, k, n,
-                                 w.bits, torch.cuda.current_stream().cuda_stream, int(self.wmma),1)
+                                 w.bits, torch.cuda.current_stream().cuda_stream, 1)
             if result:
                 raise RuntimeError(f"Hy4 HIP 線形を起動できません: {result}")
             return y

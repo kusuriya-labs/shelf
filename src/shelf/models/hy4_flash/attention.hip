@@ -211,44 +211,6 @@ Selection select(Ops &op, const std::string &p, int layer, int start, Mat x, Mat
         }
     return selected;
 }
-__global__ void attend(Mat q, Mat kv, Mat rotary, const int *indices, int stride, Param sink, Mat gate,
-                       Mat output) {
-    extern __shared__ float scores[];
-    __shared__ float scratch[256];
-    int head = blockIdx.x, row = blockIdx.y, c = threadIdx.x;
-    float maxval = read(sink, head);
-    for (int t = c; t < stride; t += 256) {
-        int idx = indices[row * stride + t];
-        float s = -INFINITY;
-        if (idx >= 0) {
-            float dot = 0;
-            for (int j = 0; j < 192; ++j)
-                dot += bv(q, row, head * 256 + j) * bv(kv, idx, head * 448 + j);
-            for (int j = 0; j < 64; ++j)
-                dot += bv(q, row, head * 256 + 192 + j) * bv(rotary, idx, j);
-            s = round_bf16(dot) * 0.0625f;
-        }
-        scores[t] = s;
-        maxval = fmaxf(maxval, s);
-    }
-    float peak = reduce<true>(maxval, scratch, 256);
-    float denom = c == 0 ? expf(read(sink, head) - peak) : 0;
-    for (int t = c; t < stride; t += 256) {
-        scores[t] = expf(scores[t] - peak);
-        denom += scores[t];
-    }
-    float sum = reduce<false>(denom, scratch, 256), v = 0;
-    for (int t = c; t < stride; t += 256)
-        scores[t] = round_bf16(scores[t] / sum);
-    __syncthreads();
-    for (int t = 0; t < stride; ++t) {
-        int idx = indices[row * stride + t];
-        if (idx >= 0)
-            v += scores[t] * bv(kv, idx, head * 448 + 192 + c);
-    }
-    output.p[size_t(row) * output.cols + head * 256 + c] =
-        f32_to_bf16_rne_device(round_bf16(v) * round_bf16(1.f / (1.f + expf(-bv(gate, row, head * 256 + c)))));
-}
 }
 Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidden, Selection &selected,
               bool draft) {
@@ -272,20 +234,16 @@ Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidd
     Mat out = op.mat(hidden.rows, heads * 256);
     int slots = sliding ? std::min(op.gpu.tokens, size_t(518)) : op.gpu.tokens;
     auto cache = op.gpu.cache[layer];
-    static const bool wmma = [] {
-        auto val = std::getenv("SHELF_HY4_WMMA");
-        return val && std::string_view(val) == "1";
-    }();
     for (int i = 0; i < hidden.rows;) {
         size_t save = op.arena.cursor;
         bool contiguous = sliding || start + hidden.rows <= 2048;
         int n = hidden.rows - i;
         if (!contiguous && !draft && start + hidden.rows > 4096)
-            n = std::min(n, op.gpu.folded.empty() ? 4 : 16);
+            n = std::min(n, 16);
         int stride = 0;
         for (int r = i; r < i + n; ++r)
             stride = std::max(stride, int(selected[r].size()));
-        bool tiles = n >= 16 && contiguous && wmma && !draft;
+        bool tiles = n >= 16 && contiguous && !draft;
         std::vector<int> ids, offsets(tiles ? 0 : n * stride, -1);
         if (n == 1 || draft) {
             ids = selected[i + n - 1];
@@ -332,16 +290,8 @@ Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidd
                                           heads, ids.size(), ids.front(), start + i, sliding));
         } else {
             auto offsets_gpu = op.indices(offsets);
-            if (!op.gpu.folded.empty()) {
-                attend_absorbed(op, p + "kv_b_proj", a, b, q.row(i, n), gate.row(i, n), offsets_gpu, stride,
-                                op.param(p + "learnable_sink_param"), out.row(i, n));
-            } else {
-                Mat expanded = op.linear(p + "kv_b_proj", a);
-                attend<<<dim3(heads, n), 256, stride * sizeof(float)>>>(
-                    q.row(i, n), expanded, b, offsets_gpu, stride, op.param(p + "learnable_sink_param"),
-                    gate.row(i, n), out.row(i, n));
-                checked(hipGetLastError());
-            }
+            attend_absorbed(op, p + "kv_b_proj", a, b, q.row(i, n), gate.row(i, n), offsets_gpu, stride,
+                            op.param(p + "learnable_sink_param"), out.row(i, n));
         }
         op.arena.cursor = save;
         i += n;

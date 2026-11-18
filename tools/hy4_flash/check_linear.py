@@ -16,7 +16,6 @@ def main():
     parser.add_argument("--library", type=Path)
     parser.add_argument("--timing", type=int, default=0)
     parser.add_argument("--grouped", action="store_true")
-    parser.add_argument("--wmma", action="store_true")
     parser.add_argument("--width", type=int)
     parser.add_argument("--input-width", type=int)
     parser.add_argument("--rows", type=int, default=5)
@@ -33,7 +32,7 @@ def main():
         raise ValueError("CPU 出力が非有限です")
     print("CPU 出力 RMS", expected.float().square().mean().sqrt().item())
     if args.library:
-        ops = HipLinear(args.library, args.wmma)
+        ops = HipLinear(args.library)
         weight = Projection(*(t.cuda() for t in tensors), marker, width)
         gpu_input = x.cuda()
         if args.grouped:
