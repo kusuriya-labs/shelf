@@ -173,7 +173,6 @@ add_library(shelf_runtime STATIC
     src/shelf/runtime/token_budget_scheduler.cpp
     src/shelf/runtime/dflash2_spec_decoder.cpp
     src/shelf/runtime/continuous_batcher.cpp
-    src/shelf/runtime/cpu_team.cpp
     src/shelf/runtime/prefix_cache.cpp
     src/shelf/runtime/graph/primitive_graph.cpp
     src/shelf/runtime/stream_bridge.cpp
@@ -308,7 +307,6 @@ add_library(shelf_inference_execution STATIC
     src/shelf/inference/execution/kv_append_dispatch.hip
     src/shelf/inference/execution/kv_calib_dump.cpp
     src/shelf/inference/execution/linear_input_dump.cpp
-    src/shelf/inference/execution/moe_cpu_miss.cpp
     src/shelf/inference/execution/moe_dispatch.hip
     src/shelf/inference/execution/hyper_connection_dispatch.hip
     src/shelf/inference/execution/ple_dispatch.hip
@@ -533,7 +531,6 @@ add_library(shelf_quant_reference STATIC
     src/shelf/quantization/fp8/fp8.cpp
     src/shelf/quantization/fp8/fp8_native.cpp
     src/shelf/quantization/mxfp4/mxfp4.cpp
-    src/shelf/quantization/mxfp4/mxfp4_cpu_expert.cpp
     src/shelf/quantization/mxfp4/mxfp4_native.cpp
     src/shelf/quantization/exl3/exl3.cpp
     src/shelf/quantization/exl3/exl3_int8.cpp

@@ -120,12 +120,6 @@ def build_compute_argv(opts) -> list[str]:
         argv += ["--tensor-parallel", str(opts.tensor_parallel)]
     if opts.moe_host_experts is not None:
         argv += ["--moe-host-experts", str(opts.moe_host_experts)]
-    if opts.moe_cpu_miss is not None:
-        argv += ["--moe-cpu-miss", str(opts.moe_cpu_miss)]
-    if opts.moe_cpu_miss_rows is not None:
-        argv += ["--moe-cpu-miss-rows", str(opts.moe_cpu_miss_rows)]
-    if opts.cpu_expert_threads is not None:
-        argv += ["--cpu-expert-threads", str(opts.cpu_expert_threads)]
     if opts.pcie_frac is not None:
         argv += ["--pcie-frac", str(opts.pcie_frac)]
     if opts.pcie_gbps is not None:
@@ -578,12 +572,6 @@ def parse_args(argv=None):
 
     parser.add_argument("--moe-host-experts", type=int, default=None,
                         help="層あたり host に退避する routed expert 数（default 0）")
-    parser.add_argument("--moe-cpu-miss", type=int, default=None, choices=(0, 1),
-                        help="host 常駐 expert を CPU で計算する（default 0）")
-    parser.add_argument("--moe-cpu-miss-rows", type=int, default=None,
-                        help="1 batch で CPU 経路が受け持つ行数（default 64）")
-    parser.add_argument("--cpu-expert-threads", type=int, default=None,
-                        help="CPU expert のスレッド数（default は物理コア半分）")
     parser.add_argument("--pcie-frac", type=float, default=None,
                         help="runtime が使ってよい PCIe の割合（default 0.25）")
     parser.add_argument("--pcie-gbps", type=float, default=None,

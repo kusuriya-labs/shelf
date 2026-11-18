@@ -107,10 +107,11 @@ lm_head (final norm なし)
   起動し、`group_row_base` で元の group 行へ書く。activation plane と combine の
   group row は 1 本のままである。miss は host plane の重みを PCIe 越しに読む。
 - slot の入れ替えは step 間だけで行う。router は local expert ごとの route 数を
-  `expert_route_freq` に積み、batch 完了後に frequency の高い host expert と、その step
-  で使われていない低頻度の VRAM expert を交換する。`SHELF_MOE_CACHE_INSERTS`
-  （既定 4）が 1 step の交換上限、`SHELF_MOE_CACHE_DECAY`（既定 4096）が frequency を
-  半分にする閾値である。
+  `expert_route_freq` に積み、batch 完了後に累積頻度の順位で host expert と VRAM expert
+  を再配置する。`SHELF_MOE_CACHE_SWAP_BUDGET`（既定 96）が 1 step の交換上限、
+  `SHELF_MOE_CACHE_MIN_GAIN`（既定 150）が交換を採る最小の頻度差、
+  `SHELF_MOE_CACHE_REBALANCE_STEPS`（既定 4）が再評価の間隔、
+  `SHELF_MOE_CACHE_DECAY`（既定 4096）が frequency を半分にする閾値である。
 - PLE は layer 1 の attention site の前に注入する。key_proj / value_proj /
   norm_key / norm_query / norm_conv / short conv を使う。
 

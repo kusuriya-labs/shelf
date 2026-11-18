@@ -64,9 +64,6 @@ detail and is not a `--variant` value.
 | `--kv-cache-dtype bf16\|fp8\|octave:FORMAT (default bf16)` |  |
 | `--arena-gib N` | (default auto = free VRAM minus 0.5 GiB) |
 | `--moe-host-experts N` | routed experts per layer kept in host memory (default 0) |
-| `--moe-cpu-miss 0\|1` | compute host-resident experts on the CPU (default 0) |
-| `--moe-cpu-miss-rows N` | rows per batch the CPU path may take (default 64) |
-| `--cpu-expert-threads N` | CPU expert threads (default half the physical cores) |
 | `--pcie-frac F` | share of PCIe the runtime may use (default 0.25) |
 | `--pcie-gbps F` | assumed PCIe bandwidth in GB/s (default 25) |
 | `--runs N` | (default 3) |
@@ -126,9 +123,6 @@ backbone kernel の allowlist に登録済みで、prefill の throughput は TP
 | `--kv-cache-dtype bf16\|fp8\|octave:FORMAT (default bf16)` |  |
 | `--arena-gib N` | (default auto = free VRAM minus 0.5 GiB) |
 | `--moe-host-experts N` | routed experts per layer kept in host memory (default 0) |
-| `--moe-cpu-miss 0\|1` | compute host-resident experts on the CPU (default 0) |
-| `--moe-cpu-miss-rows N` | rows per batch the CPU path may take (default 64) |
-| `--cpu-expert-threads N` | CPU expert threads (default half the physical cores) |
 | `--pcie-frac F` | share of PCIe the runtime may use (default 0.25) |
 | `--pcie-gbps F` | assumed PCIe bandwidth in GB/s (default 25) |
 | `--output PATH` | (default none) |

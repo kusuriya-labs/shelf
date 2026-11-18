@@ -1,5 +1,4 @@
 #include <shelf/kernels/fused/exl3/decode.h>
-#include <shelf/inference/execution/moe_cpu_miss.h>
 #include <shelf/inference/execution/moe_dispatch.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/program_executor.h>
@@ -289,75 +288,13 @@ Result<OptimizedLaunchResult> try_launch_moe_grouped_linear(const Program& progr
             host.codes_batch_stride_bytes != e.codes_batch_stride_bytes ||
             host.scales_batch_stride_bytes != e.scales_batch_stride_bytes)
             return bad("moe grouped linear: host expert plane mismatch");
-        bool handled = false;
-        const bool cpu_candidate = moe_cpu_miss_enabled() &&
-                                   ctx.actual_rows != 0u && ctx.actual_rows <= 4u;
-        if (cpu_candidate) {
-            MoeCpuMissDesc cpu;
-            cpu.host_codes = static_cast<const std::uint8_t*>(host.codes);
-            cpu.host_scales = static_cast<const std::uint8_t*>(host.scales);
-            cpu.rows = static_cast<std::uint32_t>(e.rows);
-            cpu.k_padded = wkp;
-            cpu.codes_batch_stride = static_cast<std::uint32_t>(host.codes_batch_stride_bytes);
-            cpu.scales_batch_stride =
-                static_cast<std::uint32_t>(host.scales_batch_stride_bytes);
-            cpu.scale_row_stride = host.scale_row_stride_bytes;
-            cpu.activation_codes = acodes;
-            cpu.activation_scales = ascales;
-            cpu.activation_code_stride = b.activation_code_stride;
-            cpu.activation_scale_stride = b.activation_scale_stride;
-            cpu.output = out.ptr;
-            cpu.output_row_stride = out.row_stride;
-            cpu.output_bf16 = out.dtype == ValueDType::BF16;
-            cpu.miss_slot = plan.value().arrays.miss_slot;
-            cpu.miss_rows = plan.value().arrays.miss_rows;
-            cpu.miss_base = plan.value().arrays.miss_base;
-            cpu.miss_count = plan.value().arrays.miss_count;
-            cpu.group_capacity = plan.value().group_capacity;
-            cpu.row_capacity = plan.value().row_capacity;
-            Status cpu_status = run_moe_cpu_miss(cpu, stream, &handled);
-            if (!cpu_status.ok()) return cpu_status;
-        }
-        if (!handled) {
-            herr = launch_plane(host, plan.value().arrays.miss_slot,
-                                plan.value().arrays.miss_rows, plan.value().arrays.miss_base,
-                                plan.value().arrays.miss_count);
-            if (herr == hipErrorNotSupported) return kNone;
-            if (herr != hipSuccess)
-                return Status::hip_error("moe grouped host gemm launch",
-                                         hipGetErrorString(herr), __FILE__, __LINE__);
-            if (std::getenv("SHELF_MOE_CPU_MISS_DUMP") != nullptr &&
-                plan.value().arrays.miss_base != nullptr) {
-                std::uint32_t group_base = 0u;
-                if (hipMemcpy(&group_base, plan.value().arrays.miss_base, sizeof(std::uint32_t),
-                              hipMemcpyDeviceToHost) == hipSuccess) {
-                    const std::uint32_t row = group_base * 16u;
-                    const bool bf16 = out.dtype == ValueDType::BF16;
-                    std::uint8_t host_row[16];
-                    if (hipStreamSynchronize(stream) == hipSuccess &&
-                        hipMemcpy(host_row,
-                                  static_cast<const std::uint8_t*>(out.ptr) +
-                                      static_cast<std::size_t>(row) * out.row_stride *
-                                          (bf16 ? 2u : 4u),
-                                  16u, hipMemcpyDeviceToHost) == hipSuccess) {
-                        const auto bf16_value = [](std::uint16_t raw) {
-                            std::uint32_t bits = static_cast<std::uint32_t>(raw) << 16;
-                            float value = 0.0f;
-                            std::memcpy(&value, &bits, sizeof(value));
-                            return value;
-                        };
-                        std::fprintf(stderr, "GPU_MISS row=%u v0=%f v1=%f\n", row,
-                                     bf16 ? bf16_value(reinterpret_cast<const std::uint16_t*>(
-                                                host_row)[0])
-                                          : reinterpret_cast<const float*>(host_row)[0],
-                                     bf16 ? bf16_value(reinterpret_cast<const std::uint16_t*>(
-                                                host_row)[1])
-                                          : reinterpret_cast<const float*>(host_row)[1]);
-                        std::fflush(stderr);
-                    }
-                }
-            }
-        }
+        herr = launch_plane(host, plan.value().arrays.miss_slot,
+                            plan.value().arrays.miss_rows, plan.value().arrays.miss_base,
+                            plan.value().arrays.miss_count);
+        if (herr == hipErrorNotSupported) return kNone;
+        if (herr != hipSuccess)
+            return Status::hip_error("moe grouped host gemm launch",
+                                     hipGetErrorString(herr), __FILE__, __LINE__);
     }
     record_physical_launch(1u);
     record_optimized_op();

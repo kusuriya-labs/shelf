@@ -99,9 +99,6 @@ Ready.
 | `--mtp` | checkpoint の MTP block を drafter として使う（複数 request を同時に処理する） |
 | `--mtp-drafts MTP_DRAFTS` | MTP の draft tokens per round（default 4） |
 | `--moe-host-experts MOE_HOST_EXPERTS` | 層あたり host に退避する routed expert 数（default 0） |
-| `--moe-cpu-miss {0,1}` | host 常駐 expert を CPU で計算する（default 0） |
-| `--moe-cpu-miss-rows MOE_CPU_MISS_ROWS` | 1 batch で CPU 経路が受け持つ行数（default 64） |
-| `--cpu-expert-threads CPU_EXPERT_THREADS` | CPU expert のスレッド数（default は物理コア半分） |
 | `--pcie-frac PCIE_FRAC` | runtime が使ってよい PCIe の割合（default 0.25） |
 | `--pcie-gbps PCIE_GBPS` | 想定する PCIe 帯域 GB/s（default 25） |
 | `--ple-prefetch {0,1}` | prefill 中に次の PLE 行を先読みする（default 1） |

@@ -81,9 +81,6 @@ void print_usage(FILE* out) {
         "  --kv-cache-dtype bf16|fp8|octave:FORMAT (default bf16)\n"
         "  --arena-gib N                (default auto = free VRAM minus 0.5 GiB)\n"
         "  --moe-host-experts N       routed experts per layer kept in host memory (default 0)\n"
-        "  --moe-cpu-miss 0|1         compute host-resident experts on the CPU (default 0)\n"
-        "  --moe-cpu-miss-rows N      rows per batch the CPU path may take (default 64)\n"
-        "  --cpu-expert-threads N     CPU expert threads (default half the physical cores)\n"
         "  --pcie-frac F              share of PCIe the runtime may use (default 0.25)\n"
         "  --pcie-gbps F              assumed PCIe bandwidth in GB/s (default 25)\n"
 
@@ -265,12 +262,6 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
             opts.perf_stats_output = need_value();
         } else if (key == "--moe-host-experts") {
             if (!apply_env_u32(need_value(), "SHELF_MOE_HOST_EXPERTS")) return false;
-        } else if (key == "--moe-cpu-miss") {
-            if (!apply_env_u32(need_value(), "SHELF_MOE_CPU_MISS")) return false;
-        } else if (key == "--moe-cpu-miss-rows") {
-            if (!apply_env_u32(need_value(), "SHELF_MOE_CPU_MISS_ROWS")) return false;
-        } else if (key == "--cpu-expert-threads") {
-            if (!apply_env_u32(need_value(), "SHELF_CPU_EXPERT_THREADS")) return false;
         } else if (key == "--pcie-frac") {
             if (!apply_env_double(need_value(), "SHELF_PCIE_FRAC")) return false;
         } else if (key == "--pcie-gbps") {

@@ -133,11 +133,10 @@ prefill 中に消化される。
 | 6 | 68.5 GB/s | 1.37 ms |
 | 8 | 68.6 GB/s | 1.37 ms |
 
-PCIe（25 GB/s）で同じ 36 expert を読むと約 3.5 ms なので、物理コア半分の 4 スレッドで
-約 1.9 倍、6 スレッド以上で約 2.6 倍になる。1 スレッドではレイテンシ律速で伸びないため、
-専用スレッド群が必須である。実装は
-`mxfp4_cpu_expert.h`（AVX512 GEMV）、`cpu_team.h`（固定スレッド群）、
-`pcie_budget.h`（PCIe 利用率の上限）に置き、統合は次の段階で行う。
+PCIe（25 GB/s）で同じ 36 expert を読むと約 3.5 ms なので、帯域だけ見れば CPU が
+1.9-2.6 倍有利である。1 スレッドではレイテンシ律速で伸びない。
+ただし後段の実測のとおり、node 単位の直列化と CPU 仕事量そのもののために
+この帯域差は per-token の短縮に結び付かなかった（[CPU で miss を計算する案](#cpu-で-miss-を計算する案reject)）。
 
 ## 制約
 
@@ -146,3 +145,39 @@ PCIe（25 GB/s）で同じ 36 expert を読むと約 3.5 ms なので、物理�
   split 対応が必要になる。
 - 長文 KV、prefix cache、DFlash2、KLD / top-1 は未測定。
 - offload は既定で無効（`SHELF_MOE_HOST_EXPERTS=0`）。
+
+## CPU で miss を計算する案（REJECT）
+
+PCIe（実測 25 GB/s）より CPU の DRAM 帯域（4 スレッド 50 GB/s）が広いため、
+host 常駐 expert の GEMV を AVX512 で肩代わりさせる案を実装して測った。
+AVX512 GEMV と同期経路は GPU 経路とビット一致まで詰めたが、性能が出ないため撤去した。
+
+| 方式 | per-token（`--context 256 --tokens 4`、host expert 384） |
+| --- | ---: |
+| GPU のみ（host plane を PCIe で読む） | 68.5-79.5 ms |
+| CPU 同期（行ごとの blocking copy + host 同期） | 226.2 ms |
+| CPU 非同期（pinned 先読み + 1 block wait） | 127.4-134.0 ms |
+
+- CPU 仕事量そのものが 4 token で 315 ms（約 79 ms/token、574 node、0.55 ms/node）。
+  GPU のみの 1 token 予算と同程度で、重ねられても parity が上限になる。
+- 重ねられるのは node 内の hit plane の区間だけである。stream は
+  `begin`（staging + ready）→ hit plane → `wait` → `scatter` の順に進むので、
+  CPU が hit plane より長い分はそのまま加算される。stream が `wait` で止まるため
+  CPU が先の node へ走ることもできない。
+- staging は `row_capacity` 全体（1 token で 1.3 MB）を転送しており、必要な行
+  （10 行で 80 KB）の 16 倍だった。plan を device で読む gather にすれば削れるが、
+  上の 2 点（CPU 仕事量と窓）が支配的なので撤去を選んだ。
+
+### 途中で確定した実装上の規則
+
+1. 全グリッドの GPU spin は他ストリームの D2H コピーを止める。1 block なら
+   121 us で完了するコピーが、2048 block のスピン中は解放まで 3.0 s 待たされる。
+2. pinned へ `hipMemcpyAsync`（DMA）で書いた内容は CPU から見えない。
+   8 KB のコピーで全語が不一致になり、1 launch 前の値が見えることもある。
+   `hipHostMallocCoherent` / `Mapped` / `NonCoherent` のいずれでも変わらない。
+3. kernel ストアは CPU から見えるが、コピー kernel とフラグ kernel を分けると data は
+   見えないままになる。同一 kernel 内で `__threadfence_system()` の後にフラグを
+   書いた場合だけ一致する（8 KB、4 round、mismatch 0）。
+4. `hipExtMallocWithFlags(..., hipMallocSignalMemory)` はこの環境で
+   `invalid argument` を返す（`hipDeviceAttributeCanUseStreamWaitValue` は 1）。
+   signal memory を使う `hipStreamWaitValue32` 方式は採れない。

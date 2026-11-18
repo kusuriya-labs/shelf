@@ -108,9 +108,6 @@ void compute_usage(const char* prog) {
     printf("  --top-k N              keep the N highest logits (default 0 = disabled)\n");
     printf("  --seed N               sampling seed (default 0)\n");
     printf("  --moe-host-experts N    routed experts per layer kept in host memory (default 0)\n");
-    printf("  --moe-cpu-miss 0|1      compute host-resident experts on the CPU (default 0)\n");
-    printf("  --moe-cpu-miss-rows N   rows per batch the CPU path may take (default 64)\n");
-    printf("  --cpu-expert-threads N  CPU expert threads (default half the physical cores)\n");
     printf("  --pcie-frac F           share of PCIe the runtime may use (default 0.25)\n");
     printf("  --pcie-gbps F           assumed PCIe bandwidth in GB/s (default 25)\n");
     printf("  --dflash2-model-dir PATH  DFlash2 draft model directory; enables\n");
@@ -441,27 +438,6 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
                 return kComputeParseError;
             }
             apply_env_u32("SHELF_MOE_HOST_EXPERTS", value);
-        } else if (std::strcmp(argv[i], "--moe-cpu-miss") == 0 && i + 1 < argc) {
-            unsigned long value = 0;
-            if (!parse_uint(argv[++i], value) || value > 1u) {
-                fprintf(stderr, "bad --moe-cpu-miss (expected 0 or 1)\n");
-                return kComputeParseError;
-            }
-            apply_env_u32("SHELF_MOE_CPU_MISS", value);
-        } else if (std::strcmp(argv[i], "--moe-cpu-miss-rows") == 0 && i + 1 < argc) {
-            unsigned long value = 0;
-            if (!parse_uint(argv[++i], value) || value == 0u) {
-                fprintf(stderr, "bad --moe-cpu-miss-rows\n");
-                return kComputeParseError;
-            }
-            apply_env_u32("SHELF_MOE_CPU_MISS_ROWS", value);
-        } else if (std::strcmp(argv[i], "--cpu-expert-threads") == 0 && i + 1 < argc) {
-            unsigned long value = 0;
-            if (!parse_uint(argv[++i], value) || value == 0u || value > 64u) {
-                fprintf(stderr, "bad --cpu-expert-threads (expected 1..64)\n");
-                return kComputeParseError;
-            }
-            apply_env_u32("SHELF_CPU_EXPERT_THREADS", value);
         } else if (std::strcmp(argv[i], "--pcie-frac") == 0 && i + 1 < argc) {
             float value = 0.0f;
             if (!parse_float(argv[++i], value) || value <= 0.0f || value > 1.0f) {
