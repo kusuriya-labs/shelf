@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <span>
 #include <utility>
 #include <vector>
@@ -78,12 +79,18 @@ Result<LoadedModel> LoadedModel::load(
         return out;
     }
     if (family_result.value() == ModelFamily::Qwen4Exp) {
+        shelf::qwen4exp::Qwen4ExpLoadOptions load_options;
+        if (const char* host_experts = std::getenv("SHELF_MOE_HOST_EXPERTS")) {
+            load_options.moe_host_experts =
+                static_cast<std::uint32_t>(std::strtoul(host_experts, nullptr, 10));
+        }
         auto loaded = shelf::qwen4exp::Qwen4ExpModel::load_from_safetensors(
-            model_dir, 1u, 0u, arena, stream, shelf::qwen4exp::Qwen4ExpLoadOptions{});
+            model_dir, 1u, 0u, arena, stream, load_options);
         if (!loaded.ok()) return loaded.status();
         out.owns_qwen4exp_ =
             std::make_unique<shelf::qwen4exp::Qwen4ExpModel>(loaded.release());
         out.qwen4exp_ = out.owns_qwen4exp_.get();
+        out.model_dir_ = model_dir;
         return out;
     }
     if (family_result.value() == ModelFamily::Qsa) {
@@ -268,9 +275,9 @@ Result<shelf::qwen35::Executor> LoadedModel::create_executor(
                                                kv_pool, arena, resolved);
     }
     if (qwen4exp_ != nullptr) {
-        return Status::unsupported(
-            "Qwen4Exp runs through the tensor-parallel rank model, not LoadedModel",
-            __FILE__, __LINE__);
+        auto ple_table = shelf::models::get_qwen4exp_ple_table(model_dir_);
+        return shelf::models::create_qwen4exp_model_executor(
+            *qwen4exp_, ple_table, sequence_pool, gdn_state_pool, kv_pool, arena, config);
     }
     if (qsa_ != nullptr) {
         if (config.tp != nullptr && config.tp->tp_size > 1u) {

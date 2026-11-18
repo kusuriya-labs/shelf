@@ -167,6 +167,7 @@ private:
     const shelf::qwen35moe::Qwen35MoeModel* moe_ = nullptr;
     const shelf::qwen4exp::Qwen4ExpModel* qwen4exp_ = nullptr;
     const shelf::qwen35qsa::Qwen35QsaModel* qsa_ = nullptr;
+    std::string model_dir_;
 };
 
 }  // namespace shelf::models
