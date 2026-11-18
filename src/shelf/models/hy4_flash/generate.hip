@@ -298,9 +298,11 @@ void generate(Residency &gpu, const std::vector<int> &ids, int count, int chunk,
     auto prefill = now();
     std::vector<int> generated{next};
     int rounds = 0, accepted = 0;
+    std::array<int, 6> histogram{};
     while (int(generated.size()) < count && generated.back() != 120025) {
         int anchor = generated.back();
-        if (!gpu.model.has_draft || target.history.size() + 6 > gpu.tokens) {
+        if (!gpu.model.has_draft || target.history.size() + 6 > gpu.tokens ||
+            int(generated.size()) + 1 == count) {
             generated.push_back(target.forward({anchor}, false)[0]);
             continue;
         }
@@ -311,6 +313,7 @@ void generate(Residency &gpu, const std::vector<int> &ids, int count, int chunk,
         int keep = target.verify_tokens(draft, actual);
         ++rounds;
         accepted += keep - 1;
+        ++histogram[keep - 1];
         target.accept(keep, 6);
         for (int i = 0; i < keep && int(generated.size()) < count; ++i) {
             generated.push_back(actual[i]);
@@ -323,6 +326,8 @@ void generate(Residency &gpu, const std::vector<int> &ids, int count, int chunk,
     fprintf(stderr,
             "prefill_tokens=%zu prefill_s=%.6f decode_tokens=%zu decode_s=%.6f draft_rounds=%d accepted=%d\n",
             ids.size(), pp, generated.size() - 1, tg, rounds, accepted);
+    fprintf(stderr, "accepted_histogram=%d,%d,%d,%d,%d,%d\n", histogram[0], histogram[1], histogram[2],
+            histogram[3], histogram[4], histogram[5]);
     printf("GENERATED_IDS=");
     for (size_t i = 0; i < generated.size(); ++i)
         printf("%s%d", i ? "," : "", generated[i]);
