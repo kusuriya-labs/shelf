@@ -109,42 +109,33 @@ miss expert の重みは host の pinned plane から GPU が PCIe 越しに読�
 [../research/20261118/moe_expert_offload.md](../research/20261118/moe_expert_offload.md)
 に置く。
 
-## 2026-11-18 Qwen3.8-Flash-Next MXFP4 DFlash2 decode
+## 2026-11-19 Qwen3.8-Flash-Next MXFP4 DFlash2 decode
 
 `models/Qwen3.8-Flash-Next-Quark-MXFP4` に `models/Qwen3.8-Flash-Next-DFlash2` を
 drafter として付け、単一リクエストで decode を測った。prompt は同一 token（id=1）を
 4096 個並べたもので、受理率は実運用より高く出る。
 
-- measurement revision: 2026-11-18 の working tree（DFlash2 有効化 `0e29803`）
-- GPU: Radeon AI PRO R9700（TP=1 は 1 枚、TP=2 は 2 枚）
-- `--max-new-tokens 64`、`--kv-cache-dtype octave:c5v5`、drafts 6、tree-budget 0
+- measurement revision: 2026-11-19 の working tree（TP=2 prefill 修正 `dccef70` を含む）
+- GPU: Radeon AI PRO R9700（TP=1 は 1 枚、TP=2 は 2 枚 device 2,3）
+- command: `shelf-compute --input-ids-file <4096 token> --max-new-tokens 64
+  --max-seq-len 8192 --max-num-batched-tokens 4096 --kv-cache-dtype octave:c5v5
+  --dflash2-model-dir models/Qwen3.8-Flash-Next-DFlash2 --dflash2-drafts 6
+  --dflash2-tree-budget 0`
 - `--moe-host-experts` は TP=1 で 448、TP=2 で 224
-- spec なしの TP=1 は `shelf-bench tg --context 4096 --tokens 64 --moe-host-experts 384`
 
-| 構成 | decode | 受理（full / 平均 drafts） |
-| --- | ---: | --- |
-| TP=1 spec なし | 40.2 ms/token（24.9 tok/s） | - |
-| TP=1 DFlash2 | 21.5 ms/token（46.6 tok/s） | 0.889 / 5.33 |
-| TP=2 spec なし | 65.8 ms/token（15.2 tok/s） | - |
-| TP=2 DFlash2（lm_head INT8W32） | 25.8 ms/token（38.7 tok/s） | 0.636 / 4.18 |
-| TP=2 DFlash2（`--lm-head-int8 0`） | 35.8 ms/token（28.0 tok/s） | - |
+| 構成 | prefill | decode | verify / round | 受理（平均 / full） |
+| --- | ---: | ---: | ---: | --- |
+| TP=1 | 4.88 s | 28.5 tok/s（35.1 ms/token） | 175 ms | 4.18 / 0.636 |
+| TP=2 | 4.01 s | 37.3 tok/s（26.8 ms/token） | 100 ms | 3.14 / 0.500 |
 
-- `shelf-bench tg` は DFlash2 の drafter を読み込まないため、DFlash2 の行は
-  `shelf-compute` の単一リクエスト経路で測った。
-- lm_head の INT8W32 化で TP=2 の DFlash2 は 28.0 → 38.7 tok/s になる
-  （drafter の head GEMM が短くなるため）。
-- TP=2 の `DFLASH2_D2H_MS` は 11 round で 111 ms だが、その内訳は proposal の
-  `hipStreamSynchronize` 待ち（`DFLASH2_PROPOSAL_WAIT_MS`）で、コピー本体は 0.45 ms。
-  転送ではなく drafter の計算待ちである。
-- TP=2 の drafts スイープ（`--dflash2-drafts` 3/4/5/6）: 34.9 / 36.9 / 37.0 / 38.7 tok/s。
-  この family の上限 6 が最良。
-- TP=2 で `--tensor-parallel-combine-f32 1` は 32.3 tok/s（受理 3.75、verify 1633 ms）。
-  rank 間 combine の f32 化は遅くなるだけで、受理率も改善しない。
-- TP=2 は同じ config の TP=1 より decode が遅く（25.8 vs 21.5 ms/token）、prefill も
-  13.5 s vs 4.6 s と 3 倍遅い。1 round の verify は TP=2 がむしろ速い（123 vs 129 ms）ので、
-  差は受理率（4.18 vs 5.33 drafts）と 1 row あたりの固定費（65.8 vs 40.2 ms）から来る。
-  prefill の差は BF16 shape allowlist の欠落による correctness fallback で、2026-11-19 に
-  修正した（[2026-11-19 の節](#2026-11-19-qwen38-flash-next-mxfp4-tp2-prefill)）。
+- TP=2 の prefill は BF16 allowlist と MXFP4 spill の修正で 12.6 s から短縮した
+  （[TP=2 prefill の節](#2026-11-19-qwen38-flash-next-mxfp4-tp2-prefill)）。
+- TP=1 の decode は 11-18 ツリーの測定（21.5 ms/token、受理 5.33）から後退している。
+  同じ prompt・config で verify が 129 → 175 ms/round、受理も低下しており、
+  decode 経路のカーネル選択か数値の変化が疑わしい（未解決）。
+- `shelf-bench tg` は DFlash2 の drafter を読み込まないため、DFlash2 の測定は
+  `shelf-compute` の単一リクエスト経路で行う。tg の spec なし per-token は
+  `--context 3072 --tokens 128 --moe-host-experts 384` で 37.7 ms。
 
 ## 2026-11-18 Qwen3.8-27B MXFP4 decode GEMV
 
