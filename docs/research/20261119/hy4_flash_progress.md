@@ -4,7 +4,7 @@ origin/main の 14a23730 から専用 worktree を作成した。原本の confi
 
 ## 現在の待機状態
 
-11 月 19 日 02:17 JST に DFly の 49 射影の追加量子化が完了し、本体との署名照合が通った。02:20 JST に EP=3 の 2Mi 予約が成功した。生成の照合と throughput を確認中。
+11 月 19 日 03:26 JST に 4 bpw の最終受入を完了した。採用版は 2Mi 予約、pp2048 676.62 tok/s、DFly decode 50.65 tok/s、候補撤去前後と通常生成・DFly の 256 token 全一致を確認済み。03:28 JST から別出力で 3.5 bpw の変換を実行中。
 
 | 作業 | 完了を確認する場所 |
 |---|---|
@@ -216,3 +216,13 @@ CPU logits 相対 L2 の初期目安 0.1 を超えた場合はその事実を結
 ## 毎時レビュー第 5 回への対応
 
 採用版を新規ディレクトリでビルドし、CPU テストを再確認した。256 token の検査は対象・DFly 間の照合に加え、P5 の比較に使った全候補有効バイナリでも同じ入力・配置・seed で実行し、採用版の全列と比較する。旧バイナリの SHA-256 は P5 の設定記録と照合してから実行する。rounding_control.py、配置表、研究中の一時スクリプトの継続用途はこの移行判定後に記録する。
+
+## G3　4 bpw の最終受入と 3.5 bpw への移行
+
+新規ビルドと CTest が通過。採用版実行形式の SHA-256 は a7365f79d3684159121c4cef1d162c2b7757ed6874c9657bdfe9113c357763db。pp2048 は **676.62 tok/s**、127 token の decode は **50.65 tok/s**（初回を除く 3 回の中央値）。2Mi 予約、CPU / EP=3 top-1 12286、相対 L2 0.133337、対照 0.139013、KL 0.05572 を確認。採用版の通常生成、採用版の DFly、切替撤去前の全候補有効版（SHA-256 783062b2355dc5548f03802a486eed999adab3da448ec534aa7f09c5ac217580）の 3 列は **256/256 一致**。正の温度でも同一 seed の結果を再現した。実測記録は `hy4-flash-pilot/shelf-qualification/ep3-9ao7j7r7/{results,cleanup-comparison}.json`。
+
+第 5 回レビューの衛生確認。rounding_control.py は採用版の CPU 変動の再現と 3.5 bpw の同条件検査に使用するため維持する。公式の --rounding-control で一時実装と同じ logits を再現した。配置表も通常実行と比較の入力として SHA-256 付きで `hy4-flash-pilot/shelf-placement/` に保持する。役割を終えた未追跡の recalc-rdna.py などの一時実装は除去し、測定ログは残した。
+
+## M2　3.5 bpw 変換の開始
+
+4 bpw の G3 完了後に V620 2 台を排他し、BF16 原本と同じ 128×1024 校正の hidden / router 選択から Hessian を再計算している。層ごとに利用頻度の低い expert を 3 bit にし、合計 10,931 本を選んだ。残り 10,061 本と本体の通常線形は 4 bit、共有 head は 6 bit、DFly は G2 の 4 bit を共用する。符号のみの目標平均は 3.499996 bpw。最終出力先は `hy4-flash-pilot/shelf-mixed/Hy4-flash-exl3-3.5bpw-mul24`。shard 単位で署名・SHA-256 を照合して再開でき、元の 4 bpw checkpoint を変更しない。
