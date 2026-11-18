@@ -33,7 +33,21 @@ void Residency::reserve() {
     int count = 0;
     check(hipGetDeviceCount(&count));
     if (count != 3)
-        throw std::runtime_error("R9700、V620、V620 の順に 3 台を指定してください");
+        throw std::runtime_error("R9700 と V620 2 台を指定してください");
+    int primary=0,worker=1;
+    for(int device=0;device<count;++device) {
+        hipDeviceProp_t props{};
+        check(hipGetDeviceProperties(&props,device));
+        std::string_view isa=props.gcnArchName;
+        int rank;
+        if(isa.starts_with("gfx1201") && primary++==0) rank=0;
+        else if(isa.starts_with("gfx1030") && worker<3) rank=worker++;
+        else throw std::runtime_error("R9700 と V620 2 台の構成が必要です");
+        physical[rank]=device;
+        char bus[32]{};
+        check(hipDeviceGetPCIBusId(bus,sizeof(bus),device));
+        fprintf(stderr,"rank=%d device=%d isa=%s pci=%s\n",rank,device,props.gcnArchName,bus);
+    }
     std::array<size_t, 3> available{}, overhead{};
     std::array<int, 3> used{}, limit{};
     for (const auto &row : model.owners)
@@ -41,14 +55,10 @@ void Residency::reserve() {
             ++used[r];
     constexpr size_t expert_bytes = 3 * (1536ull * 1536 / 2 + 1536 * 4);
     for (int r = 0; r < 3; ++r) {
-        hipDeviceProp_t props{};
-        check(hipGetDeviceProperties(&props, r));
-        if (!std::string_view(props.gcnArchName).starts_with(r ? "gfx1030" : "gfx1201"))
-            throw std::runtime_error("rank と GPU の ISA が一致しません");
-        check(hipSetDevice(r));
+        check(hipSetDevice(physical[r]));
         size_t total = 0;
         check(hipMemGetInfo(&available[r], &total));
-        overhead[r] = r ? size_t(512) << 20 : size_t(2) << 30;
+        overhead[r] = (r ? size_t(512) << 20 : size_t(2) << 30) + matrix_bytes;
         if (!r)
             for (int i = 0; i < 42; ++i) {
                 bool sparse = i == 0 || i % 4 == 1;
@@ -88,14 +98,14 @@ void Residency::reserve() {
         model.relocate(plan);
     fprintf(stderr, "relocated_experts=%d rank_counts=%d,%d,%d\n", moved, used[0], used[1], used[2]);
     for (int r = 0; r < 3; ++r) {
-        check(hipSetDevice(r));
+        check(hipSetDevice(physical[r]));
         size_t free, total;
         check(hipMemGetInfo(&free, &total));
         size_t work = r ? size_t(512) << 20 : size_t(2) << 30;
         size_t bytes = align(model.bytes[r]) + overhead[r];
         fprintf(stderr, "rank=%d weight=%zu workspace=%zu request=%zu free=%zu total=%zu\n", r, model.bytes[r],
                 work, bytes, free, total);
-        auto result = gpu::GpuArena::create(r, bytes);
+        auto result = gpu::GpuArena::create(physical[r], bytes);
         if (!result.ok()) {
             if (result.status().code() == Status::Code::insufficient_memory)
                 throw std::bad_alloc();
@@ -118,9 +128,27 @@ void Residency::reserve() {
         if (!r)
             for (auto &[name, ptr] : folded)
                 ptr = buffer.next(size_t(model.shape.at(name)[1]) * 512 * 2);
+        matrices[r] = static_cast<Hy4ExpertProjection *>(buffer.next(matrix_bytes));
         workspace[r] = {static_cast<uint8_t *>(buffer.next(work)), work};
     }
-    check(hipSetDevice(0));
+    check(hipSetDevice(physical[0]));
+}
+void Residency::upload_experts(int r, int layer) {
+    std::vector<Hy4ExpertProjection> table(512 * 3);
+    for (int e = 0; e < 512; ++e)
+        if (model.owners[layer - 1][e] == r) {
+            std::string key =
+                "model.layers." + std::to_string(layer) + ".mlp.experts." + std::to_string(e) + ".";
+            int kind = 0;
+            for (auto suffix : {"gate_proj", "up_proj", "down_proj"}) {
+                auto name = key + suffix;
+                table[e * 3 + kind++] = {static_cast<const uint16_t *>(device(model.at(name + ".suh"))),
+                                         static_cast<const uint16_t *>(device(model.at(name + ".svh"))),
+                                         static_cast<const uint32_t *>(device(model.at(name + ".trellis")))};
+            }
+        }
+    check(hipMemcpy(matrices[r] + (layer - 1) * 1536, table.data(), table.size() * sizeof(table[0]),
+                    hipMemcpyHostToDevice));
 }
 void Residency::upload() {
     for (int dst = 0; dst < 3; ++dst)
@@ -128,10 +156,10 @@ void Residency::upload() {
             if (src == dst || (dst && src))
                 continue;
             int accessible = 0;
-            check(hipSetDevice(dst));
-            check(hipDeviceCanAccessPeer(&accessible, dst, src));
+            check(hipSetDevice(physical[dst]));
+            check(hipDeviceCanAccessPeer(&accessible, physical[dst], physical[src]));
             if (accessible) {
-                auto status = hipDeviceEnablePeerAccess(src, 0);
+                auto status = hipDeviceEnablePeerAccess(physical[src], 0);
                 peer[dst][src] = status == hipSuccess || status == hipErrorPeerAccessAlreadyEnabled;
                 owns_peer[dst][src] = status == hipSuccess;
                 if (status != hipSuccess)
@@ -142,25 +170,27 @@ void Residency::upload() {
             fprintf(stderr, "transfer=%d->%d method=%s\n", src, dst, peer[dst][src] ? "peer" : "host");
         }
     for (int r = 0; r < 3; ++r) {
-        check(hipSetDevice(r));
+        check(hipSetDevice(physical[r]));
         for (const auto &[name, w] : model.weights)
             if (w.rank == r)
                 check(hipMemcpy(weight_base[r] + w.offset, w.host, w.bytes, hipMemcpyHostToDevice));
+        for (int layer = 1; layer < 42; ++layer)
+            upload_experts(r, layer);
     }
-    check(hipSetDevice(0));
+    check(hipSetDevice(physical[0]));
     if (!folded.empty())
         fold_kv_weights(*this);
 }
 void Residency::transfer(void *dst, int destination, const void *src, int source, size_t bytes) {
     if (peer[destination][source]) {
-        check(hipMemcpyPeer(dst, destination, src, source, bytes));
+        check(hipMemcpyPeer(dst, physical[destination], src, physical[source], bytes));
         return;
     }
     if (!staging || bytes > 128u * 1536u * 2u)
         throw std::runtime_error("転送作業域の範囲外です");
-    check(hipSetDevice(source));
+    check(hipSetDevice(physical[source]));
     check(hipMemcpy(staging, src, bytes, hipMemcpyDeviceToHost));
-    check(hipSetDevice(destination));
+    check(hipSetDevice(physical[destination]));
     check(hipMemcpy(dst, staging, bytes, hipMemcpyHostToDevice));
 }
 void Residency::shutdown() {
@@ -182,10 +212,10 @@ void Residency::shutdown() {
     for (int dst = 0; dst < 3; ++dst)
         for (int src = 0; src < 3; ++src)
             if (owns_peer[dst][src]) {
-                auto e = hipSetDevice(dst);
+                auto e = hipSetDevice(physical[dst]);
                 collect(e);
                 if (e == hipSuccess)
-                    collect(hipDeviceDisablePeerAccess(src));
+                    collect(hipDeviceDisablePeerAccess(physical[src]));
                 owns_peer[dst][src] = false;
             }
     if (!errors.empty())

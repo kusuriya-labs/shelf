@@ -1,6 +1,7 @@
 #pragma once
 
 #include <shelf/core/memory/arena.h>
+#include <shelf/kernels/hy4_flash/linear.h>
 #include <shelf/models/hy4_flash/checkpoint.h>
 
 namespace shelf::hy4 {
@@ -14,6 +15,7 @@ struct Region {
 struct Residency {
     Checkpoint &model;
     size_t tokens;
+    std::array<int,3> physical{0,1,2};
     std::vector<gpu::GpuArena> arenas;
     std::array<uint8_t *, 3> weight_base{};
     std::array<Region, 3> workspace{};
@@ -23,6 +25,9 @@ struct Residency {
     explicit Residency(Checkpoint &model, size_t tokens);
     void reserve();
     void upload();
+    void upload_experts(int rank, int layer);
+    std::array<Hy4ExpertProjection *, 3> matrices{};
+    static constexpr size_t matrix_bytes = 41 * 512 * 3 * sizeof(Hy4ExpertProjection);
     void transfer(void *dst, int destination, const void *src, int source, size_t bytes);
     std::array<std::array<bool, 3>, 3> peer{}, owns_peer{};
     void *staging = nullptr;

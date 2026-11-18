@@ -2,6 +2,7 @@
 #include <shelf/models/hy4_flash/decoder.h>
 #include <nlohmann/json.hpp>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -28,7 +29,7 @@ void compare(const std::vector<uint16_t> &output, const uint16_t *expected, int 
     if (!(error < 0.04))
         throw std::runtime_error("CPU の層出力との誤差が大きすぎます");
 }
-int run(const Path &dir) {
+int run(const Path &dir, int repeats) {
     Checkpoint model;
     std::ifstream in(dir / "fixture.json");
     auto fixture = nlohmann::json::parse(in);
@@ -81,25 +82,42 @@ int run(const Path &dir) {
         gpu.index_keys[layer] = static_cast<uint16_t *>(memory.next((ids.size() / 4 + 12) * 256));
         for (auto &[key, dest] : gpu.folded)
             dest = memory.next(size_t(model.shape.at(key)[1]) * 512 * 2);
+        gpu.matrices[0] = static_cast<Hy4ExpertProjection *>(memory.next(gpu.matrix_bytes));
+        if (layer)
+            gpu.upload_experts(0, layer);
         gpu.workspace[0] = {static_cast<uint8_t *>(memory.next(work)), work};
         if (!gpu.folded.empty())
             fold_kv_weights(gpu);
         Ops op(gpu);
         for (int chunk : {int(ids.size()), 1}) {
-            std::vector<uint16_t> actual(input_size / 2);
-            std::vector<int> history;
-            for (int i = 0; i < int(ids.size()); i += chunk) {
-                int count = std::min(chunk, int(ids.size()) - i);
-                op.arena.cursor = 0;
-                Mat x = op.mat(count, 12288);
-                op.copy(x.p, input + size_t(i) * 12288, x.bytes(), hipMemcpyHostToDevice);
-                Selection selected;
-                std::vector<int> batch(ids.begin() + i, ids.begin() + i + count);
-                decoder_layer(op, layer, i, x, history, batch, selected);
-                op.copy(actual.data() + size_t(i) * 12288, x.p, x.bytes(), hipMemcpyDeviceToHost);
-                history.insert(history.end(), batch.begin(), batch.end());
+            std::vector<double> samples;
+            for (int pass = 0; pass < repeats; ++pass) {
+                std::vector<uint16_t> actual(input_size / 2);
+                double seconds = 0;
+                std::vector<int> history;
+                for (int i = 0; i < int(ids.size()); i += chunk) {
+                    int count = std::min(chunk, int(ids.size()) - i);
+                    op.arena.cursor = 0;
+                    Mat x = op.mat(count, 12288);
+                    op.copy(x.p, input + size_t(i) * 12288, x.bytes(), hipMemcpyHostToDevice);
+                    Selection selected;
+                    std::vector<int> batch(ids.begin() + i, ids.begin() + i + count);
+                    auto begin = std::chrono::steady_clock::now();
+                    decoder_layer(op, layer, i, x, history, batch, selected);
+                    checked(hipDeviceSynchronize());
+                    seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
+                    op.copy(actual.data() + size_t(i) * 12288, x.p, x.bytes(), hipMemcpyDeviceToHost);
+                    history.insert(history.end(), batch.begin(), batch.end());
+                }
+                if (pass == 0)
+                    compare(actual, expected, chunk);
+                else
+                    samples.push_back(1000 * seconds * chunk / ids.size());
             }
-            compare(actual, expected, chunk);
+            if (!samples.empty()) {
+                std::sort(samples.begin(), samples.end());
+                printf("chunk=%d median_ms=%.6f\n", chunk, samples[samples.size() / 2]);
+            }
         }
     } catch (...) {
         gpu.shutdown();
@@ -110,10 +128,13 @@ int run(const Path &dir) {
 }
 }
 int main(int argc, char **argv) {
-    if (argc != 2)
+    if (argc < 2 || argc > 3)
         return 2;
     try {
-        return run(argv[1]);
+        int repeats = argc == 2 ? 1 : std::stoi(argv[2]);
+        if (repeats < 1 || repeats > 128)
+            return 2;
+        return run(argv[1], repeats);
     } catch (const std::exception &e) {
         fprintf(stderr, "%s\n", e.what());
         return 1;

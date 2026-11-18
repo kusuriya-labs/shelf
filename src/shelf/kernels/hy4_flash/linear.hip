@@ -10,10 +10,10 @@ using namespace shelf::kernel::exl3_detail;
 using namespace shelf::kernel::exl3_detail::mul24;
 
 __global__ void rotate_input(const uint16_t *input, const uint16_t *suh, int8_t *codes, float *scales,
-                             int width, int padded, const Hy4ExpertProjection *group = nullptr,
-                             int stride = 0) {
+                             int width, int padded, const Hy4ExpertProjection *group = nullptr, int stride = 0,
+                             const Hy4Route *routes = nullptr) {
     if (group)
-        suh = group[blockIdx.y * stride].suh;
+        suh = group[(routes ? routes[blockIdx.y].expert : blockIdx.y) * stride].suh;
     const unsigned lane = threadIdx.x;
     const int base = blockIdx.x * 128 + lane * 4;
     float v[4];
@@ -61,9 +61,10 @@ __device__ __forceinline__ int dot4(uint32_t a, uint32_t b, int acc) {
 
 template <int Bits, bool Packed = false>
 __global__ void multiply(const int8_t *codes, const float *scales, const uint32_t *trellis, float *partial,
-                         int k, int n, const Hy4ExpertProjection *group = nullptr, int stride = 0) {
+                         int k, int n, const Hy4ExpertProjection *group = nullptr, int stride = 0,
+                         const Hy4Route *routes = nullptr) {
     if (group)
-        trellis = group[blockIdx.y * stride].trellis;
+        trellis = group[(routes ? routes[blockIdx.y].expert : blockIdx.y) * stride].trellis;
     const unsigned col = threadIdx.x % 16;
     const unsigned worker = threadIdx.x / 16;
     const int row = blockIdx.y;
@@ -104,9 +105,9 @@ __global__ void multiply(const int8_t *codes, const float *scales, const uint32_
 
 __global__ void rotate_output(const float *partial, const uint16_t *svh, uint16_t *output, int width,
                               int padded, const Hy4ExpertProjection *group = nullptr, int stride = 0,
-                              float *logits = nullptr) {
+                              float *logits = nullptr, const Hy4Route *routes = nullptr) {
     if (group)
-        svh = group[blockIdx.y * stride].svh;
+        svh = group[(routes ? routes[blockIdx.y].expert : blockIdx.y) * stride].svh;
     const int base = blockIdx.x * 128 + threadIdx.x * 4;
     float v[4];
     for (int i = 0; i < 4; ++i)
@@ -157,10 +158,10 @@ extern "C" hipError_t shelf_hy4_linear(const uint16_t *input, const uint16_t *su
 
 extern "C" hipError_t shelf_hy4_expert_linear(const uint16_t *x, const Hy4ExpertProjection *matrices,
                                               int stride, int8_t *codes, float *scales, float *partial,
-                                              uint16_t *y, int rows) {
+                                              uint16_t *y, int rows, const Hy4Route *routes) {
     if (!x || !matrices || !codes || !scales || !partial || !y || rows < 1 || rows > 65535 || stride < 1)
         return hipErrorInvalidValue;
-    rotate_input<<<dim3(12, rows), 32>>>(x, nullptr, codes, scales, 1536, 1536, matrices, stride);
+    rotate_input<<<dim3(12, rows), 32>>>(x, nullptr, codes, scales, 1536, 1536, matrices, stride, routes);
     auto status = hipGetLastError();
     if (status != hipSuccess)
         return status;
@@ -170,13 +171,14 @@ extern "C" hipError_t shelf_hy4_expert_linear(const uint16_t *x, const Hy4Expert
     }();
     if (use_dot)
         multiply<4, true>
-            <<<dim3(96, rows), 128>>>(codes, scales, nullptr, partial, 1536, 1536, matrices, stride);
+            <<<dim3(96, rows), 128>>>(codes, scales, nullptr, partial, 1536, 1536, matrices, stride, routes);
     else
-        multiply<4><<<dim3(96, rows), 128>>>(codes, scales, nullptr, partial, 1536, 1536, matrices, stride);
+        multiply<4>
+            <<<dim3(96, rows), 128>>>(codes, scales, nullptr, partial, 1536, 1536, matrices, stride, routes);
     status = hipGetLastError();
     if (status != hipSuccess)
         return status;
-    rotate_output<<<dim3(12, rows), 32>>>(partial, nullptr, y, 1536, 1536, matrices, stride);
+    rotate_output<<<dim3(12, rows), 32>>>(partial, nullptr, y, 1536, 1536, matrices, stride, nullptr, routes);
     return hipGetLastError();
 }
 
