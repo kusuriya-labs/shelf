@@ -4,7 +4,7 @@ origin/main の 14a23730 から専用 worktree を作成した。原本の confi
 
 ## 現在の待機状態
 
-11 月 19 日 00:57 JST に本体の 0〜35 層と CPU 連続照合が完了した。層 35 の校正 hidden に対する 4 token の相対 L2 は 0.146325。次の入力待ちは残り 6 層、6 bit head、checkpoint 組立である。
+11 月 19 日 01:15 JST に本体の 0〜37 層と CPU 連続照合が完了した。層 37 の校正 hidden に対する 4 token の相対 L2 は 0.159950。次の入力待ちは残り 4 層、6 bit head、checkpoint 組立である。
 
 | 作業 | 完了を確認する場所 |
 |---|---|
@@ -132,3 +132,8 @@ DFly の target/draft 分布から受理または補正 token を選ぶ本番関
 ## EP4　実測に基づく配置調整の準備
 
 SHELF_HY4_PROFILE_EP=1 のときだけ、各 rank で routed expert の gather から加重和までを HIP event で計る。prefill と decode の GPU 時間を選択件数と併記し、3 台の待ち時間の偏りを診断する。通常のスループット測定では同期を追加しない。placement.py では短い推論用の予約長も指定できるため、2Mi 予約時と pp2048 実行時の配置をそれぞれ検討できる。専用ビルドと CPU テストを再確認した。
+
+## 毎時レビュー第 2 回への対応
+
+1. SHELF_HY4_WMMA、SHELF_HY4_DOT4、SHELF_HY4_ABSORB、SHELF_HY4_GROUP_ROWS は実機比較のための一時スイッチとする。EP=3 で重み・入力・配置・chunk・seed を固定し、各候補の有無を変えて CPU 基準との logits 誤差、greedy 列、pp2048・decode の反復時間を比較する。GROUP_ROWS は WMMA または dot4 と組み合わせて使うため、採用予定の組合せから外した場合も調べる。各候補の採否、適用する ISA・行数、測定記録の場所をこの文書に残す。不採用の専用 kernel、分岐、フラグ、専用の試験設定を削除する。採用した経路は適用条件を通常の dispatch に組み込み、比較専用フラグを外して再度ビルド・受入検査を行う。
+2. SHELF_HY4_ONLY=OFF は受入中の共通部品の比較ビルドに使っている。EP=3 受入後に継続利用する呼び出し元と検査を確認し、今後の用途がなければ legacy 構成の入口を整理する。現時点では検証対象を同時に変えないため削除を保留した。
