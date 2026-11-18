@@ -162,16 +162,36 @@ scalar と AVX512 の packed payload は bit 一致した。
 | 状態 | wall | user | sys |
 | --- | ---: | ---: | ---: |
 | INT6 scalar（warm） | 23.33 s | 206.5 s | 23.2 s |
-| INT6 AVX512（warm） | **19.07 s** | **24.4 s** | 26.8 s |
-| INT6 AVX512（cold） | 28.42 s | 22.7 s | 49.6 s |
+| INT6 AVX512 + mmap（warm） | **19.07 s** | **24.4 s** | 26.8 s |
+| INT6 AVX512 + mmap（cold） | 28.42 s | 22.7 s | 49.6 s |
 
-AVX512 で量子化の CPU 時間はほぼ消え、wall は BF16 95.37 GiB の読み込みと
-page fault に支配される。page cache の状態を制御した benchmark ではない。
+この mmap 経路は BF16 shard 全体を page cache に載せ得るため、出力 38.743 GiB と
+合わせて peak が 100 GiB を超える。メモリ圧を避けるため、量子化の読み込みは
+shard ごとの `pread` に変更した。
+
+## ストリーミング読み込み
+
+- shard ごとに `SafetensorsReader` で tensor の絶対 offset だけを取得し、reader は即座に破棄する。
+- 64 Ki 行（約 20 MiB）ずつ `pread` し、AVX512 で量子化する。
+- 処理済み範囲を `posix_fadvise(POSIX_FADV_DONTNEED)` で page cache から落とす。
+- BF16 table 全体を anonymous RAM にも page cache にも保持しない。残るのは INT6 出力
+  38.743 GiB と worker あたり約 20 MiB の chunk だけである。
+
+`test_qwen4exp_load --skip-gpu ...` の実測:
+
+| 経路 | wall（1 回目） | wall（warm） | user | sys | peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| AVX512 + mmap | 28.42 s | 19.07 s | 24.4 s | 26.8 s | 未測定（source 95.37 GiB が page cache に載り得る） |
+| AVX512 + streaming | 31.89 s | 31.51 s | 24.1 s | 36.6 s | **39.24 GiB** |
+
+streaming は page cache を毎回捨てるため warm でも disk 読み込みが残り、mmap より
+約 12 s 遅い。代わりに peak RSS は出力サイズ + 約 0.5 GiB に収まる。
 
 ## 起動時間
 
-INT6 W32 の page cache warm は AVX512 で wall 19.07 s、cold で 28.42 s。
-scalar では warm 23.33 s、cold 32.46 s だった。
+INT6 W32 の streaming load は wall 31.5 s（1 回目 31.9 s）、peak RSS 39.24 GiB。
+mmap 経路は warm 19.07 s / cold 28.42 s だが、BF16 の page cache を含めると
+メモリ圧が高い。
 
 ## 判断
 

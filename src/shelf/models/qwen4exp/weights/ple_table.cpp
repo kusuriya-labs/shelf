@@ -193,7 +193,6 @@ void PleTable::FreeDeleter::operator()(void* p) const noexcept {
 Result<PleTable> PleTable::load_index_shards(const std::string& model_dir,
                                              const Qwen4ExpTextConfig& config,
                                              bool fadvise_dontneed) {
-    (void)fadvise_dontneed;
     const std::vector<std::size_t> ple_layers = config.ple_layers();
     if (ple_layers.size() != 1u) {
         return Status::unsupported(
@@ -346,7 +345,89 @@ Result<PleTable> PleTable::load_index_shards(const std::string& model_dir,
             return Status::invalid_argument("PLE shard is missing from the index",
                                             __FILE__, __LINE__);
         }
-        auto reader = reader_for(shard_it.value().get<std::string>());
+        const std::string shard_file = shard_it.value().get<std::string>();
+        const std::string shard_path = model_dir + "/" + shard_file;
+        const std::size_t row_bytes_in =
+            static_cast<std::size_t>(table.row_width_) *
+            (source_dtype == shelf::io::SType::BF16 ? 2u : 1u);
+        const std::size_t out_bytes =
+            static_cast<std::size_t>(table.shard_rows_) * table.row_bytes_;
+
+        if (table.format_ == TableFormat::Int6W32Fp16) {
+            std::uint64_t tensor_offset = 0;
+            std::uint64_t tensor_bytes = 0;
+            {
+                auto local = shelf::io::SafetensorsReader::open(shard_path);
+                if (!local.ok()) return local.status();
+                auto spec = local.value().tensor_spec(name_it->second);
+                if (!spec.ok() || spec.value().dtype != source_dtype ||
+                    spec.value().shape.size() != 2u ||
+                    spec.value().shape[0] != table.shard_rows_ ||
+                    spec.value().shape[1] != table.row_width_) {
+                    return Status::invalid_argument("PLE shard shape is invalid", __FILE__,
+                                                    __LINE__);
+                }
+                auto span = local.value().tensor_span(name_it->second);
+                if (!span.ok()) return span.status();
+                tensor_offset = span.value().absolute_offset;
+                tensor_bytes = span.value().byte_length;
+            }
+            if (tensor_bytes != static_cast<std::uint64_t>(table.shard_rows_) * row_bytes_in) {
+                return Status::invalid_argument("PLE shard byte count is invalid", __FILE__,
+                                                __LINE__);
+            }
+            const int fd = ::open(shard_path.c_str(), O_RDONLY | O_CLOEXEC);
+            if (fd < 0) {
+                return Status::invalid_argument(
+                    (std::string("cannot open PLE shard: ") + std::strerror(errno)).c_str(),
+                    __FILE__, __LINE__);
+            }
+            void* memory = nullptr;
+            if (::posix_memalign(&memory, 64u, out_bytes) != 0) {
+                ::close(fd);
+                return Status::insufficient_memory("cannot allocate PLE shard", __FILE__,
+                                                   __LINE__);
+            }
+            auto* out = static_cast<std::uint8_t*>(memory);
+            constexpr std::uint32_t kChunkRows = 65536u;
+            std::vector<std::uint8_t> chunk(
+                static_cast<std::size_t>(kChunkRows) * row_bytes_in);
+            const long page_size = ::sysconf(_SC_PAGESIZE);
+            for (std::uint32_t row = 0; row < table.shard_rows_; row += kChunkRows) {
+                const std::uint32_t rows =
+                    std::min(kChunkRows, table.shard_rows_ - row);
+                const std::size_t chunk_bytes = static_cast<std::size_t>(rows) * row_bytes_in;
+                const std::uint64_t chunk_offset =
+                    tensor_offset + static_cast<std::uint64_t>(row) * row_bytes_in;
+                Status read = read_exact_at(fd, chunk_offset, chunk.data(), chunk_bytes);
+                if (!read.ok()) {
+                    std::free(memory);
+                    ::close(fd);
+                    return read;
+                }
+                const auto* source = reinterpret_cast<const shelf::bf16_t*>(chunk.data());
+                for (std::uint32_t local_row = 0; local_row < rows; ++local_row) {
+                    shelf::quantization::int6::quantize_bf16_row(
+                        source + static_cast<std::size_t>(local_row) * table.row_width_, groups,
+                        out + static_cast<std::size_t>(row + local_row) * table.row_bytes_);
+                }
+                if (fadvise_dontneed && page_size > 0) {
+                    const std::uint64_t page = static_cast<std::uint64_t>(page_size);
+                    const std::uint64_t begin = chunk_offset & ~(page - 1u);
+                    const std::uint64_t end =
+                        (chunk_offset + chunk_bytes + page - 1u) & ~(page - 1u);
+                    (void)::posix_fadvise(fd, static_cast<off_t>(begin),
+                                          static_cast<off_t>(end - begin),
+                                          POSIX_FADV_DONTNEED);
+                }
+            }
+            ::close(fd);
+            table.shards_[id].data.reset(out);
+            table.shards_[id].bytes = out_bytes;
+            return Status::make_ok();
+        }
+
+        auto reader = reader_for(shard_file);
         if (!reader.ok()) return reader.status();
         auto spec = reader.value()->tensor_spec(name_it->second);
         if (!spec.ok() || spec.value().dtype != source_dtype ||
@@ -359,31 +440,16 @@ Result<PleTable> PleTable::load_index_shards(const std::string& model_dir,
         std::size_t bytes = 0;
         auto data = reader.value()->tensor_data(name_it->second, bytes);
         if (!data.ok()) return data.status();
-        const std::size_t row_bytes_in =
-            static_cast<std::size_t>(table.row_width_) *
-            (source_dtype == shelf::io::SType::BF16 ? 2u : 1u);
         if (bytes != static_cast<std::size_t>(table.shard_rows_) * row_bytes_in) {
             return Status::invalid_argument("PLE shard byte count is invalid", __FILE__,
                                             __LINE__);
         }
-        const std::size_t out_bytes =
-            static_cast<std::size_t>(table.shard_rows_) * table.row_bytes_;
         void* memory = nullptr;
         if (::posix_memalign(&memory, 64u, out_bytes) != 0) {
             return Status::insufficient_memory("cannot allocate PLE shard", __FILE__,
                                                __LINE__);
         }
-        if (table.format_ == TableFormat::Int6W32Fp16) {
-            const auto* source = static_cast<const shelf::bf16_t*>(data.value());
-            auto* out = static_cast<std::uint8_t*>(memory);
-            for (std::uint32_t row = 0; row < table.shard_rows_; ++row) {
-                shelf::quantization::int6::quantize_bf16_row(
-                    source + static_cast<std::size_t>(row) * table.row_width_, groups,
-                    out + static_cast<std::size_t>(row) * table.row_bytes_);
-            }
-        } else {
-            std::memcpy(memory, data.value(), bytes);
-        }
+        std::memcpy(memory, data.value(), bytes);
         table.shards_[id].data.reset(static_cast<std::uint8_t*>(memory));
         table.shards_[id].bytes = out_bytes;
         return Status::make_ok();
