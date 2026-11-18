@@ -236,6 +236,16 @@ std::size_t LoadedModel::executor_reserve_bytes(std::size_t max_batch_rows,
     if (moe_ != nullptr)
         total += shelf::qwen35moe::moe_executor_grouped_bytes(moe_->text_config(),
                                                               max_batch_rows, tp_size);
+    if (qwen4exp_ != nullptr) {
+        const auto& text = qwen4exp_->text_config();
+        shelf::qwen35moe::Qwen35MoeTextConfig grouped;
+        static_cast<shelf::qwen_hybrid::QwenHybridConfig&>(grouped) = text;
+        grouped.ffn.num_experts = text.ffn.num_experts;
+        grouped.ffn.num_experts_per_tok = text.ffn.num_experts_per_tok;
+        grouped.ffn.moe_intermediate_size = text.ffn.moe_intermediate_size;
+        grouped.ffn.shared_expert_intermediate_size = text.ffn.shared_expert_intermediate_size;
+        total += shelf::qwen35moe::moe_executor_grouped_bytes(grouped, max_batch_rows, tp_size);
+    }
     return total;
 }
 
