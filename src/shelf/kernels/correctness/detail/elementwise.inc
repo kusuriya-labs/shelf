@@ -19,7 +19,7 @@ __device__ __forceinline__ ProgramStatus exec_unary(
         const float x = load_elem(in, r * in.row_stride + c);
         float y = x;
         if (kind == KernelId::SILU) y = x / (1.f + expf(-x));
-        else if (kind == KernelId::SIGMOID) y = 1.f / (1.f + expf(-x));
+        else if (kind == KernelId::SIGMOID) y = 1.f / (1.f + __expf(-x));
         else if (kind == KernelId::SCALE) y = x * b.scalar_a;
         store_elem(out, r * out.row_stride + c, y);
     }

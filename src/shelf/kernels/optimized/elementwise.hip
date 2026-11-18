@@ -149,7 +149,7 @@ __global__ void shelf_sigmoid_f32(ElementwiseArgs args) {
     for (uint32_t i = 0u; i < kElementwiseVec; ++i) {
         const uint32_t c = col0 + i;
         if (c >= args.features) break;
-        out_row[c] = 1.0f / (1.0f + expf(-in_row[c]));
+        out_row[c] = 1.0f / (1.0f + __expf(-in_row[c]));
     }
 }
 

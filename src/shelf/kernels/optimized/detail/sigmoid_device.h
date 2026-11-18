@@ -5,6 +5,6 @@
 
 namespace shelf::kernel::detail {
 
-__device__ __forceinline__ float sigmoid_f32(float x) { return 1.0f / (1.0f + expf(-x)); }
+__device__ __forceinline__ float sigmoid_f32(float x) { return 1.0f / (1.0f + __expf(-x)); }
 
 }  // namespace shelf::kernel::detail
