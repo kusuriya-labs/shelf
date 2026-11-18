@@ -115,7 +115,6 @@ void compute_usage(const char* prog) {
     printf("  --seed N               sampling seed (default 0)\n");
     printf("  --moe-host-experts N    routed experts per layer kept in host memory (default 0)\n");
     printf("  --moe-cache-swap-budget N   expert cache swap budget (default 96)\n");
-    printf("  --moe-cache-burst N     max burst swaps (default 512)\n");
     printf("  --moe-cache-min-gain N  minimum frequency gain to swap (default 150)\n");
     printf("  --moe-cache-rebalance-steps N  rebalance interval in steps (default 4)\n");
     printf("  --moe-cache-rebalance-routes N rebalance interval in routes (0 = auto)\n");
@@ -469,13 +468,6 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
                 return kComputeParseError;
             }
             apply_env_u32("SHELF_MOE_CACHE_SWAP_BUDGET", value);
-        } else if (std::strcmp(argv[i], "--moe-cache-burst") == 0 && i + 1 < argc) {
-            unsigned long value = 0;
-            if (!parse_uint(argv[++i], value)) {
-                fprintf(stderr, "bad --moe-cache-burst\n");
-                return kComputeParseError;
-            }
-            apply_env_u32("SHELF_MOE_CACHE_BURST_SWAPS", value);
         } else if (std::strcmp(argv[i], "--moe-cache-min-gain") == 0 && i + 1 < argc) {
             unsigned long value = 0;
             if (!parse_uint(argv[++i], value)) {

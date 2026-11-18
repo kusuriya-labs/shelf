@@ -120,10 +120,12 @@ lm_head (final norm なし)
   group row は 1 本のままである。miss は host plane の重みを PCIe 越しに読む。
 - slot の入れ替えは step 間だけで行う。router は local expert ごとの route 数を
   `expert_route_freq` に積み、batch 完了後に累積頻度の順位で host expert と VRAM expert
-  を再配置する。`--moe-cache-swap-budget`（既定 96）が 1 step の交換上限、
-  `--moe-cache-min-gain`（既定 150）が交換を採る最小の頻度差、
-  `--moe-cache-rebalance-steps`（既定 4）が再評価の間隔、
-  `--moe-cache-decay`（既定 4096）が frequency を半分にする閾値である。
+  を再配置する。route 数が 層×local expert を超える batch（prefill 相当）は計画した交換を
+  その step で全数消化し、decode step へ再配置を持ち越さない。それ以外の step は
+  `--moe-cache-swap-budget`（既定 96）が 1 step の交換上限で、PCIe 予算
+  （`--pcie-frac`）の範囲内で消化する。`--moe-cache-min-gain`（既定 150）が交換を採る
+  最小の頻度差、`--moe-cache-rebalance-steps`（既定 4）が再評価の間隔、
+  `--moe-cache-decay`（既定 4096）が frequency を 0.7 倍にする閾値である。
 - PLE は layer 1 の attention site の前に注入する。key_proj / value_proj /
   norm_key / norm_query / norm_conv / short conv を使う。
 

@@ -76,7 +76,6 @@ void print_usage(FILE* out) {
         "  --arena-gib N                (default auto = free VRAM minus 0.5 GiB)\n"
         "  --moe-host-experts N       routed experts per layer kept in host memory (default 0)\n"
         "  --moe-cache-swap-budget N  expert cache swap budget (default 96)\n"
-        "  --moe-cache-burst N        max burst swaps (default 512)\n"
         "  --moe-cache-min-gain N     minimum frequency gain to swap (default 150)\n"
         "  --moe-cache-rebalance-steps N  rebalance interval in steps (default 4)\n"
         "  --moe-cache-rebalance-routes N rebalance interval in routes (0 = auto)\n"
@@ -291,8 +290,6 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
             if (!apply_env_u32(need_value(), "SHELF_MOE_HOST_EXPERTS")) return false;
         } else if (key == "--moe-cache-swap-budget") {
             if (!apply_env_u32(need_value(), "SHELF_MOE_CACHE_SWAP_BUDGET")) return false;
-        } else if (key == "--moe-cache-burst") {
-            if (!apply_env_u32(need_value(), "SHELF_MOE_CACHE_BURST_SWAPS")) return false;
         } else if (key == "--moe-cache-min-gain") {
             if (!apply_env_u32(need_value(), "SHELF_MOE_CACHE_MIN_GAIN")) return false;
         } else if (key == "--moe-cache-rebalance-steps") {

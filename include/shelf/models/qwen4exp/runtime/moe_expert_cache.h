@@ -19,6 +19,11 @@ namespace qwen4exp {
 // memory. This cache swaps their contents between the two pools between steps. The
 // grouped GEMM uses the slot map (>= 0 VRAM slot, -1 - slot host slot); the host plane
 // is read over PCIe for misses, so the cache never runs a CPU matmul.
+//
+// A batch whose routes exceed layers * experts carries the whole pending swap plan in
+// that step, so a re-placement finishes while prefill-class work still amortizes the
+// PCIe traffic. Smaller steps drain the plan at `budget_` moves and within the PCIe
+// share, which keeps swap latency off the decode critical path once the plan is empty.
 class MoeExpertCache {
 public:
     static std::unique_ptr<MoeExpertCache> create(const Qwen4ExpRankWeights& weights);
@@ -58,7 +63,6 @@ private:
     std::uint32_t host_experts_ = 0;
     std::uint32_t experts_ = 0;
     std::uint32_t budget_ = 64;
-    std::uint32_t burst_ = 512;
     std::uint32_t min_gain_ = 150;
     std::uint32_t rebalance_steps_ = 4;
     std::uint32_t decay_at_ = 4096;

@@ -43,7 +43,6 @@ MoeExpertCache::MoeExpertCache(const Qwen4ExpRankWeights& weights) : weights_(&w
     host_experts_ = weights.host_experts;
     experts_ = vram_experts_ + host_experts_;
     budget_ = env_u32("SHELF_MOE_CACHE_SWAP_BUDGET", 96u);
-    burst_ = std::max<std::uint32_t>(env_u32("SHELF_MOE_CACHE_BURST_SWAPS", 512u), budget_);
     min_gain_ = std::max<std::uint32_t>(env_u32("SHELF_MOE_CACHE_MIN_GAIN", 150u), 100u);
     rebalance_steps_ =
         std::max<std::uint32_t>(env_u32("SHELF_MOE_CACHE_REBALANCE_STEPS", 4u), 1u);
@@ -147,14 +146,17 @@ Status MoeExpertCache::step(hipStream_t stream) {
     }
     const std::uint64_t batched_routes = static_cast<std::uint64_t>(layers_) * experts_;
     const bool batched = step_routes > batched_routes;
-    const std::uint32_t budget = batched ? burst_ : budget_;
     const std::uint64_t move_bytes = swap_bytes();
-    for (std::uint32_t index = 0; index < budget && pending_head_ < pending_.size();
-         ++index, ++pending_head_) {
+    const std::size_t drain_limit = batched
+        ? pending_.size()
+        : std::min<std::size_t>(pending_.size(),
+                                pending_head_ + static_cast<std::size_t>(budget_));
+    while (pending_head_ < drain_limit) {
         if (!batched && !pcie_.try_acquire(move_bytes)) break;
         const Move move = pending_[pending_head_];
         st = swap(move.layer, move.host_slot, move.vram_slot, stream);
         if (!st.ok()) return st;
+        ++pending_head_;
         ++swaps_;
     }
 

@@ -65,7 +65,6 @@ detail and is not a `--variant` value.
 | `--arena-gib N` | (default auto = free VRAM minus 0.5 GiB) |
 | `--moe-host-experts N` | routed experts per layer kept in host memory (default 0) |
 | `--moe-cache-swap-budget N` | expert cache swap budget (default 96) |
-| `--moe-cache-burst N` | max burst swaps (default 512) |
 | `--moe-cache-min-gain N` | minimum frequency gain to swap (default 150) |
 | `--moe-cache-rebalance-steps N` | rebalance interval in steps (default 4) |
 | `--moe-cache-rebalance-routes N` | rebalance interval in routes (0 = auto) |
@@ -135,7 +134,6 @@ backbone kernel の allowlist に登録済みで、prefill の throughput は TP
 | `--arena-gib N` | (default auto = free VRAM minus 0.5 GiB) |
 | `--moe-host-experts N` | routed experts per layer kept in host memory (default 0) |
 | `--moe-cache-swap-budget N` | expert cache swap budget (default 96) |
-| `--moe-cache-burst N` | max burst swaps (default 512) |
 | `--moe-cache-min-gain N` | minimum frequency gain to swap (default 150) |
 | `--moe-cache-rebalance-steps N` | rebalance interval in steps (default 4) |
 | `--moe-cache-rebalance-routes N` | rebalance interval in routes (0 = auto) |
