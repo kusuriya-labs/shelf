@@ -16,13 +16,20 @@ __device__ uint64_t mix(uint64_t v) {
     v = (v ^ (v >> 27)) * 0x94d049bb133111ebull;
     return v ^ (v >> 31);
 }
-__global__ void best_ids(const float *logits, int *tokens, int position, uint64_t seed, float temperature) {
+__global__ void best_ids(const float *logits, int *tokens, int position, uint64_t seed, float temperature,
+                         const float *subtract = nullptr) {
     __shared__ float vals[256];
     __shared__ int ids[256];
-    int tid = threadIdx.x, row = blockIdx.x, id = 0;
+    int tid = threadIdx.x, row = blockIdx.x, id = -1;
     float best = -INFINITY;
     for (int c = tid; c < 120832; c += 256) {
         float v = logits[size_t(row) * 120832 + c];
+        if (subtract) {
+            float mass = v - subtract[c];
+            if (mass <= 0)
+                continue;
+            v = logf(mass);
+        }
         if (temperature > 0) {
             uint64_t bits = mix((uint64_t(position + row) << 32 | uint32_t(c)) ^ seed);
             float uniform = (float(bits >> 41) + 0.5f) * 0x1p-23f;
@@ -46,6 +53,46 @@ __global__ void best_ids(const float *logits, int *tokens, int position, uint64_
     if (!tid)
         tokens[row] = ids[0];
 }
+__global__ void probabilities(const float *logits, float *out, float temp) {
+    __shared__ float scratch[256];
+    int t = threadIdx.x;
+    logits += size_t(blockIdx.x) * 120832;
+    out += size_t(blockIdx.x) * 120832;
+    float peak = -INFINITY;
+    for (int c = t; c < 120832; c += 256)
+        peak = fmaxf(peak, logits[c]);
+    scratch[t] = peak;
+    __syncthreads();
+    for (int n = 128; n; n /= 2) {
+        if (t < n)
+            scratch[t] = fmaxf(scratch[t], scratch[t + n]);
+        __syncthreads();
+    }
+    peak = scratch[0];
+    __syncthreads();
+    float sum = 0;
+    for (int c = t; c < 120832; c += 256) {
+        out[c] = expf((logits[c] - peak) / temp);
+        sum += out[c];
+    }
+    scratch[t] = sum;
+    __syncthreads();
+    for (int n = 128; n; n /= 2) {
+        if (t < n)
+            scratch[t] += scratch[t + n];
+        __syncthreads();
+    }
+    for (int c = t; c < 120832; c += 256)
+        out[c] /= scratch[0];
+}
+__global__ void test_drafts(const float *target, const float *draft, const int *ids, int position,
+                            uint64_t seed, int *accept) {
+    int i = threadIdx.x, token = ids[i];
+    size_t offset = size_t(i) * 120832 + token;
+    uint64_t bits = mix((uint64_t(position + i) << 32) ^ seed ^ 0xc343d97fb3efull);
+    double u = (double(bits >> 12) + 0.5) * 0x1p-52;
+    accept[i] = u * double(draft[offset]) <= double(target[offset]);
+}
 __global__ void fuse_anchor(Mat anchor, Mat fusion, const uint16_t *gate) {
     int i = blockIdx.x * 256 + threadIdx.x;
     anchor.p[i] = f32_to_bf16_rne_device(bf16_bits_to_f32(anchor.p[i]) +
@@ -57,13 +104,21 @@ struct Target {
     std::array<Selection, 5> tapped;
     Mat state{};
     size_t base = 0;
+    float *target_probs = nullptr;
+    float *draft_probs = nullptr;
     float temperature;
     uint64_t seed;
     Target(Residency &gpu, float temp, uint64_t rng) : op(gpu), temperature(temp), seed(rng) {
+        op.arena.cursor = 0;
+        if (gpu.model.has_draft && temperature > 0) {
+            target_probs = static_cast<float *>(op.arena.next(6 * 120832 * 4));
+            draft_probs = static_cast<float *>(op.arena.next(5 * 120832 * 4));
+        }
         state = op.mat(6, 3072);
         base = op.arena.cursor;
     }
-    std::vector<int> predict(Mat hidden, int position, bool draft = false, const Path &dump = {}) {
+    std::vector<int> predict(Mat hidden, int position, bool draft = false, const Path &dump = {},
+                             float *distribution = nullptr) {
         size_t mark = op.arena.cursor;
         auto codes = static_cast<int8_t *>(op.arena.next(size_t(hidden.rows) * 3072));
         auto scales = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 24 * 4));
@@ -81,6 +136,10 @@ struct Target {
             if (!file.write(reinterpret_cast<const char *>(host.data()), host.size() * 4))
                 throw std::runtime_error("logits を保存できません");
         }
+        if (distribution) {
+            probabilities<<<hidden.rows, 256>>>(logits, distribution, temperature);
+            checked(hipGetLastError());
+        }
         int *device_ids = static_cast<int *>(op.arena.next(hidden.rows * 4));
         best_ids<<<hidden.rows, 256>>>(logits, device_ids, position, seed ^ (draft ? 0x735a7ec51b09ull : 0ull),
                                        temperature);
@@ -97,34 +156,15 @@ struct Target {
         if (ids.empty() || start + ids.size() > op.gpu.tokens || (verify && ids.size() > 6))
             throw std::runtime_error("入力列が KV の範囲外です");
         Mat x = op.embed(ids, true);
-        size_t save = op.arena.cursor;
         for (int layer = 0; layer < 42; ++layer) {
-            auto p = "model.layers." + std::to_string(layer) + ".";
-            if (layer % 10 == 1 && layer <= 31)
-                engram(op, layer, x, history, ids);
-            float *post;
-            Mat a = op.collapse(x, p + "hc_attn_layer.hc_pre.hc_", post);
-            a = op.norm(a, p + "input_layernorm.weight");
             Selection selection;
-            a = attention(op, p, layer, start, a, selection, false);
-            Mat z = op.expand(x, a, post);
-            checked(hipMemcpyAsync(x.p, z.p, z.bytes(), hipMemcpyDeviceToDevice));
+            decoder_layer(op, layer, start, x, history, ids, selection);
             auto it = std::find(sources.begin(), sources.end(), layer);
             if (it != sources.end()) {
                 if (!verify)
                     selection = Selection{std::move(selection.back())};
                 tapped[it - sources.begin()] = std::move(selection);
             }
-            op.arena.cursor = save;
-            Mat f = op.collapse(x, p + "hc_mlp_layer.hc_pre.hc_", post);
-            f = op.norm(f, p + "post_attention_layernorm.weight");
-            if (layer == 0)
-                f = op.norm(feedforward(op, p + "mlp", f), p + "mlp.post_fc2_norm.weight");
-            else
-                f = moe(op, layer, f);
-            z = op.expand(x, f, post);
-            checked(hipMemcpyAsync(x.p, z.p, z.bytes(), hipMemcpyDeviceToDevice));
-            op.arena.cursor = save;
         }
         history.insert(history.end(), ids.begin(), ids.end());
         if (!need_head)
@@ -134,7 +174,7 @@ struct Target {
         float *unused;
         Mat h = op.norm(op.collapse(x, "model.hc_head.hc_head_", unused), "model.norm.weight");
         checked(hipMemcpyAsync(state.p, h.p, h.bytes(), hipMemcpyDeviceToDevice));
-        return predict(h, history.size() - h.rows + 1, false, dump);
+        return predict(h, history.size() - h.rows + 1, false, dump, verify ? target_probs : nullptr);
     }
     std::vector<int> propose(int anchor) {
         op.arena.cursor = base;
@@ -171,10 +211,41 @@ struct Target {
             auto q = op.norm(x.row(i), correction + "hidden_norm.weight");
             auto k = op.norm(op.embed({previous}, false), correction + "embed_norm.weight");
             auto corrected = op.add(x.row(i), feedforward(op, p + "hidden_correction", op.join(q, k)));
-            previous = predict(corrected, start + i, true)[0];
+            previous = predict(corrected, start + i, true, {},
+                               draft_probs ? draft_probs + (i - 1) * 120832 : nullptr)[0];
             draft.push_back(previous);
         }
         return draft;
+    }
+    int verify_tokens(const std::vector<int> &draft, std::vector<int> &actual) {
+        if (!target_probs) {
+            int keep = 1;
+            while (keep < 6 && actual[keep - 1] == draft[keep - 1])
+                ++keep;
+            return keep;
+        }
+        int position = history.size() - 5;
+        auto ids = op.indices(draft);
+        auto out = static_cast<int *>(op.arena.next(5 * sizeof(int)));
+        test_drafts<<<1, 5>>>(target_probs, draft_probs, ids, position, seed, out);
+        checked(hipGetLastError());
+        int accepted[5];
+        op.copy(accepted, out, sizeof(accepted), hipMemcpyDeviceToHost);
+        for (int i = 0; i < 5; ++i) {
+            if (accepted[i]) {
+                actual[i] = draft[i];
+                continue;
+            }
+            best_ids<<<1, 256>>>(target_probs + i * 120832, out, position + i, seed ^ 0xc1f8efb6703ull, 1.f,
+                                 draft_probs + i * 120832);
+            checked(hipGetLastError());
+            int replacement;
+            op.copy(&replacement, out, sizeof(int), hipMemcpyDeviceToHost);
+            if (replacement >= 0)
+                actual[i] = replacement;
+            return i + 1;
+        }
+        return 6;
     }
     void accept(int keep, int submitted) {
         history.resize(history.size() - submitted + keep);
@@ -184,6 +255,29 @@ struct Target {
             s = Selection{std::move(s[keep - 1])};
     }
 };
+}
+void decoder_layer(Ops &op, int layer, int start, Mat x, const std::vector<int> &history,
+                   const std::vector<int> &ids, Selection &selection) {
+    size_t save = op.arena.cursor;
+    auto p = "model.layers." + std::to_string(layer) + ".";
+    if (layer % 10 == 1 && layer <= 31)
+        engram(op, layer, x, history, ids);
+    float *post;
+    Mat a = op.collapse(x, p + "hc_attn_layer.hc_pre.hc_", post);
+    a = op.norm(a, p + "input_layernorm.weight");
+    a = attention(op, p, layer, start, a, selection, false);
+    Mat z = op.expand(x, a, post);
+    checked(hipMemcpyAsync(x.p, z.p, z.bytes(), hipMemcpyDeviceToDevice));
+    op.arena.cursor = save;
+    Mat f = op.collapse(x, p + "hc_mlp_layer.hc_pre.hc_", post);
+    f = op.norm(f, p + "post_attention_layernorm.weight");
+    if (layer == 0)
+        f = op.norm(feedforward(op, p + "mlp", f), p + "mlp.post_fc2_norm.weight");
+    else
+        f = moe(op, layer, f);
+    z = op.expand(x, f, post);
+    checked(hipMemcpyAsync(x.p, z.p, z.bytes(), hipMemcpyDeviceToDevice));
+    op.arena.cursor = save;
 }
 void generate(Residency &gpu, const std::vector<int> &ids, int count, int chunk, float temperature,
               uint64_t seed, const Path &logits_file) {
@@ -214,9 +308,7 @@ void generate(Residency &gpu, const std::vector<int> &ids, int count, int chunk,
         std::vector<int> block{anchor};
         block.insert(block.end(), draft.begin(), draft.end());
         auto actual = target.forward(block, true);
-        int keep = 1;
-        while (keep < 6 && draft[keep - 1] == actual[keep - 1])
-            ++keep;
+        int keep = target.verify_tokens(draft, actual);
         ++rounds;
         accepted += keep - 1;
         target.accept(keep, 6);

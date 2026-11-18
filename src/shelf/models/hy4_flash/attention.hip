@@ -207,7 +207,7 @@ __global__ void attend(Mat q, Mat kv, Mat rotary, const int *indices, int stride
                 dot += bv(q, row, head * 256 + j) * bv(kv, idx, head * 448 + j);
             for (int j = 0; j < 64; ++j)
                 dot += bv(q, row, head * 256 + 192 + j) * bv(rotary, idx, j);
-            s = dot * 0.0625f;
+            s = round_bf16(dot) * 0.0625f;
         }
         scores[t] = s;
         maxval = fmaxf(maxval, s);
@@ -219,13 +219,16 @@ __global__ void attend(Mat q, Mat kv, Mat rotary, const int *indices, int stride
         denom += scores[t];
     }
     float sum = reduce<false>(denom, scratch, 256), v = 0;
+    for (int t = c; t < stride; t += 256)
+        scores[t] = round_bf16(scores[t] / sum);
+    __syncthreads();
     for (int t = 0; t < stride; ++t) {
         int idx = indices[row * stride + t];
         if (idx >= 0)
             v += scores[t] * bv(kv, idx, head * 448 + 192 + c);
     }
     output.p[size_t(row) * output.cols + head * 256 + c] =
-        f32_to_bf16_rne_device(v / sum / (1.f + expf(-bv(gate, row, head * 256 + c))));
+        f32_to_bf16_rne_device(round_bf16(v) * round_bf16(1.f / (1.f + expf(-bv(gate, row, head * 256 + c)))));
 }
 }
 Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidden, Selection &selected,

@@ -48,7 +48,8 @@ __global__ void normalize(Mat x, Param weight, Mat y, float eps) {
     }
     float inv = rsqrtf(blocksum(sum, scratch) / x.cols + eps);
     for (int c = threadIdx.x; c < x.cols; c += blockDim.x)
-        y.p[base + c] = f32_to_bf16_rne_device(value(x, base + c) * inv * (weight.p ? read(weight, c) : 1.f));
+        y.p[base + c] =
+            f32_to_bf16_rne_device(round_bf16(value(x, base + c) * inv) * (weight.p ? read(weight, c) : 1.f));
 }
 __global__ void select_cols(Mat x, Mat y, int first) {
     size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -71,7 +72,7 @@ __global__ void element(Mat a, Mat b, Mat y, int mode) {
         g = fminf(g, 10.f);
         u = fminf(10.f, fmaxf(-10.f, u));
     }
-    y.p[i] = f32_to_bf16_rne_device(mode ? g * u / (1.f + expf(-g)) : g + u);
+    y.p[i] = f32_to_bf16_rne_device(mode ? round_bf16(g / (1.f + expf(-g))) * u : g + u);
 }
 __global__ void gather_rows(Mat x, const int *ids, Mat y, int repeat) {
     size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;

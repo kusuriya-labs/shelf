@@ -62,7 +62,8 @@ __global__ void score(Mat q, Mat rotary, const float *query, const float *input,
             dot += __shfl_down(dot, d, 32);
     }
     if (!lane)
-        probs[(size_t(row) * gridDim.y + head) * stride + slot] = token < 0 ? -INFINITY : dot * 0.0625f;
+        probs[(size_t(row) * gridDim.y + head) * stride + slot] =
+            token < 0 ? -INFINITY : round_bf16(dot) * 0.0625f;
 }
 __global__ void softmax(float *p, int stride, Param sinks) {
     __shared__ float scratch[256];
@@ -95,7 +96,7 @@ __global__ void softmax(float *p, int stride, Param sinks) {
         __syncthreads();
     }
     for (int i = c; i < stride; i += 256)
-        probs[i] /= scratch[0];
+        probs[i] = round_bf16(probs[i] / scratch[0]);
 }
 __global__ void weighted_latent(const float *p, const int *ids, int stride, const float *input, float *v) {
     int k = blockIdx.x * 256 + threadIdx.x, head = blockIdx.y, row = blockIdx.z;
@@ -119,7 +120,8 @@ __global__ void expand_value(const _Float16 *folded, const float *v, Mat gate, M
         sum += __shfl_down(sum, d, 32);
     size_t i = size_t(r) * out.cols + h * 256 + c;
     if (!lane)
-        out.p[i] = f32_to_bf16_rne_device(sum / (1.f + expf(-bf16_bits_to_f32(gate.p[i]))));
+        out.p[i] = f32_to_bf16_rne_device(round_bf16(sum) *
+                                          round_bf16(1.f / (1.f + expf(-bf16_bits_to_f32(gate.p[i])))));
 }
 }
 void fold_kv_weights(Residency &gpu) {

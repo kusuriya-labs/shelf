@@ -54,8 +54,8 @@ def main():
     if sequence(run("generate","dfly",flags,True)) != base:
         raise ValueError("DFly と通常生成の greedy 列が一致しません")
     sample = [*flags,"--temperature","0.8","--seed","20261119"]
-    if sequence(run("generate","sample-target",sample,False)) != sequence(run("generate","sample-dfly",sample,True)):
-        raise ValueError("同一 seed の target サンプルと DFly 生成列が一致しません")
+    if sequence(run("generate","sample-dfly-repeat",sample,True)) != sequence(run("generate","sample-dfly",sample,True)):
+        raise ValueError("同一 seed の DFly 生成列が再現しません")
     allocation = run("reserve","reserve",["--max-seq-len","2097152"],True)
     reserved = int(re.search(r"^reserved_tokens=(\d+)$",allocation,re.MULTILINE).group(1))
     if reserved not in (1048576,2097152):

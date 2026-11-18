@@ -20,6 +20,7 @@ struct Weight {
 };
 
 struct Checkpoint {
+    Checkpoint() = default;
     Checkpoint(const Path &model, const Path &engram, const Path &draft, const Owners &owners);
     const Weight &at(const std::string &key) const;
     void relocate(const Owners &layout);
@@ -29,8 +30,8 @@ struct Checkpoint {
     std::array<size_t, 3> bytes{};
     std::map<std::string, std::array<int, 2>> shape;
     std::array<std::array<int, 16>, 4> moduli{};
-    Owners owners;
-    bool has_draft;
+    Owners owners{};
+    bool has_draft = false;
 };
 
 Owners read_owners(const Path &file);

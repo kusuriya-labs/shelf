@@ -24,5 +24,5 @@
 
 1. 本体完了前は tools/hy4_flash/check_chain.py で、完成済み層まで同じ 4 token の CPU 出力を保存する。配置表も保存して同じ条件で再開する。本体完了後、同じコマンドへの --body の指定で 6 bit head の FP32 logits も保存する。
 2. 本体の head_complete と実出力の conversion_report.json を確認し、原本、組立済み本体、校正 work、DFly 出力先をこの順に quant_dfly.py に渡す。量子化側と同じ mul24 用 rocm_exl3 の Python 環境で実行する。コンテナ使用時はホストで locked.py v620 を取り、docker run に -e ROCR_VISIBLE_DEVICES を渡す。
-3. ホストで locked.py ep3 を経由して qualify.py を起動する。引数は shelf-compute、本体、Engram ディレクトリ、DFly、配置 JSON、CPU 照合結果ディレクトリ、校正 safetensors、実測記録先。温度 0 の logits と生成列、正の温度で同じ seed の生成列、実予約の順に検査する。
+3. ホストで locked.py ep3 を経由して qualify.py を起動する。引数は shelf-compute、本体、Engram ディレクトリ、DFly、配置 JSON、CPU 照合結果ディレクトリ、校正 safetensors、実測記録先。温度 0 の logits と生成列、正の温度で同じ seed の DFly 生成の再現性、実予約の順に検査する。
 4. 同一常駐モデルで pp2048 と decode を 4 回測定し、初回を除いて中央値を取る。PCIe 転送・top-k のホスト同期、kv_b_proj の再展開、R9700 上の行列演算を分けて評価する。直列にかかる時間が支配的な部分から高速化し、各変更後に CPU 照合を繰り返す。

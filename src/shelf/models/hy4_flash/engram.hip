@@ -39,7 +39,7 @@ __global__ void decode_heads(const uint8_t *packed, Norms norms, Mat embed) {
     float inv = rsqrtf(sum(v * v, scratch) / 96 + 1.1920928955e-7f);
     if (c < 96)
         embed.p[blockIdx.y * 1536 + head * 96 + c] =
-            f32_to_bf16_rne_device(v * inv * bf16_bits_to_f32(norms.head[head][c]));
+            f32_to_bf16_rne_device(round_bf16(v * inv) * bf16_bits_to_f32(norms.head[head][c]));
 }
 __global__ void bias(Mat x, const uint16_t *b) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -51,16 +51,18 @@ __global__ void add_memory(Mat x, Mat k, Mat q, Mat value, const uint16_t *scale
     int row = blockIdx.x, tid = threadIdx.x;
     float dot = 0;
     for (int i = tid; i < 3072; i += 256)
-        dot += bf16_bits_to_f32(k.p[row * 3072 + i]) * bf16_bits_to_f32(q.p[row * 3072 + i]);
-    dot = sum(dot, scratch) * 0.01804219591f;
-    float gate = 1.f / (1.f + expf(-copysignf(sqrtf(fmaxf(fabsf(dot), 1e-6f)), dot)));
+        dot += round_bf16(bf16_bits_to_f32(k.p[row * 3072 + i]) * bf16_bits_to_f32(q.p[row * 3072 + i]));
+    dot = round_bf16(round_bf16(sum(dot, scratch)) * 0.01804219591f);
+    float signed_root = dot == 0 ? 0 : copysignf(round_bf16(sqrtf(fmaxf(fabsf(dot), 1e-6f))), dot);
+    float gate = round_bf16(1.f / (1.f + expf(-signed_root)));
     if (ids[row] == 120002 || ids[row] == 120120 || ids[row] == 120124)
         return;
     for (int i = tid; i < 3072; i += 256) {
         size_t index = (size_t(row) * 4 + stream) * 3072 + i;
         float v = bf16_bits_to_f32(value.p[row * 3072 + i]);
-        x.p[index] =
-            f32_to_bf16_rne_device(bf16_bits_to_f32(x.p[index]) + v * (gate + bf16_bits_to_f32(scale[i])));
+        x.p[index] = f32_to_bf16_rne_device(
+            bf16_bits_to_f32(x.p[index]) +
+            round_bf16(round_bf16(v * gate) + round_bf16(v * bf16_bits_to_f32(scale[i]))));
     }
 }
 }

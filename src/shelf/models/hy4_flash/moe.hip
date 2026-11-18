@@ -29,7 +29,7 @@ __global__ void weighted(Mat x, const Route *route, const int *offsets, Mat out)
     int r = blockIdx.y, c = blockIdx.x * 256 + threadIdx.x;
     float sum = 0;
     for (int j = offsets[r]; j < offsets[r + 1]; ++j)
-        sum += route[j].weight * bf16_bits_to_f32(x.p[j * 1536 + c]);
+        sum = round_bf16(sum + round_bf16(route[j].weight * bf16_bits_to_f32(x.p[j * 1536 + c])));
     out.p[r * 1536 + c] = f32_to_bf16_rne_device(sum);
 }
 Mat grouped(Ops &op, Mat x, const Route *routes, int kind) {
@@ -75,6 +75,7 @@ Mat moe(Ops &op, int layer, Mat x) {
         float sum = 1e-20f;
         for (int j = 0; j < 16; ++j)
             sum += prob[ids[j]];
+        std::sort(ids, ids + 16);
         for (int j = 0; j < 16; ++j) {
             int e = ids[j], r = op.gpu.model.owners[layer - 1][e];
             Route route{i, prob[e] * 3.998f / sum, {}};
