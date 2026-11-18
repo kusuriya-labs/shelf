@@ -1564,13 +1564,11 @@ bool mxfp4_producer_enabled() {
     return enabled;
 }
 
-bool mxfp4_quant_consumer_matches(const ::shelf::runtime::Program& program, size_t qi, size_t li,
-                                  const HostExecutionContext& ctx,
-                                  PhysicalActivationQuantizeLaunch& q,
-                                  const ::shelf::runtime::WeightSlot*& weight) {
+bool mxfp4_quant_consumer_matches(const ::shelf::runtime::Program& program, size_t qi,
+                                  size_t li, const HostExecutionContext& ctx,
+                                  PhysicalActivationQuantizeLaunch& q) {
     const auto& quant = program.dispatches[qi];
     const auto& linear = program.dispatches[li];
-    weight = nullptr;
     if (quant.kernel_id != KernelId::ACTIVATION_QUANTIZE_MXFP4_ROWREF ||
         linear.kernel_id != KernelId::LINEAR_MXFP4_W4A8)
         return false;
@@ -1589,9 +1587,7 @@ bool mxfp4_quant_consumer_matches(const ::shelf::runtime::Program& program, size
         q.k == 0u || q.k_padded < q.k || q.code_row_stride == 0u ||
         q.scale_row_stride == 0u)
         return false;
-    if (w.cols != q.k || w.k_padded != q.k_padded) return false;
-    weight = &w;
-    return true;
+    return w.cols == q.k && w.k_padded == q.k_padded;
 }
 
 bool mxfp4_value_is_exclusive(const ::shelf::runtime::Program& program, uint32_t slot, size_t from,
@@ -1614,8 +1610,7 @@ Result<OptimizedLaunchResult> try_launch_mxfp4_swiglu_quantize(
         swiglu.output_count != 1u)
         return miss;
     PhysicalActivationQuantizeLaunch q{};
-    const ::shelf::runtime::WeightSlot* weight = nullptr;
-    if (!mxfp4_quant_consumer_matches(program, i + 1u, i + 2u, ctx, q, weight)) return miss;
+    if (!mxfp4_quant_consumer_matches(program, i + 1u, i + 2u, ctx, q)) return miss;
     if (swiglu.output_slots[0] != quant.input_slots[0]) return miss;
     if (!mxfp4_value_is_exclusive(program, swiglu.output_slots[0], i + 2u,
                                   program.dispatches.size()))
@@ -1662,8 +1657,7 @@ Result<OptimizedLaunchResult> try_launch_mxfp4_norm_quantize(
         norm.output_count != 1u)
         return miss;
     PhysicalActivationQuantizeLaunch q{};
-    const ::shelf::runtime::WeightSlot* weight = nullptr;
-    if (!mxfp4_quant_consumer_matches(program, i + 1u, i + 2u, ctx, q, weight)) return miss;
+    if (!mxfp4_quant_consumer_matches(program, i + 1u, i + 2u, ctx, q)) return miss;
     if (norm.output_slots[0] != quant.input_slots[0]) return miss;
     const auto* binding = program.find_value(::shelf::runtime::ValueId{norm.output_slots[0]});
     if (binding == nullptr ||
@@ -1720,8 +1714,7 @@ Result<OptimizedLaunchResult> try_launch_mxfp4_residual_norm_quantize(
         norm.input_count != 1u || norm.output_count != 1u)
         return miss;
     PhysicalActivationQuantizeLaunch q{};
-    const ::shelf::runtime::WeightSlot* weight = nullptr;
-    if (!mxfp4_quant_consumer_matches(program, i + 2u, i + 3u, ctx, q, weight)) return miss;
+    if (!mxfp4_quant_consumer_matches(program, i + 2u, i + 3u, ctx, q)) return miss;
     if (add.output_slots[0] != norm.input_slots[0] ||
         norm.output_slots[0] != quant.input_slots[0])
         return miss;
@@ -1793,8 +1786,7 @@ Result<OptimizedLaunchResult> try_launch_mxfp4_gdn_gated_quantize(
         silu.output_count != 1u || mul.input_count != 2u || mul.output_count != 1u)
         return miss;
     PhysicalActivationQuantizeLaunch q{};
-    const ::shelf::runtime::WeightSlot* weight = nullptr;
-    if (!mxfp4_quant_consumer_matches(program, i + 3u, i + 4u, ctx, q, weight)) return miss;
+    if (!mxfp4_quant_consumer_matches(program, i + 3u, i + 4u, ctx, q)) return miss;
     if (norm.output_slots[0] != mul.input_slots[0] ||
         silu.output_slots[0] != mul.input_slots[1] ||
         mul.output_slots[0] != quant.input_slots[0]) {

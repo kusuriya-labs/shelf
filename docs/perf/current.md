@@ -76,6 +76,34 @@ chunk が大きいほど再配置計画の消化が decode に持ち越され、
 - `GENERATED_IDS` は修正前後で bitwise 一致する。prompt が同一 token の繰り返しのため
   受理率などの実運用分布ではない。
 - prefill の絶対値は page cache の状態で変わるため、run 間の相対比較にのみ使う。
+## 2026-11-19 Qwen3.8-27B MXFP4 non-spec prefill / decode
+
+`models/Qwen3.8-27B-Quark-AWQ-MXFP4` の非投機 prefill と decode で、
+MXFP4 活性の量子化を producer kernel に融合した構成の測定である。
+融合の内容と棄却した候補は
+[../research/20261119/mxfp4_activation_producer.md](../research/20261119/mxfp4_activation_producer.md)
+に置く。
+
+- measurement revision: `db09503`
+- GPU: Radeon AI PRO R9700 × 1（`--device 1`、bf16 KV）
+- command:
+  `shelf-bench pp --model-dir models/Qwen3.8-27B-Quark-AWQ-MXFP4 --device 1
+  --prompt-tokens 2048 --prefill-chunk 2048 --kv-cache-dtype bf16 --warmup 1 --runs 3`
+  と `shelf-bench tg --mode greedy --model-dir models/Qwen3.8-27B-Quark-AWQ-MXFP4
+  --device 1 --context 512 --tokens 128 --prefill-chunk 512 --kv-cache-dtype bf16
+  --warmup 1`
+- `SHELF_DISABLE_MXFP4_PRODUCER` の on / off を交互に 3 回ずつ実行した p50
+
+| 断面 | 分離（off） | 融合（on） | 差 |
+| --- | ---: | ---: | ---: |
+| prefill 2048 | 937.8 ms（2,229 tok/s） | **906.2 ms（2,260 tok/s）** | −3.4 % |
+| non-spec decode ctx512 / 128 token | 31.72 tok/s | **32.87 tok/s** | +3.6 % |
+
+- 量子化単体の thread 数を rows <= 32 で 1024 にした変更（`1e9948f`）は、
+  decode 30.64 → 31.7 tok/s（+3.5 %）だった。上の fused 構成はこの変更を含む。
+- 単一リクエスト E2E（prose 512 token、16 token 生成、`shelf-compute`）は
+  30.86 → 32.02 tok/s で、`GENERATED_IDS` は一致した。
+- profile 上の decode は 30.24 → 28.5 ms/token、launch は 1653 → 1165 になった。
 
 ## 2026-11-19 Qwen3.8-Flash-Next MXFP4 TP=2 prefill
 

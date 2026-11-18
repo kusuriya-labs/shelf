@@ -24,11 +24,6 @@ constexpr uint32_t kDecodeThreads = 1024u;
 constexpr uint32_t kMaxWaves = kDecodeThreads / 32u;
 constexpr uint32_t kGroup = 128u;
 constexpr uint32_t kElemsPerLane = kGroup / 32u;
-constexpr float kEps = 1e-6f;
-
-__device__ __forceinline__ float bf16_to_f32(const bf16* p) {
-    return __bfloat162float(*p);
-}
 
 __device__ __forceinline__ float bf16_round(float x) {
     return __bfloat162float(__float2bfloat16(x));
