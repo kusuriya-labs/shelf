@@ -651,6 +651,10 @@ Result<MatrixWeight> load_expert_matrix(const qqb::QuantizedModelReader& reader,
                                         hipStream_t stream,
                                         MatrixWeight& host_plane) {
     host_plane = MatrixWeight{};
+    host_plane.experts = 0u;
+    host_plane.rows = n;
+    host_plane.cols = k;
+    host_plane.k_padded = k;
     const std::string first_name =
         prefix + "mlp.experts." + std::to_string(expert_begin) + "." + projection + ".weight";
     auto first = reader.resolve(first_name);
