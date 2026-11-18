@@ -2,6 +2,19 @@
 
 origin/main の 14a23730 から専用 worktree を作成した。原本の config と量子化側の組立仕様を確認した。本体と head の変換完了待ち。組立は Engram を BF16 のまま保持し、DFly を除外するため、どちらも別途処理する。GPU を使わない作業から着手する。
 
+## 現在の待機状態
+
+11 月 19 日 00:57 JST に本体の 0〜35 層と CPU 連続照合が完了した。層 35 の校正 hidden に対する 4 token の相対 L2 は 0.146325。次の入力待ちは残り 6 層、6 bit head、checkpoint 組立である。
+
+| 作業 | 完了を確認する場所 |
+|---|---|
+| 本体の進捗と CPU 追跡 | worktree の `build-hy4/await-body.log` |
+| DFly の追加量子化 | `hy4-flash-pilot/shelf-dfly/Hy4-flash-dfly-4bpw/conversion_report.json` |
+| EP=3 受入 | worktree の `build-hy4/await-ep3.log`、`hy4-flash-pilot/shelf-qualification/` の測定記録 |
+| 3.5 bpw | 4 bpw 版の検証・高速化後に着手 |
+
+R9700 単体では代表 3 層、長い履歴の境界、DFly の確率的棄却を検査した。V620 の数値、DFly 実重み、2Mi/1Mi の実予約、pp2048 と decode の目標達成は EP=3 受入で判定する。
+
 ## E1　Engram の保存形式
 
 変換器を追加した。原実装の BF16 スケール・E4M3FN 丸め順序に従い、1 行 96 byte の符号と 2 byte のスケールを safetensors に格納する。7 行のテストでゼロ行と最終端数チャンクを含む復元値が一致した。原本の config 上の層番号は 1 始まりで、tensor 名は 1、11、21、31。原本からの 4 表の変換を CPU で開始した。出力先は hy4-flash-pilot/engram-e4m3fn。本体の progress は確認時点で層 26 まで。量子化スクリプト上の最終 report の位置は rocm-exl3-rdna2/models/Hy4-flash-exl3-4bpw-mul24/conversion_report.json。
