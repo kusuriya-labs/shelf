@@ -1182,6 +1182,23 @@ in-memory 量子化（1,048,576 行、入力 1 GiB）:
   disk 帯域で決まり、方式差は 1 s 未満だった（mmap / O_DIRECT は各 1 回）。
 - full model load、GPU 実行、生成品質はこの計測に含まない。
 
+## 2026-11-18 PLE INT6 artifact cache
+
+- model: `models/Qwen3.8-Flash-Next-Quark-MXFP4` の PLE n-gram table
+- artifact: `<model_dir>/quanted_ple.bin`、41,600,684,376 B（38.743 GiB）
+- command: `./build/tests/test_qwen4exp_load --skip-gpu --model-dir models/Qwen3.8-Flash-Next-Quark-MXFP4`
+- CPU: Ryzen 7 7800X3D、16 thread
+
+| 状態 | wall | user | sys | peak RSS |
+| --- | ---: | ---: | ---: | ---: |
+| 初回（量子化 + artifact 書き込み） | 52.08 s | 21.6 s | 31.4 s | 未測定 |
+| 2 回目（artifact 読み込み） | **15.04 s** | **0.67 s** | 20.68 s | **38.93 GiB** |
+
+- artifact は source shard の size / mtime fingerprint で検証し、stale なら再量子化する。
+- 初回は temp file へ書き、8 shard ごとに `fdatasync` してから `rename` する。
+- `SHELF_PLE_ARTIFACT=0` で artifact を無効にできる。
+- full model load、GPU 実行、生成品質はこの計測に含まない。
+
 ## 記録規則
 
 - 新しい計測をしていない数値は更新しない。

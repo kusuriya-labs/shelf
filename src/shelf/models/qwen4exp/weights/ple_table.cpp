@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -16,6 +17,7 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 #include <map>
@@ -186,6 +188,87 @@ Status expect_tensor_bytes(const TensorRecord& record, std::uint64_t expected) {
 
 }  // namespace
 
+namespace {
+
+constexpr const char* kPleArtifactName = "quanted_ple.bin";
+constexpr std::uint32_t kPleArtifactVersion = 1u;
+constexpr std::uint32_t kPleArtifactHeaderBytes = 8192u;
+constexpr std::uint32_t kPleArtifactFormatInt6 = 1u;
+constexpr std::uint32_t kPleArtifactSourceBf16 = 1u;
+constexpr std::uint32_t kPleArtifactSourceBytes = 32u;
+
+bool ple_artifact_enabled() noexcept {
+    const char* value = std::getenv("SHELF_PLE_ARTIFACT");
+    return value == nullptr || std::strcmp(value, "0") != 0;
+}
+
+std::string ple_artifact_path(const std::string& model_dir) {
+    return model_dir + "/" + kPleArtifactName;
+}
+
+std::uint64_t align_up_u64(std::uint64_t value, std::uint64_t alignment) noexcept {
+    return (value + alignment - 1u) & ~(alignment - 1u);
+}
+
+void append_u32(std::vector<std::uint8_t>& out, std::size_t& at, std::uint32_t value) {
+    std::memcpy(out.data() + at, &value, sizeof(value));
+    at += sizeof(value);
+}
+
+void append_u64(std::vector<std::uint8_t>& out, std::size_t& at, std::uint64_t value) {
+    std::memcpy(out.data() + at, &value, sizeof(value));
+    at += sizeof(value);
+}
+
+void append_i64(std::vector<std::uint8_t>& out, std::size_t& at, std::int64_t value) {
+    std::memcpy(out.data() + at, &value, sizeof(value));
+    at += sizeof(value);
+}
+
+bool take_u32(const std::uint8_t*& at, const std::uint8_t* end, std::uint32_t& value) {
+    if (static_cast<std::size_t>(end - at) < sizeof(value)) return false;
+    std::memcpy(&value, at, sizeof(value));
+    at += sizeof(value);
+    return true;
+}
+
+bool take_u64(const std::uint8_t*& at, const std::uint8_t* end, std::uint64_t& value) {
+    if (static_cast<std::size_t>(end - at) < sizeof(value)) return false;
+    std::memcpy(&value, at, sizeof(value));
+    at += sizeof(value);
+    return true;
+}
+
+bool take_i64(const std::uint8_t*& at, const std::uint8_t* end, std::int64_t& value) {
+    if (static_cast<std::size_t>(end - at) < sizeof(value)) return false;
+    std::memcpy(&value, at, sizeof(value));
+    at += sizeof(value);
+    return true;
+}
+
+Status pwrite_exact(int fd, const void* src, std::size_t bytes, std::uint64_t offset) {
+    const auto* bytes_ptr = static_cast<const std::uint8_t*>(src);
+    std::size_t done = 0;
+    while (done < bytes) {
+        const ssize_t got = ::pwrite(fd, bytes_ptr + done, bytes - done,
+                                     static_cast<off_t>(offset + done));
+        if (got < 0) {
+            if (errno == EINTR) continue;
+            return Status::invalid_argument(
+                (std::string("PLE artifact write failed: ") + std::strerror(errno)).c_str(),
+                __FILE__, __LINE__);
+        }
+        if (got == 0) {
+            return Status::invalid_argument("PLE artifact write made no progress",
+                                            __FILE__, __LINE__);
+        }
+        done += static_cast<std::size_t>(got);
+    }
+    return Status::make_ok();
+}
+
+}  // namespace
+
 void PleTable::FreeDeleter::operator()(void* p) const noexcept {
     std::free(p);
 }
@@ -295,6 +378,43 @@ Result<PleTable> PleTable::load_index_shards(const std::string& model_dir,
     if (groups == 0u || table.row_width_ % 32u != 0u) {
         return Status::invalid_argument("PLE row width is not a W32 multiple", __FILE__,
                                         __LINE__);
+    }
+
+    const bool artifact_enabled = ple_artifact_enabled();
+    std::vector<ArtifactSource> artifact_sources;
+    if (artifact_enabled) {
+        artifact_sources.reserve(table.shard_count_);
+        for (std::uint32_t id = 0; id < table.shard_count_; ++id) {
+            auto name_it = shards.find(id);
+            if (name_it == shards.end()) {
+                artifact_sources.clear();
+                break;
+            }
+            auto shard_it = weight_map.find(name_it->second);
+            if (shard_it == weight_map.end()) {
+                artifact_sources.clear();
+                break;
+            }
+            struct stat st {};
+            const std::string shard_path =
+                model_dir + "/" + shard_it.value().get<std::string>();
+            if (::stat(shard_path.c_str(), &st) != 0) {
+                artifact_sources.clear();
+                break;
+            }
+            ArtifactSource source;
+            source.id = id;
+            source.size = static_cast<std::uint64_t>(st.st_size);
+            source.mtime_sec = static_cast<std::int64_t>(st.st_mtim.tv_sec);
+            source.mtime_nsec = static_cast<std::int64_t>(st.st_mtim.tv_nsec);
+            artifact_sources.push_back(source);
+        }
+        if (artifact_sources.size() != table.shard_count_) artifact_sources.clear();
+    }
+    if (source_dtype == shelf::io::SType::BF16 && !artifact_sources.empty()) {
+        PleTable cached;
+        auto loaded = load_int6_artifact(model_dir, config, artifact_sources, cached);
+        if (loaded.ok() && loaded.value()) return cached;
     }
 
     if (source_dtype == shelf::io::SType::BF16) {
@@ -564,7 +684,288 @@ Result<PleTable> PleTable::load_index_shards(const std::string& model_dir,
     }
     table.payload_bytes_ = static_cast<std::uint64_t>(table.shard_count_) *
                            table.shard_rows_ * table.row_bytes_;
+    if (table.format_ == TableFormat::Int6W32Fp16 && artifact_enabled &&
+        !artifact_sources.empty()) {
+        Status written = write_int6_artifact(model_dir, artifact_sources, table);
+        if (!written.ok()) {
+            std::fprintf(stderr, "PLE artifact write skipped: %s\n",
+                         written.message().c_str());
+        }
+    }
     return table;
+}
+
+Result<bool> PleTable::load_int6_artifact(
+    const std::string& model_dir, const Qwen4ExpTextConfig& config,
+    const std::vector<ArtifactSource>& sources, PleTable& out) {
+    if (sources.empty()) return false;
+    const std::string path = ple_artifact_path(model_dir);
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    struct stat st {};
+    if (::fstat(fd, &st) != 0 ||
+        st.st_size < static_cast<off_t>(kPleArtifactHeaderBytes)) {
+        ::close(fd);
+        return false;
+    }
+    std::vector<std::uint8_t> header(kPleArtifactHeaderBytes);
+    Status read = read_exact_at(fd, 0, header.data(), header.size());
+    if (!read.ok()) {
+        ::close(fd);
+        return false;
+    }
+    static constexpr char kMagic[8] = {'S', 'H', 'E', 'L', 'Q', 'P', 'L', '1'};
+    const std::uint8_t* at = header.data();
+    const std::uint8_t* end = header.data() + header.size();
+    if (std::memcmp(at, kMagic, sizeof(kMagic)) != 0) {
+        ::close(fd);
+        return false;
+    }
+    at += sizeof(kMagic);
+    std::uint32_t version = 0;
+    std::uint32_t header_bytes = 0;
+    std::uint32_t format = 0;
+    std::uint32_t source_format = 0;
+    std::uint64_t rows = 0;
+    std::uint32_t row_width = 0;
+    std::uint32_t row_bytes = 0;
+    std::uint32_t shard_rows = 0;
+    std::uint32_t shard_count = 0;
+    std::uint32_t source_count = 0;
+    std::uint64_t payload_stride = 0;
+    std::uint64_t payload_bytes = 0;
+    std::uint32_t source_bytes = 0;
+    std::uint32_t reserved = 0;
+    const bool parsed =
+        take_u32(at, end, version) && take_u32(at, end, header_bytes) &&
+        take_u32(at, end, format) && take_u32(at, end, source_format) &&
+        take_u64(at, end, rows) && take_u32(at, end, row_width) &&
+        take_u32(at, end, row_bytes) && take_u32(at, end, shard_rows) &&
+        take_u32(at, end, shard_count) && take_u32(at, end, source_count) &&
+        take_u64(at, end, payload_stride) && take_u64(at, end, payload_bytes) &&
+        take_u32(at, end, source_bytes) && take_u32(at, end, reserved);
+    auto reject = [&]() -> Result<bool> {
+        std::fprintf(stderr, "PLE artifact is stale or invalid; rebuilding\n");
+        ::close(fd);
+        return false;
+    };
+    if (!parsed || version != kPleArtifactVersion ||
+        header_bytes != kPleArtifactHeaderBytes || format != kPleArtifactFormatInt6 ||
+        source_format != kPleArtifactSourceBf16 || source_bytes != kPleArtifactSourceBytes ||
+        row_width != kExpectedRowWidth || row_bytes != 130u ||
+        shard_count != config.ple.split_ngram_parts || source_count != sources.size() ||
+        shard_rows == 0u || shard_count == 0u ||
+        static_cast<std::uint64_t>(shard_rows) * shard_count != rows ||
+        payload_bytes != static_cast<std::uint64_t>(shard_rows) * row_bytes ||
+        payload_stride < payload_bytes || (payload_stride % 4096u) != 0u) {
+        return reject();
+    }
+    auto padded_rows = qwen4exp_ple_padded_rows(config, 0u);
+    if (!padded_rows.ok() || padded_rows.value() != rows) return reject();
+    const std::uint64_t required = static_cast<std::uint64_t>(kPleArtifactHeaderBytes) +
+                                   static_cast<std::uint64_t>(shard_count - 1u) *
+                                       payload_stride +
+                                   payload_bytes;
+    if (static_cast<std::uint64_t>(st.st_size) < required) return reject();
+    for (std::size_t index = 0; index < sources.size(); ++index) {
+        std::uint32_t id = 0;
+        std::uint32_t pad = 0;
+        std::uint64_t size = 0;
+        std::int64_t sec = 0;
+        std::int64_t nsec = 0;
+        if (!take_u32(at, end, id) || !take_u32(at, end, pad) ||
+            !take_u64(at, end, size) || !take_i64(at, end, sec) ||
+            !take_i64(at, end, nsec) ||
+            id != sources[index].id || size != sources[index].size ||
+            sec != sources[index].mtime_sec || nsec != sources[index].mtime_nsec) {
+            return reject();
+        }
+    }
+    const auto head_sizes = qwen4exp_ple_head_vocab_sizes(config, 0u);
+    const auto head_offsets = qwen4exp_ple_head_offsets(config, 0u);
+    const auto multipliers = qwen4exp_ple_layer_multipliers(config, 0u);
+    if (!head_sizes.ok() || !head_offsets.ok() || !multipliers.ok()) return reject();
+
+    PleTable loaded;
+    loaded.file_path_ = path;
+    loaded.format_ = TableFormat::Int6W32Fp16;
+    loaded.rows_ = rows;
+    loaded.row_width_ = row_width;
+    loaded.row_bytes_ = row_bytes;
+    loaded.k_bits_ = 0u;
+    loaded.shard_count_ = shard_count;
+    loaded.shard_rows_ = shard_rows;
+    loaded.ngram_size_ = static_cast<std::uint32_t>(config.ple.ngram_size);
+    loaded.heads_per_ngram_ = static_cast<std::uint32_t>(config.ple.heads_per_ngram);
+    loaded.eos_token_id_ = config.ple.eos_token_id;
+    loaded.head_offsets_.assign(head_offsets.value().begin(), head_offsets.value().end());
+    loaded.head_vocab_sizes_.assign(head_sizes.value().begin(), head_sizes.value().end());
+    loaded.layer_multipliers_.assign(multipliers.value().begin(), multipliers.value().end());
+    loaded.payload_bytes_ = static_cast<std::uint64_t>(shard_count) * payload_bytes;
+    loaded.shards_.resize(shard_count);
+
+    const std::uint32_t worker_count = std::min<std::uint32_t>(16u, shard_count);
+    std::vector<Status> errors(worker_count, Status::make_ok());
+    std::vector<std::thread> workers;
+    workers.reserve(worker_count);
+    for (std::uint32_t worker = 0; worker < worker_count; ++worker) {
+        workers.emplace_back([&, worker]() {
+            for (std::uint32_t id = worker; id < shard_count; id += worker_count) {
+                void* memory = nullptr;
+                if (::posix_memalign(&memory, 64u, static_cast<std::size_t>(payload_bytes)) != 0) {
+                    errors[worker] = Status::insufficient_memory(
+                        "cannot allocate PLE artifact shard", __FILE__, __LINE__);
+                    return;
+                }
+                auto* dst = static_cast<std::uint8_t*>(memory);
+                const std::uint64_t offset =
+                    static_cast<std::uint64_t>(kPleArtifactHeaderBytes) +
+                    static_cast<std::uint64_t>(id) * payload_stride;
+                Status st = read_exact_at(fd, offset, dst,
+                                          static_cast<std::size_t>(payload_bytes));
+                if (!st.ok()) {
+                    std::free(memory);
+                    errors[worker] = st;
+                    return;
+                }
+                (void)::posix_fadvise(fd, static_cast<off_t>(offset),
+                                      static_cast<off_t>(payload_bytes),
+                                      POSIX_FADV_DONTNEED);
+                loaded.shards_[id].data.reset(dst);
+                loaded.shards_[id].bytes = static_cast<std::size_t>(payload_bytes);
+            }
+        });
+    }
+    for (std::thread& worker : workers) worker.join();
+    ::close(fd);
+    for (const Status& error : errors) {
+        if (!error.ok()) return false;
+    }
+    out = std::move(loaded);
+    return true;
+}
+
+Status PleTable::write_int6_artifact(const std::string& model_dir,
+                                     const std::vector<ArtifactSource>& sources,
+                                     const PleTable& table) {
+    if (table.format_ != TableFormat::Int6W32Fp16 || sources.empty() ||
+        table.shard_count_ != sources.size() || table.shard_rows_ == 0u) {
+        return Status::make_ok();
+    }
+    const std::uint64_t payload_bytes =
+        static_cast<std::uint64_t>(table.shard_rows_) * table.row_bytes_;
+    const std::uint64_t payload_stride = align_up_u64(payload_bytes, 4096u);
+    const std::uint64_t required = static_cast<std::uint64_t>(kPleArtifactHeaderBytes) +
+                                   static_cast<std::uint64_t>(table.shard_count_ - 1u) *
+                                       payload_stride +
+                                   payload_bytes;
+    struct statvfs vfs {};
+    if (::statvfs(model_dir.c_str(), &vfs) == 0) {
+        const std::uint64_t free_bytes =
+            static_cast<std::uint64_t>(vfs.f_bavail) * vfs.f_frsize;
+        constexpr std::uint64_t kMargin = 64ull * 1024ull * 1024ull;
+        if (free_bytes < required + kMargin) {
+            return Status::insufficient_memory(
+                "not enough free space for PLE artifact", __FILE__, __LINE__);
+        }
+    }
+    std::vector<std::uint8_t> header(kPleArtifactHeaderBytes, 0u);
+    static constexpr char kMagic[8] = {'S', 'H', 'E', 'L', 'Q', 'P', 'L', '1'};
+    std::memcpy(header.data(), kMagic, sizeof(kMagic));
+    std::size_t at = sizeof(kMagic);
+    append_u32(header, at, kPleArtifactVersion);
+    append_u32(header, at, kPleArtifactHeaderBytes);
+    append_u32(header, at, kPleArtifactFormatInt6);
+    append_u32(header, at, kPleArtifactSourceBf16);
+    append_u64(header, at, table.rows_);
+    append_u32(header, at, table.row_width_);
+    append_u32(header, at, table.row_bytes_);
+    append_u32(header, at, table.shard_rows_);
+    append_u32(header, at, table.shard_count_);
+    append_u32(header, at, static_cast<std::uint32_t>(sources.size()));
+    append_u64(header, at, payload_stride);
+    append_u64(header, at, payload_bytes);
+    append_u32(header, at, kPleArtifactSourceBytes);
+    append_u32(header, at, 0u);
+    for (const ArtifactSource& source : sources) {
+        append_u32(header, at, source.id);
+        append_u32(header, at, 0u);
+        append_u64(header, at, source.size);
+        append_i64(header, at, source.mtime_sec);
+        append_i64(header, at, source.mtime_nsec);
+    }
+    const std::string path = ple_artifact_path(model_dir);
+    std::string temp = path + ".tmp.XXXXXX";
+    std::vector<char> temp_name(temp.begin(), temp.end());
+    temp_name.push_back('\0');
+    const int fd = ::mkstemp(temp_name.data());
+    if (fd < 0) {
+        return Status::invalid_argument(
+            (std::string("cannot create PLE artifact: ") + std::strerror(errno)).c_str(),
+            __FILE__, __LINE__);
+    }
+    (void)::fchmod(fd, 0644);
+    auto cleanup = [&]() {
+        ::close(fd);
+        (void)::unlink(temp_name.data());
+    };
+    Status st = pwrite_exact(fd, header.data(), header.size(), 0);
+    if (!st.ok()) {
+        cleanup();
+        return st;
+    }
+    for (std::uint32_t id = 0; id < table.shard_count_; ++id) {
+        const Shard& shard = table.shards_[id];
+        if (shard.data == nullptr || shard.bytes != payload_bytes) {
+            cleanup();
+            return Status::invalid_state("PLE artifact shard is incomplete", __FILE__,
+                                         __LINE__);
+        }
+        const std::uint64_t offset =
+            static_cast<std::uint64_t>(kPleArtifactHeaderBytes) +
+            static_cast<std::uint64_t>(id) * payload_stride;
+        st = pwrite_exact(fd, shard.data.get(), shard.bytes, offset);
+        if (!st.ok()) {
+            cleanup();
+            return st;
+        }
+        if (((id + 1u) % 8u) == 0u || (id + 1u) == table.shard_count_) {
+            if (::fdatasync(fd) != 0) {
+                const Status sync_error = Status::invalid_argument(
+                    (std::string("PLE artifact fdatasync failed: ") +
+                     std::strerror(errno)).c_str(),
+                    __FILE__, __LINE__);
+                cleanup();
+                return sync_error;
+            }
+            const std::uint32_t begin_id = id - (id % 8u);
+            const std::uint64_t begin =
+                static_cast<std::uint64_t>(kPleArtifactHeaderBytes) +
+                static_cast<std::uint64_t>(begin_id) * payload_stride;
+            const std::uint64_t end = offset + static_cast<std::uint64_t>(shard.bytes);
+            (void)::posix_fadvise(fd, static_cast<off_t>(begin),
+                                  static_cast<off_t>(end - begin),
+                                  POSIX_FADV_DONTNEED);
+        }
+    }
+    if (::fsync(fd) != 0) {
+        const Status sync_error = Status::invalid_argument(
+            (std::string("PLE artifact fsync failed: ") + std::strerror(errno)).c_str(),
+            __FILE__, __LINE__);
+        cleanup();
+        return sync_error;
+    }
+    if (::close(fd) != 0) {
+        (void)::unlink(temp_name.data());
+        return Status::invalid_argument("PLE artifact close failed", __FILE__, __LINE__);
+    }
+    if (::rename(temp_name.data(), path.c_str()) != 0) {
+        (void)::unlink(temp_name.data());
+        return Status::invalid_argument(
+            (std::string("PLE artifact rename failed: ") + std::strerror(errno)).c_str(),
+            __FILE__, __LINE__);
+    }
+    return Status::make_ok();
 }
 
 Result<PleTable> PleTable::load(const std::string& model_dir,

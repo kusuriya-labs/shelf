@@ -99,9 +99,22 @@ public:
                                                       std::uint64_t row) const;
 
 private:
+    struct ArtifactSource {
+        std::uint32_t id = 0;
+        std::uint64_t size = 0;
+        std::int64_t mtime_sec = 0;
+        std::int64_t mtime_nsec = 0;
+    };
+
     static Result<PleTable> load_index_shards(const std::string& model_dir,
                                               const Qwen4ExpTextConfig& config,
                                               bool fadvise_dontneed);
+    static Result<bool> load_int6_artifact(
+        const std::string& model_dir, const Qwen4ExpTextConfig& config,
+        const std::vector<ArtifactSource>& sources, PleTable& out);
+    static Status write_int6_artifact(const std::string& model_dir,
+                                      const std::vector<ArtifactSource>& sources,
+                                      const PleTable& table);
 
     std::size_t head_for_row(std::uint64_t row) const noexcept;
 

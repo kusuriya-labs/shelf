@@ -64,6 +64,11 @@ PLE の n-gram history を復元 prefix で再 seed する。MTP は無効であ
   `madvise(MADV_DONTNEED)` と `posix_fadvise(DONTNEED)` で page cache を落とす。
   I/O は `SHELF_PLE_STREAM_IO=pread|mmap|direct` で選ぶ（既定 mmap、direct は
   O_DIRECT）。BF16 table 全体を anonymous RAM にも page cache にも保持しない。
+- 初回のオンライン量子化後、`<model_dir>/quanted_ple.bin` に INT6 table を書く。次回
+  以降は source shard の size と mtime が header の fingerprint と一致する場合に
+  その artifact を読む。artifact は 4096-byte 境界の shard payload を持ち、
+  `SHELF_PLE_ARTIFACT=0` で読み書きを無効にできる。stale / invalid なら再量子化して
+  上書きする。書き込み失敗は model load を失敗させない。
 - MXFP4 / FP8 の preshuffle staging は関数ローカルの buffer を非同期コピーしない。
   同期コピーで device へ移してから buffer を破棄する。
 
