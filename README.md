@@ -1,40 +1,24 @@
-# Shelf
+# Shelf — Hy4-flash 専用 fork
 
-AMD RDNA4 GPU（R9700）向けの軽量推論エンジン
-
-特徴
-- まあまあの精度
-- まあまあの速度
-- まあまあの並列性
-- 依存が少ない
-
-実用性を第一目標とする
+Hy4-flash のテキスト生成を AMD Radeon AI PRO R9700 1 台と V620 2 台で実行する。expert parallel は 3 rank、本体は EXL3-INT8、Engram は FP8、KV は Octave。付属の DFly2 で 5 token を先読みできる。
 
 ## クイックスタート
 
-ビルド
+[このホストのビルド手順](docs/research/20261119/hy4_flash_plan.md#このホストでのビルドと入力)で `build-hy4/shelf-compute` を作成する。入力は空白区切りの token ID を保存したテキストファイル。次の例は校正列の先頭 4 token から生成する。
+
 ```bash
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DSHELF_ROCM_ROOT="$(rocm-sdk path --root)" \
-  -DCMAKE_PREFIX_PATH="$(rocm-sdk path --cmake)" \
-  -DCMAKE_HIP_COMPILER_ROCM_ROOT="$(rocm-sdk path --root)" \
-  -DCMAKE_HIP_ARCHITECTURES=gfx1201
-cmake --build build --parallel
+quantroot="$HOME/datapool/rocm-exl3-rdna2"
+pilot="$quantroot/hy4-flash-pilot"
+printf '%s\n' '120000 802 15063 2576' > prompt-ids.txt
+python3 tools/hy4_flash/locked.py ep3 build-hy4/shelf-compute hy4 generate \
+  --model-dir "$quantroot/models/Hy4-flash-exl3-4bpw-mul24" \
+  --engram-dir "$pilot/engram-e4m3fn" \
+  --dfly-dir "$pilot/shelf-dfly/Hy4-flash-dfly-4bpw" \
+  --placement "$pilot/shelf-placement/owners-4bpw.json" \
+  --input-ids-file prompt-ids.txt --max-new-tokens 128 --chunk 1024
 ```
 
-起動
-```bash
-./build/shelf-server \
-    --model-dir models/kusuriya-labs/Qwen3.8-27B-EXL3-INT8-4bpw \
-    --dflash2-model-dir models/Qwen3.8-27B-DFlash2-FP8 \
-    --prefix-cache-strategy radix \
-    --max-seq-len 131072 \
-    --kv-cache-dtype octave:c5v5 \
-    --port 8123
-```
-
-- R9700 1枚で 4並列 コンテキストサイズ 131072 を確保
-- DFlash2 有りで実用的な速度で動作
+生成した token ID は `GENERATED_IDS` に出力される。GPU の予約量と速度は[性能記録](docs/perf/current.md#hy4-flash-専用-fork-の-ep3)を参照。
 
 ## Contributors
 
