@@ -67,3 +67,30 @@ python3 tools/hy4_flash/locked.py ep3 build-hy4/shelf-compute hy4 generate \
 ```
 
 入力は空白区切りの token ID または既存の PSKLDTOK 形式。専用構成では shelf-compute に直接オプションを渡すと generate を実行する。本体単独との比較は --dfly-dir を省く。採用版は R9700 の WMMA、worker の dot4、短い query の吸収形 MLA、8 行以上の expert 集約を自動選択する。推論時の比較フラグは不要。測定時は --chunk 1024 を指定する。候補ごとの採否・生成列・測定条件は進捗記録の P5 に残す。
+
+## 3.5 bpw の再現
+
+4 bpw 版の候補撤去後の受入と 256 token 照合の後に開始する。quant_mixed.py は校正頻度をもとに各層の 266 または 267 expert を選び、合計 10,931 本の gate/up/down を BF16 原本から 3 bit に再量子化する。選択した ID と実 trellis の形状は組立時に照合する。作業中は .work/checkpoint と shard 別 marker を保持し、入力署名が同じ実行は保存済み shard の SHA-256 を確認して再開する。残りの 4 bit 重みと 6 bit head は元の値を保つ。4 枚の FP8 Engram は新しい checkpoint の index に含める。
+
+前節の変数を使い、ホストの 2 台分の排他を変換終了まで保持する。
+
+```bash
+outdir="$pilot/shelf-mixed"
+mixed="$outdir/Hy4-flash-exl3-3.5bpw-mul24"
+quantrepo="$HOME/coding-local/rocm_exl3/.worktrees/hy4-flash"
+hfsource=("$quantroot"/hy4-flash-env/transformers-*/src)
+mkdir -p "$outdir"
+python3 tools/hy4_flash/locked.py v620-pair docker run --rm --pull=never --network=none \
+  --device=/dev/kfd --device=/dev/dri --group-add video --group-add "$(stat -c '%g' /dev/dri/renderD128)" \
+  --user "$(id -u):$(id -g)" --shm-size=8g --entrypoint /opt/venv/bin/python -w /src \
+  -e ROCR_VISIBLE_DEVICES -e ROCM_PATH=/opt/rocm/core-7.14 -e PYTORCH_ROCM_ARCH=gfx1030 \
+  -e LD_PRELOAD=/opt/rocm/core-7.14/lib/libhsa-runtime64.so.1 \
+  -e LD_LIBRARY_PATH=/opt/rocm/core-7.14/lib:/opt/venv/lib/python3.12/site-packages/torch/lib \
+  -e PYTHONPATH=/hf-src:/extension:/src:/src/tools/hy4_flash -e XDG_CACHE_HOME=/tmp/cache -e OMP_NUM_THREADS=2 \
+  -v /opt/rocm:/opt/rocm:ro -v "$original:$original:ro" -v "$body:$body:ro" -v "$engram:$engram:ro" \
+  -v "$work:$work:ro" -v "$outdir:$outdir:rw" -v "$PWD/tools/hy4_flash:/shelf-tools:ro" \
+  -v "$quantrepo:/src:ro" -v "${hfsource[0]}:/hf-src:ro" -v "$quantroot/lib-mul24-v620:/extension:ro" \
+  rocm-exl3-investigation:tested -u /shelf-tools/quant_mixed.py "$original" "$body" "$engram" "$work" "$mixed"
+```
+
+組立後は --model-dir と --engram-dir に同じ mixed ディレクトリを渡す。DFly は校正署名が一致する既存 sidecar を指定する。4 bpw と同じ配置・入力・chunk 1024・seed の測定条件で比較する。

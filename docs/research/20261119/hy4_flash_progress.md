@@ -234,3 +234,7 @@ CPU logits 相対 L2 の初期目安 0.1 を超えた場合はその事実を結
 変換済みの層 1 は 3 bit expert 267 本。校正先頭 16 token の元の 256 選択には 3 bit が 71 件含まれた。R9700 で同じ mixed 層を実行し、CPU 基準への相対 L2 は 16 行一括 0.004823、逐次 1 行 0.005646。expert 4 の実 3 bit gate の grouped 6 行は相対 L2 0.0000283。両 ISA をビルドし、既存 4 bit + DFly の inspect と CPU CTest も通過した。全校正で 3 bit 化する expert の選択は 19,977,959 / 85,983,232 件（23.23%）。原本の routing から独立に再計算した選択リストの SHA-256 も変換計画と一致した。
 
 3.5 bpw の shard を検証しながら同じ 4 token の CPU 連続照合を追跡中。組立後は `build-hy4/mixed-accept.log` の手順で、同じ配置・pp2048・256 token の greedy 照合、CPU reorder 対照、EP=3 の実予約・速度を記録する。
+
+## M4　混在幅の内積と再構成
+
+同一 launch に実 3 bit の 8 行と 4 bit の 16 行を並べ、R9700 で grouped WMMA と LDS/dot4 を両方照合した。どちらも CPU 相対 L2 は 0.00000670。層 1 expert 4 の元 BF16 に対する再構成相対 L2 は 4 bit → 3 bit で gate 0.09190 → 0.18110、up 0.09198 → 0.18120、down 0.07586 → 0.14987。低ビット化する重みの誤差であり、生成品質とは区別する。再現用の 2 台 lock の起動例を計画書に追記した。

@@ -31,7 +31,8 @@ def run(ranks, command):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="共有 lock を保持し、指定 GPU で検証を実行する")
-    parser.add_argument("devices", choices=["ep3", *DEVICES])
+    parser.add_argument("devices", choices=["ep3", "v620-pair", *DEVICES])
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
-    run(list(DEVICES) if args.devices == "ep3" else [args.devices], args.command)
+    ranks = {"ep3": list(DEVICES), "v620-pair": ["v620", "v620-76"]}.get(args.devices, [args.devices])
+    run(ranks, args.command)
