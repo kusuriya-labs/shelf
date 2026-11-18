@@ -9,6 +9,7 @@
 #include <shelf/inference/execution/final_producer.h>
 #include <shelf/inference/execution/exl3_dispatch_decision.h>
 #include <shelf/kernels/fused/fp8_activation_producer.h>
+#include <shelf/kernels/fused/mxfp4_activation_producer.h>
 #include <shelf/inference/execution/physical_launch.h>
 #include <shelf/quantization/quant_contract.h>
 #include <shelf/inference/execution/program_executor.h>
@@ -1556,6 +1557,307 @@ Result<OptimizedLaunchResult> try_launch_fp8_residual_norm_quantize(
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 3u};
 }
 
+bool mxfp4_producer_enabled() {
+    static const bool enabled = std::getenv("SHELF_DISABLE_MXFP4_PRODUCER") == nullptr &&
+        std::getenv("SHELF_OP_DUMP") == nullptr && std::getenv("SHELF_OP_SYNC") == nullptr &&
+        std::getenv("SHELF_LINEAR_INPUT_DUMP") == nullptr;
+    return enabled;
+}
+
+bool mxfp4_quant_consumer_matches(const ::shelf::runtime::Program& program, size_t qi, size_t li,
+                                  const HostExecutionContext& ctx,
+                                  PhysicalActivationQuantizeLaunch& q,
+                                  const ::shelf::runtime::WeightSlot*& weight) {
+    const auto& quant = program.dispatches[qi];
+    const auto& linear = program.dispatches[li];
+    weight = nullptr;
+    if (quant.kernel_id != KernelId::ACTIVATION_QUANTIZE_MXFP4_ROWREF ||
+        linear.kernel_id != KernelId::LINEAR_MXFP4_W4A8)
+        return false;
+    if (quant.input_count != 1u || quant.workspace_slot == ::shelf::runtime::kNoWorkspace ||
+        quant.workspace_slot != linear.workspace_slot || linear.input_count != 0u ||
+        linear.output_count != 1u)
+        return false;
+    if (linear.weight_index >= ctx.weight_count) return false;
+    const auto& w = ctx.weights[linear.weight_index];
+    if (w.encoding != static_cast<uint8_t>(::shelf::weights::MatrixEncoding::Mxfp4))
+        return false;
+    auto resolved = resolve_activation_quantize_physical(program, quant, ctx, q);
+    if (!resolved.ok() || resolved.value() != PhysicalResolveStatus::Applicable)
+        return false;
+    if (q.row_index != 0u || q.codes == 0u || q.scales == 0u || q.rows == 0u ||
+        q.k == 0u || q.k_padded < q.k || q.code_row_stride == 0u ||
+        q.scale_row_stride == 0u)
+        return false;
+    if (w.cols != q.k || w.k_padded != q.k_padded) return false;
+    weight = &w;
+    return true;
+}
+
+bool mxfp4_value_is_exclusive(const ::shelf::runtime::Program& program, uint32_t slot, size_t from,
+                              size_t until) {
+    for (size_t j = from; j < until; ++j)
+        for (uint32_t n = 0; n < program.dispatches[j].input_count; ++n)
+            if (program.dispatches[j].input_slots[n] == slot) return false;
+    return true;
+}
+
+Result<OptimizedLaunchResult> try_launch_mxfp4_swiglu_quantize(
+    const ::shelf::runtime::Program& program, size_t i, size_t end, HostExecutionContext& ctx,
+    hipStream_t stream) {
+    const OptimizedLaunchResult miss{OptimizedLaunchKind::NotApplicable};
+    if (!mxfp4_producer_enabled() || ctx.value_trace || ctx.layer_override_count ||
+        i + 2u >= end || ctx.workspace == nullptr || ctx.weights == nullptr) return miss;
+    const auto& swiglu = program.dispatches[i];
+    const auto& quant = program.dispatches[i + 1u];
+    if (swiglu.kernel_id != KernelId::SWIGLU || swiglu.input_count != 2u ||
+        swiglu.output_count != 1u)
+        return miss;
+    PhysicalActivationQuantizeLaunch q{};
+    const ::shelf::runtime::WeightSlot* weight = nullptr;
+    if (!mxfp4_quant_consumer_matches(program, i + 1u, i + 2u, ctx, q, weight)) return miss;
+    if (swiglu.output_slots[0] != quant.input_slots[0]) return miss;
+    if (!mxfp4_value_is_exclusive(program, swiglu.output_slots[0], i + 2u,
+                                  program.dispatches.size()))
+        return miss;
+    PhysicalElementwiseLaunch elem{};
+    auto resolved = resolve_elementwise_physical(program, swiglu, ctx, elem);
+    if (!resolved.ok()) return resolved.status();
+    if (resolved.value() != PhysicalResolveStatus::Applicable ||
+        elem.profile != ElementwiseProfile::SwigluBf16 || elem.rows != q.rows ||
+        elem.features != q.k || !elem.in0 || !elem.in1 ||
+        elem.in0_stride < elem.features || elem.in1_stride < elem.features)
+        return miss;
+    ::shelf::execution::Mxfp4SwigluArgs args{};
+    args.gate = reinterpret_cast<const ::shelf::bf16_t*>(elem.in0);
+    args.up = reinterpret_cast<const ::shelf::bf16_t*>(elem.in1);
+    args.codes = reinterpret_cast<uint8_t*>(q.codes);
+    args.scales = reinterpret_cast<float*>(q.scales);
+    args.rows = q.rows;
+    args.k = q.k;
+    args.k_padded = q.k_padded;
+    args.gate_stride = elem.in0_stride;
+    args.up_stride = elem.in1_stride;
+    args.code_stride = q.code_row_stride;
+    args.scale_stride = q.scale_row_stride;
+    args.bf16_intermediate = elem.aux != 0u;
+    const hipError_t herr = ::shelf::execution::launch_mxfp4_swiglu_quantize(args, stream);
+    if (herr != hipSuccess)
+        return Status::hip_error("mxfp4 swiglu quantize launch", hipGetErrorString(herr),
+                                 __FILE__, __LINE__);
+    record_physical_launch(1);
+    record_optimized_op();
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 2u};
+}
+
+Result<OptimizedLaunchResult> try_launch_mxfp4_norm_quantize(
+    const ::shelf::runtime::Program& program, size_t i, size_t end, HostExecutionContext& ctx,
+    hipStream_t stream) {
+    const OptimizedLaunchResult miss{OptimizedLaunchKind::NotApplicable};
+    if (!mxfp4_producer_enabled() || ctx.value_trace || ctx.layer_override_count ||
+        i + 2u >= end || ctx.workspace == nullptr || ctx.weights == nullptr) return miss;
+    const auto& norm = program.dispatches[i];
+    const auto& quant = program.dispatches[i + 1u];
+    if (norm.kernel_id != KernelId::RMS_NORM || norm.input_count != 1u ||
+        norm.output_count != 1u)
+        return miss;
+    PhysicalActivationQuantizeLaunch q{};
+    const ::shelf::runtime::WeightSlot* weight = nullptr;
+    if (!mxfp4_quant_consumer_matches(program, i + 1u, i + 2u, ctx, q, weight)) return miss;
+    if (norm.output_slots[0] != quant.input_slots[0]) return miss;
+    const auto* binding = program.find_value(::shelf::runtime::ValueId{norm.output_slots[0]});
+    if (binding == nullptr ||
+        (binding->storage != ::shelf::runtime::ValueStorage::WORKSPACE &&
+         binding->storage != ::shelf::runtime::ValueStorage::WORKSPACE_VIEW))
+        return miss;
+    if (!mxfp4_value_is_exclusive(program, norm.output_slots[0], i + 2u,
+                                  program.dispatches.size()))
+        return miss;
+    PhysicalRmsNormLaunch n{};
+    auto resolved_norm = resolve_rmsnorm_physical(program, norm, ctx, n);
+    if (!resolved_norm.ok()) return resolved_norm.status();
+    if (resolved_norm.value() != PhysicalResolveStatus::Applicable ||
+        n.variant != PhysicalRmsNormVariant::Bf16PfOnePlus || n.rows != q.rows ||
+        n.features != q.k || n.group_size != q.k || !n.weight)
+        return miss;
+    auto input = resolve_host_value(program, ::shelf::runtime::ValueId{norm.input_slots[0]}, ctx);
+    if (!input.ok()) return input.status();
+    if (input.value().dtype != ValueDType::BF16 || input.value().feature_count != q.k ||
+        input.value().ptr == nullptr)
+        return miss;
+    ::shelf::execution::Mxfp4NormArgs args{};
+    args.input = static_cast<const ::shelf::bf16_t*>(input.value().ptr);
+    args.weight = reinterpret_cast<const ::shelf::bf16_t*>(n.weight);
+    args.codes = reinterpret_cast<uint8_t*>(q.codes);
+    args.scales = reinterpret_cast<float*>(q.scales);
+    args.rows = q.rows;
+    args.k = q.k;
+    args.k_padded = q.k_padded;
+    args.input_stride = input.value().row_stride;
+    args.code_stride = q.code_row_stride;
+    args.scale_stride = q.scale_row_stride;
+    args.eps = n.eps;
+    const hipError_t herr = ::shelf::execution::launch_mxfp4_norm_quantize(args, stream);
+    if (herr != hipSuccess)
+        return Status::hip_error("mxfp4 norm quantize launch", hipGetErrorString(herr),
+                                 __FILE__, __LINE__);
+    record_physical_launch(1);
+    record_optimized_op();
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 2u};
+}
+
+Result<OptimizedLaunchResult> try_launch_mxfp4_residual_norm_quantize(
+    const ::shelf::runtime::Program& program, size_t i, size_t end, HostExecutionContext& ctx,
+    hipStream_t stream) {
+    const OptimizedLaunchResult miss{OptimizedLaunchKind::NotApplicable};
+    if (!mxfp4_producer_enabled() || ctx.value_trace || ctx.layer_override_count ||
+        i + 3u >= end || ctx.workspace == nullptr || ctx.weights == nullptr) return miss;
+    const auto& add = program.dispatches[i];
+    const auto& norm = program.dispatches[i + 1u];
+    const auto& quant = program.dispatches[i + 2u];
+    if (add.kernel_id != KernelId::RESIDUAL_ADD || add.input_count != 2u ||
+        add.output_count != 1u || norm.kernel_id != KernelId::RMS_NORM ||
+        norm.input_count != 1u || norm.output_count != 1u)
+        return miss;
+    PhysicalActivationQuantizeLaunch q{};
+    const ::shelf::runtime::WeightSlot* weight = nullptr;
+    if (!mxfp4_quant_consumer_matches(program, i + 2u, i + 3u, ctx, q, weight)) return miss;
+    if (add.output_slots[0] != norm.input_slots[0] ||
+        norm.output_slots[0] != quant.input_slots[0])
+        return miss;
+    const auto* binding = program.find_value(::shelf::runtime::ValueId{norm.output_slots[0]});
+    if (binding == nullptr ||
+        (binding->storage != ::shelf::runtime::ValueStorage::WORKSPACE &&
+         binding->storage != ::shelf::runtime::ValueStorage::WORKSPACE_VIEW))
+        return miss;
+    if (!mxfp4_value_is_exclusive(program, norm.output_slots[0], i + 3u,
+                                  program.dispatches.size()))
+        return miss;
+    PhysicalRmsNormLaunch n{};
+    auto resolved_norm = resolve_rmsnorm_physical(program, norm, ctx, n);
+    if (!resolved_norm.ok()) return resolved_norm.status();
+    if (resolved_norm.value() != PhysicalResolveStatus::Applicable ||
+        n.variant != PhysicalRmsNormVariant::Bf16PfOnePlus || n.rows != q.rows ||
+        n.features != q.k || n.group_size != q.k || !n.weight)
+        return miss;
+    auto a = resolve_host_value(program, ::shelf::runtime::ValueId{add.input_slots[0]}, ctx);
+    auto b = resolve_host_value(program, ::shelf::runtime::ValueId{add.input_slots[1]}, ctx);
+    auto r = resolve_host_value(program, ::shelf::runtime::ValueId{add.output_slots[0]}, ctx);
+    if (!a.ok()) return a.status();
+    if (!b.ok()) return b.status();
+    if (!r.ok()) return r.status();
+    if (a.value().dtype != ValueDType::BF16 || b.value().dtype != ValueDType::BF16 ||
+        r.value().dtype != ValueDType::BF16 || a.value().feature_count != q.k ||
+        b.value().feature_count != q.k || r.value().feature_count != q.k ||
+        a.value().ptr == nullptr || b.value().ptr == nullptr || r.value().ptr == nullptr ||
+        rows_for(r.value(), ctx) != q.rows)
+        return miss;
+    ::shelf::execution::Mxfp4ResidualNormArgs args{};
+    args.a = static_cast<const ::shelf::bf16_t*>(a.value().ptr);
+    args.b = static_cast<const ::shelf::bf16_t*>(b.value().ptr);
+    args.residual = static_cast<::shelf::bf16_t*>(r.value().ptr);
+    args.weight = reinterpret_cast<const ::shelf::bf16_t*>(n.weight);
+    args.codes = reinterpret_cast<uint8_t*>(q.codes);
+    args.scales = reinterpret_cast<float*>(q.scales);
+    args.rows = q.rows;
+    args.k = q.k;
+    args.k_padded = q.k_padded;
+    args.a_stride = a.value().row_stride;
+    args.b_stride = b.value().row_stride;
+    args.residual_stride = r.value().row_stride;
+    args.code_stride = q.code_row_stride;
+    args.scale_stride = q.scale_row_stride;
+    args.eps = n.eps;
+    const hipError_t herr =
+        ::shelf::execution::launch_mxfp4_residual_norm_quantize(args, stream);
+    if (herr != hipSuccess)
+        return Status::hip_error("mxfp4 residual norm quantize launch",
+                                 hipGetErrorString(herr), __FILE__, __LINE__);
+    record_physical_launch(1);
+    record_optimized_op();
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 3u};
+}
+
+Result<OptimizedLaunchResult> try_launch_mxfp4_gdn_gated_quantize(
+    const ::shelf::runtime::Program& program, size_t i, size_t end, HostExecutionContext& ctx,
+    hipStream_t stream) {
+    const OptimizedLaunchResult miss{OptimizedLaunchKind::NotApplicable};
+    if (!mxfp4_producer_enabled() || ctx.value_trace || ctx.layer_override_count ||
+        i + 4u >= end || ctx.workspace == nullptr || ctx.weights == nullptr) return miss;
+    const auto& norm = program.dispatches[i];
+    const auto& silu = program.dispatches[i + 1u];
+    const auto& mul = program.dispatches[i + 2u];
+    const auto& quant = program.dispatches[i + 3u];
+    if (norm.kernel_id != KernelId::RMS_NORM || silu.kernel_id != KernelId::SILU ||
+        mul.kernel_id != KernelId::MUL || norm.output_count != 1u ||
+        silu.output_count != 1u || mul.input_count != 2u || mul.output_count != 1u)
+        return miss;
+    PhysicalActivationQuantizeLaunch q{};
+    const ::shelf::runtime::WeightSlot* weight = nullptr;
+    if (!mxfp4_quant_consumer_matches(program, i + 3u, i + 4u, ctx, q, weight)) return miss;
+    if (norm.output_slots[0] != mul.input_slots[0] ||
+        silu.output_slots[0] != mul.input_slots[1] ||
+        mul.output_slots[0] != quant.input_slots[0]) {
+        return miss;
+    }
+    if (!mxfp4_value_is_exclusive(program, norm.output_slots[0], i + 4u,
+                                  program.dispatches.size()) ||
+        !mxfp4_value_is_exclusive(program, silu.output_slots[0], i + 4u,
+                                  program.dispatches.size()) ||
+        !mxfp4_value_is_exclusive(program, mul.output_slots[0], i + 4u,
+                                  program.dispatches.size()))
+        return miss;
+    PhysicalRmsNormLaunch n{};
+    auto resolved_norm = resolve_rmsnorm_physical(program, norm, ctx, n);
+    if (!resolved_norm.ok()) return resolved_norm.status();
+    if (resolved_norm.value() != PhysicalResolveStatus::Applicable ||
+        n.variant != PhysicalRmsNormVariant::F32PgDirect || n.rows != q.rows ||
+        n.features != q.k || n.group_size != 128u || !n.weight) {
+        return miss;
+    }
+    PhysicalElementwiseLaunch z{};
+    auto resolved_silu = resolve_elementwise_physical(program, silu, ctx, z);
+    if (!resolved_silu.ok()) return resolved_silu.status();
+    if (resolved_silu.value() != PhysicalResolveStatus::Applicable ||
+        z.profile != ElementwiseProfile::SiluBf16ToF32 || z.rows != q.rows ||
+        z.features != q.k)
+        return miss;
+    PhysicalElementwiseLaunch m{};
+    auto resolved_mul = resolve_elementwise_physical(program, mul, ctx, m);
+    if (!resolved_mul.ok()) return resolved_mul.status();
+    if (resolved_mul.value() != PhysicalResolveStatus::Applicable ||
+        m.profile != ElementwiseProfile::MulF32F32ToBf16 || m.rows != q.rows ||
+        m.features != q.k)
+        return miss;
+    auto rec = resolve_host_value(program, ::shelf::runtime::ValueId{norm.input_slots[0]}, ctx);
+    if (!rec.ok()) return rec.status();
+    if (rec.value().dtype != ValueDType::F32 || rec.value().feature_count != q.k ||
+        rec.value().ptr == nullptr)
+        return miss;
+    ::shelf::execution::Mxfp4GdnGatedArgs args{};
+    args.rec = static_cast<const float*>(rec.value().ptr);
+    args.z = reinterpret_cast<const ::shelf::bf16_t*>(z.in0);
+    args.weight = reinterpret_cast<const ::shelf::bf16_t*>(n.weight);
+    args.codes = reinterpret_cast<uint8_t*>(q.codes);
+    args.scales = reinterpret_cast<float*>(q.scales);
+    args.rows = q.rows;
+    args.features = q.k;
+    args.group_size = n.group_size;
+    args.rec_stride = rec.value().row_stride;
+    args.z_stride = z.in0_stride;
+    args.code_stride = q.code_row_stride;
+    args.scale_stride = q.scale_row_stride;
+    args.eps = n.eps;
+    const hipError_t herr =
+        ::shelf::execution::launch_mxfp4_gdn_gated_quantize(args, stream);
+    if (herr != hipSuccess)
+        return Status::hip_error("mxfp4 gdn gated quantize launch",
+                                 hipGetErrorString(herr), __FILE__, __LINE__);
+    record_physical_launch(1);
+    record_optimized_op();
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 4u};
+}
+
 Result<OptimizedLaunchResult> try_launch_fp8_final_gather(
     const ::shelf::runtime::Program& program, size_t i, size_t end,
     HostExecutionContext& ctx, hipStream_t stream) {
@@ -1811,6 +2113,14 @@ Result<OptimizedLaunchResult> try_launch_optimized(
         case KernelId::RMS_NORM: {
             auto fp8 = try_launch_fp8_norm_quantize(program, dispatch_index, dispatch_end, ctx, stream);
             if (!fp8.ok() || fp8.value().kind == OptimizedLaunchKind::Launched) return fp8;
+            auto gdn_mxfp4 = try_launch_mxfp4_gdn_gated_quantize(
+                program, dispatch_index, dispatch_end, ctx, stream);
+            if (!gdn_mxfp4.ok() || gdn_mxfp4.value().kind == OptimizedLaunchKind::Launched)
+                return gdn_mxfp4;
+            auto mxfp4 = try_launch_mxfp4_norm_quantize(
+                program, dispatch_index, dispatch_end, ctx, stream);
+            if (!mxfp4.ok() || mxfp4.value().kind == OptimizedLaunchKind::Launched)
+                return mxfp4;
             static const bool enabled = [] {
                 const char* env = std::getenv("SHELF_PLAMO_EXL3_NORM_ROTATE");
                 return (env == nullptr || std::strcmp(env, "0") != 0) &&
@@ -1851,6 +2161,10 @@ Result<OptimizedLaunchResult> try_launch_optimized(
         case KernelId::SWIGLU: {
             auto fp8 = try_launch_fp8_swiglu_quantize(program, dispatch_index, dispatch_end, ctx, stream);
             if (!fp8.ok() || fp8.value().kind == OptimizedLaunchKind::Launched) return fp8;
+            auto mxfp4 = try_launch_mxfp4_swiglu_quantize(
+                program, dispatch_index, dispatch_end, ctx, stream);
+            if (!mxfp4.ok() || mxfp4.value().kind == OptimizedLaunchKind::Launched)
+                return mxfp4;
             static const bool rq_enabled = std::getenv("SHELF_DISABLE_SWIGLU_RQ") == nullptr &&
                 std::getenv("SHELF_OP_DUMP") == nullptr && std::getenv("SHELF_OP_SYNC") == nullptr &&
                 std::getenv("SHELF_LINEAR_INPUT_DUMP") == nullptr &&
@@ -2003,6 +2317,10 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             auto fp8 = try_launch_fp8_residual_norm_quantize(
                 program, dispatch_index, dispatch_end, ctx, stream);
             if (!fp8.ok() || fp8.value().kind == OptimizedLaunchKind::Launched) return fp8;
+            auto mxfp4 = try_launch_mxfp4_residual_norm_quantize(
+                program, dispatch_index, dispatch_end, ctx, stream);
+            if (!mxfp4.ok() || mxfp4.value().kind == OptimizedLaunchKind::Launched)
+                return mxfp4;
             if (dispatch_index + 2u < dispatch_end &&
                 program.dispatches[dispatch_index + 1u].kernel_id == KernelId::RMS_NORM &&
                 program.dispatches[dispatch_index + 2u].kernel_id == KernelId::LINEAR_EXL3_INT8) {
