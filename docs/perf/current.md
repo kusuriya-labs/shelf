@@ -92,7 +92,8 @@ MXFP4 活性の量子化を producer kernel に融合した構成の測定であ
   と `shelf-bench tg --mode greedy --model-dir models/Qwen3.8-27B-Quark-AWQ-MXFP4
   --device 1 --context 512 --tokens 128 --prefill-chunk 512 --kv-cache-dtype bf16
   --warmup 1`
-- `SHELF_DISABLE_MXFP4_PRODUCER` の on / off を交互に 3 回ずつ実行した p50
+- `SHELF_DISABLE_MXFP4_PRODUCER` の on / off を交互に 3 回ずつ実行した p50。
+  sclk は固定していない
 
 | 断面 | 分離（off） | 融合（on） | 差 |
 | --- | ---: | ---: | ---: |
