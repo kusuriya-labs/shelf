@@ -107,6 +107,11 @@ VRAM 在籍率 160/256 = 62.5% とほぼ同じで、8 step では頻度 swap の
 | `SHELF_MOE_CACHE_MIN_GAIN` | 150 | 交換に必要な頻度比（%） |
 | `SHELF_MOE_CACHE_DECAY` | 4096 | 累積頻度のピークがこれを超えたら全体を 0.7 倍 |
 
+2026-11-19 の修正で、route 数が 層×local expert を超える batch は計画した交換をその
+step で全数消化するようになり、`SHELF_MOE_CACHE_BURST_SWAPS`（`--moe-cache-burst`）は
+削除された。経緯は
+[../20261119/moe_cache_chunk_dependent_decode.md](../20261119/moe_cache_chunk_dependent_decode.md)。
+
 結果（`--tokens 128`、交換後）: ヒット率 21.2 % → 累積 69.3 %（直近区間 92.8 %）、
 per-token 68.9 ms → 38.0 ms。`--tokens 256` では累積 70.1 %（直近 92.6 %）/
 38.6 ms。再配置は約 4 900 組、PCIe 約 26 GB の一括コスト（約 1.0 s）で、

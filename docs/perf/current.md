@@ -49,6 +49,34 @@ date・build・GPU 割り当て・生成結果の一致アンカーとともに�
 | カテゴリ別 serving | `vendor/BetterBench`（methodology §9） | decode t/s、TTFT p50 |
 | fp8 KV の数値品質 | `tools/quality_gate.py` / `shelf-bench quality` | ppl 差、mean KL、top-1 一致率 |
 
+## 2026-11-19 Qwen3.8-Flash-Next MXFP4 単一リクエスト decode の chunk 非依存化
+
+`--moe-host-experts 448` の TP=1 単一リクエストで、`--prefill-chunk` によらず decode が
+22.3〜23.0 tok/s になるよう expert cache の再配置スケジュールを修正した。修正前は
+chunk が大きいほど再配置計画の消化が decode に持ち越され、14.3 tok/s まで落ちていた。
+経緯と切り分けは
+[../research/20261119/moe_cache_chunk_dependent_decode.md](../research/20261119/moe_cache_chunk_dependent_decode.md)。
+
+- measurement revision: 2026-11-19 の working tree（expert cache の batch step 全数消化を含む）
+- GPU: Radeon AI PRO R9700 × 1（`--device 0`）
+- command: `shelf-compute --model-dir models/Qwen3.8-Flash-Next-Quark-MXFP4 --device 0
+  --moe-host-experts 448 --prefill-chunk <512|1024|2048|4096> --input-ids-file
+  <同一 token 4096 個> --max-new-tokens 64 --max-seq-len 8192 --kv-cache-dtype octave:c5v5`
+
+| prefill-chunk | 修正前 decode | 修正後 decode | 修正後 prefill |
+| ---: | ---: | ---: | ---: |
+| 512 | 22.18 tok/s | 22.30 tok/s | 10,268.5 ms |
+| 1024 | 16.41 tok/s | 22.53 tok/s | 7,652.6 ms |
+| 2048 | 14.52 tok/s | 22.56 tok/s | 5,707.2 ms |
+| 4096 | 14.30 tok/s | 23.04 tok/s | 5,103.4 ms |
+
+- 修正後の prefill は再配置の一括コストを含む。同一 session の chunk 4096 は修正前
+  3,564.9 ms → 修正後 5,103.4 ms で、増分は decode が担っていた約 2,474 交換
+  （PCIe 往復約 12 GiB）の移動である。E2E 合計は 7,805 ms → 7,621 ms。
+- `GENERATED_IDS` は修正前後で bitwise 一致する。prompt が同一 token の繰り返しのため
+  受理率などの実運用分布ではない。
+- prefill の絶対値は page cache の状態で変わるため、run 間の相対比較にのみ使う。
+
 ## 2026-11-19 Qwen3.8-Flash-Next MXFP4 TP=2 prefill
 
 TP=2 で `LINEAR_BF16` の `(out_features 3072, k 2560)` が allowlist から漏れ、
