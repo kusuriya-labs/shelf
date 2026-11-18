@@ -139,12 +139,39 @@ INT6 W32 の 2.151% は、EXL3 K=5 の 16.451% より 7.6 倍小さい。
 K=5 の EXL3 は行単位の scale を 1 本だけ持つのに対し、INT6 W32 は 32 値ごとに
 scale を持つことが効いている。
 
+## AVX512 量子化
+
+量子化器は AVX512F / AVX512BW / AVX512VL / BMI2 が使える CPU では AVX512 経路、
+それ以外は scalar 経路で動く（runtime dispatch）。AVX512 経路は 32 値の BF16 を
+2 本の 512-bit vector に変換し、amax、RNE 丸め、clamp を vector で行う。6-bit code は
+`vpmovdb` で byte に落とした後、BMI2 `pext` で 8 code = 48 bit を 6 byte に詰める。
+
+CPU: AMD Ryzen 7 7800X3D（8 core / 16 thread、AVX512F/BW/VL/BMI2）、
+入力 1 GiB BF16（1,048,576 行）の in-memory 量子化:
+
+| thread | scalar | AVX512 | 倍率 |
+| ---: | ---: | ---: | ---: |
+| 1 | 1.56 GiB/s | 9.91 GiB/s | 6.34x |
+| 8 | 8.21 GiB/s | 37.65 GiB/s | 4.58x |
+| 16 | 10.44 GiB/s | 37.90 GiB/s | 3.63x |
+
+scalar と AVX512 の packed payload は bit 一致した。
+
+`test_qwen4exp_load --skip-gpu --model-dir models/Qwen3.8-Flash-Next-Quark-MXFP4`:
+
+| 状態 | wall | user | sys |
+| --- | ---: | ---: | ---: |
+| INT6 scalar（warm） | 23.33 s | 206.5 s | 23.2 s |
+| INT6 AVX512（warm） | **19.07 s** | **24.4 s** | 26.8 s |
+| INT6 AVX512（cold） | 28.42 s | 22.7 s | 49.6 s |
+
+AVX512 で量子化の CPU 時間はほぼ消え、wall は BF16 95.37 GiB の読み込みと
+page fault に支配される。page cache の状態を制御した benchmark ではない。
+
 ## 起動時間
 
-`test_qwen4exp_load --skip-gpu --model-dir models/Qwen3.8-Flash-Next-Quark-MXFP4` は
-page cache が温まった状態で INT6 W32 が wall 25.60 s（user 212.1 s、sys 35.3 s、16 core）。
-INT5 W32 では wall 23.33 s、最初の実行で 32.46 s だった。
-BF16 の 95.37 GiB 読み込みと量子化を含む。page cache の状態を制御した benchmark ではない。
+INT6 W32 の page cache warm は AVX512 で wall 19.07 s、cold で 28.42 s。
+scalar では warm 23.33 s、cold 32.46 s だった。
 
 ## 判断
 

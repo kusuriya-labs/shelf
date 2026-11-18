@@ -4,6 +4,10 @@
 #include <cmath>
 #include <cstring>
 
+#if defined(__x86_64__) || defined(__i386__)
+#include <immintrin.h>
+#endif
+
 namespace shelf {
 namespace quantization {
 namespace int6 {
@@ -27,10 +31,8 @@ inline void store_scale(std::uint8_t* bytes, shelf::fp16_t scale) noexcept {
     std::memcpy(bytes, &scale, sizeof(scale));
 }
 
-}  // namespace
-
-void quantize_bf16_row(const bf16_t* src, std::uint32_t groups,
-                       std::uint8_t* dst) noexcept {
+void quantize_bf16_row_scalar(const bf16_t* src, std::uint32_t groups,
+                              std::uint8_t* dst) noexcept {
     for (std::uint32_t group = 0; group < groups; ++group) {
         const bf16_t* source = src + static_cast<std::size_t>(group) * kGroupSize;
         float values[kGroupSize];
@@ -70,6 +72,83 @@ void quantize_bf16_row(const bf16_t* src, std::uint32_t groups,
         }
         store_scale(codes + kGroupCodeBytes, stored);
     }
+}
+
+#if defined(__x86_64__) || defined(__i386__)
+bool cpu_has_avx512_bmi2() noexcept {
+    static const bool available =
+        __builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512bw") &&
+        __builtin_cpu_supports("avx512vl") && __builtin_cpu_supports("bmi2");
+    return available;
+}
+
+__attribute__((target("avx512f,avx512bw,avx512vl,bmi2")))
+void quantize_bf16_row_avx512(const bf16_t* src, std::uint32_t groups,
+                              std::uint8_t* dst) noexcept {
+    const __m512i sign_shift = _mm512_set1_epi32(16);
+    const __m512 zero = _mm512_setzero_ps();
+    const __m512i low = _mm512_set1_epi32(-static_cast<int>(kMaxNegativeMagnitude));
+    const __m512i high = _mm512_set1_epi32(static_cast<int>(kMaxPositive));
+    const __m512i code_mask = _mm512_set1_epi32(0x3F);
+    constexpr std::uint64_t kByteMask = 0x3F3F3F3F3F3F3F3Full;
+    for (std::uint32_t group = 0; group < groups; ++group) {
+        const std::uint16_t* source =
+            reinterpret_cast<const std::uint16_t*>(src) + group * kGroupSize;
+        const __m256i raw0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(source));
+        const __m256i raw1 =
+            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(source + 16));
+        const __m512 f0 =
+            _mm512_castsi512_ps(_mm512_sllv_epi32(_mm512_cvtepu16_epi32(raw0), sign_shift));
+        const __m512 f1 =
+            _mm512_castsi512_ps(_mm512_sllv_epi32(_mm512_cvtepu16_epi32(raw1), sign_shift));
+
+        const __m512 positive = _mm512_max_ps(zero, _mm512_max_ps(f0, f1));
+        const __m512 negative = _mm512_min_ps(zero, _mm512_min_ps(f0, f1));
+        const float pos = _mm512_reduce_max_ps(positive);
+        const float neg = _mm512_reduce_min_ps(negative);
+        const float raw = std::max(pos / kMaxPositive, -neg / kMaxNegativeMagnitude);
+        const shelf::fp16_t stored = raw > 0.0f
+            ? shelf::f32_to_fp16(std::max(raw, kMinScale))
+            : shelf::f32_to_fp16(1.0f);
+        const float inv = 1.0f / shelf::fp16_to_f32(stored);
+        const __m512 scale = _mm512_set1_ps(inv);
+
+        __m512i c0 = _mm512_cvtps_epi32(_mm512_roundscale_ps(
+            _mm512_mul_ps(f0, scale), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+        __m512i c1 = _mm512_cvtps_epi32(_mm512_roundscale_ps(
+            _mm512_mul_ps(f1, scale), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+        c0 = _mm512_and_si512(_mm512_min_epi32(_mm512_max_epi32(c0, low), high), code_mask);
+        c1 = _mm512_and_si512(_mm512_min_epi32(_mm512_max_epi32(c1, low), high), code_mask);
+
+        alignas(32) std::uint8_t bytes[32];
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(bytes),
+                         _mm512_cvtepi32_epi8(c0));
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(bytes + 16),
+                         _mm512_cvtepi32_epi8(c1));
+
+        std::uint8_t* codes = dst + static_cast<std::size_t>(group) * kGroupBytes;
+        for (std::uint32_t i = 0; i < 4u; ++i) {
+            std::uint64_t word = 0;
+            std::memcpy(&word, bytes + i * 8u, 8u);
+            const std::uint64_t packed = _pext_u64(word, kByteMask);
+            std::memcpy(codes + i * 6u, &packed, 6u);
+        }
+        store_scale(codes + kGroupCodeBytes, stored);
+    }
+}
+#endif
+
+}  // namespace
+
+void quantize_bf16_row(const bf16_t* src, std::uint32_t groups,
+                       std::uint8_t* dst) noexcept {
+#if defined(__x86_64__) || defined(__i386__)
+    if (cpu_has_avx512_bmi2()) {
+        quantize_bf16_row_avx512(src, groups, dst);
+        return;
+    }
+#endif
+    quantize_bf16_row_scalar(src, groups, dst);
 }
 
 void dequantize_row(const std::uint8_t* src, std::uint32_t groups,

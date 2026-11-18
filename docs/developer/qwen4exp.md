@@ -52,7 +52,9 @@ PLE の n-gram history を復元 prefix で再 seed する。MTP は無効であ
   1 group を 24 byte の code と 2 byte の scale で表す。160 値の行は 130 byte
   （6.5 bit/value）になる。scale は group の `max(max_positive / 31,
   -min_negative / 32)` で、両側の極値を飽和させない。全 zero の group は scale 1 と
-  code 0 にする。BF16 table はオンライン変換後、元の BF16 shard を保持しない。
+  code 0 にする。量子化器は AVX512F/BW/VL/BMI2 がある CPU では AVX512 経路、
+  それ以外は scalar 経路を使う。BF16 table はオンライン変換後、元の BF16 shard を
+  保持しない。
 - MXFP4 / FP8 の preshuffle staging は関数ローカルの buffer を非同期コピーしない。
   同期コピーで device へ移してから buffer を破棄する。
 

@@ -1083,6 +1083,31 @@ shelf-compute --model-dir models/Qwen3.6-35B-A3B-Quark-AWQ-MXFP4 \\
   していない
 - 3 stage 以上は未検証（この環境は GPU 2 枚まで）。TP と PP の同時利用は非対応
 
+## 2026-11-18 PLE INT6 online quantization（AVX512）
+
+- model: `models/Qwen3.8-Flash-Next-Quark-MXFP4` の PLE n-gram table のみ
+- CPU: AMD Ryzen 7 7800X3D（8 core / 16 thread、AVX512F/BW/VL/BMI2）
+- command: `./build/tests/test_qwen4exp_load --skip-gpu --model-dir models/Qwen3.8-Flash-Next-Quark-MXFP4`
+- table: 320,001,536 行 × 160 値、BF16 95.37 GiB → INT6 W32 38.743 GiB
+
+| 量子化器 | wall（warm） | wall（cold） | user（warm） | sys（warm） |
+| --- | ---: | ---: | ---: | ---: |
+| scalar | 23.33 s | 32.46 s | 206.5 s | 23.2 s |
+| AVX512 | **19.07 s** | **28.42 s** | **24.4 s** | 26.8 s |
+
+in-memory 量子化（1,048,576 行、入力 1 GiB）:
+
+| thread | scalar | AVX512 | 倍率 |
+| ---: | ---: | ---: | ---: |
+| 1 | 1.56 GiB/s | 9.91 GiB/s | 6.34x |
+| 8 | 8.21 GiB/s | 37.65 GiB/s | 4.58x |
+| 16 | 10.44 GiB/s | 37.90 GiB/s | 3.63x |
+
+- packed payload は scalar と AVX512 で bit 一致。
+- warm の wall は BF16 shard の読み込みと page fault が支配的で、量子化の CPU 時間は
+  ほぼなくなった。page cache の状態を制御した benchmark ではない。
+- full model load、GPU 実行、生成品質はこの計測に含まない。
+
 ## 記録規則
 
 - 新しい計測をしていない数値は更新しない。
