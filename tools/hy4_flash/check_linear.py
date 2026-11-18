@@ -42,7 +42,7 @@ def main():
             proj = torch.tensor([[weight.suh.data_ptr(), weight.svh.data_ptr(), weight.trellis.data_ptr()]]
                                 * args.rows, device="cuda",dtype=torch.int64)
             group = ops.library.shelf_hy4_expert_linear
-            group.argtypes = [ctypes.c_void_p]*2+[ctypes.c_int]+[ctypes.c_void_p]*4+[ctypes.c_int,ctypes.c_void_p]
+            group.argtypes = [ctypes.c_void_p]*2+[ctypes.c_int]+[ctypes.c_void_p]*4+[ctypes.c_int,ctypes.c_void_p,ctypes.c_void_p,ctypes.c_int,ctypes.c_int]
             group.restype = ctypes.c_int
             codes = torch.empty_like(gpu_input,dtype=torch.int8)
             scales = torch.empty(args.rows,12,device="cuda",dtype=torch.float32)
@@ -50,7 +50,7 @@ def main():
             output = torch.empty_like(gpu_input)
             def launch():
                 status = group(gpu_input.data_ptr(),proj.data_ptr(),1,codes.data_ptr(),scales.data_ptr(),
-                               partial.data_ptr(),output.data_ptr(),args.rows,None)
+                               partial.data_ptr(),output.data_ptr(),args.rows,None,None,0,0)
                 if status:
                     raise RuntimeError(f"grouped HIP 線形の起動失敗: {status}")
                 return output

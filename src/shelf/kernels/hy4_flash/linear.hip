@@ -5,6 +5,8 @@
 hipError_t shelf_hy4_wmma(const int8_t *, const float *, const uint32_t *, float *, int, int, int, int,
                           hipStream_t);
 
+hipError_t shelf_hy4_wmma_experts(const int8_t *, const float *, const Hy4ExpertProjection *, const Hy4Route *,
+                                  const Hy4ExpertBatch *, int, float *);
 namespace {
 using namespace shelf::kernel::exl3_detail;
 using namespace shelf::kernel::exl3_detail::mul24;
@@ -103,6 +105,45 @@ __global__ void multiply(const int8_t *codes, const float *scales, const uint32_
     }
 }
 
+__global__ void expert_batch4(const int8_t *codes, const float *scales, const Hy4ExpertProjection *matrices,
+                              const Hy4Route *routes, const Hy4ExpertBatch *batches, float *partial) {
+    auto batch = batches[blockIdx.y];
+    unsigned col = threadIdx.x % 16, worker = threadIdx.x / 16;
+    auto weight = matrices[3 * routes[batch.first].expert].trellis;
+    float acc[4]{};
+    for (unsigned kt = worker; kt < 96; kt += 8) {
+        auto tile = weight + (kt * 96 + blockIdx.x) * 32;
+        int sums[4]{};
+#pragma unroll
+        for (unsigned j = 0; j < 4; ++j) {
+            uint32_t b = unpack_four<4>(tile, j / 2 * 128 + col * 8 + j % 2 * 4);
+#pragma unroll
+            for (int r = 0; r < 4; ++r)
+                if (r < batch.count) {
+                    uint32_t a;
+                    __builtin_memcpy(&a, codes + size_t(batch.first + r) * 1536 + kt * 16 + j * 4, 4);
+                    sums[r] = dot4(a, b, sums[r]);
+                }
+        }
+#pragma unroll
+        for (int r = 0; r < 4; ++r)
+            if (r < batch.count)
+                acc[r] += sums[r] * scales[(batch.first + r) * 12 + kt / 8];
+    }
+    __shared__ float reduce[4][8][16];
+#pragma unroll
+    for (int r = 0; r < 4; ++r)
+        reduce[r][worker][col] = acc[r];
+    __syncthreads();
+    if (!worker)
+        for (int r = 0; r < batch.count; ++r) {
+            for (int i = 1; i < 8; ++i)
+                acc[r] += reduce[r][i][col];
+            partial[(batch.first + r) * 1536 + blockIdx.x * 16 + col] =
+                acc[r] * shelf::quantization::exl3::kExl3Int8GridStep;
+        }
+}
+
 __global__ void rotate_output(const float *partial, const uint16_t *svh, uint16_t *output, int width,
                               int padded, const Hy4ExpertProjection *group = nullptr, int stride = 0,
                               float *logits = nullptr, const Hy4Route *routes = nullptr) {
@@ -158,8 +199,11 @@ extern "C" hipError_t shelf_hy4_linear(const uint16_t *input, const uint16_t *su
 
 extern "C" hipError_t shelf_hy4_expert_linear(const uint16_t *x, const Hy4ExpertProjection *matrices,
                                               int stride, int8_t *codes, float *scales, float *partial,
-                                              uint16_t *y, int rows, const Hy4Route *routes) {
+                                              uint16_t *y, int rows, const Hy4Route *routes,
+                                              const Hy4ExpertBatch *batches, int num_batches, int wmma) {
     if (!x || !matrices || !codes || !scales || !partial || !y || rows < 1 || rows > 65535 || stride < 1)
+        return hipErrorInvalidValue;
+    if ((batches && (!routes || num_batches<1 || num_batches>rows || stride!=3)) || (!batches && num_batches))
         return hipErrorInvalidValue;
     rotate_input<<<dim3(12, rows), 32>>>(x, nullptr, codes, scales, 1536, 1536, matrices, stride, routes);
     auto status = hipGetLastError();
@@ -169,7 +213,13 @@ extern "C" hipError_t shelf_hy4_expert_linear(const uint16_t *x, const Hy4Expert
         auto v = std::getenv("SHELF_HY4_DOT4");
         return v && v[0] == '1' && !v[1];
     }();
-    if (use_dot)
+    if (batches && wmma) {
+        status = shelf_hy4_wmma_experts(codes, scales, matrices, routes, batches, num_batches, partial);
+        if (status != hipSuccess)
+            return status;
+    } else if (batches) {
+        expert_batch4<<<dim3(96, num_batches), 128>>>(codes, scales, matrices, routes, batches, partial);
+    } else if (use_dot)
         multiply<4, true>
             <<<dim3(96, rows), 128>>>(codes, scales, nullptr, partial, 1536, 1536, matrices, stride, routes);
     else

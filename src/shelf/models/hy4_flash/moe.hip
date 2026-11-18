@@ -54,21 +54,25 @@ __global__ void gather_route(Mat x, const Hy4Route *route, Mat out) {
     int r = blockIdx.y, c = blockIdx.x * 256 + threadIdx.x;
     out.p[r * 1536 + c] = x.p[route[r].row * 1536 + c];
 }
-__global__ void weighted(Mat x, const Hy4Route *route, const int *offsets, Mat out) {
+__global__ void weighted(Mat x, const Hy4Route *route, const int *offsets, const int *inverse, Mat out) {
     int r = blockIdx.y, c = blockIdx.x * 256 + threadIdx.x;
     float sum = 0;
-    for (int j = offsets[r]; j < offsets[r + 1]; ++j)
+    for (int i = offsets[r]; i < offsets[r + 1]; ++i) {
+        int j = inverse ? inverse[i] : i;
         sum = round_bf16(sum + round_bf16(route[j].weight * bf16_bits_to_f32(x.p[j * 1536 + c])));
+    }
     out.p[r * 1536 + c] = f32_to_bf16_rne_device(sum);
 }
-Mat grouped(Ops &op, Mat x, const Hy4Route *routes, int layer, int kind) {
+Mat grouped(Ops &op, Mat x, const Hy4Route *routes, int layer, int kind, const Hy4ExpertBatch *batches,
+            int count, bool wmma) {
     Mat y = op.mat(x.rows, 1536);
     size_t mark = op.arena.cursor;
     auto codes = static_cast<int8_t *>(op.arena.next(size_t(x.rows) * 1536));
     auto scales = static_cast<float *>(op.arena.next(size_t(x.rows) * 12 * 4));
     auto partial = static_cast<float *>(op.arena.next(size_t(x.rows) * 1536 * 4));
     auto desc = op.gpu.matrices[op.rank] + (layer - 1) * 1536 + kind;
-    checked(shelf_hy4_expert_linear(x.p, desc, 3, codes, scales, partial, y.p, x.rows, routes));
+    checked(shelf_hy4_expert_linear(x.p, desc, 3, codes, scales, partial, y.p, x.rows, routes, batches, count,
+                                    wmma));
     op.arena.cursor = mark;
     return y;
 }
@@ -114,6 +118,40 @@ Mat moe(Ops &op, int layer, Mat x) {
             op.gpu.transfer(input.p, r, latent.p, 0, latent.bytes());
         }
         int count = routes[r].size();
+        static const bool batch_rows = [] {
+            auto v = std::getenv("SHELF_HY4_GROUP_ROWS");
+            return v && std::string_view(v) == "1";
+        }();
+        static const bool wmma = [] {
+            auto v = std::getenv("SHELF_HY4_WMMA");
+            return v && std::string_view(v) == "1";
+        }();
+        Hy4ExpertBatch *batches = nullptr;
+        int *inverse = nullptr;
+        int num_batches = 0;
+        bool use_wmma = !r && wmma;
+        if (batch_rows && x.rows >= 8) {
+            auto &route = routes[r];
+            std::vector<int> order(count), undo(count);
+            std::iota(order.begin(), order.end(), 0);
+            std::stable_sort(order.begin(), order.end(),
+                             [&](int i, int j) { return route[i].expert < route[j].expert; });
+            std::vector<Hy4Route> sorted(count);
+            std::vector<Hy4ExpertBatch> groups;
+            for (int j = 0; j < count; ++j) {
+                sorted[j] = route[order[j]];
+                undo[order[j]] = j;
+                if (!j || sorted[j - 1].expert != sorted[j].expert ||
+                    groups.back().count == (use_wmma ? 16 : 4))
+                    groups.push_back({j, 0});
+                ++groups.back().count;
+            }
+            route.swap(sorted);
+            inverse = rank.indices(undo);
+            num_batches = groups.size();
+            batches = static_cast<Hy4ExpertBatch *>(rank.arena.next(groups.size() * sizeof(groups[0])));
+            rank.copy(batches, groups.data(), groups.size() * sizeof(groups[0]), hipMemcpyHostToDevice);
+        }
         auto gpu_routes = static_cast<Hy4Route *>(rank.arena.next(sizeof(Hy4Route) * count));
         rank.copy(gpu_routes, routes[r].data(), sizeof(Hy4Route) * count, hipMemcpyHostToDevice);
         offsets[r].push_back(count);
@@ -121,10 +159,11 @@ Mat moe(Ops &op, int layer, Mat x) {
         Mat a = rank.mat(count, 1536);
         gather_route<<<dim3(6, count), 256>>>(input, gpu_routes, a);
         checked(hipGetLastError());
-        Mat g = grouped(rank, a, gpu_routes, layer, 0), u = grouped(rank, a, gpu_routes, layer, 1);
-        Mat v = grouped(rank, rank.swiglu(g, u, true), gpu_routes, layer, 2);
+        Mat g = grouped(rank, a, gpu_routes, layer, 0, batches, num_batches, use_wmma),
+            u = grouped(rank, a, gpu_routes, layer, 1, batches, num_batches, use_wmma);
+        Mat v = grouped(rank, rank.swiglu(g, u, true), gpu_routes, layer, 2, batches, num_batches, use_wmma);
         result[r] = rank.mat(x.rows, 1536);
-        weighted<<<dim3(6, x.rows), 256>>>(v, gpu_routes, offsets_gpu, result[r]);
+        weighted<<<dim3(6, x.rows), 256>>>(v, gpu_routes, offsets_gpu, inverse, result[r]);
         checked(hipGetLastError());
     }
     checked(hipSetDevice(op.gpu.physical[0]));
