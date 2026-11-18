@@ -71,33 +71,73 @@ step=8 hit=62.82% swaps=32
 
 VRAM 在籍率 160/256 = 62.5% とほぼ同じで、8 step では頻度 swap の効果はまだ出ていない。
 
-### 長い decode での再評価（TP=1）
+### routing の偏り（TP=1、`host_experts=384`）
 
-`host_experts=384`（VRAM 128 / host 384）、context 3072、128 token を 152 step 回し、
-`SHELF_MOE_CACHE_INSERTS` を変えて比較した。1 step の routing は 48 層 × top_k 10 ×
-128 token = 61 440。
+`context 3072` / 128 token を 152 step 回し、累積の routing から配置の上限を測った。
+1 step の routing は 48 層 × top_k 10 × 128 token = 61 440。
 
-| INSERTS | hit | swaps | wall_us_per_token | tok/s |
-| ---: | ---: | ---: | ---: | ---: |
-| 0 | 21.2 % | 0 | 68 939 | 14.51 |
-| 4 | 21.3 % | 608 | 72 092 | 13.87 |
-| 64 | 20.3 % | 2 115 | 75 796 | 13.19 |
+| 指標 | 値 |
+| --- | ---: |
+| VRAM 在籍率 | 25.0 %（層あたり 128 / 512） |
+| ロード時の配置（expert 0..127）のヒット率 | 21.2 % |
+| 層ごとに上位 128 を選んだ場合 | 95.4 % |
+| 全体で上位 6 144 pair を選んだ場合 | 97.8 % |
+| 上位 2 % / 5 % / 10 % / 25 % の pair が占める routing | 48.1 / 69.2 / 85.0 / 97.7 % |
 
-ヒット率は VRAM 在籍率 128/512 = 25 % を下回ったまま動かない。512 expert / top_k 10 の
-routing は層あたり 512 通りに広がり、頻度の偏りが swap の判定に必要な差を作らない。
-交換は PCIe 転送を足すだけで、ヒット率を上げない。
+一様なら 25 % になるはずのヒット率が 21.2 % で、偏りは非常に強い。**在籍率ではなく
+置き場所が律速**である。同じモデルで 20.8 % という値が `docs/PREFILL_HEAD_ALIAS.md` に
+あるが、あれは 2 % 在籍（508 / 24 576 pair）での値で、比較できる数字ではない。
 
-- ACCEPT: hit/miss を plan で分けて host plane を PCIe 越しに読む構成。offload した
-  expert を CPU で計算せずに済み、TP=1 でも 170 GiB のモデルを動かせる。
-- ACCEPT: ヒット率と swap 数を stderr に出す計測口。
-- REJECT: 既定での頻度 swap。ヒット率を上げず 1 トークンあたり 4.6 %（INSERTS=4）/
-  10 %（INSERTS=64）遅くする。既定を `SHELF_MOE_CACHE_INSERTS=0` にした。
-- REJECT: INSERTS を増やしてヒット率を上げる方向。上限 64 でも改善しない。
-- 未検証: expert の初期配置を頻度順に選ぶ方式。現在は先頭 `vram_experts` 個が VRAM に
-  残るだけで、在籍率がそのままヒット率の上限になる。
+### 交換の実装をやり直した
 
-offload がある限り decode は PCIe 律速で、TP=1 は 14.5 tok/s、TP=2 + host 64 で
-17.0 tok/s である。
+- `swap()` が slot map を逆に更新していた。VRAM に入るのは host 側の expert なのに、
+  退避した expert を VRAM 在籍として記録していた。このため交換してもヒット率が動かず、
+  交換後の計算は誤った重みを読んでいた（`INSERTS` を使った以前の計測はすべて無効）。
+- 交換の判断材料を「その step に使われたか」から「累積頻度の順位」に変えた。
+  128 token の step では層あたり 1 280 回の routing が 512 expert に散り、
+  「未使用の VRAM expert」がほぼ存在しないため、旧方式では交換候補が作れなかった。
+- 交換を step あたりの本数ではなく、**層ごとのランキング差分**としてまとめて計画し、
+  複数 step に分けて消化するようにした。
+
+| 設定 | 既定 | 内容 |
+| --- | ---: | --- |
+| `SHELF_MOE_CACHE_REBALANCE_STEPS` | 4 | 再評価の間隔（step） |
+| `SHELF_MOE_CACHE_SWAP_BUDGET` | 96 | 1 step の交換数 |
+| `SHELF_MOE_CACHE_BURST_SWAPS` | 512 | batch が大きい step（routes > 層×expert）の交換数 |
+| `SHELF_MOE_CACHE_MIN_GAIN` | 150 | 交換に必要な頻度比（%） |
+| `SHELF_MOE_CACHE_DECAY` | 4096 | 累積頻度のピークがこれを超えたら全体を 0.7 倍 |
+
+結果（`--tokens 128`、交換後）: ヒット率 21.2 % → 累積 69.3 %（直近区間 92.8 %）、
+per-token 68.9 ms → 38.0 ms。`--tokens 256` では累積 70.1 %（直近 92.6 %）/
+38.6 ms。再配置は約 4 900 組、PCIe 約 26 GB の一括コスト（約 1.0 s）で、
+prefill 中に消化される。
+
+- ACCEPT: 累積頻度の順位による再配置。上限 95.4 % に対し 92-93 % に達する。
+- ACCEPT: 4 step ごとの再評価と min-gain 1.5。収束後は交換が発生せずコストが無い。
+- REJECT: その step の使用有無による 1 対 1 交換。候補が作れず、map のバグと相まって
+  ヒット率を上げられなかった。
+- REJECT: `SHELF_MOE_CACHE_INSERTS` を増やす方向（上限 64 でも改善しない）。
+- 未検証: 層をまたいだ全体ランキング（層ごとの上限 95.4 % に対し全体は 97.8 %）。
+  現状の在籍は層ごとに固定なので、層ごとの割り当てを変える設計が要る。
+
+### CPU 側で miss を計算する場合の上限（AVX512）
+
+`moe_intermediate 640` / `hidden 2560` の MXFP4 expert（2.46 MB）を、DDR5 上の
+512 expert からランダムに 36 個読んで 1 行 GEMV する条件の実測:
+
+| スレッド | 帯域 | 36 expert の処理 |
+| ---: | ---: | ---: |
+| 1 | 13.8 GB/s | 6.81 ms |
+| 2 | 26.7 GB/s | 3.52 ms |
+| 4 | 50.5 GB/s | 1.86 ms |
+| 6 | 68.5 GB/s | 1.37 ms |
+| 8 | 68.6 GB/s | 1.37 ms |
+
+PCIe（25 GB/s）で同じ 36 expert を読むと約 3.5 ms なので、物理コア半分の 4 スレッドで
+約 1.9 倍、6 スレッド以上で約 2.6 倍になる。1 スレッドではレイテンシ律速で伸びないため、
+専用スレッド群が必須である。実装は
+`mxfp4_cpu_expert.h`（AVX512 GEMV）、`cpu_team.h`（固定スレッド群）、
+`pcie_budget.h`（PCIe 利用率の上限）に置き、統合は次の段階で行う。
 
 ## 制約
 

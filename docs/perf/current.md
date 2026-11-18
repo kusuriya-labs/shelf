@@ -49,47 +49,35 @@ date・build・GPU 割り当て・生成結果の一致アンカーとともに�
 | カテゴリ別 serving | `vendor/BetterBench`（methodology §9） | decode t/s、TTFT p50 |
 | fp8 KV の数値品質 | `tools/quality_gate.py` / `shelf-bench quality` | ppl 差、mean KL、top-1 一致率 |
 
-## 2026-11-18 Qwen3.8-Flash-Next MXFP4 host offload decode と expert cache ヒット率
+## 2026-11-18 Qwen3.8-Flash-Next MXFP4 host offload decode
 
-`models/Qwen3.8-Flash-Next-Quark-MXFP4`（48 層・experts 512・top_k 10）は 170 GiB で
-1 枚の 32 GiB GPU に収まらないため、`SHELF_MOE_HOST_EXPERTS=384`（512 中 384）を
-host に退避した TP=1 で decode を測った。`MoeExpertCache` は
-`SHELF_MOE_CACHE_INSERTS` を変えて、ヒット率（routing が VRAM 常駐 expert に当たった
-割合）と 1 トークン時間を比較した。
+`models/Qwen3.8-Flash-Next-Quark-MXFP4`（48 層・hidden 2560・experts 512・top_k 10・
+moe_intermediate 640）は 170 GiB で 1 枚の 32 GiB GPU に収まらない。
+`SHELF_MOE_HOST_EXPERTS=384`（512 中 384）を host に退避した TP=1 で decode を測った。
 
-- measurement revision: 2026-11-18 の working tree（TP=1 `LoadedModel` への cache 配線と、
-  既定 `SHELF_MOE_CACHE_INSERTS=0` の変更を含む）
+- measurement revision: 2026-11-18 の working tree（expert cache の再配置を含む）
 - GPU: Radeon AI PRO R9700 × 1（`--device 0`、sclk 1735 MHz）
-- command: `SHELF_MOE_HOST_EXPERTS=384 SHELF_MOE_CACHE_INSERTS=<0|4|64>
-  SHELF_MOE_CACHE_LOG_INTERVAL=8 shelf-bench tg --model-dir models/Qwen3.8-Flash-Next-Quark-MXFP4
-  --device 0 --warmup 1 --context 3072 --tokens 128 --kv-cache-dtype fp8`
-- 1 step = 128 token、1 step の routing は 48 層 × 10 × 128 = 61440
+- command: `SHELF_MOE_HOST_EXPERTS=384 shelf-bench tg --model-dir
+  models/Qwen3.8-Flash-Next-Quark-MXFP4 --device 0 --warmup 1 --context 3072
+  --kv-cache-dtype fp8 --tokens <8|128|256>`
 
-| `SHELF_MOE_CACHE_INSERTS` | ヒット率 | swaps（152 step） | wall_us_per_token | tok/s |
-| ---: | ---: | ---: | ---: | ---: |
-| 0 | 21.2 % | 0 | 68 939 | 14.51 |
-| 4（旧既定） | 21.3 % | 608 | 72 092 | 13.87 |
-| 64 | 20.3 % | 2 115 | 75 796 | 13.19 |
+| 配置の決め方 | ヒット率（累積） | 直近区間のヒット率 | per-token |
+| --- | ---: | ---: | ---: |
+| ロード時のまま（expert 0..127 が VRAM） | 21.2 % | 21.2 % | 68.9 ms |
+| routing 頻度で再配置（128 token） | 69.3 % | 92.8 % | 38.0 ms |
+| routing 頻度で再配置（256 token） | 70.1 % | 92.6 % | 38.6 ms |
 
-ヒット率はスワップ数によらずほぼ一定で、一様 routing の期待値
-（`vram_experts / experts` = 25 %）をわずかに下回る。スワップは滞在 expert の
-入れ替えに過ぎずヒット率を上げないため、増やすほど PCIe 転送だけが増える。
-既定を 0 にした理由はこの表である。
+- 再配置は decode 開始前の prefill 中に完了する。1 回の再配置は約 4 900 組の交換で、
+  PCIe を約 26 GB 使う（25 GB/s で約 1.0 s の一括コスト）。
+- 累積ヒット率が 70 % なのは、交換中の step が平均を押し下げるためである。定常状態は
+  92-93 % で、その配置で取れる上限（95.4 %）に近い。
+- 1 トークンの実測モデルは `16.5 ms + 0.669 ms × miss率(%)`。定常（miss 7.4 %）で
+  約 21.5 ms、miss 79 %（再配置なし）で 68.9 ms になり、実測と一致する。
+- TP=2 + offload 64 は `--tokens 8` で 58.8 ms / 17.0 tok/s。TP=4 は
+  `num_key_value_heads=2` が 4 で割り切れず実行できない。
 
-同じモデルの TP 構成による差（同一 command、`--tokens 8`）:
-
-| 構成 | wall_us_per_token | tok/s |
-| --- | ---: | ---: |
-| TP=1 + offload 384 | 68 844 | 14.53 |
-| TP=2 + offload 64 | 58 755 | 17.02 |
-
-TP=4 は `num_key_value_heads=2` が 4 で割り切れず実行できない
-（`TpCoordinator::create` が `unsupported` を返す）。
-
-1 トークンの内訳（概算）は、backbone 約 10.6 GiB が VRAM 帯域（実測 640 GB/s）で約 16.5 ms、
-active expert のうち host 常駐分（75 %）が PCIe で約 35 ms、残りが attention と起動である。
-offload した expert の読み出しが支配的なので、この構成の decode は
-DRAM ではなく PCIe 律速になる。採否判断は
+miss expert の重みは host の pinned plane から GPU が PCIe 越しに読む。PCIe の実測は
+約 25 GB/s で、VRAM の約 1/25 である。routing の偏りと上限の測定は
 [../research/20261118/moe_expert_offload.md](../research/20261118/moe_expert_offload.md)
 に置く。
 

@@ -28,7 +28,7 @@ public:
     bool enabled() const noexcept { return weights_ != nullptr; }
 
     // Reads the routing observed in the last batch, updates the frequency table, and
-    // applies at most `inserts_` VRAM<->host swaps. Runs after the batch completed and
+    // executes the next slice of VRAM<->host moves. Runs after the batch completed and
     // before the next one is submitted.
     Status step(hipStream_t stream);
 
@@ -38,17 +38,36 @@ public:
 private:
     explicit MoeExpertCache(const Qwen4ExpRankWeights& weights);
 
+    struct Move {
+        std::uint32_t layer = 0;
+        std::uint32_t host_slot = 0;
+        std::uint32_t vram_slot = 0;
+        std::uint64_t score = 0;
+    };
+
     Status swap(std::uint32_t layer, std::uint32_t host_slot, std::uint32_t vram_slot,
                 hipStream_t stream);
+    void plan();
+    void log_oracle() const;
 
     const Qwen4ExpRankWeights* weights_ = nullptr;
     std::uint32_t layers_ = 0;
     std::uint32_t vram_experts_ = 0;
     std::uint32_t host_experts_ = 0;
     std::uint32_t experts_ = 0;
-    std::uint32_t inserts_ = 4;
+    std::uint32_t budget_ = 64;
+    std::uint32_t burst_ = 512;
+    std::uint32_t min_gain_ = 150;
+    std::uint32_t rebalance_steps_ = 4;
     std::uint32_t decay_at_ = 4096;
     std::uint32_t log_interval_ = 64;
+    std::uint64_t rebalance_routes_ = 0;
+    std::uint64_t next_rebalance_routes_ = 0;
+    std::uint64_t last_plan_step_ = 0;
+    bool oracle_ = false;
+
+    std::vector<Move> pending_;
+    std::size_t pending_head_ = 0;
 
     std::vector<std::uint32_t> freq_acc_;    // [layers][experts]
     std::vector<std::uint32_t> step_freq_;   // [layers][experts]

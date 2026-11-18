@@ -42,13 +42,23 @@ MoeExpertCache::MoeExpertCache(const Qwen4ExpRankWeights& weights) : weights_(&w
     vram_experts_ = weights.vram_experts;
     host_experts_ = weights.host_experts;
     experts_ = vram_experts_ + host_experts_;
-    inserts_ = std::min<std::uint32_t>(env_u32("SHELF_MOE_CACHE_INSERTS", 0u), 64u);
+    budget_ = env_u32("SHELF_MOE_CACHE_SWAP_BUDGET", 96u);
+    burst_ = std::max<std::uint32_t>(env_u32("SHELF_MOE_CACHE_BURST_SWAPS", 512u), budget_);
+    min_gain_ = std::max<std::uint32_t>(env_u32("SHELF_MOE_CACHE_MIN_GAIN", 150u), 100u);
+    rebalance_steps_ =
+        std::max<std::uint32_t>(env_u32("SHELF_MOE_CACHE_REBALANCE_STEPS", 4u), 1u);
+    rebalance_routes_ = env_u32("SHELF_MOE_CACHE_REBALANCE_ROUTES", 0u);
     decay_at_ = std::max<std::uint32_t>(env_u32("SHELF_MOE_CACHE_DECAY", 4096u), 1u);
     log_interval_ = std::max<std::uint32_t>(
         env_u32("SHELF_MOE_CACHE_LOG_INTERVAL", 64u), 1u);
+    oracle_ = env_u32("SHELF_MOE_CACHE_ORACLE", 0u) != 0u;
 
     const std::size_t route_slots =
         static_cast<std::size_t>(layers_) * experts_;
+    if (rebalance_routes_ == 0u) {
+        rebalance_routes_ = 16u * static_cast<std::uint64_t>(route_slots);
+    }
+    next_rebalance_routes_ = rebalance_routes_;
     freq_acc_.assign(route_slots, 0u);
     step_freq_.assign(route_slots, 0u);
     map_host_.assign(route_slots, -1);
@@ -106,15 +116,20 @@ Status MoeExpertCache::step(hipStream_t stream) {
         peak = std::max(peak, freq_acc_[index]);
     }
     if (peak >= decay_at_) {
-        for (std::uint32_t& count : freq_acc_) count /= 2u;
+        for (std::uint32_t& count : freq_acc_) {
+            count = static_cast<std::uint32_t>(
+                static_cast<std::uint64_t>(count) * 7u / 10u);
+        }
     }
 
+    std::uint64_t step_routes = 0;
     std::uint64_t routes = 0;
     std::uint64_t hits = 0;
     for (std::uint32_t layer = 0; layer < layers_; ++layer) {
         for (std::uint32_t expert = 0; expert < experts_; ++expert) {
             const std::size_t index = static_cast<std::size_t>(layer) * experts_ + expert;
             const std::uint32_t count = step_freq_[index];
+            step_routes += count;
             if (count == 0u) continue;
             routes += count;
             if (map_host_[index] >= 0) hits += count;
@@ -123,66 +138,18 @@ Status MoeExpertCache::step(hipStream_t stream) {
     routes_ += routes;
     hits_ += hits;
 
-    struct Candidate {
-        std::uint32_t layer = 0;
-        std::uint32_t host_slot = 0;
-        std::uint32_t vram_slot = 0;
-        std::uint64_t score = 0;
-    };
-    std::vector<Candidate> candidates;
-    candidates.reserve(layers_);
-    if (inserts_ != 0u) {
-        for (std::uint32_t layer = 0; layer < layers_; ++layer) {
-            std::int32_t best_host = -1;
-            std::uint64_t best_host_score = 0;
-            for (std::uint32_t slot = 0; slot < host_experts_; ++slot) {
-                const std::size_t expert_index =
-                    static_cast<std::size_t>(layer) * host_experts_ + slot;
-                const std::int32_t expert = host_expert_[expert_index];
-                const std::size_t index =
-                    static_cast<std::size_t>(layer) * experts_ + expert;
-                if (step_freq_[index] == 0u) continue;
-                const std::uint64_t score = freq_acc_[index];
-                if (best_host < 0 || score > best_host_score) {
-                    best_host = static_cast<std::int32_t>(slot);
-                    best_host_score = score;
-                }
-            }
-            if (best_host < 0) continue;
-            std::int32_t best_vram = -1;
-            std::uint64_t best_vram_score = UINT64_MAX;
-            for (std::uint32_t slot = 0; slot < vram_experts_; ++slot) {
-                const std::size_t expert_index =
-                    static_cast<std::size_t>(layer) * vram_experts_ + slot;
-                const std::int32_t expert = vram_expert_[expert_index];
-                const std::size_t index =
-                    static_cast<std::size_t>(layer) * experts_ + expert;
-                if (step_freq_[index] != 0u) continue;
-                const std::uint64_t score = freq_acc_[index];
-                if (best_vram < 0 || score < best_vram_score) {
-                    best_vram = static_cast<std::int32_t>(slot);
-                    best_vram_score = score;
-                }
-            }
-            if (best_vram < 0 || best_host_score <= best_vram_score) continue;
-            Candidate candidate;
-            candidate.layer = layer;
-            candidate.host_slot = static_cast<std::uint32_t>(best_host);
-            candidate.vram_slot = static_cast<std::uint32_t>(best_vram);
-            candidate.score = best_host_score - best_vram_score;
-            candidates.push_back(candidate);
-        }
-        std::sort(candidates.begin(), candidates.end(),
-                  [](const Candidate& a, const Candidate& b) {
-                      return a.score > b.score;
-                  });
+    if (pending_head_ >= pending_.size()) {
+        const bool due = routes_ >= next_rebalance_routes_;
+        const bool periodic = routes_ >= rebalance_routes_ &&
+                              step_ - last_plan_step_ >= rebalance_steps_;
+        if (due || periodic) plan();
     }
-
-    const std::uint32_t count =
-        std::min<std::uint32_t>(inserts_, static_cast<std::uint32_t>(candidates.size()));
-    for (std::uint32_t index = 0; index < count; ++index) {
-        const Candidate& candidate = candidates[index];
-        st = swap(candidate.layer, candidate.host_slot, candidate.vram_slot, stream);
+    const std::uint64_t batched_routes = static_cast<std::uint64_t>(layers_) * experts_;
+    const std::uint32_t budget = step_routes > batched_routes ? burst_ : budget_;
+    for (std::uint32_t index = 0; index < budget && pending_head_ < pending_.size();
+         ++index, ++pending_head_) {
+        const Move move = pending_[pending_head_];
+        st = swap(move.layer, move.host_slot, move.vram_slot, stream);
         if (!st.ok()) return st;
         ++swaps_;
     }
@@ -196,8 +163,115 @@ Status MoeExpertCache::step(hipStream_t stream) {
                      100.0 * static_cast<double>(hits_) / static_cast<double>(routes_),
                      static_cast<unsigned long long>(swaps_));
         std::fflush(stderr);
+        if (oracle_) log_oracle();
     }
     return Status::make_ok();
+}
+
+void MoeExpertCache::plan() {
+    pending_.clear();
+    pending_head_ = 0;
+
+    struct Ranked {
+        std::uint32_t freq = 0;
+        std::uint32_t slot = 0;
+    };
+    std::vector<Ranked> resident(vram_experts_);
+    std::vector<Ranked> waiting(host_experts_);
+    for (std::uint32_t layer = 0; layer < layers_; ++layer) {
+        const std::size_t base = static_cast<std::size_t>(layer) * experts_;
+        for (std::uint32_t slot = 0; slot < vram_experts_; ++slot) {
+            const std::size_t index =
+                static_cast<std::size_t>(layer) * vram_experts_ + slot;
+            const std::uint32_t expert = static_cast<std::uint32_t>(vram_expert_[index]);
+            resident[slot].freq = freq_acc_[base + expert];
+            resident[slot].slot = slot;
+        }
+        for (std::uint32_t slot = 0; slot < host_experts_; ++slot) {
+            const std::size_t index =
+                static_cast<std::size_t>(layer) * host_experts_ + slot;
+            const std::uint32_t expert = static_cast<std::uint32_t>(host_expert_[index]);
+            waiting[slot].freq = freq_acc_[base + expert];
+            waiting[slot].slot = slot;
+        }
+        std::sort(resident.begin(), resident.end(),
+                  [](const Ranked& a, const Ranked& b) { return a.freq < b.freq; });
+        std::sort(waiting.begin(), waiting.end(),
+                  [](const Ranked& a, const Ranked& b) { return a.freq > b.freq; });
+        const std::size_t pairs =
+            std::min<std::size_t>(vram_experts_, host_experts_);
+        for (std::size_t i = 0; i < pairs; ++i) {
+            const std::uint64_t admitted = waiting[i].freq;
+            const std::uint64_t evicted = resident[i].freq;
+            if (admitted == 0u || admitted <= evicted) break;
+            if (admitted * 100u <= evicted * min_gain_) break;
+            Move move;
+            move.layer = layer;
+            move.host_slot = waiting[i].slot;
+            move.vram_slot = resident[i].slot;
+            move.score = admitted - evicted;
+            pending_.push_back(move);
+        }
+    }
+    std::sort(pending_.begin(), pending_.end(),
+              [](const Move& a, const Move& b) { return a.score > b.score; });
+    last_plan_step_ = step_;
+    next_rebalance_routes_ =
+        routes_ + std::max<std::uint64_t>(rebalance_routes_, routes_ / 4u);
+}
+
+void MoeExpertCache::log_oracle() const {
+    std::uint64_t total = 0;
+    for (const std::uint32_t count : freq_acc_) total += count;
+    if (total == 0u) return;
+
+    std::vector<std::uint32_t> order(freq_acc_.size());
+    for (std::uint32_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::sort(order.begin(), order.end(), [this](std::uint32_t a, std::uint32_t b) {
+        return freq_acc_[a] > freq_acc_[b];
+    });
+
+    const std::size_t capacity = static_cast<std::size_t>(layers_) * vram_experts_;
+    std::uint64_t global_top = 0;
+    for (std::size_t i = 0; i < order.size() && i < capacity; ++i) {
+        global_top += freq_acc_[order[i]];
+    }
+
+    std::uint64_t layer_top = 0;
+    std::vector<std::uint32_t> slice(experts_);
+    for (std::uint32_t layer = 0; layer < layers_; ++layer) {
+        const std::size_t base = static_cast<std::size_t>(layer) * experts_;
+        for (std::uint32_t e = 0; e < experts_; ++e) slice[e] = freq_acc_[base + e];
+        const std::size_t keep = std::min<std::size_t>(vram_experts_, experts_);
+        std::nth_element(slice.begin(), slice.begin() + keep, slice.end(),
+                         [](std::uint32_t a, std::uint32_t b) { return a > b; });
+        for (std::size_t i = 0; i < keep; ++i) layer_top += slice[i];
+    }
+
+    const double fraction[] = {0.02, 0.05, 0.10, 0.25, 0.50};
+    double coverage[5] = {0.0, 0.0, 0.0, 0.0, 0.0};
+    std::uint64_t running = 0;
+    std::size_t next = 0;
+    for (std::size_t i = 0; i < order.size() && next < 5u; ++i) {
+        running += freq_acc_[order[i]];
+        while (next < 5u &&
+               static_cast<double>(i + 1u) >= fraction[next] * static_cast<double>(order.size())) {
+            coverage[next] = 100.0 * static_cast<double>(running) / static_cast<double>(total);
+            ++next;
+        }
+    }
+
+    std::fprintf(stderr,
+                 "MOE_CACHE_ORACLE step=%llu slot=%.1f%% current=%.2f%% layer_top=%.2f%% "
+                 "global_top=%.2f%% cov2=%.1f%% cov5=%.1f%% cov10=%.1f%% cov25=%.1f%% "
+                 "cov50=%.1f%%\n",
+                 static_cast<unsigned long long>(step_),
+                 100.0 * static_cast<double>(capacity) / static_cast<double>(order.size()),
+                 100.0 * static_cast<double>(hits_) / static_cast<double>(routes_),
+                 100.0 * static_cast<double>(layer_top) / static_cast<double>(total),
+                 100.0 * static_cast<double>(global_top) / static_cast<double>(total),
+                 coverage[0], coverage[1], coverage[2], coverage[3], coverage[4]);
+    std::fflush(stderr);
 }
 
 Status MoeExpertCache::swap(std::uint32_t layer, std::uint32_t host_slot,
@@ -276,13 +350,13 @@ Status MoeExpertCache::swap(std::uint32_t layer, std::uint32_t host_slot,
         static_cast<std::size_t>(layer) * vram_experts_ + vram_slot;
     const std::size_t host_index =
         static_cast<std::size_t>(layer) * host_experts_ + host_slot;
-    const std::int32_t promoted = vram_expert_[vram_index];
-    const std::int32_t demoted = host_expert_[host_index];
-    vram_expert_[vram_index] = demoted;
-    host_expert_[host_index] = promoted;
+    const std::int32_t evicted = vram_expert_[vram_index];
+    const std::int32_t admitted = host_expert_[host_index];
+    vram_expert_[vram_index] = admitted;
+    host_expert_[host_index] = evicted;
     const std::size_t map_base = static_cast<std::size_t>(layer) * experts_;
-    map_host_[map_base + promoted] = static_cast<std::int32_t>(vram_slot);
-    map_host_[map_base + demoted] = -1 - static_cast<std::int32_t>(host_slot);
+    map_host_[map_base + admitted] = static_cast<std::int32_t>(vram_slot);
+    map_host_[map_base + evicted] = -1 - static_cast<std::int32_t>(host_slot);
 
     Status st = copy_async(weights_->expert_slot_map.data<std::int32_t>() + map_base,
                            map_host_.data() + map_base,
