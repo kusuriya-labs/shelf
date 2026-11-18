@@ -105,7 +105,16 @@ drafter として付け、単一リクエストで decode を測った。prompt 
   `shelf-compute` の単一リクエスト経路で測った。
 - lm_head の INT8W32 化で TP=2 の DFlash2 は 28.0 → 38.7 tok/s になる
   （drafter の head GEMM が短くなるため）。
-- TP=2 の `DFLASH2_D2H_MS` は 11 round で 111 ms。host token ids の往復が次の削減対象。
+- TP=2 の `DFLASH2_D2H_MS` は 11 round で 111 ms だが、その内訳は proposal の
+  `hipStreamSynchronize` 待ち（`DFLASH2_PROPOSAL_WAIT_MS`）で、コピー本体は 0.45 ms。
+  転送ではなく drafter の計算待ちである。
+- TP=2 の drafts スイープ（`--dflash2-drafts` 3/4/5/6）: 34.9 / 36.9 / 37.0 / 38.7 tok/s。
+  この family の上限 6 が最良。
+- TP=2 で `--tensor-parallel-combine-f32 1` は 32.3 tok/s（受理 3.75、verify 1633 ms）。
+  rank 間 combine の f32 化は遅くなるだけで、受理率も改善しない。
+- TP=2 は同じ config の TP=1 より decode が遅く（25.8 vs 21.5 ms/token）、prefill も
+  13.5 s vs 4.6 s と 3 倍遅い。1 round の verify は TP=2 がむしろ速い（123 vs 129 ms）ので、
+  差は受理率（4.18 vs 5.33 drafts）と 1 row あたりの固定費（65.8 vs 40.2 ms）から来る。
 
 ## 2026-11-18 Qwen3.8-27B MXFP4 decode GEMV
 
