@@ -117,7 +117,7 @@ void compute_usage(const char* prog) {
     printf("  --moe-cache-swap-budget N   expert cache swap budget (default 96)\n");
     printf("  --moe-cache-min-gain N  minimum frequency gain to swap (default 150)\n");
     printf("  --moe-cache-rebalance-steps N  rebalance interval in steps (default 4)\n");
-    printf("  --moe-cache-rebalance-routes N rebalance interval in routes (0 = auto)\n");
+    printf("  --moe-cache-rebalance-routes N  rebalance interval in routes (0 = auto)\n");
     printf("  --moe-cache-decay N     halve expert frequency at this count (default 4096)\n");
     printf("  --moe-cache-log-interval N  expert cache hit-rate log interval (default 64)\n");
     printf("  --moe-cache-oracle 0|1  log cache oracle decisions (default 0)\n");

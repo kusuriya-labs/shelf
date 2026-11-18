@@ -48,7 +48,7 @@ TP、pipeline parallel、MTP、DFlash2、2048 token 超の長文は未対応。
 | `--moe-cache-swap-budget N` | expert cache swap budget (default 96) |
 | `--moe-cache-min-gain N` | minimum frequency gain to swap (default 150) |
 | `--moe-cache-rebalance-steps N` | rebalance interval in steps (default 4) |
-| `--moe-cache-rebalance-routes N rebalance interval in routes (0 = auto)` |  |
+| `--moe-cache-rebalance-routes N` | rebalance interval in routes (0 = auto) |
 | `--moe-cache-decay N` | halve expert frequency at this count (default 4096) |
 | `--moe-cache-log-interval N` | expert cache hit-rate log interval (default 64) |
 | `--moe-cache-oracle 0\|1` | log cache oracle decisions (default 0) |

@@ -71,8 +71,8 @@ detail and is not a `--variant` value.
 | `--moe-cache-decay N` | halve expert frequency at this count (default 4096) |
 | `--moe-cache-log-interval N` | expert cache hit-rate log interval (default 64) |
 | `--moe-cache-oracle 0\|1` | log cache oracle decisions (default 0) |
-| `--ple-artifact 0\|1` | write/read `<model_dir>/quanted_ple.bin` (default 1) |
-| `--ple-stream-io MODE` | `pread` \| `mmap` \| `direct` PLE source I/O (default mmap) |
+| `--ple-artifact 0\|1` | write/read <model_dir>/quanted_ple.bin (default 1) |
+| `--ple-stream-io MODE` | pread \| mmap \| direct (default mmap) |
 | `--lm-head-int8 0\|1` | quantize the BF16 lm head to INT8 W32 on load (default 1) |
 | `--pcie-frac F` | share of PCIe the runtime may use (default 0.25) |
 | `--pcie-gbps F` | assumed PCIe bandwidth in GB/s (default 25) |
@@ -140,8 +140,8 @@ backbone kernel の allowlist に登録済みで、prefill の throughput は TP
 | `--moe-cache-decay N` | halve expert frequency at this count (default 4096) |
 | `--moe-cache-log-interval N` | expert cache hit-rate log interval (default 64) |
 | `--moe-cache-oracle 0\|1` | log cache oracle decisions (default 0) |
-| `--ple-artifact 0\|1` | write/read `<model_dir>/quanted_ple.bin` (default 1) |
-| `--ple-stream-io MODE` | `pread` \| `mmap` \| `direct` PLE source I/O (default mmap) |
+| `--ple-artifact 0\|1` | write/read <model_dir>/quanted_ple.bin (default 1) |
+| `--ple-stream-io MODE` | pread \| mmap \| direct (default mmap) |
 | `--lm-head-int8 0\|1` | quantize the BF16 lm head to INT8 W32 on load (default 1) |
 | `--pcie-frac F` | share of PCIe the runtime may use (default 0.25) |
 | `--pcie-gbps F` | assumed PCIe bandwidth in GB/s (default 25) |
