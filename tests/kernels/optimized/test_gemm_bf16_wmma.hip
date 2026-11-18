@@ -326,6 +326,14 @@ int main() {
         run_case(64, 64, 256, 256, 64, 0xB1600002u, arena, stream, "rep rows=64 N=64 K=256");
     }
 
+    // Qwen3.8-Flash-Next at tp_size 2: GDN in_proj_z (rank-local value width).
+    {
+        run_case(1, 3072, 2560, 2560, 3072, 0x4E6A0001u, arena, stream,
+                 "qwen4exp tp2 rows=1 N=3072 K=2560");
+        run_case(96, 3072, 2560, 2560, 3072, 0x4E6A0002u, arena, stream,
+                 "qwen4exp tp2 rows=96 N=3072 K=2560");
+    }
+
     // Qwen3.8-27B TP=2 local geometries.
     {
         run_case(1, 8704, 5120, 5120, 8704, 0x7B200001u, arena, stream,

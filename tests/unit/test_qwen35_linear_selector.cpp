@@ -357,6 +357,26 @@ void test_mxfp4() {
           "mxfp4 rows past 192 -> RowBlock4");
 }
 
+void test_qwen4exp_tp2_shapes() {
+    // Qwen3.8-Flash-Next (Qwen4Exp) at tp_size 2: the GDN value width halves from
+    // 6144 to 3072, so in_proj_z becomes 3072x2560. It was missing from the
+    // allowlist and fell back to the correctness interpreter.
+    using shelf::execution::linear_shape_supported;
+    using shelf::execution::LinearComputeFamily;
+    check(linear_shape_supported(LinearComputeFamily::Bf16, 3072u, 2560u),
+          "qwen4exp tp2 bf16 3072x2560 (in_proj_z)");
+    check(linear_shape_supported(LinearComputeFamily::Bf16, 6144u, 2560u),
+          "qwen4exp tp1 bf16 6144x2560 (in_proj_z)");
+    check(sel_bf16(1, 3072, 2560, 2560, true, true, true).has_value(),
+          "qwen4exp tp2 bf16 3072x2560 rows=1 -> config");
+    for (uint32_t rows : {8u, 512u, 4096u}) {
+        check(sel_bf16(rows, 3072, 2560, 2560, true, true, false).has_value(),
+              "qwen4exp tp2 bf16 3072x2560 prefill -> config");
+    }
+    check(!linear_shape_supported(LinearComputeFamily::Bf16, 3073u, 2560u),
+          "qwen4exp bf16 3073x2560 stays unmeasured");
+}
+
 }  // namespace
 
 int main() {
@@ -367,6 +387,7 @@ int main() {
     test_tp2_shapes();
     test_qsa_indexer_shapes();
     test_moe_tp2_shapes();
+    test_qwen4exp_tp2_shapes();
 
     std::printf("\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;

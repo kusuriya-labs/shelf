@@ -4,7 +4,7 @@
 build ディレクトリの compile_commands.json から実際のビルドフラグを取り、
 対象 translation unit を assembly へコンパイルして、kernel ごとに
 レジスタspill と private segment (local memory) 使用量を読む。
-FP8 kernel は spill 0 / private segment 0 が契約である。
+FP8 kernel と MXFP4 GEMM kernel は spill 0 / private segment 0 が契約である。
 """
 
 import argparse
@@ -20,12 +20,14 @@ KERNELS = {
     "src/shelf/kernels/optimized/linear/fp8.hip": "gemm_fp8_",
     "src/shelf/kernels/optimized/activation_quantize.hip": "activation_quantize_fp8_",
     "src/shelf/kernels/optimized/attention/paged_decode.hip": "fp8_impl",
+    "src/shelf/kernels/optimized/linear/mxfp4.hip": "gemm_mxfp4_",
 }
 
 LIMITS = {
     "gemm_fp8_": {"vgpr_spill": 0, "sgpr_spill": 0, "private": 0},
     "activation_quantize_fp8_": {"vgpr_spill": 0, "sgpr_spill": 0, "private": 0},
     "fp8_impl": {"vgpr_spill": 0, "sgpr_spill": 0, "private": 0},
+    "gemm_mxfp4_": {"vgpr_spill": 0, "sgpr_spill": 0, "private": 0},
 }
 
 META = {
@@ -148,7 +150,7 @@ def main():
         for f in failures:
             print(f"FAIL: {f}", file=sys.stderr)
         return 1
-    print("FP8 kernel spill / private segment contract: OK")
+    print("kernel spill / private segment contract: OK")
     return 0
 
 

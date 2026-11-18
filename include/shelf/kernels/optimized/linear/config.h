@@ -116,6 +116,7 @@ struct Mxfp4GemmConfig {
 };
 
 inline constexpr uint32_t kMxfp4GemmPrefill2dKChunk = 128u;
+inline constexpr uint32_t kMxfp4GemmPrefill2dOutBlock = 64u;
 inline constexpr uint32_t kMxfp4GemmPrefill2dMinRows = 512u;
 inline constexpr uint64_t kMxfp4GemmPrefill2dMinWeights = 40000000ull;
 inline constexpr uint32_t kMxfp4GemmPrefill2dRowsPerBlock = 16u * kMxfp4GemmRowTile;

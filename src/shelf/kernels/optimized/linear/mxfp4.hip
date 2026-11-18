@@ -220,7 +220,11 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_mxfp4_w4a8_wmma_kernel(
             }
         }
     };
-    constexpr int kUnroll = (MB >= 4) ? 2 : 4;
+    // The unfolded path keeps a separate product per 32-K block and rescales it,
+    // which widens the live set. MB 2/4 then walk one K group at a time so the
+    // row tiles stay inside the register budget; MB 1 has a single accumulator
+    // and keeps the wider unroll.
+    constexpr int kUnroll = kFold ? ((MB >= 4) ? 2 : 4) : (MB >= 2 ? 1 : 4);
     if (full_tile)
         run_k_loop.template operator()<false, kUnroll>();
     else
@@ -567,8 +571,8 @@ __global__ __launch_bounds__(kGemvThreads) void gemv_mxfp4_w4a8_kernel(
 
 constexpr uint32_t k2dThreads = 256u;
 constexpr uint32_t k2dRowsPerBlock = kMxfp4GemmPrefill2dRowsPerBlock;
-constexpr uint32_t k2dKChunk = 128u;
-constexpr uint32_t k2dOutBlockFixed = 64u;
+constexpr uint32_t k2dKChunk = kMxfp4GemmPrefill2dKChunk;
+constexpr uint32_t k2dOutBlockFixed = kMxfp4GemmPrefill2dOutBlock;
 
 // Prefill: one block evaluates 256 activation rows x kBn outputs with 8 waves.
 // Each wave expands its share of the 16-output x 32-K weight blocks into LDS
@@ -581,7 +585,11 @@ constexpr uint32_t k2dOutBlockFixed = 64u;
 // the K loop carries no activation scale and the epilogue applies the row reference
 // once. With kFold the WMMA fragments chain straight through K; without it each
 // 32 K block keeps its own weight E8M0 rescale.
-template <uint32_t kBn, bool kGuarded, bool kFold>
+// The prefill 2D variant requires full 64-output blocks: shapes with a partial
+// output block stay on the row-block family, whose per-output guard is already
+// part of that kernel. Keeping the guard out of this kernel is also what keeps
+// the non-folded variant inside the register contract.
+template <uint32_t kBn, bool kFold>
 __global__ void __launch_bounds__(k2dThreads) gemm_mxfp4_w4a8_prefill_2d_kernel(
     const uint8_t* __restrict__ weight_codes,
     const uint8_t* __restrict__ weight_scales,
@@ -639,7 +647,7 @@ __global__ void __launch_bounds__(k2dThreads) gemm_mxfp4_w4a8_prefill_2d_kernel(
     __shared__ float smem_as[k2dRowsPerBlock];
     for (uint32_t r = tid; r < k2dRowsPerBlock; r += k2dThreads) {
             const uint32_t rr = row_start + r;
-        smem_as[r] = (!kGuarded || rr < rows)
+        smem_as[r] = rr < rows
             ? activation_scales[static_cast<size_t>(rr) * as_row_floats]
             : 0.0f;
     }
@@ -650,7 +658,7 @@ __global__ void __launch_bounds__(k2dThreads) gemm_mxfp4_w4a8_prefill_2d_kernel(
         #pragma unroll
         for (uint32_t nt = 0; nt < kNtTotal; ++nt) {
             const uint32_t o_ref = out_block_start + nt * kTileOut + m_lane;
-            ref_lds[nt] = (!kGuarded || o_ref < out_features) ? weight_ref[o_ref] : 0u;
+            ref_lds[nt] = weight_ref[o_ref];
         }
         detail::lds_barrier();
     }
@@ -669,38 +677,34 @@ __global__ void __launch_bounds__(k2dThreads) gemm_mxfp4_w4a8_prefill_2d_kernel(
             const uint32_t nt = slot % kNtTotal;
             const uint32_t kb = slot / kNtTotal;
             const uint32_t o_stage = out_block_start + nt * kTileOut + m_lane;
-            const bool stage_valid = !kGuarded || (o_stage < out_features);
-            if (stage_valid) {
-                const uint32_t ib = cb * kKb + kb;
-                const uint8_t* wrow = weight_codes +
-                    static_cast<size_t>(o_stage >> 4) * (static_cast<size_t>(nb) * kWeightBlockBytes) +
-                    static_cast<size_t>(o_stage & 15u) * 16u + k_group * 8u;
-                int32x2_t w0 = {};
-                int32x2_t w1 = {};
-                if constexpr (kFold) {
-                    const uint32_t d = mxfp4_fold_d(
-                        ref_lds[nt], weight_scales[static_cast<size_t>(o_stage) *
-                                                   weight_scale_stride + ib]);
-                    const uint2 mg = mag_lds[d];
-                    mxfp4_weight_pair(wrow + static_cast<size_t>(ib) * kWeightBlockBytes,
-                                      mg.x, mg.y, w0, w1);
-                } else {
-                    mxfp4_weight_pair(wrow + static_cast<size_t>(ib) * kWeightBlockBytes,
-                                      kFoldMag[0][0], kFoldMag[0][1], w0, w1);
-                    if (k_group == 0u) {
-                        ws_lds[nt][kb][m_lane] = weight_scales[
-                            static_cast<size_t>(o_stage) * weight_scale_stride + ib];
-                    }
+            const uint32_t ib = cb * kKb + kb;
+            const uint8_t* wrow = weight_codes +
+                static_cast<size_t>(o_stage >> 4) * (static_cast<size_t>(nb) * kWeightBlockBytes) +
+                static_cast<size_t>(o_stage & 15u) * 16u + k_group * 8u;
+            int32x2_t w0 = {};
+            int32x2_t w1 = {};
+            if constexpr (kFold) {
+                const uint32_t d = mxfp4_fold_d(
+                    ref_lds[nt], weight_scales[static_cast<size_t>(o_stage) *
+                                               weight_scale_stride + ib]);
+                const uint2 mg = mag_lds[d];
+                mxfp4_weight_pair(wrow + static_cast<size_t>(ib) * kWeightBlockBytes,
+                                  mg.x, mg.y, w0, w1);
+            } else {
+                mxfp4_weight_pair(wrow + static_cast<size_t>(ib) * kWeightBlockBytes,
+                                  kFoldMag[0][0], kFoldMag[0][1], w0, w1);
+                if (k_group == 0u) {
+                    ws_lds[nt][kb][m_lane] = weight_scales[
+                        static_cast<size_t>(o_stage) * weight_scale_stride + ib];
                 }
-                w0f_lds[nt][kb][lane] = w0;
-                w1f_lds[nt][kb][lane] = w1;
             }
+            w0f_lds[nt][kb][lane] = w0;
+            w1f_lds[nt][kb][lane] = w1;
         }
         detail::lds_barrier();
 
 
-        #pragma unroll
-        for (uint32_t kb = 0; kb < kKb; ++kb) {
+        auto compute_kb = [&](uint32_t kb) {
             int32x2_t wf0[kNtPerWave];
             int32x2_t wf1[kNtPerWave];
             float wsv[kNtPerWave];
@@ -717,8 +721,7 @@ __global__ void __launch_bounds__(k2dThreads) gemm_mxfp4_w4a8_prefill_2d_kernel(
             for (int t = 0; t < 4; ++t) {
                 int32x2_t a0 = {};
                 int32x2_t a1 = {};
-                if (!kGuarded ||
-                    (row_base + static_cast<uint32_t>(t) * kTileRow + m_lane) < rows) {
+                if ((row_base + static_cast<uint32_t>(t) * kTileRow + m_lane) < rows) {
                     const uint8_t* ap = arow[t] + aoff;
                     a0 = *reinterpret_cast<const int32x2_t*>(ap);
                     a1 = *reinterpret_cast<const int32x2_t*>(ap + 8u);
@@ -740,6 +743,18 @@ __global__ void __launch_bounds__(k2dThreads) gemm_mxfp4_w4a8_prefill_2d_kernel(
                         acc[t][nt][j] = __builtin_fmaf(c[j], wsv[nt], acc[t][nt][j]);
                 }
             }
+        };
+        // The folded variant chains one WMMA accumulator through the four 32-K
+        // blocks of a 128-K group and schedules well fully unrolled. The unfolded
+        // variant keeps a separate product per block and then rescales it, which
+        // makes the fully unrolled body exceed the register budget, so it walks
+        // the blocks one at a time.
+        if constexpr (kFold) {
+            #pragma unroll
+            for (uint32_t kb = 0; kb < kKb; ++kb) compute_kb(kb);
+        } else {
+            #pragma unroll 1
+            for (uint32_t kb = 0; kb < kKb; ++kb) compute_kb(kb);
         }
         detail::lds_barrier();
     }
@@ -747,8 +762,6 @@ __global__ void __launch_bounds__(k2dThreads) gemm_mxfp4_w4a8_prefill_2d_kernel(
     #pragma unroll
     for (uint32_t nt = 0; nt < kNtPerWave; ++nt) {
         const uint32_t o_self = out_block_start + (wave_n * kNtPerWave + nt) * kTileOut + m_lane;
-        if (kGuarded && o_self >= out_features)
-            continue;
         #pragma unroll
         for (int t = 0; t < 4; ++t) {
             const uint32_t r_base = row_base + static_cast<uint32_t>(t) * kTileRow + 8u * k_group;
@@ -966,11 +979,11 @@ hipError_t launch_splitk(const LaunchArgs& a, hipStream_t stream) {
     return hipGetLastError();
 }
 
-template <bool kGuarded, bool kFold>
+template <bool kFold>
 hipError_t launch_prefill_2d(const LaunchArgs& a, hipStream_t stream) {
     const dim3 grid2d((a.out_features + k2dOutBlockFixed - 1u) / k2dOutBlockFixed,
                       a.rows / k2dRowsPerBlock, 1);
-    gemm_mxfp4_w4a8_prefill_2d_kernel<k2dOutBlockFixed, kGuarded, kFold>
+    gemm_mxfp4_w4a8_prefill_2d_kernel<k2dOutBlockFixed, kFold>
         <<<grid2d, k2dThreads, 0, stream>>>(MXFP4_ARGS(a));
     return hipGetLastError();
 }
@@ -1012,14 +1025,11 @@ hipError_t launch_gemm_mxfp4_w4a8_wmma(
         // BN 128 was measured and rejected: the non-folded per-K32 rescale needs
         // 16 float8 accumulators per wave and the kernel loses 1.8x to BN 64.
         if ((k_padded % k2dKChunk) != 0u || (rows % k2dRowsPerBlock) != 0u ||
-            out_features < k2dOutBlockFixed)
+            out_features < k2dOutBlockFixed ||
+            (out_features % k2dOutBlockFixed) != 0u)
             return hipErrorNotSupported;
-        const bool guarded = (out_features % k2dOutBlockFixed) != 0u;
-        if (guarded)
-            return weight_ref != nullptr ? launch_prefill_2d<true, true>(a, stream)
-                                         : launch_prefill_2d<true, false>(a, stream);
-        return weight_ref != nullptr ? launch_prefill_2d<false, true>(a, stream)
-                                     : launch_prefill_2d<false, false>(a, stream);
+        return weight_ref != nullptr ? launch_prefill_2d<true>(a, stream)
+                                     : launch_prefill_2d<false>(a, stream);
     }
     if (config.id == Mxfp4GemmConfigId::Gemv) {
         if (rows > kMxfp4GemmGemvMaxRows)

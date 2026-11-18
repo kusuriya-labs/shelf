@@ -111,6 +111,9 @@ constexpr LinearShapeRule kLinearShapeRules[] = {
     { 4, 10240, kFamilyBf16 },
     { 10240, 2560, kFamilyBf16 },
     { 6144, 2560, kFamilyBf16 },
+    // GDN in_proj_z at tp_size 2 (and q_proj of the full-attention layers): the
+    // rank-local value width is 24 heads * 128 = 3072 over the 2560 hidden.
+    { 3072, 2560, kFamilyBf16 },
     { 48, 2560, kFamilyBf16 },
     { 2560, 6144, kFamilyBf16 },
     { 12288, 2560, kFamilyBf16 },
@@ -322,7 +325,8 @@ select_mxfp4_gemm_config(const Mxfp4GemmSelectorInput& input) {
         input.rows >= shelf::kernel::kMxfp4GemmPrefill2dMinRows &&
         (input.rows % shelf::kernel::kMxfp4GemmPrefill2dRowsPerBlock) == 0u &&
         (input.k_padded % shelf::kernel::kMxfp4GemmPrefill2dKChunk) == 0u &&
-        input.out_features >= 64u;
+        (input.out_features % shelf::kernel::kMxfp4GemmPrefill2dOutBlock) == 0u &&
+        input.out_features >= shelf::kernel::kMxfp4GemmPrefill2dOutBlock;
     if (prefill2d && (input.rows >= 1024u ||
                       static_cast<uint64_t>(input.out_features) * input.k_padded >=
                           shelf::kernel::kMxfp4GemmPrefill2dMinWeights)) {
