@@ -36,7 +36,10 @@ target_include_directories(shelf_io SYSTEM PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/
 target_link_libraries(shelf_io PUBLIC shelf_core hip::host)
 target_compile_options(shelf_io PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
-add_library(shelf_hy4_flash SHARED src/shelf/kernels/hy4_flash/linear.hip)
+add_library(shelf_hy4_wmma OBJECT src/shelf/kernels/hy4_flash/wmma.hip)
+target_link_libraries(shelf_hy4_wmma PRIVATE shelf_core hip::host)
+set_target_properties(shelf_hy4_wmma PROPERTIES HIP_ARCHITECTURES gfx1201 POSITION_INDEPENDENT_CODE ON)
+add_library(shelf_hy4_flash SHARED src/shelf/kernels/hy4_flash/linear.hip $<TARGET_OBJECTS:shelf_hy4_wmma>)
 target_link_libraries(shelf_hy4_flash PRIVATE shelf_core hip::host)
 set_target_properties(shelf_hy4_flash PROPERTIES HIP_ARCHITECTURES "gfx1030;gfx1201")
 shelf_set_rocm_rpath(shelf_hy4_flash)

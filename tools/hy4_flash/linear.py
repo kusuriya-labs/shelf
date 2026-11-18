@@ -52,13 +52,17 @@ class Projection:
             raise ValueError("mul24 行列の形状・型・乗数が不正です")
         self.trellis, self.suh, self.svh, self.width = trellis, suh, svh, width
 
-    def cpu(self, x, fp32=False):
+    def input_codes(self, x):
         k, n = self.suh.numel(), self.svh.numel()
         padded = F.pad(x.float(), (0, k - x.shape[-1]))
         rotated = hadamard(padded * self.suh, 128).reshape(-1, k // 128, 128)
         scales = rotated.abs().amax(-1, keepdim=True) / 127
         codes = (rotated / torch.where(scales == 0, 1, scales)).round()
-        a = (codes * scales).reshape(-1, k)
+        return (codes * scales).reshape(-1, k)
+
+    def cpu(self, x, fp32=False):
+        k, n = self.suh.numel(), self.svh.numel()
+        a = self.input_codes(x)
         partial = torch.empty(len(a), n)
         for first in range(0, n, 512):
             w = unpack(self.trellis[:, first // 16:(first + 512) // 16].contiguous())
@@ -68,10 +72,11 @@ class Projection:
 
 
 class HipLinear:
-    def __init__(self, library):
+    def __init__(self, library, wmma=False):
+        self.wmma = wmma
         self.library = ctypes.CDLL(str(library))
         self.launch = self.library.shelf_hy4_linear
-        self.launch.argtypes = [ctypes.c_void_p] * 8 + [ctypes.c_int] * 6 + [ctypes.c_void_p]
+        self.launch.argtypes = [ctypes.c_void_p] * 8 + [ctypes.c_int] * 6 + [ctypes.c_void_p, ctypes.c_int]
         self.launch.restype = ctypes.c_int
 
     def __call__(self, w, x):
@@ -87,7 +92,7 @@ class HipLinear:
             y = torch.empty(rows, w.width, device=x.device, dtype=torch.bfloat16)
             tensors = (x, w.suh, w.svh, w.trellis, codes, scales, partial, y)
             result = self.launch(*(t.data_ptr() for t in tensors), rows, width, w.width, k, n,
-                                 w.bits, torch.cuda.current_stream().cuda_stream)
+                                 w.bits, torch.cuda.current_stream().cuda_stream, int(self.wmma))
             if result:
                 raise RuntimeError(f"Hy4 HIP 線形を起動できません: {result}")
             return y

@@ -47,3 +47,9 @@ quant_dfly.py は本体の report、校正署名、head_complete を照合して
 ## Q1　実機受入手順
 
 loader で生の norm、router、Engram、indexer、DFly の形状と型を照合するようにした。生成コマンドで最終 prefill 行の FP32 logits を保存できる。同じ重みを保持したまま複数の独立リクエストを反復する機能を、ウォームアップと計測に使用する。lock と load average を検査する locked.py と、CPU logits・DFly の有無・2Mi/1Mi 予約・pp2048・decode の結果を保存する qualify.py を追加。実機受入は本体・DFly 完成後に行う。
+
+## K2　比較用の最適化候補
+
+R9700 向けには既存 WMMA group_body の K-major 入力を有効にし、V620 向けには mul24 の 4 符号復号と整数 dot4 の候補を追加した。専用ビルド、両 ISA のコンパイルに成功。比較用の SHELF_HY4_WMMA=1 と SHELF_HY4_DOT4=1 はそれぞれ独立で、速度・正しさの確認前は既定にしない。
+
+MLA の kv_b_proj について、出力 H128 と svh を整数格子に適用した FP16 行列を使い、nope の query と value の計算順序を入れ替える実験を行った。層 0・2 の実重みと固定乱数 64 行で、直接展開との logit 相対 L2 は 0.001759・0.001658、attention 出力は 0.002236・0.001909。CPU での数値比較であり性能は未測定。長文脈で過去行全体の kv_b_proj を繰り返さずに済む候補として検証する。

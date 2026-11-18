@@ -12,6 +12,7 @@ def main():
     parser.add_argument("shard", type=Path)
     parser.add_argument("--prefix", default="")
     parser.add_argument("--library", type=Path)
+    parser.add_argument("--wmma", action="store_true")
     parser.add_argument("--width", type=int)
     parser.add_argument("--input-width", type=int)
     parser.add_argument("--rows", type=int, default=5)
@@ -28,7 +29,7 @@ def main():
         raise ValueError("CPU 出力が非有限です")
     print("CPU 出力 RMS", expected.float().square().mean().sqrt().item())
     if args.library:
-        actual = HipLinear(args.library)(Projection(*(t.cuda() for t in tensors), marker, width), x.cuda()).cpu()
+        actual = HipLinear(args.library, args.wmma)(Projection(*(t.cuda() for t in tensors), marker, width), x.cuda()).cpu()
         error = (actual.float() - expected.float()).norm() / expected.float().norm().clamp_min(1e-12)
         print("HIP 出力の相対 L2", error.item())
         if not error < 0.002:
