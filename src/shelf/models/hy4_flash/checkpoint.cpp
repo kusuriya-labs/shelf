@@ -155,4 +155,20 @@ void Checkpoint::load(const Path& directory,bool draft) {
         files.push_back(std::move(reader));
     }
 }
+void Checkpoint::relocate(const Owners& layout) {
+    bytes.fill(0);
+    for(auto& [key,w]:weights) {
+        if(w.rank<0) continue;
+        if(key.find(".mlp.experts.")!=std::string::npos) {
+            int layer=0,e=0;
+            if(sscanf(key.c_str(),"model.layers.%d.mlp.experts.%d.",&layer,&e)!=2)
+                throw std::runtime_error("expert 名の解析に失敗しました");
+            w.rank=layout.at(layer-1).at(e);
+        }
+        w.offset=(bytes[w.rank]+15)&~size_t(15);
+        bytes[w.rank]=w.offset+w.bytes;
+    }
+    owners=layout;
+}
+
 }

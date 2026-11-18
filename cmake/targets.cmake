@@ -36,6 +36,28 @@ target_include_directories(shelf_io SYSTEM PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/
 target_link_libraries(shelf_io PUBLIC shelf_core hip::host)
 target_compile_options(shelf_io PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
+add_library(shelf_hy4_flash SHARED src/shelf/kernels/hy4_flash/linear.hip)
+target_link_libraries(shelf_hy4_flash PRIVATE shelf_core hip::host)
+set_target_properties(shelf_hy4_flash PROPERTIES HIP_ARCHITECTURES "gfx1030;gfx1201")
+shelf_set_rocm_rpath(shelf_hy4_flash)
+
+add_library(shelf_hy4_model STATIC
+    src/shelf/models/hy4_flash/checkpoint.cpp
+    src/shelf/models/hy4_flash/residency.cpp
+    src/shelf/models/hy4_flash/ops.hip
+    src/shelf/models/hy4_flash/attention.hip
+    src/shelf/models/hy4_flash/engram.hip
+    src/shelf/models/hy4_flash/moe.hip
+    src/shelf/models/hy4_flash/generate.hip
+)
+target_include_directories(shelf_hy4_model SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
+target_link_libraries(shelf_hy4_model PUBLIC shelf_io shelf_gpu shelf_hy4_flash)
+set_target_properties(shelf_hy4_model PROPERTIES HIP_ARCHITECTURES "gfx1030;gfx1201")
+
+if(SHELF_HY4_ONLY)
+    return()
+endif()
+
 # Generic weight loading (model-independent): safetensors / quantized
 # safetensors -> GPU MatrixWeight / Tensor. Depends on format + quantization
 # layers, never on models/.
@@ -544,22 +566,3 @@ target_compile_features(shelf_quant_reference PRIVATE cxx_std_20)
 target_include_directories(shelf_quant_reference PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(shelf_quant_reference PUBLIC shelf_core)
 target_compile_options(shelf_quant_reference PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
-
-
-add_library(shelf_hy4_flash SHARED src/shelf/kernels/hy4_flash/linear.hip)
-target_link_libraries(shelf_hy4_flash PRIVATE shelf_core hip::host)
-set_target_properties(shelf_hy4_flash PROPERTIES HIP_ARCHITECTURES "gfx1030;gfx1201")
-shelf_set_rocm_rpath(shelf_hy4_flash)
-
-add_library(shelf_hy4_model STATIC
-    src/shelf/models/hy4_flash/checkpoint.cpp
-    src/shelf/models/hy4_flash/residency.cpp
-    src/shelf/models/hy4_flash/ops.hip
-    src/shelf/models/hy4_flash/attention.hip
-    src/shelf/models/hy4_flash/engram.hip
-    src/shelf/models/hy4_flash/moe.hip
-    src/shelf/models/hy4_flash/generate.hip
-)
-target_include_directories(shelf_hy4_model SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
-target_link_libraries(shelf_hy4_model PUBLIC shelf_io shelf_gpu shelf_hy4_flash)
-set_target_properties(shelf_hy4_model PROPERTIES HIP_ARCHITECTURES "gfx1030;gfx1201")

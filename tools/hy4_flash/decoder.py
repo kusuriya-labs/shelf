@@ -32,6 +32,7 @@ def collapse(x, fn, scale, base):
 
 class DecoderLayer:
     def __init__(self, weights, layer, capacity):
+        weights.require_layer(layer)
         self.w = weights
         self.layer = layer
         self.prefix = f"model.layers.{layer}."

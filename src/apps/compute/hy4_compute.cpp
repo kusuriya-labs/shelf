@@ -2,6 +2,7 @@
 #include <shelf/models/hy4_flash/residency.h>
 #include <shelf/models/hy4_flash/generate.h>
 #include <fstream>
+#include <cmath>
 #include <charconv>
 #include <cstdio>
 #include <stdexcept>
@@ -11,7 +12,7 @@ namespace shelf::hy4 {
 int compute(int argc,char** argv) {
     try {
         if(argc==1 || std::string_view(argv[1])=="--help") {
-            puts("shelf-compute hy4 inspect|reserve|generate --model-dir PATH --engram-dir PATH --placement PATH [--dfly-dir PATH] [--max-seq-len N] [--input-ids-file PATH] [--max-new-tokens N] [--chunk N]");
+            puts("shelf-compute hy4 inspect|reserve|generate --model-dir PATH --engram-dir PATH --placement PATH [--dfly-dir PATH] [--max-seq-len N] [--input-ids-file PATH] [--max-new-tokens N] [--chunk N] [--temperature T] [--seed N]");
             return 0;
         }
         std::string_view mode=argv[1];
@@ -19,12 +20,23 @@ int compute(int argc,char** argv) {
         size_t tokens=mode=="reserve"?2097152:4096;
         Path input;
         int count=32,chunk=64;
+        float temperature=0;
+        uint64_t seed=0;
         for(int i=2;i<argc;i+=2) {
             if(i+1>=argc) throw std::runtime_error("引数の値がありません");
             std::string_view key=argv[i],value=argv[i+1];
             if(key=="--model-dir") model=value;
             else if(key=="--engram-dir") engram=value;
             else if(key=="--dfly-dir") draft=value;
+            else if(key=="--temperature") {
+                auto [p,err]=std::from_chars(value.data(),value.data()+value.size(),temperature);
+                if(p!=value.data()+value.size() || err!=std::errc{} || !std::isfinite(temperature) || temperature<0)
+                    throw std::runtime_error("温度が不正です");
+            }
+            else if(key=="--seed") {
+                auto [p,err]=std::from_chars(value.data(),value.data()+value.size(),seed);
+                if(p!=value.data()+value.size() || err!=std::errc{}) throw std::runtime_error("乱数 seed が不正です");
+            }
             else if(key=="--input-ids-file") input=value;
             else if(key=="--max-new-tokens" || key=="--chunk") {
                 auto& dest=key=="--chunk"?chunk:count;
@@ -56,16 +68,30 @@ int compute(int argc,char** argv) {
             if(!file.eof() || ids.empty() || ids.size()+count>tokens || tokens>1048576 || chunk>128)
                 throw std::runtime_error("入力列または生成長が不正です");
         }
-        Residency gpu(checkpoint,tokens);
-        try {
-            gpu.reserve();
-            if(mode=="generate") {gpu.upload();generate(gpu,ids,count,chunk);}
-        } catch(...) {
+        for(;;) {
+            Residency gpu(checkpoint,tokens);
+            try {
+                gpu.reserve();
+                if(mode=="generate") {
+                    gpu.upload();
+                    generate(gpu,ids,count,chunk,temperature,seed);
+                }
+            } catch(const std::bad_alloc&) {
+                gpu.shutdown();
+                if(mode=="reserve" && tokens==2097152) {
+                    fprintf(stderr,"2Mi の領域が不足しています。1Mi で再試行します。\n");
+                    tokens=1048576;
+                    continue;
+                }
+                throw;
+            } catch(...) {
+                gpu.shutdown();
+                throw;
+            }
             gpu.shutdown();
-            throw;
+            break;
         }
-        gpu.shutdown();
-        printf("reserved_tokens=%zu\n",tokens);
+        if(mode=="reserve") printf("reserved_tokens=%zu\n",tokens);
         return 0;
     } catch(const std::exception& e) {
         fprintf(stderr,"Hy4-flash: %s\n",e.what());

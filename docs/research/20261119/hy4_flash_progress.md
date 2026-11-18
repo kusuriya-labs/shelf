@@ -37,3 +37,9 @@ DFly の slot 0 融合、各後続 slot の hidden correction、過去 index と
 ## D1　DFly の追加量子化の準備
 
 quant_dfly.py は本体の report、校正署名、head_complete を照合してから、校正時の層出力を利用して付属 DFly の各行列の Hessian を捕捉する。slot 0 には本体の最終 norm 後の hidden と次 token を入れ、後続 slot の補正には校正列の直前 token を使用する。各 sparse 層の KV を 4 bit Octave で往復してから DFly 固有の kv_b_proj を適用する。実機未使用の検査では、校正済み層 25 の KV と原本 DFly 層 0 で CPU forward を実施し、6 行の出力が有限で、9 射影すべての Hessian 入力を取得できた。5 層全体の校正と mul24 への変換は本体完了後に実施する。
+
+## C3　連続照合と専用ビルド
+
+校正列の先頭 4 token を、途中で BF16 校正状態に戻さず層 0 から層 28 まで CPU で連続実行した。層 28 の BF16 校正 hidden に対する相対 L2 は 0.108770。次回は保存した同一配置・同一入力の続きから検査できる。専用構成の通常ビルドと CTest が成功し、ゼロ行・チャンク境界、sliding リング折り返しをまたぐ 6 行の棄却、2048 境界の選択、容量制約下の expert 配置を検査した。
+
+本体 head の出力・サンプリングを FP32 にした。温度 0 は greedy、正の温度は位置・語彙 ID・seed を用いる Gumbel サンプリングを使う。DFly の提案と target の乱数を分け、採択判定は同じ位置の target サンプルと比較する。2Mi の実予約前に実空き量を調べて枠を超える分だけ expert を再配置し、容量不足時だけ 1Mi で再試行する。

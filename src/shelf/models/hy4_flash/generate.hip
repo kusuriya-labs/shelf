@@ -10,13 +10,23 @@ namespace shelf::hy4 {
 namespace {
 using namespace shelf::kernel::exl3_detail::mul24;
 constexpr std::array<int,5> sources{25,29,33,37,41};
-__global__ void best_ids(Mat logits,int* tokens) {
+__device__ uint64_t mix(uint64_t v) {
+    v=(v^(v>>30))*0xbf58476d1ce4e5b9ull;
+    v=(v^(v>>27))*0x94d049bb133111ebull;
+    return v^(v>>31);
+}
+__global__ void best_ids(const float* logits,int* tokens,int position,uint64_t seed,float temperature) {
     __shared__ float vals[256];
     __shared__ int ids[256];
     int tid=threadIdx.x,row=blockIdx.x,id=0;
     float best=-INFINITY;
-    for(int c=tid;c<logits.cols;c+=256) {
-        float v=bf16_bits_to_f32(logits.p[size_t(row)*logits.cols+c]);
+    for(int c=tid;c<120832;c+=256) {
+        float v=logits[size_t(row)*120832+c];
+        if(temperature>0) {
+            uint64_t bits=mix((uint64_t(position+row)<<32 | uint32_t(c))^seed);
+            float uniform=(float(bits>>41)+0.5f)*0x1p-23f;
+            v-=temperature*logf(-logf(uniform));
+        }
         if(v>best) {best=v;id=c;}
     }
     vals[tid]=best;
@@ -42,17 +52,27 @@ struct Target {
     std::array<Selection,5> tapped;
     Mat state{};
     size_t base=0;
-    explicit Target(Residency& gpu):op(gpu) {
+    float temperature;
+    uint64_t seed;
+    Target(Residency& gpu,float temp,uint64_t rng):op(gpu),temperature(temp),seed(rng) {
         state=op.mat(6,3072);
         base=op.arena.cursor;
     }
-    std::vector<int> predict(Mat hidden) {
-        Mat logits=op.linear("lm_head",hidden);
+    std::vector<int> predict(Mat hidden,int position,bool draft=false) {
+        size_t mark=op.arena.cursor;
+        auto codes=static_cast<int8_t*>(op.arena.next(size_t(hidden.rows)*3072));
+        auto scales=static_cast<float*>(op.arena.next(size_t(hidden.rows)*24*4));
+        auto partial=static_cast<float*>(op.arena.next(size_t(hidden.rows)*120832*4));
+        auto logits=static_cast<float*>(op.arena.next(size_t(hidden.rows)*120832*4));
+        checked(shelf_hy4_head(hidden.p,static_cast<const uint16_t*>(op.param("lm_head.suh").p),
+            static_cast<const uint16_t*>(op.param("lm_head.svh").p),static_cast<const uint32_t*>(op.param("lm_head.trellis").p),
+            codes,scales,partial,logits,hidden.rows));
         int* device_ids=static_cast<int*>(op.arena.next(hidden.rows*4));
-        best_ids<<<hidden.rows,256>>>(logits,device_ids);
+        best_ids<<<hidden.rows,256>>>(logits,device_ids,position,seed^(draft?0x735a7ec51b09ull:0ull),temperature);
         checked(hipGetLastError());
         std::vector<int> result(hidden.rows);
         op.copy(result.data(),device_ids,result.size()*4,hipMemcpyDeviceToHost);
+        op.arena.cursor=mark;
         return result;
     }
     std::vector<int> forward(const std::vector<int>& ids,bool verify) {
@@ -91,7 +111,7 @@ struct Target {
         Mat h=op.norm(op.collapse(x,"model.hc_head.hc_head_",unused),"model.norm.weight");
         checked(hipMemcpyAsync(state.p,h.p,h.bytes(),hipMemcpyDeviceToDevice));
         history.insert(history.end(),ids.begin(),ids.end());
-        return predict(h);
+        return predict(h,history.size()-h.rows+1);
     }
     std::vector<int> propose(int anchor) {
         op.arena.cursor=base;
@@ -125,7 +145,7 @@ struct Target {
             auto q=op.norm(x.row(i),correction+"hidden_norm.weight");
             auto k=op.norm(op.embed({previous},false),correction+"embed_norm.weight");
             auto corrected=op.add(x.row(i),feedforward(op,p+"hidden_correction",op.join(q,k)));
-            previous=predict(corrected)[0];
+            previous=predict(corrected,start+i,true)[0];
             draft.push_back(previous);
         }
         return draft;
@@ -137,11 +157,11 @@ struct Target {
     }
 };
 }
-void generate(Residency& gpu,const std::vector<int>& ids,int count,int chunk) {
+void generate(Residency& gpu,const std::vector<int>& ids,int count,int chunk,float temperature,uint64_t seed) {
     if(ids.empty() || !count || ids.size()+count>gpu.tokens || gpu.tokens>1048576 || chunk<1 || chunk>128)
         throw std::runtime_error("入力・出力長または prefill chunk が範囲外です");
     auto now=std::chrono::steady_clock::now;
-    Target target(gpu);
+    Target target(gpu,temperature,seed);
     auto begin=now();
     int next=0;
     for(size_t first=0;first<ids.size();first+=chunk) {

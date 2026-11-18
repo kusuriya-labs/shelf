@@ -22,6 +22,7 @@ struct Weight {
 struct Checkpoint {
     Checkpoint(const Path& model, const Path& engram, const Path& draft, const Owners& owners);
     const Weight& at(const std::string& key) const;
+    void relocate(const Owners& layout);
     void load(const Path& directory, bool draft);
     std::vector<io::SafetensorsReader> files;
     std::map<std::string, Weight> weights;

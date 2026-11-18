@@ -5,7 +5,6 @@
 #   shelf-server    OpenAI-compatible serving product (aiohttp adapter)
 #   shelf-bench     E2E benchmark (pp / tg) + GEMM kernel micro-benchmark
 
-option(SHELF_HY4_ONLY "Hy4-flash 専用の shelf-compute を構築する" OFF)
 if(SHELF_HY4_ONLY)
     add_executable(shelf-compute src/apps/compute/hy4_compute.cpp)
     target_compile_definitions(shelf-compute PRIVATE SHELF_HY4_ONLY=1)

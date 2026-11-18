@@ -17,35 +17,63 @@ void* Region::next(size_t length) {
     cursor=start+length;
     return base+start;
 }
-Residency::Residency(const Checkpoint& model,size_t tokens):model(model),tokens(tokens) {
+Residency::Residency(Checkpoint& model,size_t tokens):model(model),tokens(tokens) {
     if(!tokens || tokens>2097152) throw std::runtime_error("KV の予約長が範囲外です");
 }
 void Residency::reserve() {
     int count=0;
     check(hipGetDeviceCount(&count));
     if(count!=3) throw std::runtime_error("R9700、V620、V620 の順に 3 台を指定してください");
+    std::array<size_t,3> available{},overhead{};
+    std::array<int,3> used{},limit{};
+    for(const auto& row:model.owners) for(int r:row) ++used[r];
+    constexpr size_t expert_bytes=3*(1536ull*1536/2+1536*4);
     for(int r=0;r<3;++r) {
-        hipDeviceProp_t properties{};
-        check(hipGetDeviceProperties(&properties,r));
-        if(!std::string_view(properties.gcnArchName).starts_with(r?"gfx1030":"gfx1201"))
+        hipDeviceProp_t props{};
+        check(hipGetDeviceProperties(&props,r));
+        if(!std::string_view(props.gcnArchName).starts_with(r?"gfx1030":"gfx1201"))
             throw std::runtime_error("rank と GPU の ISA が一致しません");
         check(hipSetDevice(r));
-        size_t free=0,total=0;
-        check(hipMemGetInfo(&free,&total));
-        size_t bytes=align(model.bytes[r]);
-        size_t work=r?size_t(512)<<20:size_t(2)<<30;
-        if(!r) {
-            for(int i=0;i<42;++i) {
-                bool sparse=i==0 || i%4==1;
-                bytes+=align(294*(sparse?tokens:std::min(tokens,size_t(518))));
-                if(sparse) bytes+=align((tokens/4+12)*256);
-            }
+        size_t total=0;
+        check(hipMemGetInfo(&available[r],&total));
+        overhead[r]=r?size_t(512)<<20:size_t(2)<<30;
+        if(!r) for(int i=0;i<42;++i) {
+            bool sparse=i==0 || i%4==1;
+            overhead[r]+=align(294*(sparse?tokens:std::min(tokens,size_t(518))));
+            if(sparse) overhead[r]+=align((tokens/4+12)*256);
         }
-        bytes+=work;
+        size_t fixed=align(model.bytes[r])-used[r]*expert_bytes+overhead[r];
+        if(available[r]<fixed) throw std::bad_alloc();
+        limit[r]=(available[r]-fixed)/expert_bytes;
+    }
+    if(limit[0]+limit[1]+limit[2]<41*512) throw std::bad_alloc();
+    auto plan=model.owners;
+    int moved=0;
+    for(int expert=511;expert>=0;--expert) for(auto& row:plan) {
+        int from=row[expert];
+        if(used[from]<=limit[from]) continue;
+        int dest=0;
+        for(int r=1;r<3;++r)
+            if(limit[r]-used[r]>limit[dest]-used[dest]) dest=r;
+        if(dest==from || used[dest]>=limit[dest]) throw std::bad_alloc();
+        row[expert]=dest;
+        --used[from]; ++used[dest]; ++moved;
+    }
+    if(moved) model.relocate(plan);
+    fprintf(stderr,"relocated_experts=%d rank_counts=%d,%d,%d\n",moved,used[0],used[1],used[2]);
+    for(int r=0;r<3;++r) {
+        check(hipSetDevice(r));
+        size_t free,total;
+        check(hipMemGetInfo(&free,&total));
+        size_t work=r?size_t(512)<<20:size_t(2)<<30;
+        size_t bytes=align(model.bytes[r])+overhead[r];
         fprintf(stderr,"rank=%d weight=%zu workspace=%zu request=%zu free=%zu total=%zu\n",
                 r,model.bytes[r],work,bytes,free,total);
         auto result=gpu::GpuArena::create(r,bytes);
-        if(!result.ok()) throw std::runtime_error(result.status().message());
+        if(!result.ok()) {
+            if(result.status().code()==Status::Code::insufficient_memory) throw std::bad_alloc();
+            throw std::runtime_error(result.status().message());
+        }
         arenas.push_back(result.release());
         auto allocation=arenas.back().allocate_aligned(bytes,256);
         if(!allocation.ok()) throw std::runtime_error(allocation.status().message());

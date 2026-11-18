@@ -15,7 +15,7 @@ def read_json(path):
 
 
 class Weights:
-    def __init__(self, model, engram, work=None, device="cpu", hip=None):
+    def __init__(self, model, engram, work=None):
         config = read_json(model / "config.json")
         self.config = config.get("text_config", config)
         cfg = self.config
@@ -23,7 +23,7 @@ class Weights:
                 or cfg["n_routed_experts"] != 512 or cfg["hc_mult"] != 4):
             raise ValueError("対象の Hy4-flash checkpoint が必要です")
         self.index = read_json(model / "model.safetensors.index.json")["weight_map"]
-        self.model, self.engram, self.work, self.device, self.hip = model, engram, work, device, hip
+        self.model, self.engram, self.work, self.device = model, engram, work, "cpu"
         self.shapes = {}
         self.local = {}
         if work is None:
@@ -40,7 +40,16 @@ class Weights:
                 self.shapes[key] = info["original_shape"]
                 self.local[key] = marker.with_suffix(".safetensors")
         self.owners = None
-        self.devices = [device]
+        self.devices = ["cpu"]
+
+    def require_layer(self, layer):
+        if self.work is None:
+            return
+        root = self.work / f"layer-{layer:02d}"
+        entries = read_json(root / "capture/capture.json")["entries"]
+        missing = [name for name in entries if name.removesuffix(".weight") not in self.shapes]
+        if missing or layer > read_json(self.work / "progress.json")["last_layer"]:
+            raise ValueError(f"層 {layer} の量子化が未完了です")
 
     def source(self, key):
         return self.model / self.index[key]
@@ -72,8 +81,7 @@ class Weights:
         if name not in self.shapes and ".experts." not in name:
             weight = self.raw(name + ".weight")
             return F.linear(x.to(weight.dtype), weight)
-        w = self.projection(name, x.device) if self.hip is None else self.resident[name]
-        return w.cpu(x) if self.hip is None else self.hip(w, x.bfloat16())
+        return self.projection(name, x.device).cpu(x)
 
     @lru_cache(maxsize=4)
     def engram_table(self, layer):

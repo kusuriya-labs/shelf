@@ -62,15 +62,18 @@ __global__ void multiply(const int8_t* codes, const float* scales, const uint32_
 }
 
 __global__ void rotate_output(const float* partial, const uint16_t* svh, uint16_t* output,
-                              int width, int padded, const Hy4ExpertProjection* group=nullptr,int stride=0) {
+                              int width, int padded, const Hy4ExpertProjection* group=nullptr,int stride=0, float* logits=nullptr) {
     if(group) svh=group[blockIdx.y*stride].svh;
     const int base = blockIdx.x * 128 + threadIdx.x * 4;
     float v[4];
     for (int i = 0; i < 4; ++i) v[i] = partial[size_t(blockIdx.y) * padded + base + i];
     fwht128(v[0], v[1], v[2], v[3], threadIdx.x);
-    for (int i = 0; i < 4 && base + i < width; ++i)
-        output[size_t(blockIdx.y) * width + base + i] =
-            f32_to_bf16_rne_device(v[i] * kInvSqrt128 * f16_bits_to_f32(svh[base + i]));
+    for (int i = 0; i < 4 && base + i < width; ++i) {
+        float value=v[i]*kInvSqrt128*f16_bits_to_f32(svh[base+i]);
+        size_t offset=size_t(blockIdx.y)*width+base+i;
+        if(logits) logits[offset]=value;
+        else output[offset]=f32_to_bf16_rne_device(value);
+    }
 }
 }
 
@@ -111,5 +114,19 @@ hipError_t shelf_hy4_expert_linear(const uint16_t* x,const Hy4ExpertProjection* 
     status=hipGetLastError();
     if(status!=hipSuccess) return status;
     rotate_output<<<dim3(12,rows),32>>>(partial,nullptr,y,1536,1536,matrices,stride);
+    return hipGetLastError();
+}
+
+hipError_t shelf_hy4_head(const uint16_t* x,const uint16_t* suh,const uint16_t* svh,
+    const uint32_t* trellis,int8_t* codes,float* scales,float* partial,float* logits,int rows) {
+    if(!x || !suh || !svh || !trellis || !codes || !scales || !partial || !logits || rows<1 || rows>6)
+        return hipErrorInvalidValue;
+    rotate_input<<<dim3(24,rows),32>>>(x,suh,codes,scales,3072,3072);
+    auto status=hipGetLastError();
+    if(status!=hipSuccess) return status;
+    multiply<6><<<dim3(7552,rows),128>>>(codes,scales,trellis,partial,3072,120832);
+    status=hipGetLastError();
+    if(status!=hipSuccess) return status;
+    rotate_output<<<dim3(944,rows),32>>>(partial,svh,nullptr,120832,120832,nullptr,0,logits);
     return hipGetLastError();
 }

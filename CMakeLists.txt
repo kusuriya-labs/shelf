@@ -14,6 +14,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Build options and platform detection.
 include(cmake/options.cmake)
+option(SHELF_HY4_ONLY "Hy4-flash 専用の shelf-compute を構築する" OFF)
+
 
 # Production / library targets.
 include(cmake/targets.cmake)
@@ -24,5 +26,10 @@ include(cmake/apps.cmake)
 # Test suite.
 if(SHELF_BUILD_TESTS)
     enable_testing()
-    add_subdirectory(tests)
+    if(SHELF_HY4_ONLY)
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        add_test(NAME hy4_flash_cpu COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/unit/test_hy4_flash.py)
+    else()
+        add_subdirectory(tests)
+    endif()
 endif()

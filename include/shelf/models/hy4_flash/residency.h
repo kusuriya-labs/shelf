@@ -12,14 +12,14 @@ struct Region {
 };
 
 struct Residency {
-    const Checkpoint& model;
+    Checkpoint& model;
     size_t tokens;
     std::vector<gpu::GpuArena> arenas;
     std::array<uint8_t*,3> weight_base{};
     std::array<Region,3> workspace{};
     std::array<uint8_t*,42> cache{};
     std::array<uint16_t*,42> index_keys{};
-    explicit Residency(const Checkpoint& model, size_t tokens);
+    explicit Residency(Checkpoint& model, size_t tokens);
     void reserve();
     void upload();
     void shutdown();
