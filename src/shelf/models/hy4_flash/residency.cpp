@@ -182,7 +182,7 @@ void Residency::upload() {
                     (void)hipGetLastError();
             }
             if (!peer[dst][src] && !staging)
-                check(hipHostMalloc(&staging, 128u * 1536u * 2u, hipHostMallocPortable));
+                check(hipHostMalloc(&staging, max_prefill_chunk * 1536u * 2u, hipHostMallocPortable));
             fprintf(stderr, "transfer=%d->%d method=%s\n", src, dst, peer[dst][src] ? "peer" : "host");
         }
     const auto begin = std::chrono::steady_clock::now();
@@ -239,19 +239,25 @@ void Residency::upload() {
 }
 void Residency::transfer(void *dst, int destination, const void *src, int source, size_t bytes) {
     transfer_bytes[source][destination] += bytes;
+    std::chrono::steady_clock::time_point begin;
+    if (expert_begin[0])
+        begin = std::chrono::steady_clock::now();
     if (peer[destination][source]) {
         check(hipSetDevice(physical[source]));
         check(hipStreamSynchronize(nullptr));
         check(hipSetDevice(physical[destination]));
         check(hipMemcpyPeer(dst, physical[destination], src, physical[source], bytes));
-        return;
+    } else {
+        if (!staging || bytes > max_prefill_chunk * 1536u * 2u)
+            throw std::runtime_error("転送作業域の範囲外です");
+        check(hipSetDevice(physical[source]));
+        check(hipMemcpy(staging, src, bytes, hipMemcpyDeviceToHost));
+        check(hipSetDevice(physical[destination]));
+        check(hipMemcpy(dst, staging, bytes, hipMemcpyHostToDevice));
     }
-    if (!staging || bytes > 128u * 1536u * 2u)
-        throw std::runtime_error("転送作業域の範囲外です");
-    check(hipSetDevice(physical[source]));
-    check(hipMemcpy(staging, src, bytes, hipMemcpyDeviceToHost));
-    check(hipSetDevice(physical[destination]));
-    check(hipMemcpy(dst, staging, bytes, hipMemcpyHostToDevice));
+    if (expert_begin[0])
+        transfer_ms +=
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
 }
 void Residency::shutdown() {
     std::string errors;

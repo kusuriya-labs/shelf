@@ -105,45 +105,38 @@ __global__ void multiply(const int8_t *codes, const float *scales, const uint32_
     }
 }
 
-__global__ void expert_batch4(const int8_t *codes, const float *scales, const Hy4ExpertProjection *matrices,
-                              const Hy4Route *routes, const Hy4ExpertBatch *batches, float *partial) {
-    auto batch = batches[blockIdx.y];
-    unsigned col = threadIdx.x % 16, worker = threadIdx.x / 16;
+__global__ void expert_batch16(const int8_t *codes, const float *scales, const Hy4ExpertProjection *matrices,
+                               const Hy4Route *routes, const Hy4ExpertBatch *batches, float *partial) {
+    __shared__ uint32_t b[32][16], a[16][33];
+    const auto batch = batches[blockIdx.y];
+    unsigned tid = threadIdx.x, col = tid % 16, row = tid / 16;
     auto weight = matrices[3 * routes[batch.first].expert].trellis;
-    float acc[4]{};
-    for (unsigned kt = worker; kt < 96; kt += 8) {
-        auto tile = weight + (kt * 96 + blockIdx.x) * 32;
-        int sums[4]{};
+    float acc = 0;
+    for (int g = 0; g < 12; ++g) {
+        if (tid < 128) {
+            int seg = tid / 16;
+            auto tile = weight + ((g * 8 + seg) * 96 + blockIdx.x) * 32;
 #pragma unroll
-        for (unsigned j = 0; j < 4; ++j) {
-            uint32_t b = unpack_four<4>(tile, j / 2 * 128 + col * 8 + j % 2 * 4);
-#pragma unroll
-            for (int r = 0; r < 4; ++r)
-                if (r < batch.count) {
-                    uint32_t a;
-                    __builtin_memcpy(&a, codes + size_t(batch.first + r) * 1536 + kt * 16 + j * 4, 4);
-                    sums[r] = dot4(a, b, sums[r]);
-                }
+            for (unsigned j = 0; j < 4; ++j)
+                b[seg * 4 + j][col] = unpack_four<4>(tile, j / 2 * 128 + col * 8 + j % 2 * 4);
         }
+        for (unsigned j = tid; j < unsigned(batch.count * 32); j += 256)
+            __builtin_memcpy(&a[j / 32][j % 32],
+                             codes + size_t(batch.first + j / 32) * 1536 + g * 128 + (j % 32) * 4, 4);
+        __syncthreads();
+        if (row < unsigned(batch.count)) {
+            int sum = 0;
 #pragma unroll
-        for (int r = 0; r < 4; ++r)
-            if (r < batch.count)
-                acc[r] += sums[r] * scales[(batch.first + r) * 12 + kt / 8];
+            for (int j = 0; j < 32; ++j)
+                sum = dot4(a[row][j], b[j][col], sum);
+            acc += sum * scales[(batch.first + row) * 12 + g];
+        }
+        __syncthreads();
     }
-    __shared__ float reduce[4][8][16];
-#pragma unroll
-    for (int r = 0; r < 4; ++r)
-        reduce[r][worker][col] = acc[r];
-    __syncthreads();
-    if (!worker)
-        for (int r = 0; r < batch.count; ++r) {
-            for (int i = 1; i < 8; ++i)
-                acc[r] += reduce[r][i][col];
-            partial[(batch.first + r) * 1536 + blockIdx.x * 16 + col] =
-                acc[r] * shelf::quantization::exl3::kExl3Int8GridStep;
-        }
+    if (row < unsigned(batch.count))
+        partial[(batch.first + row) * 1536 + blockIdx.x * 16 + col] =
+            acc * shelf::quantization::exl3::kExl3Int8GridStep;
 }
-
 __global__ void rotate_output(const float *partial, const uint16_t *svh, uint16_t *output, int width,
                               int padded, const Hy4ExpertProjection *group = nullptr, int stride = 0,
                               float *logits = nullptr, const Hy4Route *routes = nullptr) {
@@ -203,7 +196,8 @@ extern "C" hipError_t shelf_hy4_expert_linear(const uint16_t *x, const Hy4Expert
                                               const Hy4ExpertBatch *batches, int num_batches, int wmma) {
     if (!x || !matrices || !codes || !scales || !partial || !y || rows < 1 || rows > 65535 || stride < 1)
         return hipErrorInvalidValue;
-    if ((batches && (!routes || num_batches<1 || num_batches>rows || stride!=3)) || (!batches && num_batches))
+    if ((batches && (!routes || num_batches < 1 || num_batches > rows || stride != 3)) ||
+        (!batches && num_batches))
         return hipErrorInvalidValue;
     rotate_input<<<dim3(12, rows), 32>>>(x, nullptr, codes, scales, 1536, 1536, matrices, stride, routes);
     auto status = hipGetLastError();
@@ -218,7 +212,7 @@ extern "C" hipError_t shelf_hy4_expert_linear(const uint16_t *x, const Hy4Expert
         if (status != hipSuccess)
             return status;
     } else if (batches) {
-        expert_batch4<<<dim3(96, num_batches), 128>>>(codes, scales, matrices, routes, batches, partial);
+        expert_batch16<<<dim3(96, num_batches), 256>>>(codes, scales, matrices, routes, batches, partial);
     } else if (use_dot)
         multiply<4, true>
             <<<dim3(96, rows), 128>>>(codes, scales, nullptr, partial, 1536, 1536, matrices, stride, routes);

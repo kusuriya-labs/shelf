@@ -28,7 +28,7 @@ def main():
     p = argparse.ArgumentParser(description="Hy4-flash の EP=3 一致・予約・実効速度を検証する")
     for field in ("executable", "body", "engram", "draft", "placement", "reference", "calibration", "results"):
         p.add_argument(field, type=Path)
-    p.add_argument("--chunk",type=int,choices=(32,64,128),default=64)
+    p.add_argument("--chunk",type=int,choices=(32,64,128,256,512),default=64)
     args = p.parse_args()
     visible = os.environ.get("ROCR_VISIBLE_DEVICES")
     if visible != "GPU-a8e9ddefa2d60f55,GPU-08b2ddcbd6e6b36c,GPU-76a08c022586fed6":

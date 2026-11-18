@@ -79,7 +79,7 @@ int compute(int argc, char **argv) {
             ids = io::read_input_ids(input.string());
             if (std::any_of(ids.begin(), ids.end(), [](int id) { return id < 0 || id >= 120832; }))
                 throw std::runtime_error("入力 ID が範囲外です");
-            if (ids.empty() || ids.size() + count > tokens || tokens > 1048576 || chunk > 128)
+            if (ids.empty() || ids.size() + count > tokens || tokens > 1048576 || chunk > max_prefill_chunk)
                 throw std::runtime_error("入力列または生成長が不正です");
         }
         for (;;) {

@@ -1,4 +1,5 @@
 #include <hip/hip_fp16.h>
+#include <shelf/kernels/hy4_flash/mla_prefill.h>
 #include <shelf/models/hy4_flash/attention.h>
 #include <shelf/models/hy4_flash/absorbed.h>
 #include <shelf/kernels/fused/detail/octave_common.h>
@@ -271,6 +272,10 @@ Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidd
     Mat out = op.mat(hidden.rows, heads * 256);
     int slots = sliding ? std::min(op.gpu.tokens, size_t(518)) : op.gpu.tokens;
     auto cache = op.gpu.cache[layer];
+    static const bool wmma = [] {
+        auto val = std::getenv("SHELF_HY4_WMMA");
+        return val && std::string_view(val) == "1";
+    }();
     for (int i = 0; i < hidden.rows;) {
         size_t save = op.arena.cursor;
         bool contiguous = sliding || start + hidden.rows <= 2048;
@@ -280,7 +285,8 @@ Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidd
         int stride = 0;
         for (int r = i; r < i + n; ++r)
             stride = std::max(stride, int(selected[r].size()));
-        std::vector<int> ids, offsets(n * stride, -1);
+        bool tiles = n >= 16 && contiguous && wmma && !draft;
+        std::vector<int> ids, offsets(tiles ? 0 : n * stride, -1);
         if (n == 1 || draft) {
             ids = selected[i + n - 1];
             for (int r = 0; r < n; ++r)
@@ -290,9 +296,11 @@ Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidd
             int first = selected[i][0];
             ids.resize(selected[i + n - 1].back() + 1 - first);
             std::iota(ids.begin(), ids.end(), first);
-            for (int r = 0; r < n; ++r)
-                std::iota(offsets.begin() + r * stride, offsets.begin() + r * stride + selected[i + r].size(),
-                          selected[i + r][0] - first);
+            if (!tiles)
+                for (int r = 0; r < n; ++r)
+                    std::iota(offsets.begin() + r * stride,
+                              offsets.begin() + r * stride + selected[i + r].size(),
+                              selected[i + r][0] - first);
         } else {
             std::vector<int> remap(start + i + n, -1);
             for (int r = i; r < i + n; ++r)
@@ -313,16 +321,27 @@ Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidd
         checked(hipGetLastError());
         unpack<64, 11><<<dim3(1, ids.size()), 64>>>(cache, fresh, positions, start, slots, b, 260);
         checked(hipGetLastError());
-        auto offsets_gpu = op.indices(offsets);
-        if (!op.gpu.folded.empty()) {
-            attend_absorbed(op, p + "kv_b_proj", a, b, q.row(i, n), gate.row(i, n), offsets_gpu, stride,
-                            op.param(p + "learnable_sink_param"), out.row(i, n));
-        } else {
+        if (tiles) {
             Mat expanded = op.linear(p + "kv_b_proj", a);
-            attend<<<dim3(heads, n), 256, stride * sizeof(float)>>>(
-                q.row(i, n), expanded, b, offsets_gpu, stride, op.param(p + "learnable_sink_param"),
-                gate.row(i, n), out.row(i, n));
-            checked(hipGetLastError());
+            size_t size = size_t(n) * heads * ((ids.size() + 15) / 16 * 16);
+            auto scores = static_cast<float *>(op.arena.next(size * 4));
+            auto probs = static_cast<uint16_t *>(op.arena.next(size * 2));
+            auto sinks = op.param(p + "learnable_sink_param");
+            checked(shelf_hy4_mla_prefill(q.row(i, n).p, expanded.p, b.p, gate.row(i, n).p, sinks.p,
+                                          sinks.type == io::SType::F32, out.row(i, n).p, scores, probs, n,
+                                          heads, ids.size(), ids.front(), start + i, sliding));
+        } else {
+            auto offsets_gpu = op.indices(offsets);
+            if (!op.gpu.folded.empty()) {
+                attend_absorbed(op, p + "kv_b_proj", a, b, q.row(i, n), gate.row(i, n), offsets_gpu, stride,
+                                op.param(p + "learnable_sink_param"), out.row(i, n));
+            } else {
+                Mat expanded = op.linear(p + "kv_b_proj", a);
+                attend<<<dim3(heads, n), 256, stride * sizeof(float)>>>(
+                    q.row(i, n), expanded, b, offsets_gpu, stride, op.param(p + "learnable_sink_param"),
+                    gate.row(i, n), out.row(i, n));
+                checked(hipGetLastError());
+            }
         }
         op.arena.cursor = save;
         i += n;

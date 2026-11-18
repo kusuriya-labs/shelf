@@ -5,6 +5,8 @@
 #include <shelf/models/hy4_flash/checkpoint.h>
 
 namespace shelf::hy4 {
+inline constexpr int max_prefill_chunk = 512;
+
 struct Region {
     uint8_t *base = nullptr;
     size_t size = 0;
@@ -30,6 +32,7 @@ struct Residency {
     Residency &operator=(const Residency &) = delete;
     std::array<hipEvent_t, 3> expert_begin{}, expert_end{};
     std::array<double, 3> expert_ms{};
+    double attention_ms = 0, ffn_ms = 0, transfer_ms = 0;
     void reserve();
     void upload();
     void upload_experts(int rank, int layer);

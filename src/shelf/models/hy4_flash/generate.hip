@@ -104,6 +104,7 @@ struct Target {
     std::array<Selection, 5> tapped;
     Mat state{};
     size_t base = 0;
+    double head_ms = 0;
     float *target_probs = nullptr;
     float *draft_probs = nullptr;
     float temperature;
@@ -116,12 +117,16 @@ struct Target {
         }
         gpu.routed_rows = {};
         gpu.expert_ms = {};
+        gpu.attention_ms = gpu.ffn_ms = gpu.transfer_ms = 0;
         gpu.transfer_bytes = {};
         state = op.mat(6, 3072);
         base = op.arena.cursor;
     }
     std::vector<int> predict(Mat hidden, int position, bool draft = false, const Path &dump = {},
                              float *distribution = nullptr) {
+        std::chrono::steady_clock::time_point begin;
+        if (op.gpu.expert_begin[0])
+            begin = std::chrono::steady_clock::now();
         size_t mark = op.arena.cursor;
         auto codes = static_cast<int8_t *>(op.arena.next(size_t(hidden.rows) * 3072));
         auto scales = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 24 * 4));
@@ -150,6 +155,9 @@ struct Target {
         std::vector<int> result(hidden.rows);
         op.copy(result.data(), device_ids, result.size() * 4, hipMemcpyDeviceToHost);
         op.arena.cursor = mark;
+        if (op.gpu.expert_begin[0])
+            head_ms +=
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
         if (std::find(result.begin(), result.end(), -1) != result.end())
             throw std::runtime_error("有効な出力 logit がありません");
         return result;
@@ -263,6 +271,12 @@ int verify_speculation(Ops &op, const float *target_probs, const float *draft_pr
 }
 void decoder_layer(Ops &op, int layer, int start, Mat x, const std::vector<int> &history,
                    const std::vector<int> &ids, Selection &selection) {
+    auto now = std::chrono::steady_clock::now;
+    std::chrono::steady_clock::time_point start_time;
+    if (op.gpu.expert_begin[0]) {
+        checked(hipStreamSynchronize(nullptr));
+        start_time = now();
+    }
     size_t save = op.arena.cursor;
     auto p = "model.layers." + std::to_string(layer) + ".";
     if (layer % 10 == 1 && layer <= 31)
@@ -274,6 +288,12 @@ void decoder_layer(Ops &op, int layer, int start, Mat x, const std::vector<int> 
     Mat z = op.expand(x, a, post);
     checked(hipMemcpyAsync(x.p, z.p, z.bytes(), hipMemcpyDeviceToDevice));
     op.arena.cursor = save;
+    if (op.gpu.expert_begin[0]) {
+        checked(hipStreamSynchronize(nullptr));
+        auto end = now();
+        op.gpu.attention_ms += std::chrono::duration<double, std::milli>(end - start_time).count();
+        start_time = end;
+    }
     Mat f = op.collapse(x, p + "hc_mlp_layer.hc_pre.hc_", post);
     f = op.norm(f, p + "post_attention_layernorm.weight");
     if (layer == 0)
@@ -283,11 +303,15 @@ void decoder_layer(Ops &op, int layer, int start, Mat x, const std::vector<int> 
     z = op.expand(x, f, post);
     checked(hipMemcpyAsync(x.p, z.p, z.bytes(), hipMemcpyDeviceToDevice));
     op.arena.cursor = save;
+    if (op.gpu.expert_begin[0]) {
+        checked(hipStreamSynchronize(nullptr));
+        op.gpu.ffn_ms += std::chrono::duration<double, std::milli>(now() - start_time).count();
+    }
 }
 void generate(Residency &gpu, const std::vector<int> &ids, int count, int chunk, float temperature,
               uint64_t seed, const Path &logits_file) {
     if (ids.empty() || !count || ids.size() + count > gpu.tokens || gpu.tokens > 1048576 || chunk < 1 ||
-        chunk > 128)
+        chunk > max_prefill_chunk)
         throw std::runtime_error("入力・出力長または prefill chunk が範囲外です");
     auto now = std::chrono::steady_clock::now;
     Target target(gpu, temperature, seed);
@@ -301,6 +325,8 @@ void generate(Residency &gpu, const std::vector<int> &ids, int count, int chunk,
             next = output.back();
     }
     auto prefill = now();
+    double pp_attn = gpu.attention_ms, pp_ffn = gpu.ffn_ms, pp_transfer = gpu.transfer_ms,
+           pp_head = target.head_ms, draft_ms = 0;
     auto pp_routes = gpu.routed_rows;
     auto pp_expert_ms = gpu.expert_ms;
     auto pp_bytes = gpu.transfer_bytes;
@@ -314,7 +340,12 @@ void generate(Residency &gpu, const std::vector<int> &ids, int count, int chunk,
             generated.push_back(target.forward({anchor}, false)[0]);
             continue;
         }
+        std::chrono::steady_clock::time_point draft_begin;
+        if (gpu.expert_begin[0])
+            draft_begin = now();
         auto draft = target.propose(anchor);
+        if (gpu.expert_begin[0])
+            draft_ms += std::chrono::duration<double, std::milli>(now() - draft_begin).count();
         std::vector<int> block{anchor};
         block.insert(block.end(), draft.begin(), draft.end());
         auto actual = target.forward(block, true);
@@ -351,6 +382,12 @@ void generate(Residency &gpu, const std::vector<int> &ids, int count, int chunk,
                                                     pp_bytes[0][r] - pp_bytes[r][0]));
         fputc('\n', stderr);
     }
+    if (gpu.expert_begin[0])
+        fprintf(stderr,
+                "profile_pp_ms attention=%.3f ffn=%.3f transfer=%.3f head=%.3f\n"
+                "profile_tg_ms attention=%.3f ffn=%.3f transfer=%.3f head=%.3f draft=%.3f\n",
+                pp_attn, pp_ffn, pp_transfer, pp_head, gpu.attention_ms - pp_attn, gpu.ffn_ms - pp_ffn,
+                gpu.transfer_ms - pp_transfer, target.head_ms - pp_head, draft_ms);
     printf("GENERATED_IDS=");
     for (size_t i = 0; i < generated.size(); ++i)
         printf("%s%d", i ? "," : "", generated[i]);
