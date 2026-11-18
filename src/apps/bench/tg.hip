@@ -75,6 +75,16 @@ void print_usage(FILE* out) {
         "  --kv-cache-dtype bf16|fp8|octave:FORMAT (default bf16)\n"
         "  --arena-gib N                (default auto = free VRAM minus 0.5 GiB)\n"
         "  --moe-host-experts N       routed experts per layer kept in host memory (default 0)\n"
+        "  --moe-cache-swap-budget N  expert cache swap budget (default 96)\n"
+        "  --moe-cache-burst N        max burst swaps (default 512)\n"
+        "  --moe-cache-min-gain N     minimum frequency gain to swap (default 150)\n"
+        "  --moe-cache-rebalance-steps N  rebalance interval in steps (default 4)\n"
+        "  --moe-cache-rebalance-routes N rebalance interval in routes (0 = auto)\n"
+        "  --moe-cache-decay N        halve expert frequency at this count (default 4096)\n"
+        "  --moe-cache-log-interval N expert cache hit-rate log interval (default 64)\n"
+        "  --moe-cache-oracle 0|1     log cache oracle decisions (default 0)\n"
+        "  --ple-artifact 0|1         write/read <model_dir>/quanted_ple.bin (default 1)\n"
+        "  --ple-stream-io MODE       pread | mmap | direct (default mmap)\n"
         "  --lm-head-int8 0|1         quantize the BF16 lm head to INT8 W32 on load (default 1)\n"
         "  --pcie-frac F              share of PCIe the runtime may use (default 0.25)\n"
         "  --pcie-gbps F              assumed PCIe bandwidth in GB/s (default 25)\n"
@@ -109,6 +119,11 @@ static bool apply_env_double(const std::string& raw, const char* name) {
         fprintf(stderr, "invalid value for %s\n", name);
         return false;
     }
+    setenv(name, raw.c_str(), 1);
+    return true;
+}
+
+static bool apply_env_string(const std::string& raw, const char* name) {
     setenv(name, raw.c_str(), 1);
     return true;
 }
@@ -274,6 +289,41 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
             }
         } else if (key == "--moe-host-experts") {
             if (!apply_env_u32(need_value(), "SHELF_MOE_HOST_EXPERTS")) return false;
+        } else if (key == "--moe-cache-swap-budget") {
+            if (!apply_env_u32(need_value(), "SHELF_MOE_CACHE_SWAP_BUDGET")) return false;
+        } else if (key == "--moe-cache-burst") {
+            if (!apply_env_u32(need_value(), "SHELF_MOE_CACHE_BURST_SWAPS")) return false;
+        } else if (key == "--moe-cache-min-gain") {
+            if (!apply_env_u32(need_value(), "SHELF_MOE_CACHE_MIN_GAIN")) return false;
+        } else if (key == "--moe-cache-rebalance-steps") {
+            if (!apply_env_u32(need_value(), "SHELF_MOE_CACHE_REBALANCE_STEPS")) return false;
+        } else if (key == "--moe-cache-rebalance-routes") {
+            if (!apply_env_u32(need_value(), "SHELF_MOE_CACHE_REBALANCE_ROUTES")) return false;
+        } else if (key == "--moe-cache-oracle") {
+            const std::string value = need_value();
+            if (value != "0" && value != "1") {
+                fprintf(stderr, "invalid --moe-cache-oracle (expected 0 or 1)\n");
+                return false;
+            }
+            if (!apply_env_string(value, "SHELF_MOE_CACHE_ORACLE")) return false;
+        } else if (key == "--moe-cache-decay") {
+            if (!apply_env_u32(need_value(), "SHELF_MOE_CACHE_DECAY")) return false;
+        } else if (key == "--moe-cache-log-interval") {
+            if (!apply_env_u32(need_value(), "SHELF_MOE_CACHE_LOG_INTERVAL")) return false;
+        } else if (key == "--ple-artifact") {
+            const std::string value = need_value();
+            if (value != "0" && value != "1") {
+                fprintf(stderr, "invalid --ple-artifact (expected 0 or 1)\n");
+                return false;
+            }
+            if (!apply_env_string(value, "SHELF_PLE_ARTIFACT")) return false;
+        } else if (key == "--ple-stream-io") {
+            const std::string value = need_value();
+            if (value != "pread" && value != "mmap" && value != "direct") {
+                fprintf(stderr, "invalid --ple-stream-io (expected pread, mmap or direct)\n");
+                return false;
+            }
+            if (!apply_env_string(value, "SHELF_PLE_STREAM_IO")) return false;
         } else if (key == "--lm-head-int8") {
             if (!apply_env_u32(need_value(), "SHELF_LM_HEAD_INT8")) return false;
         } else if (key == "--pcie-frac") {

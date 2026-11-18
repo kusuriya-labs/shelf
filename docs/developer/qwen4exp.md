@@ -38,12 +38,12 @@ PLE の n-gram history を復元 prefix で再 seed する。MTP は無効であ
   vocab-parallel head は `Int8W32`、DFlash2 の sharded proposal も `Int8W32` 経路で
   動く。無効にすると BF16 のままになり、DFlash2 の sharded proposal は
   BF16 用の exact-rows GEMM 経路を使う。
-- routed expert は既定で全 local expert を VRAM に置く。`SHELF_MOE_HOST_EXPERTS=N`
+- routed expert は既定で全 local expert を VRAM に置く。`--moe-host-experts N`
   （layer あたり）を設定すると、各 layer の N expert を pinned host の plane に置き、
   残りを VRAM の slot に置く。host plane は `hipHostMallocMapped` で、GPU の grouped
   GEMM が PCIe 越しに読む。expert ごとの配置は device の slot map
   `int32 [layers][local_experts]` が持つ（`>= 0` は VRAM slot、`-1 - slot` は host slot）。
-  EXL3 expert の host offload は未対応で、`SHELF_MOE_HOST_EXPERTS>0` は
+  EXL3 expert の host offload は未対応で、`--moe-host-experts` が 0 より大きい場合は
   `Status::unsupported` で停止する。
 - attention / GDN は `preshuffle_fp8_native` で gfx1201 の FP8 WMMA fragment order に
   する。活性は per-token dynamic FP8（`scale = amax / 448`）で、GEMM の epilogue で
@@ -62,12 +62,12 @@ PLE の n-gram history を復元 prefix で再 seed する。MTP は無効であ
   code 0 にする。量子化器は AVX512F/BW/VL/BMI2 がある CPU では AVX512 経路、
   それ以外は scalar 経路を使う。BF16 shard は 20 MiB の窓で読み、量子化後に
   `madvise(MADV_DONTNEED)` と `posix_fadvise(DONTNEED)` で page cache を落とす。
-  I/O は `SHELF_PLE_STREAM_IO=pread|mmap|direct` で選ぶ（既定 mmap、direct は
+  I/O は `--ple-stream-io pread|mmap|direct` で選ぶ（既定 mmap、direct は
   O_DIRECT）。BF16 table 全体を anonymous RAM にも page cache にも保持しない。
 - 初回のオンライン量子化後、`<model_dir>/quanted_ple.bin` に INT6 table を書く。次回
   以降は source shard の size と mtime が header の fingerprint と一致する場合に
   その artifact を読む。artifact は 4096-byte 境界の shard payload を持ち、
-  `SHELF_PLE_ARTIFACT=0` で読み書きを無効にできる。stale / invalid なら再量子化して
+  `--ple-artifact 0` で読み書きを無効にできる。stale / invalid なら再量子化して
   上書きする。書き込み失敗は model load を失敗させない。
 - MXFP4 / FP8 の preshuffle staging は関数ローカルの buffer を非同期コピーしない。
   同期コピーで device へ移してから buffer を破棄する。
@@ -120,10 +120,10 @@ lm_head (final norm なし)
   group row は 1 本のままである。miss は host plane の重みを PCIe 越しに読む。
 - slot の入れ替えは step 間だけで行う。router は local expert ごとの route 数を
   `expert_route_freq` に積み、batch 完了後に累積頻度の順位で host expert と VRAM expert
-  を再配置する。`SHELF_MOE_CACHE_SWAP_BUDGET`（既定 96）が 1 step の交換上限、
-  `SHELF_MOE_CACHE_MIN_GAIN`（既定 150）が交換を採る最小の頻度差、
-  `SHELF_MOE_CACHE_REBALANCE_STEPS`（既定 4）が再評価の間隔、
-  `SHELF_MOE_CACHE_DECAY`（既定 4096）が frequency を半分にする閾値である。
+  を再配置する。`--moe-cache-swap-budget`（既定 96）が 1 step の交換上限、
+  `--moe-cache-min-gain`（既定 150）が交換を採る最小の頻度差、
+  `--moe-cache-rebalance-steps`（既定 4）が再評価の間隔、
+  `--moe-cache-decay`（既定 4096）が frequency を半分にする閾値である。
 - PLE は layer 1 の attention site の前に注入する。key_proj / value_proj /
   norm_key / norm_query / norm_conv / short conv を使う。
 
@@ -216,14 +216,14 @@ arena の実消費と一致することを検証する。
 expert offload の E2E（TP=2）:
 
 ```bash
-SHELF_MOE_HOST_EXPERTS=96 ./build/shelf-compute \
+--moe-host-experts 96 ./build/shelf-compute \
   --model-dir models/Qwen3.8-Flash-Next-Quark-MXFP4 \
   --input-ids-file <prompt.ids> --max-new-tokens 8 --max-seq-len 128 \
   --device 2,3 --tensor-parallel 2 --prefix-cache 0 --kv-cache-dtype bf16 \
   --temperature 0 --arena-gib 30
 ```
 
-`SHELF_MOE_CACHE_LOG_INTERVAL=1` で step ごとの hit rate と swap 数を stderr に出す。
+`--moe-cache-log-interval 1` で step ごとの hit rate と swap 数を stderr に出す。
 
 実 checkpoint の E2E:
 

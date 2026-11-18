@@ -1178,7 +1178,7 @@ in-memory 量子化（1,048,576 行、入力 1 GiB）:
   ほぼなくなった。page cache の状態を制御した benchmark ではない。
 - mmap 経路は BF16 95.37 GiB が page cache に載り得る。streaming 経路は処理済み範囲を
   `madvise` / `posix_fadvise(DONTNEED)` で落とし、peak RSS を約 39.2 GiB に抑える。
-  `SHELF_PLE_STREAM_IO=pread|mmap|direct` で切り替え、既定は mmap window。wall は
+  `--ple-stream-io pread|mmap|direct` で切り替え、既定は mmap window。wall は
   disk 帯域で決まり、方式差は 1 s 未満だった（mmap / O_DIRECT は各 1 回）。
 - full model load、GPU 実行、生成品質はこの計測に含まない。
 
@@ -1196,7 +1196,7 @@ in-memory 量子化（1,048,576 行、入力 1 GiB）:
 
 - artifact は source shard の size / mtime fingerprint で検証し、stale なら再量子化する。
 - 初回は temp file へ書き、8 shard ごとに `fdatasync` してから `rename` する。
-- `SHELF_PLE_ARTIFACT=0` で artifact を無効にできる。
+- `--ple-artifact 0` で artifact を無効にできる。
 - full model load、GPU 実行、生成品質はこの計測に含まない。
 
 ## 記録規則

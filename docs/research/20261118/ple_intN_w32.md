@@ -175,7 +175,7 @@ shard ごとの `pread` に変更した。
 - 既定は 20 MiB の mmap window（64 Ki 行）で読み、AVX512 で量子化する。
 - window を `madvise(MADV_DONTNEED)` + `munmap` し、`posix_fadvise(DONTNEED)` で
   page cache も落とす。
-- `SHELF_PLE_STREAM_IO=pread|mmap|direct` で切り替える。`direct` は `O_DIRECT` を使い、
+- `--ple-stream-io pread|mmap|direct` で切り替える。`direct` は `O_DIRECT` を使い、
   page cache を経由しない。
 - BF16 table 全体を anonymous RAM にも page cache にも保持しない。残るのは INT6 出力
   38.743 GiB と worker あたり約 20 MiB の window だけである。
@@ -202,7 +202,7 @@ wall は disk 帯域で決まり、方式差は 1 s 未満だった。mmap windo
 - 実ファイル: 41,600,684,376 B（38.743 GiB）。
 - source fingerprint: PLE shard を含む safetensors file の `st_size` と `st_mtim`。
 - stale / invalid / 途中で切れた artifact は再量子化して上書きする。
-- `SHELF_PLE_ARTIFACT=0` で artifact の読み書きを無効にできる。
+- `--ple-artifact 0` で artifact の読み書きを無効にできる。
 - 書き込みは temp file + `rename` で atomic。`fdatasync` は 8 shard ごとに行い、
   page cache の dirty を約 2.6 GiB に抑える。書き込み失敗は model load を失敗させない。
 
