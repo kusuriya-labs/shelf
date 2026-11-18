@@ -161,3 +161,8 @@ DFly は 49 射影を量子化し、sidecar は index・report 込みで 424,485
 受入の最初の起動では校正ファイルの読み取り権限が足りなかった。層 0 の校正 capture が保存した同一 input_ids を使い、実際の 2048 ID の SHA-256 を記録するよう修正した。次の試行では共通 GpuArena の gfx1201 制約が rank 1 の確保を拒否した。Hy4 worker は scoped device の確保・解放まで gfx1030 を明示し、既存呼び出しの既定は gfx1201 に保った。
 
 3 台の lock を保持した再試行で、最終配置から 382 expert を再配置し、R9700 / V620 / V620 の本数は 4802 / 8095 / 8095。2,097,152 token の確保成功時の committed は 34,129,931,008 / 29,335,341,056 / 29,335,341,056 B。確保直後の空きは 2,097,152 / 4,972,347,392 / 4,972,347,392 B。DFly と吸収形 MLA の補助行列も含む。2Mi での推論は行っていない。記録は `hy4-flash-pilot/shelf-qualification/ep3-lywnol6v/reserve.log`。
+
+## 毎時レビュー第 4 回への対応
+
+1. 9b0d483a の共通部変更後に、別の build-hy4-default を SHELF_HY4_ONLY=OFF、CMAKE_HIP_ARCHITECTURES=gfx1201 で再構成し、shelf_gpu と既存 shelf-compute の main.hip・compute_runtime.hip を比較ビルドした。6 ステップすべて成功した。既存の引数を省略する ScopedDevice / GpuArena 呼び出しは既定の DeviceArch::gfx1201 を使用し、Hy4 worker の確保だけが gfx1030 を明示する。これは legacy のコンパイル確認であり、既存モデルの生成試験とは区別する。記録は `build-hy4/legacy-arena-config.log` と `build-hy4/legacy-arena-build.log`。
+2. EP=3 の同一入力・温度 0 の target-only と DFly の token 列を全件比較する。最終位置の top-1 だけではこの受入条件を通さない。現在は通常生成用の実重みを 3 台へ転送している。
