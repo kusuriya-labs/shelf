@@ -1,4 +1,5 @@
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -9,7 +10,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 from safetensors import safe_open
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 
 from decoder import collapse, rms, rotate
 from octave import decode, encode
@@ -42,7 +43,7 @@ class Calibration:
     def __init__(self, args):
         self.args = args
         self.index = json.loads((args.original / "model.safetensors.index.json").read_bytes())["weight_map"]
-        self.device = torch.device("cuda")
+        self.device = torch.device("cuda:0")
         self.h = {}
         self.samples = {}
 
@@ -162,9 +163,7 @@ class Calibration:
 
 @torch.inference_mode()
 def run(args):
-    from exllamav3.modules.quant.exl3_lib.quantize import codebook_mul1_mult
-
-    if codebook_mul1_mult != 0xDCD12D or not json.loads((args.work/"progress.json").read_bytes()).get("head_complete"):
+    if not json.loads((args.work/"progress.json").read_bytes()).get("head_complete"):
         raise ValueError("本体の完了と mul24 拡張が必要です")
     body = args.body / "conversion_report.json"
     report = json.loads(body.read_bytes())
@@ -174,6 +173,9 @@ def run(args):
             report["assembly_signature"]["settings_sha256"] != digest(settings) or
             json.loads(settings.read_bytes())["index_sha256"] != digest(orig_index)):
         raise ValueError("原本・校正作業・本体の署名が一致しません")
+    from exllamav3.modules.quant.exl3_lib.quantize import codebook_mul1_mult
+    if codebook_mul1_mult != 0xDCD12D:
+        raise ValueError("mul24 拡張が必要です")
     torch.set_num_threads(2)
     torch.set_float32_matmul_precision("highest")
     cal = Calibration(args)
@@ -182,15 +184,43 @@ def run(args):
     if not 0 < args.rows <= rows or cols>2048 or not 0<args.anchors<=cols-6:
         raise ValueError("校正の行数または文脈長が範囲外です")
     block = groups(cols,args.anchors).to(cal.device)
-    if args.output.exists():
-        raise FileExistsError(args.output)
-    args.output.parent.mkdir(parents=True,exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=args.output.parent) as temp:
-        staging=Path(temp)/"dfly"
-        staging.mkdir()
+    signature = dict(body=digest(body), original_index=digest(orig_index), rows=args.rows,
+                     anchors=args.anchors, work=str(args.work.resolve()), algorithm=1)
+    scratch = args.output.with_name(args.output.name + ".work")
+    scratch.mkdir(parents=True,exist_ok=True)
+    with (scratch / "convert.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if args.output.exists():
+            old = json.loads((args.output/"conversion_report.json").read_bytes())
+            if old.get("signature") == signature and all(
+                digest(args.output/k) == v for k,v in old["shard_sha256"].items()
+            ):
+                return
+            raise FileExistsError(args.output)
+        settings_path = scratch/"settings.json"
+        if settings_path.exists() and json.loads(settings_path.read_bytes()) != signature:
+            raise ValueError("既存の DFly 作業領域の入力が異なります")
+        atomic_json(settings_path, signature)
+        staging=scratch/"dfly"
+        staging.mkdir(exist_ok=True)
         names, shapes, checksums = {}, {}, {}
         states = []
         for stage in range(-1,6):
+            marker = scratch/f"stage-{stage}.json"
+            hidden_path = scratch/f"hidden-{stage}.safetensors"
+            if marker.exists():
+                saved = json.loads(marker.read_bytes())
+                if any(digest(staging/file) != expected for file,expected in saved["checksums"].items()):
+                    raise ValueError(f"保存済み DFly 層が破損しています: {stage}")
+                if stage < 5:
+                    if digest(hidden_path) != saved["hidden_sha256"]:
+                        raise ValueError("保存済み校正 hidden が破損しています")
+                    states = list(load_file(hidden_path)["hidden"].unbind())
+                names.update(saved["names"])
+                shapes.update(saved["shapes"])
+                checksums.update(saved["checksums"])
+                continue
+            stage_shapes, stage_files, stage_names = {}, {}, {}
             for row in range(args.rows):
                 if stage==-1:
                     states.append(cal.fusion(row,block).cpu())
@@ -201,11 +231,19 @@ def run(args):
                 else:
                     states[row]=cal.layer(stage,row,block,states[row].to(cal.device)).cpu()
             for name in sorted(cal.h):
-                packed, shapes[name] = cal.quantize(name,len(shapes))
+                packed, stage_shapes[name] = cal.quantize(name,len(shapes)+len(stage_shapes))
                 file=name+".safetensors"
                 save_file(packed,staging/file)
-                names.update({k:file for k in packed})
-                checksums[file]=digest(staging/file)
+                stage_names.update({k:file for k in packed})
+                stage_files[file]=digest(staging/file)
+            names.update(stage_names)
+            shapes.update(stage_shapes)
+            checksums.update(stage_files)
+            hidden_hash = None
+            if stage < 5:
+                save_file({"hidden": torch.stack(states)},hidden_path)
+                hidden_hash = digest(hidden_path)
+            atomic_json(marker,dict(names=stage_names,shapes=stage_shapes,checksums=stage_files,hidden_sha256=hidden_hash))
             cal.weight.cache_clear()
             print("DFly の校正・量子化が完了した段階",stage,flush=True)
         raw={}
@@ -220,8 +258,9 @@ def run(args):
         names.update({k:"raw.safetensors" for k in raw})
         checksums["raw.safetensors"]=digest(staging/"raw.safetensors")
         atomic_json(staging/"model.safetensors.index.json",dict(weight_map=names))
+        checksums["model.safetensors.index.json"]=digest(staging/"model.safetensors.index.json")
         atomic_json(staging/"conversion_report.json",dict(method="dfly",bits=4,linear_shapes=shapes,
-                    body_assembly_signature=report["assembly_signature"],body_report_sha256=digest(body),rows=args.rows,anchors=args.anchors,shard_sha256=checksums))
+                    signature=signature,body_assembly_signature=report["assembly_signature"],body_report_sha256=digest(body),rows=args.rows,anchors=args.anchors,shard_sha256=checksums))
         staging.rename(args.output)
 
 
