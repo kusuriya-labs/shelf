@@ -43,3 +43,7 @@ quant_dfly.py は本体の report、校正署名、head_complete を照合して
 校正列の先頭 4 token を、途中で BF16 校正状態に戻さず層 0 から層 28 まで CPU で連続実行した。層 28 の BF16 校正 hidden に対する相対 L2 は 0.108770。次回は保存した同一配置・同一入力の続きから検査できる。専用構成の通常ビルドと CTest が成功し、ゼロ行・チャンク境界、sliding リング折り返しをまたぐ 6 行の棄却、2048 境界の選択、容量制約下の expert 配置を検査した。
 
 本体 head の出力・サンプリングを FP32 にした。温度 0 は greedy、正の温度は位置・語彙 ID・seed を用いる Gumbel サンプリングを使う。DFly の提案と target の乱数を分け、採択判定は同じ位置の target サンプルと比較する。2Mi の実予約前に実空き量を調べて枠を超える分だけ expert を再配置し、容量不足時だけ 1Mi で再試行する。
+
+## Q1　実機受入手順
+
+loader で生の norm、router、Engram、indexer、DFly の形状と型を照合するようにした。生成コマンドで最終 prefill 行の FP32 logits を保存できる。同じ重みを保持したまま複数の独立リクエストを反復する機能を、ウォームアップと計測に使用する。lock と load average を検査する locked.py と、CPU logits・DFly の有無・2Mi/1Mi 予約・pp2048・decode の結果を保存する qualify.py を追加。実機受入は本体・DFly 完成後に行う。

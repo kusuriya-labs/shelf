@@ -81,7 +81,7 @@ class Weights:
         if name not in self.shapes and ".experts." not in name:
             weight = self.raw(name + ".weight")
             return F.linear(x.to(weight.dtype), weight)
-        return self.projection(name, x.device).cpu(x)
+        return self.projection(name, x.device).cpu(x, fp32=name == "lm_head")
 
     @lru_cache(maxsize=4)
     def engram_table(self, layer):

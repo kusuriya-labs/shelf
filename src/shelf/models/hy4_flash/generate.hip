@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <fstream>
 #include <stdexcept>
 
 namespace shelf::hy4 {
@@ -58,7 +59,7 @@ struct Target {
         state=op.mat(6,3072);
         base=op.arena.cursor;
     }
-    std::vector<int> predict(Mat hidden,int position,bool draft=false) {
+    std::vector<int> predict(Mat hidden,int position,bool draft=false,const Path& dump={}) {
         size_t mark=op.arena.cursor;
         auto codes=static_cast<int8_t*>(op.arena.next(size_t(hidden.rows)*3072));
         auto scales=static_cast<float*>(op.arena.next(size_t(hidden.rows)*24*4));
@@ -67,6 +68,13 @@ struct Target {
         checked(shelf_hy4_head(hidden.p,static_cast<const uint16_t*>(op.param("lm_head.suh").p),
             static_cast<const uint16_t*>(op.param("lm_head.svh").p),static_cast<const uint32_t*>(op.param("lm_head.trellis").p),
             codes,scales,partial,logits,hidden.rows));
+        if(!dump.empty()) {
+            std::vector<float> host(120832);
+            op.copy(host.data(),logits+size_t(hidden.rows-1)*120832,host.size()*4,hipMemcpyDeviceToHost);
+            std::ofstream file(dump,std::ios::binary);
+            if(!file.write(reinterpret_cast<const char*>(host.data()),host.size()*4))
+                throw std::runtime_error("logits を保存できません");
+        }
         int* device_ids=static_cast<int*>(op.arena.next(hidden.rows*4));
         best_ids<<<hidden.rows,256>>>(logits,device_ids,position,seed^(draft?0x735a7ec51b09ull:0ull),temperature);
         checked(hipGetLastError());
@@ -75,7 +83,7 @@ struct Target {
         op.arena.cursor=mark;
         return result;
     }
-    std::vector<int> forward(const std::vector<int>& ids,bool verify) {
+    std::vector<int> forward(const std::vector<int>& ids,bool verify,bool need_head=true,const Path& dump={}) {
         op.arena.cursor=base;
         int start=history.size();
         if(ids.empty() || start+ids.size()>op.gpu.tokens || (verify && ids.size()>6))
@@ -106,12 +114,13 @@ struct Target {
             checked(hipMemcpyAsync(x.p,z.p,z.bytes(),hipMemcpyDeviceToDevice));
             op.arena.cursor=save;
         }
+        history.insert(history.end(),ids.begin(),ids.end());
+        if(!need_head) return {};
         if(!verify) x=x.row(x.rows-1);
         float* unused;
         Mat h=op.norm(op.collapse(x,"model.hc_head.hc_head_",unused),"model.norm.weight");
         checked(hipMemcpyAsync(state.p,h.p,h.bytes(),hipMemcpyDeviceToDevice));
-        history.insert(history.end(),ids.begin(),ids.end());
-        return predict(h,history.size()-h.rows+1);
+        return predict(h,history.size()-h.rows+1,false,dump);
     }
     std::vector<int> propose(int anchor) {
         op.arena.cursor=base;
@@ -157,7 +166,7 @@ struct Target {
     }
 };
 }
-void generate(Residency& gpu,const std::vector<int>& ids,int count,int chunk,float temperature,uint64_t seed) {
+void generate(Residency& gpu,const std::vector<int>& ids,int count,int chunk,float temperature,uint64_t seed,const Path& logits_file) {
     if(ids.empty() || !count || ids.size()+count>gpu.tokens || gpu.tokens>1048576 || chunk<1 || chunk>128)
         throw std::runtime_error("入力・出力長または prefill chunk が範囲外です");
     auto now=std::chrono::steady_clock::now;
@@ -166,7 +175,8 @@ void generate(Residency& gpu,const std::vector<int>& ids,int count,int chunk,flo
     int next=0;
     for(size_t first=0;first<ids.size();first+=chunk) {
         auto end=std::min(first+chunk,ids.size());
-        next=target.forward({ids.begin()+first,ids.begin()+end},false).back();
+        auto output=target.forward({ids.begin()+first,ids.begin()+end},false,end==ids.size(),logits_file);
+        if(!output.empty()) next=output.back();
     }
     auto prefill=now();
     std::vector<int> generated{next};

@@ -116,6 +116,119 @@ Checkpoint::Checkpoint(const Path& model,const Path& engram,const Path& draft,co
         std::memcpy(&marker,at(name+".mul1").host,sizeof(marker));
         require(marker==quantization::exl3::kExl3Mul24Multiplier,"mul24 乗数が不正です");
     }
+    auto raw=[&](const std::string& name,io::SType dtype,std::vector<size_t> dims){
+        const auto& w=at(name);
+        require(w.spec.dtype==dtype && w.spec.shape==dims,"未量子化 tensor の型・形状が不正です: "+name);
+    };
+    auto linear=[&](const std::string& name,int k,int n,bool allow_raw=false){
+        auto it=shape.find(name);
+        if(it==shape.end() && allow_raw) {
+            const auto& w=at(name+".weight");
+            require(w.spec.shape==std::vector<size_t>{size_t(n),size_t(k)} &&
+                    (w.spec.dtype==io::SType::BF16 || w.spec.dtype==io::SType::F32),
+                    "indexer 線形の形状・型が不正です: "+name);
+        } else {
+            require(it!=shape.end() && it->second==std::array<int,2>{k,n},"射影の形状が不正です: "+name);
+        }
+    };
+    auto norm=[&](const std::string& name,size_t n){
+        const auto& w=at(name);
+        require(w.spec.shape==std::vector<size_t>{n} &&
+                (w.spec.dtype==io::SType::BF16 || w.spec.dtype==io::SType::F32),
+                "正規化係数の型・形状が不正です: "+name);
+    };
+    auto mlp=[&](const std::string& p,int k,int n,int out){
+        linear(p+".gate_proj",k,n);
+        linear(p+".up_proj",k,n);
+        linear(p+".down_proj",n,out);
+    };
+    auto attention=[&](const std::string& p,int heads){
+        linear(p+"q_a_proj",3072,1024);
+        linear(p+"q_b_proj",1024,heads*256);
+        linear(p+"kv_a_proj_with_mqa",3072,576);
+        linear(p+"kv_b_proj",512,heads*448);
+        linear(p+"linear_gate",3072,heads*256);
+        linear(p+"o_proj",heads*256,3072);
+        norm(p+"q_a_layernorm.weight",1024);
+        norm(p+"kv_a_layernorm.weight",512);
+        norm(p+"learnable_sink_param",heads);
+        norm(p+"post_proj_norm.weight",3072);
+    };
+    raw("model.embed_tokens.weight",io::SType::BF16,{120832,3072});
+    raw("model.hc_head.hc_head_fn",io::SType::F32,{4,12288});
+    raw("model.hc_head.hc_head_base",io::SType::F32,{4});
+    norm("model.norm.weight",3072);
+    require(at("model.hc_head.hc_head_scale").bytes==4 &&
+            at("model.hc_head.hc_head_scale").spec.dtype==io::SType::F32,"head の scale が不正です");
+    linear("lm_head",3072,120832);
+    for(int i=0;i<42;++i) {
+        auto p="model.layers."+std::to_string(i)+".";
+        bool sparse=i==0 || i%4==1;
+        attention(p+"self_attn.",sparse?32:64);
+        norm(p+"input_layernorm.weight",3072);
+        norm(p+"post_attention_layernorm.weight",3072);
+        for(auto sub:{"hc_attn_layer.","hc_mlp_layer."}) {
+            auto h=p+sub+"hc_pre.hc_";
+            raw(h+"fn",io::SType::F32,{8,12288});
+            raw(h+"scale",io::SType::F32,{2});
+            raw(h+"base",io::SType::F32,{8});
+        }
+        if(sparse) {
+            auto a=p+"self_attn.compressed_indexer.";
+            linear(a+"token_key_projection",3072,128,true);
+            linear(a+"head_weight_projection",3072,16,true);
+            linear(a+"query_projection",1024,2048,true);
+            for(auto key:{"key_value_projection.weight","key_gate_projection.weight"})
+                raw(a+key,io::SType::F32,{128,128});
+            raw(a+"intra_group_ape",io::SType::F32,{4,128});
+            norm(a+"key_norm.weight",128);
+            norm(a+"token_key_norm.weight",128);
+        }
+        if(i==0) {
+            mlp(p+"mlp",3072,13824,3072);
+            norm(p+"mlp.post_fc2_norm.weight",3072);
+        } else {
+            raw(p+"mlp.gate.weight",io::SType::BF16,{512,3072});
+            raw(p+"mlp.gate.e_score_correction_bias",io::SType::F32,{512});
+            linear(p+"mlp.routed_expert_down_proj",3072,1536);
+            linear(p+"mlp.routed_expert_up_proj",1536,3072);
+            mlp(p+"mlp.shared_experts",3072,1536,3072);
+            norm(p+"mlp.combine_output_norm.weight",3072);
+        }
+        if(i%10==1 && i<=31) {
+            auto e=p+"engram_layer.";
+            raw(e+"lookup_table",io::SType::I32,{120818});
+            auto lut=static_cast<const int32_t*>(at(e+"lookup_table").host);
+            auto bounds=std::minmax_element(lut,lut+120818);
+            require(*bounds.first>=0 && *bounds.second==92619,"Engram の正規化語彙が異なります");
+            linear(e+"value_proj",1536,3072);
+            for(auto name:{"value_proj.bias","unified_pre_gamma"}) raw(e+name,io::SType::BF16,{3072});
+            for(int j=0;j<16;++j) raw(e+"lookup_per_head_norms."+std::to_string(j)+".weight",io::SType::BF16,{96});
+            for(int j=0;j<4;++j) {
+                auto num=std::to_string(j);
+                linear(e+"key_projs."+num,1536,3072);
+                raw(e+"key_projs."+num+".bias",io::SType::BF16,{3072});
+                raw(e+"norm_key."+num+".weight",io::SType::BF16,{3072});
+                raw(e+"norm_query."+num+".weight",io::SType::BF16,{3072});
+                raw(e+"unified_per_hc_scales."+num,io::SType::BF16,{3072});
+            }
+        }
+    }
+    if(has_draft) {
+        std::string p="model.dfly_layers.";
+        for(int i=0;i<5;++i) {
+            auto l=p+std::to_string(i)+".";
+            attention(l+"self_attn.",32);
+            norm(l+"input_layernorm.weight",3072);
+            norm(l+"post_attention_layernorm.weight",3072);
+            mlp(l+"mlp",3072,9216,3072);
+        }
+        for(auto name:{"mtp_fusion.enorm","mtp_fusion.hnorm","hidden_correction.embed_norm",
+                       "hidden_correction.hidden_norm","final_norm"}) norm(p+name+".weight",3072);
+        raw(p+"mtp_fusion.gate",io::SType::BF16,{3072});
+        linear(p+"mtp_fusion.eh_proj",6144,3072);
+        mlp(p+"hidden_correction",6144,3072,3072);
+    }
     for(const auto& [name,dims]:shape) at(name+".trellis");
     for(int i=1;i<42;++i) for(int e=0;e<512;++e) {
         auto stem="model.layers."+std::to_string(i)+".mlp.experts."+std::to_string(e)+".";

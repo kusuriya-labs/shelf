@@ -52,7 +52,7 @@ class Projection:
             raise ValueError("mul24 行列の形状・型・乗数が不正です")
         self.trellis, self.suh, self.svh, self.width = trellis, suh, svh, width
 
-    def cpu(self, x):
+    def cpu(self, x, fp32=False):
         k, n = self.suh.numel(), self.svh.numel()
         padded = F.pad(x.float(), (0, k - x.shape[-1]))
         rotated = hadamard(padded * self.suh, 128).reshape(-1, k // 128, 128)
@@ -64,7 +64,7 @@ class Projection:
             w = unpack(self.trellis[:, first // 16:(first + 512) // 16].contiguous())
             partial[:, first:first + 512] = a @ w.float().T
         y = hadamard(partial * (4 * 887 / 131072), 128) * self.svh
-        return y[:, :self.width].bfloat16()
+        return y[:, :self.width] if fp32 else y[:, :self.width].bfloat16()
 
 
 class HipLinear:

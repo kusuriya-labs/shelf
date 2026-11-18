@@ -12,14 +12,14 @@ namespace shelf::hy4 {
 int compute(int argc,char** argv) {
     try {
         if(argc==1 || std::string_view(argv[1])=="--help") {
-            puts("shelf-compute hy4 inspect|reserve|generate --model-dir PATH --engram-dir PATH --placement PATH [--dfly-dir PATH] [--max-seq-len N] [--input-ids-file PATH] [--max-new-tokens N] [--chunk N] [--temperature T] [--seed N]");
+            puts("shelf-compute hy4 inspect|reserve|generate --model-dir PATH --engram-dir PATH --placement PATH [--dfly-dir PATH] [--max-seq-len N] [--input-ids-file PATH] [--max-new-tokens N] [--chunk N] [--temperature T] [--seed N] [--dump-logits PATH] [--repeats N]");
             return 0;
         }
         std::string_view mode=argv[1];
         Path model,engram,draft,placement;
         size_t tokens=mode=="reserve"?2097152:4096;
-        Path input;
-        int count=32,chunk=64;
+        Path input,logits_file;
+        int count=32,chunk=64,repeats=1;
         float temperature=0;
         uint64_t seed=0;
         for(int i=2;i<argc;i+=2) {
@@ -37,9 +37,10 @@ int compute(int argc,char** argv) {
                 auto [p,err]=std::from_chars(value.data(),value.data()+value.size(),seed);
                 if(p!=value.data()+value.size() || err!=std::errc{}) throw std::runtime_error("乱数 seed が不正です");
             }
+            else if(key=="--dump-logits") logits_file=value;
             else if(key=="--input-ids-file") input=value;
-            else if(key=="--max-new-tokens" || key=="--chunk") {
-                auto& dest=key=="--chunk"?chunk:count;
+            else if(key=="--max-new-tokens" || key=="--chunk" || key=="--repeats") {
+                auto& dest=key=="--chunk"?chunk:key=="--repeats"?repeats:count;
                 auto [p,err]=std::from_chars(value.data(),value.data()+value.size(),dest);
                 if(p!=value.data()+value.size() || err!=std::errc{} || dest<=0) throw std::runtime_error("長さが不正です");
             }
@@ -74,7 +75,7 @@ int compute(int argc,char** argv) {
                 gpu.reserve();
                 if(mode=="generate") {
                     gpu.upload();
-                    generate(gpu,ids,count,chunk,temperature,seed);
+                    for(int pass=0;pass<repeats;++pass) generate(gpu,ids,count,chunk,temperature,seed,pass?Path{}:logits_file);
                 }
             } catch(const std::bad_alloc&) {
                 gpu.shutdown();
