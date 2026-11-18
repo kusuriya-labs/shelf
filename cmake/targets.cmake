@@ -545,3 +545,8 @@ target_include_directories(shelf_quant_reference PUBLIC "${CMAKE_CURRENT_SOURCE_
 target_link_libraries(shelf_quant_reference PUBLIC shelf_core)
 target_compile_options(shelf_quant_reference PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
+
+add_library(shelf_hy4_flash SHARED src/shelf/kernels/hy4_flash/linear.hip)
+target_link_libraries(shelf_hy4_flash PRIVATE shelf_core hip::host)
+set_target_properties(shelf_hy4_flash PROPERTIES HIP_ARCHITECTURES "gfx1030;gfx1201")
+shelf_set_rocm_rpath(shelf_hy4_flash)
