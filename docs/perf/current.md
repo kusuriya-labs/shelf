@@ -49,6 +49,34 @@ date・build・GPU 割り当て・生成結果の一致アンカーとともに�
 | カテゴリ別 serving | `vendor/BetterBench`（methodology §9） | decode t/s、TTFT p50 |
 | fp8 KV の数値品質 | `tools/quality_gate.py` / `shelf-bench quality` | ppl 差、mean KL、top-1 一致率 |
 
+## 2026-11-19 Qwen3.8-Flash-Next MXFP4 TP=2 prefill
+
+TP=2 で `LINEAR_BF16` の `(out_features 3072, k 2560)` が allowlist から漏れ、
+36 GDN 層が correctness interpreter に落ちていた。allowlist と MXFP4 の spill を
+修正した後の測定である。経緯は
+[../research/20261119/mxfp4_tp2_prefill_fallback_and_spills.md](../research/20261119/mxfp4_tp2_prefill_fallback_and_spills.md)
+に置く。
+
+- measurement revision: 2026-11-19 の working tree
+- GPU: Radeon AI PRO R9700 × 2（device 2,3）
+- command: `shelf-bench pp --model-dir models/Qwen3.8-Flash-Next-Quark-MXFP4
+  --device 2,3 --tensor-parallel 2 --moe-host-experts 224 --prompt-tokens 4096
+  --prefill-chunk 4096 --kv-cache-dtype octave:c5v5 --tokens-file <4096 token>
+  --warmup 1 --runs 3`
+
+| 構成 | prefill p50 |
+| --- | ---: |
+| TP=2（device 2,3、host 224） | **1,447.4 ms**（2,829.9 tok/s） |
+| TP=1（device 1、host 448） | 2,389.5 ms（1,714.2 tok/s） |
+
+- TP=2 の 3 run は 1,722.8 / 1,447.4 / 1,277.3 ms で、run ごとに短くなる。TP=1 は
+  2,399.4 / 2,389.5 / 2,389.5 ms で安定している。
+- 修正前の TP=2 は 12.65 s（device 2,3）／12.84 s（device 0,2）だった。kernel trace では
+  `model_dispatch_kernel` が 1 dispatch 約 310 ms × 36 層 × 2 rank を占めていた。
+- 参考: `models/Qwen3.8-27B-Quark-AWQ-MXFP4` の prefill 256 token は
+  MXFP4 non-fold kernel の spill 修正で 169.8/170.8 ms → 156.8/157.0 ms（−7.7 %）。
+  2048 token は 934.3/937.0 ms → 935.3 ms で変化しない。
+
 ## 2026-11-18 Qwen3.8-Flash-Next MXFP4 host offload decode
 
 `models/Qwen3.8-Flash-Next-Quark-MXFP4`（48 層・hidden 2560・experts 512・top_k 10・
@@ -115,6 +143,8 @@ drafter として付け、単一リクエストで decode を測った。prompt 
 - TP=2 は同じ config の TP=1 より decode が遅く（25.8 vs 21.5 ms/token）、prefill も
   13.5 s vs 4.6 s と 3 倍遅い。1 round の verify は TP=2 がむしろ速い（123 vs 129 ms）ので、
   差は受理率（4.18 vs 5.33 drafts）と 1 row あたりの固定費（65.8 vs 40.2 ms）から来る。
+  prefill の差は BF16 shape allowlist の欠落による correctness fallback で、2026-11-19 に
+  修正した（[2026-11-19 の節](#2026-11-19-qwen38-flash-next-mxfp4-tp2-prefill)）。
 
 ## 2026-11-18 Qwen3.8-27B MXFP4 decode GEMV
 
