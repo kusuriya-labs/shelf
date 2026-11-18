@@ -203,3 +203,25 @@ AVX512 GEMV と同期経路は GPU 経路とビット一致まで詰めたが、
 
 prompt が同一 token の繰り返し（id=1）なので受理率は実運用より高い。TP=2 の DFlash2 は
 `DFLASH2_D2H_MS` が 11 round で 111 ms あり、host token ids の往復が次の削減対象である。
+
+## host plane を別 stream で重ねる案（REJECT）
+
+miss（host plane）は PCIe 律速、hit（resident plane）は演算律速なので、2 本の stream に
+分けて重ねれば PCIe を隠せると考えて実装した（executor に aux stream と 2 つの event、
+`--moe-miss-overlap`）。計測は `shelf-bench tg --context 3072 --tokens 128
+--moe-host-experts 384`。
+
+| 実行 | per-token | p50 | LOGITS |
+| --- | ---: | ---: | --- |
+| overlap=0 | 37.76 ms | 37.47 ms | max=21.077881 sum=-552621.438 |
+| overlap=1 | 37.91 ms | 37.53 ms | max=21.826017 sum=-580326.312 |
+| overlap=0 | 37.65 ms | 37.42 ms | max=21.077881 sum=-552621.438 |
+| overlap=1 | 37.86 ms | 37.58 ms | max=21.077881 sum=-552621.438 |
+
+- 性能差は ±0.5 % で、重ねても PCIe は隠れなかった。miss の読み出しは hit と同じ
+  kernel（同じ SM 資源）を奪い合うため、帯域ではなく SM が律速になっている。
+- 同じ config の overlap=1 で LOGITS が 1 回だけ変わった。event 待ちが効かず plan を
+  読み違える競合が疑わしい（`shelf-bench` は legacy default stream を使う）。
+  再現性が無いため不採用とし、実装は stash に退避した。
+- 副産物: 最初の測定（96.7 ms/token）は同一ホストで走っていた別の pp 計測による
+  PCIe 競合で汚染されていた。単独実行では再現しない。
