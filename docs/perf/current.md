@@ -6,6 +6,16 @@
 
 測定原則は [methodology.md](methodology.md) を正本とする。
 
+## Hy4-flash 専用 fork の EP=3
+
+R9700 と V620 2 台を使用する。V620 は routed expert を担当する。DFly2 は 5 候補、head は 6 bit、Engram はホスト上の FP8、KV は Octave。固定入力 2,048 token を chunk 1,024 で処理し、温度 0 で 128 token を生成した。重みは常駐させ、初回を除く 3 回の中央値を取った。decode の分子は prefill で得た先頭を除く 127 token。予約は別の実行で確認した。
+
+| 本体の decoder 符号平均 | pp2048 (tok/s) | DFly2 decode (tok/s) | 予約 token 数 | 通常生成と DFly2 の greedy 一致 |
+|---|---:|---:|---:|---:|
+| 4 bpw | 676.62 | 50.65 | 2,097,152 | 256/256 |
+
+4 bpw の測定バイナリの SHA-256 は `a7365f79d3684159121c4cef1d162c2b7757ed6874c9657bdfe9113c357763db`。入力 ID、配置、実行条件、各反復の時間と受理長分布は `hy4-flash-pilot/shelf-qualification/ep3-9ao7j7r7` に保存した。[再現手順](../research/20261119/hy4_flash_plan.md)・[受入記録](../research/20261119/hy4_flash_progress.md)
+
 ## 現在の状態
 
 **現在の build に対する qualified baseline は、2026-11-03 の long-context prefill、

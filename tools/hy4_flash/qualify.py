@@ -111,11 +111,11 @@ def main():
     steady_target=sequence(run("generate","bench-target",long_options,False))
     steady_draft=sequence(run("generate","long-dfly",long_options,True))
     outputs=[list(map(int,row.split(","))) for row in re.findall(r"^GENERATED_IDS=([0-9,]+)$",bench,re.MULTILINE)]
-    if (steady_target!=steady_draft or len(outputs)!=4 or
+    if (len(steady_target)!=256 or steady_target!=steady_draft or len(outputs)!=4 or
             any(row!=steady_target[:128] for row in outputs)):
         raise ValueError("pp2048 後の通常生成と DFly の全生成列が一致しません")
     rows = re.findall(r"prefill_tokens=(\d+) prefill_s=([\d.]+) decode_tokens=(\d+) decode_s=([\d.]+)",bench)
-    if len(rows) != 4 or any(int(n)!=2048 or int(t)<1 for n,_,t,_ in rows):
+    if len(rows) != 4 or any(int(n)!=2048 or int(t)!=127 for n,_,t,_ in rows):
         raise ValueError("ベンチ結果の反復数または token 数が不正です")
     pp = [int(n)/float(s) for n,s,_,_ in rows[1:]]
     tg = [int(t)/float(s) for _,_,t,s in rows[1:]]
