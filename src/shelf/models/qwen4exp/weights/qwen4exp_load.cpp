@@ -2,6 +2,7 @@
 
 #include <shelf/models/common/qwen_hybrid/tensor_partition.h>
 #include <shelf/models/common/qwen_hybrid/weight_loader.h>
+#include <shelf/quantization/bundle/hf_manifest.h>
 #include <shelf/quantization/bundle/quantized_model_reader.h>
 #include <shelf/quantization/exl3/exl3_int8.h>
 #include <shelf/quantization/mxfp4/mxfp4.h>
@@ -13,6 +14,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -23,6 +26,7 @@ namespace {
 namespace qhy = shelf::qwen_hybrid;
 namespace qqb = shelf::quantization::bundle;
 namespace qqm = shelf::quantization::manifest;
+namespace qfs = std::filesystem;
 using shelf::gpu::GpuArena;
 using shelf::gpu::Tensor;
 using shelf::weights::MatrixWeight;
@@ -130,9 +134,64 @@ Status copy_from_staging(void* dst, const void* src, std::size_t bytes, hipStrea
     return Status::make_ok();
 }
 
+struct QuantizedLmHeadSummary {
+    qqm::QuantizedEncoding encoding = qqm::QuantizedEncoding::Bf16;
+    std::uint64_t rows = 0;
+    std::uint64_t cols = 0;
+    std::uint64_t k_padded = 0;
+};
+
+bool fill_lm_head_summary(const std::map<std::string, qqm::QuantizedTensorMetadata>& tensors,
+                          const std::string& preferred, QuantizedLmHeadSummary& out) {
+    auto it = preferred.empty() ? tensors.end() : tensors.find(preferred);
+    if (it == tensors.end()) it = tensors.find("model.language_model.lm_head.weight");
+    if (it == tensors.end()) it = tensors.find("lm_head.weight");
+    if (it == tensors.end()) return false;
+    const auto& meta = it->second;
+    if (meta.logical_shape.size() != 2 || meta.logical_shape[0] <= 0 ||
+        meta.logical_shape[1] <= 0) {
+        return false;
+    }
+    out.encoding = meta.encoding;
+    out.rows = static_cast<std::uint64_t>(meta.logical_shape[0]);
+    out.cols = static_cast<std::uint64_t>(meta.logical_shape[1]);
+    out.k_padded = meta.k_padded;
+    return true;
+}
+
+bool read_quantized_lm_head_summary(const std::string& model_dir,
+                                    QuantizedLmHeadSummary& out) {
+    if (!qfs::exists(qfs::path(model_dir) / qqm::kQuantizedMetadataFile)) {
+        auto source_result = qqb::synthesize_hf_quantized_source(
+            model_dir, {"model.language_model.lm_head.weight"}, true);
+        if (!source_result.ok()) return false;
+        return fill_lm_head_summary(source_result.value().manifest.tensors, "lm_head.weight",
+                                    out);
+    }
+    auto reader_result = qqb::QuantizedModelReader::open(model_dir, false);
+    if (!reader_result.ok()) return false;
+    auto alias_result =
+        reader_result.value().resolve_alias("model.language_model.lm_head.weight");
+    const std::string canonical =
+        alias_result.ok() ? alias_result.value() : std::string("lm_head.weight");
+    return fill_lm_head_summary(reader_result.value().manifest().tensors, canonical, out);
+}
+
+bool quantized_lm_head_shardable(const QuantizedLmHeadSummary& head,
+                                 std::uint32_t tp_size) {
+    if (tp_size < 2u) return false;
+    if (head.encoding == qqm::QuantizedEncoding::Bf16) return true;
+    if (head.encoding != qqm::QuantizedEncoding::Exl3) return false;
+    if ((head.rows % tp_size) != 0u) return false;
+    const std::uint64_t local_vocab = head.rows / tp_size;
+    return (local_vocab % 128u) == 0u && (head.cols % 128u) == 0u &&
+           head.k_padded == head.cols;
+}
+
 Result<TensorPartitionPlan> build_tp_plan(const Qwen4ExpTextConfig& config,
                                           std::uint32_t tp_size,
-                                          std::uint32_t tp_rank) {
+                                          std::uint32_t tp_rank,
+                                          bool shard_lm_head) {
     TensorPartitionPlan plan;
     plan.tp_size = tp_size;
     plan.tp_rank = tp_rank;
@@ -151,6 +210,10 @@ Result<TensorPartitionPlan> build_tp_plan(const Qwen4ExpTextConfig& config,
     for (std::size_t layer = 0; layer < config.num_hidden_layers; ++layer) {
         Status st = qhy::add_hybrid_layer_partitions(
             plan, body, layer_prefix(layer), qhy::layer_is_gdn(config, layer));
+        if (!st.ok()) return st;
+    }
+    if (shard_lm_head) {
+        Status st = qhy::add_lm_head_partitions(plan, config, body);
         if (!st.ok()) return st;
     }
     return plan;
@@ -1018,7 +1081,12 @@ Result<Qwen4ExpRankWeights> load_qwen4exp_rank(const std::string& model_dir,
     if (!config_result.ok()) return config_result.status();
     const Qwen4ExpTextConfig& config = config_result.value();
 
-    auto plan_result = build_tp_plan(config, options.tp_size, options.tp_rank);
+    QuantizedLmHeadSummary lm_head_summary;
+    const bool shard_lm_head =
+        read_quantized_lm_head_summary(model_dir, lm_head_summary) &&
+        quantized_lm_head_shardable(lm_head_summary, options.tp_size);
+    auto plan_result =
+        build_tp_plan(config, options.tp_size, options.tp_rank, shard_lm_head);
     if (!plan_result.ok()) return plan_result.status();
     const TensorPartitionPlan& plan = plan_result.value();
 
@@ -1361,12 +1429,22 @@ Status validate_qwen4exp_rank(const Qwen4ExpRankWeights& weights,
         return Status::invalid_argument("Qwen4Exp embed_tokens is not BF16", __FILE__,
                                         __LINE__);
     }
-    st = expect_matrix(weights.lm_head, vocab, hidden, "lm_head");
+    const bool lm_head_sharded = weights.lm_head.partition.has_value();
+    const std::uint32_t expected_lm_rows =
+        lm_head_sharded ? static_cast<std::uint32_t>(vocab / tp_size) : vocab;
+    st = expect_matrix(weights.lm_head, expected_lm_rows, hidden, "lm_head");
     if (!st.ok()) return st;
     if (weights.lm_head.encoding != shelf::weights::MatrixEncoding::Exl3 &&
         weights.lm_head.encoding != shelf::weights::MatrixEncoding::Bf16) {
         return Status::invalid_argument("Qwen4Exp lm_head is not EXL3 or BF16", __FILE__,
                                         __LINE__);
+    }
+    if (lm_head_sharded) {
+        const auto& part = weights.lm_head.partition.value();
+        if (part.axis != 0 || part.count != tp_size || part.index != tp_rank) {
+            return Status::invalid_argument("Qwen4Exp lm_head partition is invalid", __FILE__,
+                                            __LINE__);
+        }
     }
     st = expect_mixer(weights.mixer, hidden, hc_count, lowrank, "hyper_connection_mixer");
     if (!st.ok()) return st;

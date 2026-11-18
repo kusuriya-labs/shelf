@@ -24,6 +24,9 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <condition_variable>
+#include <future>
+#include <mutex>
 #include <optional>
 #include <thread>
 
@@ -32,6 +35,8 @@
 #endif
 
 namespace {
+
+using shelf::bf16_t;
 
 struct BenchOptions {
     int prompt_tokens = 128;
@@ -539,6 +544,78 @@ int run_pp(int argc, char** argv) {
         }
     }
 
+    struct PlePrefetchWorker {
+        const shelf::qwen4exp::PleTable* table = nullptr;
+        std::thread worker;
+        std::mutex mutex;
+        std::condition_variable cv;
+        struct Job {
+            std::vector<int32_t> prefix_tail;
+            std::vector<int32_t> tokens;
+            std::shared_ptr<std::promise<std::vector<bf16_t>>> promise;
+        };
+        std::optional<Job> job;
+        bool stop = false;
+
+        explicit PlePrefetchWorker(const shelf::qwen4exp::PleTable* t) : table(t) {
+            worker = std::thread([this] {
+                while (true) {
+                    Job local;
+                    {
+                        std::unique_lock<std::mutex> lock(mutex);
+                        cv.wait(lock, [this] { return stop || job.has_value(); });
+                        if (stop && !job.has_value()) return;
+                        local = std::move(job.value());
+                        job.reset();
+                    }
+                    auto result =
+                        table->gather_bf16_stateless(local.prefix_tail, local.tokens);
+                    if (result.ok()) {
+                        local.promise->set_value(std::move(result.value()));
+                    } else {
+                        local.promise->set_exception(std::make_exception_ptr(
+                            std::runtime_error(result.status().message())));
+                    }
+                }
+            });
+        }
+        ~PlePrefetchWorker() {
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                stop = true;
+            }
+            cv.notify_all();
+            if (worker.joinable()) worker.join();
+        }
+        std::future<std::vector<bf16_t>> submit(std::vector<int32_t> prefix_tail,
+                                                std::vector<int32_t> tokens) {
+            auto promise = std::make_shared<std::promise<std::vector<bf16_t>>>();
+            auto future = promise->get_future();
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                job = Job{std::move(prefix_tail), std::move(tokens), promise};
+            }
+            cv.notify_all();
+            return future;
+        }
+    };
+
+    const char* ple_prefetch_env = std::getenv("SHELF_PLE_PREFETCH");
+    const bool ple_prefetch_on =
+        ple_prefetch_env != nullptr && ple_prefetch_env[0] != '0';
+    std::shared_ptr<const shelf::qwen4exp::PleTable> ple_table;
+    std::optional<PlePrefetchWorker> ple_worker;
+    if (ple_prefetch_on) {
+        ple_table = shelf::models::get_qwen4exp_ple_table(opts.model_dir);
+        if (ple_table != nullptr) {
+            ple_worker.emplace(ple_table.get());
+            fprintf(stderr, "PLE_PREFETCH enabled (one-chunk-ahead worker)\n");
+        } else {
+            fprintf(stderr, "PLE_PREFETCH requested but no PLE table found; "
+                            "falling back to synchronous gather\n");
+        }
+    }
+
     hipEvent_t start_event = nullptr;
     hipEvent_t stop_event = nullptr;
     hip_err = hipEventCreate(&start_event);
@@ -600,9 +677,33 @@ int run_pp(int argc, char** argv) {
             return 1;
         }
 
+        std::future<std::vector<bf16_t>> ple_future;
+        std::vector<bf16_t> ple_current;
+        if (ple_worker.has_value()) {
+            const uint32_t first_len = std::min(chunk, total_tokens);
+            std::vector<int32_t> tokens(prompt_tokens_host, prompt_tokens_host + first_len);
+            ple_future = ple_worker->submit({}, std::move(tokens));
+        }
         for (uint32_t processed = 0; processed < total_tokens;) {
             const uint32_t chunk_len = std::min(chunk, total_tokens - processed);
             const bool last = processed + chunk_len == total_tokens;
+            if (ple_worker.has_value()) {
+                ple_current = ple_future.get();
+                const uint32_t next_processed = processed + chunk_len;
+                if (next_processed < total_tokens) {
+                    const uint32_t next_len =
+                        std::min(chunk, total_tokens - next_processed);
+                    const uint32_t tail = std::min<uint32_t>(2u, next_processed);
+                    std::vector<int32_t> prefix_tail(
+                        prompt_tokens_host + next_processed - tail,
+                        prompt_tokens_host + next_processed);
+                    std::vector<int32_t> tokens(
+                        prompt_tokens_host + next_processed,
+                        prompt_tokens_host + next_processed + next_len);
+                    ple_future =
+                        ple_worker->submit(std::move(prefix_tail), std::move(tokens));
+                }
+            }
             ::shelf::runtime::ScheduledRequest req;
             req.sequence = &seq; req.handle = seq.request_handle();
             req.execution_class = shelf::runtime::ExecutionClass::PREFILL;
@@ -621,19 +722,24 @@ int run_pp(int argc, char** argv) {
             batch.num_verify_requests = 0;
             batch.num_prefill_requests = 1;
             const auto submit_start = host_timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+            shelf::qwen35::ExecuteBatchOptions single_options;
+            std::vector<shelf::qwen35::ExecuteBatchOptions> per_rank_options;
+            if (ple_worker.has_value()) {
+                single_options.prepared_external_input = ple_current.data();
+                single_options.prepared_external_input_rows = chunk_len;
+                if (tp_coordinator != nullptr) {
+                    per_rank_options.assign(
+                        static_cast<std::size_t>(tp_coordinator->tp_size()),
+                        single_options);
+                }
+            }
             auto st = [&]() -> shelf::Result<shelf::qwen35::BatchExecutionOutput> {
-                if (!host_timing || !measured || tp_coordinator != nullptr)
-                    return tp_coordinator != nullptr ? tp_coordinator->on_execute(batch)
-                                                     : shelf::qwen35::execute_batch(executor, batch, stream);
-                auto pending = shelf::qwen35::submit_batch(executor, batch, stream);
-                const auto complete_start = std::chrono::steady_clock::now();
-                fprintf(stderr, "PP_HOST run=%d begin=%u submit_ms=%.3f\n", run, processed,
-                        std::chrono::duration<double, std::milli>(complete_start - submit_start).count());
-                if (!pending.ok()) return pending.status();
-                auto result = shelf::qwen35::complete_batch(executor, std::move(pending.release()), stream);
-                fprintf(stderr, "PP_HOST run=%d begin=%u complete_ms=%.3f\n", run, processed,
-                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - complete_start).count());
-                return result;
+                if (tp_coordinator != nullptr)
+                    return tp_coordinator->on_execute(
+                        batch, per_rank_options.empty() ? nullptr
+                                                       : per_rank_options.data());
+                return shelf::qwen35::execute_batch(executor, batch, stream,
+                                                    single_options);
             }();
             if (host_timing && measured)
                 fprintf(stderr, "PP_HOST run=%d begin=%u rows=%u execute_ms=%.3f\n", run, processed, chunk_len,

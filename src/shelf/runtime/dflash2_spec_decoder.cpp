@@ -12,8 +12,15 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstdio>
+#include <future>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <stdexcept>
+#include <thread>
 #include <vector>
 
 namespace shelf::runtime {
@@ -769,6 +776,74 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
     const uint32_t last_boundary =
         page_tokens == 0u ? prompt_count
                           : (prompt_count / page_tokens) * page_tokens;
+    const char* ple_prefetch_env = std::getenv("SHELF_PLE_PREFETCH");
+    const bool ple_prefetch_on =
+        ple_prefetch_env == nullptr || ple_prefetch_env[0] != '0';
+    struct PlePrefetchWorker {
+        const ExternalInputStatelessFn* gather = nullptr;
+        std::thread worker;
+        std::mutex mutex;
+        std::condition_variable cv;
+        struct Job {
+            std::vector<std::int32_t> prefix_tail;
+            std::vector<std::int32_t> tokens;
+            std::shared_ptr<std::promise<std::vector<bf16_t>>> promise;
+        };
+        std::optional<Job> job;
+        bool stop = false;
+        explicit PlePrefetchWorker(const ExternalInputStatelessFn* g) : gather(g) {
+            worker = std::thread([this] {
+                while (true) {
+                    Job local;
+                    {
+                        std::unique_lock<std::mutex> lock(mutex);
+                        cv.wait(lock, [this] { return stop || job.has_value(); });
+                        if (stop && !job.has_value()) return;
+                        local = std::move(job.value());
+                        job.reset();
+                    }
+                    std::vector<bf16_t> out;
+                    const Status st = (*gather)(
+                        std::span<const std::int32_t>(local.prefix_tail),
+                        std::span<const std::int32_t>(local.tokens), out);
+                    if (st.ok()) {
+                        local.promise->set_value(std::move(out));
+                    } else {
+                        local.promise->set_exception(std::make_exception_ptr(
+                            std::runtime_error(st.message())));
+                    }
+                }
+            });
+        }
+        ~PlePrefetchWorker() {
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                stop = true;
+            }
+            cv.notify_all();
+            if (worker.joinable()) worker.join();
+        }
+        std::future<std::vector<bf16_t>> submit(std::vector<std::int32_t> prefix_tail,
+                                                std::vector<std::int32_t> tokens) {
+            auto promise = std::make_shared<std::promise<std::vector<bf16_t>>>();
+            auto future = promise->get_future();
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                job = Job{std::move(prefix_tail), std::move(tokens), promise};
+            }
+            cv.notify_all();
+            return future;
+        }
+    };
+    std::optional<PlePrefetchWorker> ple_worker;
+    std::future<std::vector<bf16_t>> ple_future;
+    std::vector<std::vector<bf16_t>> ple_buffers;
+    ple_buffers.reserve(static_cast<std::size_t>(prompt_count / std::max(1u, chunk_limit)) + 4u);
+    bool ple_first_chunk = true;
+    if (ple_prefetch_on && decoder.target != nullptr &&
+        decoder.target->external_input_stateless) {
+        ple_worker.emplace(&decoder.target->external_input_stateless);
+    }
     while (offset < prompt_count) {
         uint32_t n = std::min(chunk_limit, prompt_count - offset);
         if (page_tokens != 0u && offset < last_boundary &&
@@ -785,10 +860,44 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
             n = next_checkpoint - offset;
         }
         const bool final_chunk = (offset + n == prompt_count);
+        if (ple_worker.has_value()) {
+            const uint32_t tail = std::min<uint32_t>(2u, offset);
+            std::vector<std::int32_t> prefix_tail(prompt_tokens + offset - tail,
+                                                  prompt_tokens + offset);
+            std::vector<std::int32_t> tokens(prompt_tokens + offset,
+                                             prompt_tokens + offset + n);
+            if (ple_first_chunk) {
+                ple_future =
+                    ple_worker->submit(std::move(prefix_tail), std::move(tokens));
+                ple_buffers.push_back(ple_future.get());
+                ple_first_chunk = false;
+            } else {
+                ple_buffers.push_back(ple_future.get());
+            }
+            const uint32_t next_offset = offset + n;
+            if (next_offset < prompt_count) {
+                const uint32_t next_len = std::min(chunk_limit, prompt_count - next_offset);
+                const uint32_t next_tail = std::min<uint32_t>(2u, next_offset);
+                std::vector<std::int32_t> next_prefix_tail(
+                    prompt_tokens + next_offset - next_tail,
+                    prompt_tokens + next_offset);
+                std::vector<std::int32_t> next_tokens(
+                    prompt_tokens + next_offset,
+                    prompt_tokens + next_offset + next_len);
+                ple_future = ple_worker->submit(std::move(next_prefix_tail),
+                                                std::move(next_tokens));
+            }
+        }
         ScheduledBatch batch = make_prefill_batch(
             *decoder.sequence, requests, prompt_tokens + offset, n, offset, final_chunk,
             final_chunk ? &decoder.sampling : nullptr, decoder.sample_index);
-        const std::vector<ExecuteBatchOptions> poptions = build_gdn_options(decoder, 1u);
+        std::vector<ExecuteBatchOptions> poptions = build_gdn_options(decoder, 1u);
+        if (ple_worker.has_value()) {
+            for (auto& opt : poptions) {
+                opt.prepared_external_input = ple_buffers.back().data();
+                opt.prepared_external_input_rows = n;
+            }
+        }
         struct TimingEvents {
             hipEvent_t begin = nullptr;
             hipEvent_t target_end = nullptr;
@@ -848,6 +957,18 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
         if (on_chunk_complete) {
             on_chunk_complete(offset);
         }
+    }
+    if (ple_worker.has_value()) {
+        const std::span<const std::int32_t> tokens(prompt_tokens, prompt_count);
+        Status restored = Status::make_ok();
+        if (decoder.tp_hook != nullptr) {
+            restored = decoder.tp_hook->on_prefix_restored(*decoder.sequence, tokens);
+        } else if (decoder.target != nullptr &&
+                   decoder.target->external_prefix_restore) {
+            restored = decoder.target->external_prefix_restore(decoder.sequence->slot,
+                                                               tokens);
+        }
+        if (!restored.ok()) return restored;
     }
     decoder.token_history.assign(prompt_tokens, prompt_tokens + prompt_count);
     decoder.token_history.push_back(out.pending_token);

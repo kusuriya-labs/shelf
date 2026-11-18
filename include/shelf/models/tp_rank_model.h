@@ -127,6 +127,11 @@ shelf::Result<std::unique_ptr<TpRankModel>> build_moe_tp_rank_model(
 void prefetch_qwen4exp_ple_table(const std::string& model_dir);
 void release_prefetched_qwen4exp_ple_table();
 
+// Returns the process-shared PLE table for a Qwen4Exp model dir (loaded on first use).
+// Returns nullptr when the dir is not a Qwen4Exp model or the table is absent.
+std::shared_ptr<const shelf::qwen4exp::PleTable> get_qwen4exp_ple_table(
+    const std::string& model_dir);
+
 // Sets config.build_rank_model to the family config.model_dir declares, read from
 // num_experts before any tensor is opened.
 shelf::Status select_tp_rank_model(shelf::qwen35::runtime::TpCoordinatorConfig& config);

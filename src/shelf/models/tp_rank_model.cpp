@@ -388,6 +388,13 @@ void release_prefetched_qwen4exp_ple_table() {
     prefetched_ple.clear();
 }
 
+std::shared_ptr<const qwen4exp::PleTable> get_qwen4exp_ple_table(
+    const std::string& model_dir) {
+    auto config_result = qwen4exp::read_qwen4exp_text_config(model_dir);
+    if (!config_result.ok()) return nullptr;
+    return shared_ple_table(model_dir, config_result.value());
+}
+
 Result<q35::Executor> create_qwen4exp_model_executor(
     const qwen4exp::Qwen4ExpModel& model,
     const std::shared_ptr<const qwen4exp::PleTable>& ple_table,
@@ -441,6 +448,16 @@ Result<q35::Executor> create_qwen4exp_model_executor(
             [runtime](::shelf::state::SequenceSlotId slot,
                       std::span<const int32_t> tokens) {
                 return runtime->seed(slot, tokens);
+            };
+        executor.value().external_input_stateless =
+            [ple_table](std::span<const std::int32_t> prefix_tail,
+                        std::span<const std::int32_t> tokens,
+                        std::vector<bf16_t>& out) {
+                std::vector<std::int32_t> tail(prefix_tail.begin(), prefix_tail.end());
+                auto rows = ple_table->gather_bf16_stateless(tail, tokens);
+                if (!rows.ok()) return rows.status();
+                out = std::move(rows.value());
+                return Status::make_ok();
             };
     }
     return executor;

@@ -72,6 +72,27 @@ std::uint32_t tensor_elements(const gpu::Tensor& t) {
     return static_cast<std::uint32_t>(n);
 }
 
+struct VocabParallelHead {
+    bool sharded = false;
+    std::uint32_t col_offset = 0;
+};
+
+VocabParallelHead vocab_parallel_head(const MatrixWeight& lm_head, std::uint32_t tp_size,
+                                      std::uint32_t tp_rank, std::uint32_t vocab) {
+    VocabParallelHead result;
+    if (tp_size < 2u || !lm_head.partition.has_value()) return result;
+    const bool shardable = lm_head.encoding == shelf::weights::MatrixEncoding::Bf16 ||
+                           lm_head.encoding == shelf::weights::MatrixEncoding::Int8W32 ||
+                           lm_head.encoding == shelf::weights::MatrixEncoding::Exl3;
+    if (!shardable) return result;
+    const auto& part = lm_head.partition.value();
+    if (part.axis != 0 || part.count != tp_size || part.index != tp_rank) return result;
+    if (static_cast<std::uint64_t>(lm_head.rows) * tp_size != vocab) return result;
+    result.sharded = true;
+    result.col_offset = static_cast<std::uint32_t>(part.index) * lm_head.rows;
+    return result;
+}
+
 }  // namespace
 
 Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
@@ -474,6 +495,8 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
                                            mixer_indices, hyper, false, "mixer.");
     if (!mixed.ok()) return mixed.status();
 
+    const VocabParallelHead lm_parallel =
+        vocab_parallel_head(weights.lm_head, tp_size, options.tp_rank, vocab);
     QH::HybridHeadLowering head;
     head.hidden_features = hidden;
     head.eps = eps;
@@ -482,7 +505,14 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
     head.lm_shape = RT::MatrixwiseShapeKey{weights.lm_head.rows, weights.lm_head.cols};
     head.lm_weight_index = lm_index;
     head.out_vocab = vocab;
-    QH::emit_hybrid_head(em, head, mixed.value().mixed, "head.");
+    const QH::HybridHeadOutput head_out =
+        QH::emit_hybrid_head(em, head, mixed.value().mixed, "head.");
+    if (lm_parallel.sharded) {
+        pg.nodes[head_out.logits_node_index].tp_combine = 1;
+        pg.nodes[head_out.logits_node_index].tp_combine_local_cols = weights.lm_head.rows;
+        lowered.weights[lm_index].output_col_offset = lm_parallel.col_offset;
+        lowered.weights[lm_index].output_col_total = vocab;
+    }
 
     for (std::size_t t = 0; t < hidden_tap_values.size(); ++t) {
         if (hidden_tap_found[t] == 0)

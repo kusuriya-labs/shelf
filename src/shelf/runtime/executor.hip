@@ -1099,19 +1099,41 @@ Result<PendingBatch> submit_co_batch(
 
         if (executor.external_input_preparer &&
             executor.input_hidden.data<void>() != nullptr) {
-            std::vector<bf16_t> host;
-            stq = executor.external_input_preparer(batch, host);
-            if (!stq.ok()) return stq;
             const std::size_t expected =
                 static_cast<std::size_t>(N) * executor.model.config->hidden_size;
-            if (host.size() != expected) {
-                return Status::invalid_state(
-                    "external input preparer returned a wrong row count", __FILE__,
-                    __LINE__);
+            const char* ple_timing_env = std::getenv("SHELF_PLE_TIMING");
+            const bool ple_timing =
+                ple_timing_env != nullptr && ple_timing_env[0] != '0';
+            const bf16_t* src = nullptr;
+            std::vector<bf16_t> host;
+            if (options.prepared_external_input != nullptr &&
+                options.prepared_external_input_rows == N) {
+                src = options.prepared_external_input;
+                if (ple_timing)
+                    std::fprintf(stderr,
+                                 "PLE_TIMING rows=%u ple_gather_ms=0.000 (prefetched)\n",
+                                 N);
+            } else {
+                const std::chrono::steady_clock::time_point ple_t0 =
+                    std::chrono::steady_clock::now();
+                stq = executor.external_input_preparer(batch, host);
+                if (ple_timing) {
+                    const double ple_ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - ple_t0).count();
+                    std::fprintf(stderr, "PLE_TIMING rows=%u ple_gather_ms=%.3f\n", N,
+                                 ple_ms);
+                }
+                if (!stq.ok()) return stq;
+                if (host.size() != expected) {
+                    return Status::invalid_state(
+                        "external input preparer returned a wrong row count", __FILE__,
+                        __LINE__);
+                }
+                src = host.data();
             }
             const hipError_t copy_error =
-                hipMemcpyAsync(executor.input_hidden.data<void>(), host.data(),
-                               host.size() * sizeof(bf16_t), hipMemcpyHostToDevice,
+                hipMemcpyAsync(executor.input_hidden.data<void>(), src,
+                               expected * sizeof(bf16_t), hipMemcpyHostToDevice,
                                stream);
             if (copy_error != hipSuccess) {
                 return Status::hip_error("external input upload",
@@ -1341,6 +1363,7 @@ Executor::Executor(Executor&& other) noexcept
       external_input_preparer(std::move(other.external_input_preparer)),
       external_prefix_restore(std::move(other.external_prefix_restore)),
       after_batch(std::move(other.after_batch)),
+      external_input_stateless(std::move(other.external_input_stateless)),
       config(other.config),
       batch_context_storage(std::move(other.batch_context_storage)),
       batch_context(nullptr),
@@ -1476,6 +1499,7 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         external_input_preparer = std::move(other.external_input_preparer);
         external_prefix_restore = std::move(other.external_prefix_restore);
         after_batch = std::move(other.after_batch);
+        external_input_stateless = std::move(other.external_input_stateless);
         config = other.config;
         batch_context_storage = std::move(other.batch_context_storage);
         if (batch_context_storage.device_struct.allocation_base() != nullptr) {
@@ -1594,6 +1618,7 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         other.external_input_preparer = nullptr;
         other.external_prefix_restore = nullptr;
         other.after_batch = nullptr;
+        other.external_input_stateless = nullptr;
         other.batch_context_storage = ::shelf::runtime::DeviceBatchContextStorage{};
         other.input_ids = gpu::Tensor{};
         other.input_hidden = gpu::Tensor{};
@@ -1792,6 +1817,7 @@ Status executor_shutdown(Executor& ex) noexcept {
     ex.ple_conv_state_pool.reset();
     ex.external_input_preparer = nullptr;
     ex.external_prefix_restore = nullptr;
+    ex.external_input_stateless = nullptr;
     ex.host_model_state = ::shelf::kernel::ModelDispatchStateView{};
     ex.execution_status = gpu::Tensor{};
     ex.execution_workspace = gpu::Tensor{};

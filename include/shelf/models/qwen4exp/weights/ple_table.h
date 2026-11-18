@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -85,6 +86,13 @@ public:
     // Same gather, rounded once to BF16 for the graph's PLE external input.
     Result<std::vector<bf16_t>> gather_bf16(const std::vector<std::int32_t>& history,
                                             std::size_t out_len) const;
+
+    // Stateless gather for a run of tokens that follow `prefix_tail` (the last
+    // ngram_size - 1 tokens of the prefix). Returns [token][hidden] BF16 rows without
+    // touching any caller history.
+    Result<std::vector<bf16_t>> gather_bf16_stateless(
+        const std::vector<std::int32_t>& prefix_tail,
+        std::span<const std::int32_t> tokens) const;
 
     // Re-read one packaged row from the source file. Validation only.
     Result<std::vector<std::uint8_t>> read_source_row(const std::string& model_dir,

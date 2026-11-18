@@ -952,6 +952,26 @@ Result<std::vector<bf16_t>> PleTable::gather_bf16(
     return out;
 }
 
+Result<std::vector<bf16_t>> PleTable::gather_bf16_stateless(
+    const std::vector<std::int32_t>& prefix_tail,
+    std::span<const std::int32_t> tokens) const {
+    const std::size_t head_count = head_offsets_.size();
+    std::vector<std::int32_t> history(prefix_tail.begin(), prefix_tail.end());
+    std::vector<bf16_t> out;
+    out.reserve(tokens.size() * head_count * row_width_);
+    for (std::size_t t = 0; t < tokens.size(); ++t) {
+        history.push_back(tokens[t]);
+        auto rows = gather_bf16(history, 1u);
+        if (!rows.ok()) return rows.status();
+        if (rows.value().size() != head_count * row_width_) {
+            return Status::invalid_state("PLE stateless gather width mismatch", __FILE__,
+                                         __LINE__);
+        }
+        out.insert(out.end(), rows.value().begin(), rows.value().end());
+    }
+    return out;
+}
+
 Result<std::vector<std::uint8_t>> PleTable::read_source_row(const std::string& model_dir,
                                                             std::uint64_t row) const {
     if (format_ != TableFormat::Exl3Trellis) {

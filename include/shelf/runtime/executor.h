@@ -286,6 +286,14 @@ using ExternalInputPreparer =
 using ExternalPrefixRestoreHandler =
     std::function<Status(::shelf::state::SequenceSlotId, std::span<const int32_t>)>;
 
+// Stateless gather of the extra external input for a run of tokens that follow
+// `prefix_tail`. The family supplies it so a prefill driver can compute the next chunk's
+// rows on a worker thread while the current chunk runs on the GPU.
+using ExternalInputStatelessFn =
+    std::function<Status(std::span<const std::int32_t> prefix_tail,
+                         std::span<const std::int32_t> tokens,
+                         std::vector<bf16_t>& out)>;
+
 struct GraphCacheSlot {
     hipGraphExec_t exec = nullptr;
     uint32_t token_count = 0;
@@ -344,6 +352,7 @@ struct Executor {
     std::unique_ptr<::shelf::state::PleConvStatePool> ple_conv_state_pool;
     ExternalInputPreparer external_input_preparer;
     ExternalPrefixRestoreHandler external_prefix_restore;
+    ExternalInputStatelessFn external_input_stateless;
     // Runs after a batch has completed and before the next one is submitted. The Qwen4Exp
     // expert cache uses it to update residency from the routing the batch produced.
     std::function<Status(hipStream_t)> after_batch;
@@ -481,6 +490,8 @@ struct ExecuteBatchOptions {
     const uint32_t* tree_committed_end_rows = nullptr;
     const uint32_t* rope_positions = nullptr;
     const int32_t* tree_row_parent = nullptr;
+    const bf16_t* prepared_external_input = nullptr;
+    uint32_t prepared_external_input_rows = 0u;
 };
 
 struct QsaSpecReplayRequest {
