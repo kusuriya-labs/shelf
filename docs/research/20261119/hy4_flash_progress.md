@@ -2,7 +2,7 @@
 
 origin/main の 14a23730 から専用 worktree を作成した。原本の config と量子化側の組立仕様を確認した。本体と head の変換完了待ち。組立は Engram を BF16 のまま保持し、DFly を除外するため、どちらも別途処理する。GPU を使わない作業から着手する。
 
-## 現在の待機状態
+## 現在の状態
 
 11 月 19 日 03:26 JST に 4 bpw の最終受入を完了した。採用版は 2Mi 予約、pp2048 676.62 tok/s、DFly decode 50.65 tok/s、候補撤去前後と通常生成・DFly の 256 token 全一致を確認済み。03:28 JST から別出力で 3.5 bpw の変換を実行中。
 
@@ -11,9 +11,9 @@ origin/main の 14a23730 から専用 worktree を作成した。原本の confi
 | 本体の進捗と CPU 追跡 | worktree の `build-hy4/await-body.log` |
 | DFly の追加量子化 | `hy4-flash-pilot/shelf-dfly/Hy4-flash-dfly-4bpw/conversion_report.json` |
 | EP=3 受入 | worktree の `build-hy4/await-ep3.log`、`hy4-flash-pilot/shelf-qualification/` の測定記録 |
-| 3.5 bpw | 4 bpw 版の検証・高速化後に着手 |
+| 3.5 bpw | worktree の `build-hy4/quant-mixed.log` と `build-hy4/mixed-cpu-chain.log`。完成した checkpoint と変換報告は `hy4-flash-pilot/shelf-mixed/` |
 
-R9700 単体では代表 3 層、長い履歴の境界、DFly の確率的棄却を検査した。3 台を使う数値照合と pp2048・decode の目標達成は EP=3 受入で判定する。
+R9700 単体では代表 3 層、長い履歴の境界、DFly の確率的棄却を検査した。4 bpw の EP=3 での数値照合と速度の結果は G3 に記録した。
 
 ## E1　Engram の保存形式
 
@@ -238,3 +238,9 @@ CPU logits 相対 L2 の初期目安 0.1 を超えた場合はその事実を結
 ## M4　混在幅の内積と再構成
 
 同一 launch に実 3 bit の 8 行と 4 bit の 16 行を並べ、R9700 で grouped WMMA と LDS/dot4 を両方照合した。どちらも CPU 相対 L2 は 0.00000670。層 1 expert 4 の元 BF16 に対する再構成相対 L2 は 4 bit → 3 bit で gate 0.09190 → 0.18110、up 0.09198 → 0.18120、down 0.07586 → 0.14987。低ビット化する重みの誤差であり、生成品質とは区別する。再現用の 2 台 lock の起動例を計画書に追記した。
+
+## M5　混在版の受入準備と変換済み shard の追跡
+
+04:12 JST 時点で 197 / 656 shard、3,279 / 10,931 expert を保存し、12 個の MoE 層ですべての shard がそろった。CPU は層 11 まで連続照合し、同層の BF16 校正出力に対する相対 L2 は 0.077759。正規の build-hy4 でも両 ISA のビルドと CPU CTest が通った。4 bpw の 1,161 shard の header を独立に集計し、decoder 符号平均 4.0、補助 tensor 込み 4.020704 bpw、未量子化線形も含めて 4.022769 bpw を再現した。3.5 bpw の完成後にも同じ集計を行う。
+
+受入では実際の生成列長が 256、速度測定の decode 区間が 127 token であることを検査する。混在幅対応後の実行形式でも、4 bpw で全候補有効版の 256 token を再現するかを照合する。fork の既定構成の起動例は README、4 bpw の基準値は [性能記録](../../perf/current.md#hy4-flash-専用-fork-の-ep3) に反映した。
