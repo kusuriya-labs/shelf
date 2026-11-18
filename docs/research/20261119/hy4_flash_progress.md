@@ -4,7 +4,7 @@ origin/main の 14a23730 から専用 worktree を作成した。原本の confi
 
 ## 現在の待機状態
 
-11 月 19 日 01:15 JST に本体の 0〜37 層と CPU 連続照合が完了した。層 37 の校正 hidden に対する 4 token の相対 L2 は 0.159950。次の入力待ちは残り 4 層、6 bit head、checkpoint 組立である。
+11 月 19 日 01:54 JST に decoder 全 42 層の量子化と CPU 連続照合が完了した。最終層の校正 hidden に対する 4 token の相対 L2 は 0.248071。6 bit head と checkpoint 組立の完了を待っている。
 
 | 作業 | 完了を確認する場所 |
 |---|---|
