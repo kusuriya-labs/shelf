@@ -46,7 +46,7 @@ hipMemAllocationProp device_allocation_prop(int device) {
 
 }
 
-Result<GpuArena> GpuArena::create(int physical_device, std::size_t capacity_bytes) {
+Result<GpuArena> GpuArena::create(int physical_device, std::size_t capacity_bytes, DeviceArch arch) {
     if (physical_device < 0) {
         return Status::invalid_argument("invalid device", __FILE__, __LINE__);
     }
@@ -55,12 +55,13 @@ Result<GpuArena> GpuArena::create(int physical_device, std::size_t capacity_byte
         return Status::invalid_argument("capacity must be non-zero", __FILE__, __LINE__);
     }
 
-    auto dev_result = ScopedDevice::create(physical_device);
+    auto dev_result = ScopedDevice::create(physical_device, arch);
     if (!dev_result.ok()) {
         return dev_result.status();
     }
 
     GpuArena arena;
+    arena.arch_ = arch;
     arena.device_ = physical_device;
     arena.capacity_ = capacity_bytes;
     arena.offset_ = 0;
@@ -158,7 +159,7 @@ Status GpuArena::ensure_committed(std::size_t required_end) {
             "commit size not granularity aligned", __FILE__, __LINE__);
     }
 
-    auto dev_result = ScopedDevice::create(device_);
+    auto dev_result = ScopedDevice::create(device_, arch_);
     if (!dev_result.ok()) {
         return dev_result.status();
     }
@@ -198,12 +199,12 @@ Status GpuArena::ensure_committed(std::size_t required_end) {
 namespace {
 
 Status free_arena_base(
-    int device, bool vmm, void* base, std::size_t reserved_bytes,
+    int device, DeviceArch arch, bool vmm, void* base, std::size_t reserved_bytes,
     const std::vector<GpuArena::VmmMapping>& mappings) {
     if (device < 0) {
         return Status::invalid_state("arena device invalid", __FILE__, __LINE__);
     }
-    auto dev_result = ScopedDevice::create(device);
+    auto dev_result = ScopedDevice::create(device, arch);
     if (!dev_result.ok()) {
         return dev_result.status();
     }
@@ -232,7 +233,7 @@ Status GpuArena::shutdown() {
         return Status::make_ok();
     }
 
-    Status error = free_arena_base(device_, vmm_, base_, reserved_bytes_, mappings_);
+    Status error = free_arena_base(device_, arch_, vmm_, base_, reserved_bytes_, mappings_);
     mappings_.clear();
 
     device_ = -1;
@@ -251,7 +252,7 @@ Status GpuArena::shutdown() {
 
 void GpuArena::release_noexcept() {
     if (base_) {
-        auto error = free_arena_base(device_, vmm_, base_, reserved_bytes_, mappings_);
+        auto error = free_arena_base(device_, arch_, vmm_, base_, reserved_bytes_, mappings_);
         if (!error.ok()) {
             std::cerr << "arena destructor: free failed: "
                       << error.message() << std::endl;
@@ -275,7 +276,8 @@ GpuArena::~GpuArena() noexcept {
 }
 
 GpuArena::GpuArena(GpuArena&& other) noexcept
-    : device_(other.device_),
+    : arch_(other.arch_),
+      device_(other.device_),
       base_(other.base_),
       capacity_(other.capacity_),
       offset_(other.offset_),
@@ -302,6 +304,7 @@ GpuArena::GpuArena(GpuArena&& other) noexcept
 GpuArena& GpuArena::operator=(GpuArena&& other) noexcept {
     if (this != &other) {
         release_noexcept();
+        arch_ = other.arch_;
         device_ = other.device_;
         base_ = other.base_;
         capacity_ = other.capacity_;

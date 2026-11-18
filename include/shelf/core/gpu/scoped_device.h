@@ -5,9 +5,11 @@
 
 namespace shelf::gpu {
 
+enum class DeviceArch { gfx1201, gfx1030 };
+
 class ScopedDevice {
 public:
-    static Result<ScopedDevice> create(int target_device);
+    static Result<ScopedDevice> create(int target_device, DeviceArch required = DeviceArch::gfx1201);
 
     ~ScopedDevice();
 

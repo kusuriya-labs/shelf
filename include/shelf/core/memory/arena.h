@@ -19,7 +19,8 @@ public:
         hipMemGenericAllocationHandle_t handle{};
     };
 
-    static Result<GpuArena> create(int physical_device, std::size_t capacity_bytes);
+    static Result<GpuArena> create(int physical_device, std::size_t capacity_bytes,
+                                   DeviceArch arch = DeviceArch::gfx1201);
 
     ~GpuArena() noexcept;
     GpuArena(GpuArena&& other) noexcept;
@@ -49,6 +50,7 @@ public:
     Status ensure_committed(std::size_t required_end);
     void release_noexcept();
 
+    DeviceArch arch_ = DeviceArch::gfx1201;
     int device_ = -1;
     void* base_ = nullptr;
     std::size_t capacity_ = 0;

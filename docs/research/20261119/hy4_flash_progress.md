@@ -4,7 +4,7 @@ origin/main の 14a23730 から専用 worktree を作成した。原本の confi
 
 ## 現在の待機状態
 
-11 月 19 日 02:13 JST に本体の最終 report と head_complete を確認した。組立済み checkpoint の native inspect が成功し、V620 1 台の排他下で DFly の追加量子化を実行中。CPU は最終配置表で全層の連続照合を進めている。
+11 月 19 日 02:17 JST に DFly の 49 射影の追加量子化が完了し、本体との署名照合が通った。02:20 JST に EP=3 の 2Mi 予約が成功した。生成の照合と throughput を確認中。
 
 | 作業 | 完了を確認する場所 |
 |---|---|
@@ -13,7 +13,7 @@ origin/main の 14a23730 から専用 worktree を作成した。原本の confi
 | EP=3 受入 | worktree の `build-hy4/await-ep3.log`、`hy4-flash-pilot/shelf-qualification/` の測定記録 |
 | 3.5 bpw | 4 bpw 版の検証・高速化後に着手 |
 
-R9700 単体では代表 3 層、長い履歴の境界、DFly の確率的棄却を検査した。V620 の数値、DFly 実重み、2Mi/1Mi の実予約、pp2048 と decode の目標達成は EP=3 受入で判定する。
+R9700 単体では代表 3 層、長い履歴の境界、DFly の確率的棄却を検査した。3 台を使う数値照合と pp2048・decode の目標達成は EP=3 受入で判定する。
 
 ## E1　Engram の保存形式
 
@@ -153,3 +153,11 @@ SHELF_HY4_PROFILE_EP=1 のときだけ、各 rank で routed expert の gather �
 ## G2　本体組立と DFly 開始
 
 本体は 1161 shard。decoder の符号は 4.0 bpw、量子化線形の実保存量は 4.020704 bpw、未量子化線形を含む値は 4.022769 bpw。head は 6 bit、expert の Hessian fallback は変換 report 上で 17 件。BF16 Engram を含む元の組立済み tensor は 205,729,506,824 B。native loader は必要行だけを読む別の FP8 表を使い、BF16 Engram は常駐させない。最終配置による本体の rank 別の重みは 22,771,088,864 / 28,117,499,904 / 28,117,499,904 B（DFly・作業域・KV を除く）。02:14 JST に DFly の slot 0 融合射影の校正・量子化完了を確認した。
+
+## M1　DFly 完了と 2Mi 実予約
+
+DFly は 49 射影を量子化し、sidecar は index・report 込みで 424,485,632 B。最終配置で CPU の連続照合も再実行した。原本比 logits 相対 L2 は 0.236051、top-1 は 4 位置中 3 位置で一致し、最終位置はともに 12286。H2 の初期配置との違いは rank 別の BF16 加重和を含む。
+
+受入の最初の起動では校正ファイルの読み取り権限が足りなかった。層 0 の校正 capture が保存した同一 input_ids を使い、実際の 2048 ID の SHA-256 を記録するよう修正した。次の試行では共通 GpuArena の gfx1201 制約が rank 1 の確保を拒否した。Hy4 worker は scoped device の確保・解放まで gfx1030 を明示し、既存呼び出しの既定は gfx1201 に保った。
+
+3 台の lock を保持した再試行で、最終配置から 382 expert を再配置し、R9700 / V620 / V620 の本数は 4802 / 8095 / 8095。2,097,152 token の確保成功時の committed は 34,129,931,008 / 29,335,341,056 / 29,335,341,056 B。確保直後の空きは 2,097,152 / 4,972,347,392 / 4,972,347,392 B。DFly と吸収形 MLA の補助行列も含む。2Mi での推論は行っていない。記録は `hy4-flash-pilot/shelf-qualification/ep3-lywnol6v/reserve.log`。

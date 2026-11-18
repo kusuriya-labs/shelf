@@ -38,9 +38,14 @@ def main():
     def checksum(path):
         with path.open("rb") as stream:
             return hashlib.file_digest(stream,"sha256").hexdigest()
+    with safe_open(args.calibration,framework="np") as f:
+        ids = f.get_tensor("input_ids").reshape(-1)[:2048].astype("<i4")
+    if len(ids)!=2048:
+        raise ValueError("pp2048 の入力が不足しています")
+    prompt_hash = hashlib.sha256(ids.tobytes()).hexdigest()
     settings = dict(devices=visible,chunk=args.chunk,body_report=checksum(args.body/"conversion_report.json"),
                     draft_report=checksum(args.draft/"conversion_report.json"),placement=checksum(args.placement),
-                    engine=checksum(args.executable),calibration=checksum(args.calibration),
+                    engine=checksum(args.executable),prompt_sha256=prompt_hash,
                     options={k:v for k,v in os.environ.items() if k.startswith("SHELF_HY4_")})
     (output/"settings.json").write_text(json.dumps(settings,indent=2))
     common = ["--model-dir", args.body, "--engram-dir", args.engram, "--placement", args.placement]
@@ -70,10 +75,6 @@ def main():
     sample = [*flags,"--temperature","0.8","--seed","20261119"]
     if sequence(run("generate","sample-dfly-repeat",sample,True)) != sequence(run("generate","sample-dfly",sample,True)):
         raise ValueError("同一 seed の DFly 生成列が再現しません")
-    with safe_open(args.calibration,framework="np") as f:
-        ids = f.get_tensor("input_ids").reshape(-1)[:2048].tolist()
-    if len(ids) != 2048:
-        raise ValueError("pp2048 の入力が不足しています")
     prompt=output/"pp2048-ids.txt"
     prompt.write_text(" ".join(map(str,ids)))
     bench = run("generate","bench",["--input-ids-file",prompt,"--max-seq-len","2304","--max-new-tokens","128",

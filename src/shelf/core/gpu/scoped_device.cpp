@@ -1,11 +1,11 @@
 #include <shelf/core/gpu/scoped_device.h>
-#include <shelf/core/gpu/gfx_arch.h>
+#include <string_view>
 
 #include <string>
 
 namespace shelf::gpu {
 
-Result<ScopedDevice> ScopedDevice::create(int target_device) {
+Result<ScopedDevice> ScopedDevice::create(int target_device, DeviceArch required) {
     int device_count = 0;
 
     const hipError_t count_result = hipGetDeviceCount(&device_count);
@@ -25,17 +25,16 @@ Result<ScopedDevice> ScopedDevice::create(int target_device) {
             __LINE__);
     }
 
-    if (!is_gfx1201(static_cast<uint32_t>(target_device))) {
-        hipDeviceProp_t props{};
-        const char* name = (hipGetDeviceProperties(&props, target_device) == hipSuccess)
-            ? props.gcnArchName
-            : "unknown";
+    hipDeviceProp_t props{};
+    const auto props_result = hipGetDeviceProperties(&props, target_device);
+    if (props_result != hipSuccess)
+        return Status::hip_error("hipGetDeviceProperties", hipGetErrorString(props_result), __FILE__, __LINE__);
+    const char* expected = required == DeviceArch::gfx1201 ? "gfx1201" : "gfx1030";
+    const std::string_view name(props.gcnArchName);
+    if (name.substr(0, name.find(':')) != expected)
         return Status::invalid_argument(
-            ("Shelf requires gfx1201 (AMD Radeon AI PRO R9700); device "
-             + std::to_string(target_device) + " is " + name).c_str(),
-            __FILE__,
-            __LINE__);
-    }
+            ("必要な GPU は " + std::string(expected) + "、実際の device " + std::to_string(target_device) +
+             " は " + props.gcnArchName).c_str(), __FILE__, __LINE__);
 
     ScopedDevice guard;
 

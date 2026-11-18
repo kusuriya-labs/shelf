@@ -115,7 +115,7 @@ void Residency::reserve() {
         size_t bytes = align(model.bytes[r]) + overhead[r];
         fprintf(stderr, "rank=%d weight=%zu workspace=%zu request=%zu free=%zu total=%zu\n", r, model.bytes[r],
                 work, bytes, free, total);
-        auto result = gpu::GpuArena::create(physical[r], bytes);
+        auto result = gpu::GpuArena::create(physical[r], bytes, r ? gpu::DeviceArch::gfx1030 : gpu::DeviceArch::gfx1201);
         if (!result.ok()) {
             if (result.status().code() == Status::Code::insufficient_memory)
                 throw std::bad_alloc();
