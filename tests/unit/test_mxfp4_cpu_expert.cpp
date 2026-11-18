@@ -1,3 +1,5 @@
+#include <shelf/quantization/codec/e4m3.h>
+#include <shelf/quantization/fp8/fp8_frag.h>
 #include <shelf/quantization/mxfp4/mxfp4_cpu_expert.h>
 
 #include <cmath>
@@ -30,12 +32,28 @@ float e2m1(std::uint8_t nibble) {
     return (nibble & 0x8u) != 0u ? -value : value;
 }
 
+float e8m0_scale(std::uint8_t exponent) {
+    if (exponent == 0u) return 5.877471754111438e-39f;
+    const std::uint32_t bits = static_cast<std::uint32_t>(exponent) << 23;
+    float value = 0.0f;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+float e4m3_at(const std::vector<std::uint8_t>& plane, std::uint32_t k_padded,
+              std::uint32_t i) {
+    const std::uint8_t code =
+        plane[static_cast<std::size_t>(i >> 6u) * shelf::quantization::fp8::kFragBlockBytes +
+              shelf::quantization::fp8::fp8_frag_offset(0u, i & 63u)];
+    return shelf::quantization::codec::e4m3_decode_f32(code);
+}
+
 float reference_row(const std::vector<std::uint8_t>& codes,
                     const std::vector<std::uint8_t>& scales, std::uint32_t slot,
                     std::uint32_t out_row, std::uint32_t blocks, std::uint32_t rows,
-                    const std::vector<std::int8_t>& acodes,
+                    const std::vector<std::uint8_t>& acodes,
                     const std::vector<float>& ascales, std::uint32_t row,
-                    std::uint32_t k_padded) {
+                    std::uint32_t k_padded, float row_scale) {
     const std::uint32_t row_stride = k_padded / 2u;
     const std::uint8_t* base_codes =
         codes.data() + static_cast<std::size_t>(slot) * rows * row_stride;
@@ -45,20 +63,19 @@ float reference_row(const std::vector<std::uint8_t>& codes,
     const std::uint8_t* row_scales =
         scales.data() + static_cast<std::size_t>(slot) * rows * blocks +
         static_cast<std::size_t>(out_row) * blocks;
-    const std::int8_t* x = acodes.data() + static_cast<std::size_t>(row) * k_padded;
-    const float* xs = ascales.data() + static_cast<std::size_t>(row) * blocks;
     float acc = 0.0f;
     for (std::uint32_t ib = 0; ib < blocks; ++ib) {
         const std::uint8_t* packed = row_codes + static_cast<std::size_t>(ib) * 256u;
-        const float ws = e8m0(row_scales[ib]);
+        const float ws = e8m0_scale(row_scales[ib]);
         float partial = 0.0f;
         for (std::uint32_t b = 0; b < 16u; ++b) {
-            partial += e2m1(packed[b] & 0xFu) * static_cast<float>(x[ib * 32u + b]);
-            partial += e2m1(packed[b] >> 4u) * static_cast<float>(x[ib * 32u + 16u + b]);
+            partial += e2m1(packed[b] & 0xFu) * e4m3_at(acodes, k_padded, ib * 32u + b);
+            partial += e2m1(packed[b] >> 4u) *
+                       e4m3_at(acodes, k_padded, ib * 32u + 16u + b);
         }
-        acc += partial * ws * xs[ib];
+        acc += partial * ws;
     }
-    return acc;
+    return acc * row_scale;
 }
 
 }  // namespace
@@ -80,18 +97,21 @@ int main() {
     for (auto& value : codes) value = static_cast<std::uint8_t>(next() & 0xFFu);
     for (auto& value : scales) value = static_cast<std::uint8_t>(120u + (next() % 12u));
 
-    std::vector<std::int8_t> acodes(k_padded);
+    std::vector<std::uint8_t> acodes(shelf::quantization::fp8::fp8_frag_tile_bytes(k_padded));
     std::vector<float> ascales(blocks);
     for (std::uint32_t i = 0; i < k_padded; ++i) {
-        acodes[i] = static_cast<std::int8_t>(static_cast<int>(next() % 255u) - 127);
+        acodes[static_cast<std::size_t>(i >> 6u) * shelf::quantization::fp8::kFragBlockBytes +
+               shelf::quantization::fp8::fp8_frag_offset(0u, i & 63u)] =
+            shelf::quantization::codec::e4m3_encode_u8(
+                std::sin(0.37f * static_cast<float>(i) + 0.11f) * 3.0f);
     }
     for (auto& value : ascales) value = 0.001f * static_cast<float>(1u + (next() % 8u));
+    const float row_scale = ascales[0];
 
-    shelf::quantization::mxfp4::CpuActivationPlane activation;
+    shelf::quantization::mxfp4::CpuActivationTile activation;
     activation.codes = acodes.data();
-    activation.scales = ascales.data();
-    activation.code_stride = k_padded;
-    activation.scale_stride = blocks * sizeof(float);
+    activation.row_scale = &ascales[0];
+    activation.k_padded = k_padded;
 
     float max_error = 0.0f;
     for (std::uint32_t slot = 0; slot < slots; ++slot) {
@@ -111,13 +131,13 @@ int main() {
         for (std::uint32_t o = 0; o < rows; ++o) {
             const float want =
                 reference_row(codes, scales, slot, o, blocks, rows, acodes, ascales, 0u,
-                              k_padded);
+                              k_padded, row_scale);
             const float diff = std::fabs(want - out[o]);
             const float scale = std::fabs(want) > 1.0f ? std::fabs(want) : 1.0f;
             if (diff / scale > max_error) max_error = diff / scale;
         }
     }
-    check(max_error < 2e-3f, "gemv_row matches the scalar reference");
+    check(max_error < 2e-3f, "gemv_row matches the e4m3 scalar reference");
 
     shelf::quantization::mxfp4::CpuExpertPlane odd;
     odd.codes = codes.data();
@@ -134,7 +154,8 @@ int main() {
     bool range_ok = true;
     for (std::uint32_t o = 0; o < rows; ++o) {
         const float want =
-            reference_row(codes, scales, 1u, o, blocks, rows, acodes, ascales, 0u, k_padded);
+            reference_row(codes, scales, 1u, o, blocks, rows, acodes, ascales, 0u, k_padded,
+                         row_scale);
         if (o >= 4u && o < 12u) {
             range_ok = range_ok && std::fabs(rows_out[static_cast<std::size_t>(o) * 2u] - want) <
                                        std::fabs(want) * 2e-3f + 1e-3f;
