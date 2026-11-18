@@ -75,6 +75,8 @@ int run(const Path &dir, int repeats) {
             size_t bytes;
             const auto ptr = take(reader.tensor_data(source, bytes));
             std::string key = target;
+            if (key.ends_with(".trellis") && spec.shape.size() == 3 && spec.shape[2] == 48)
+                model.mixed = true;
             int rank = (key.find("multi_head_embedding.") != std::string::npos ||
                         key.ends_with(".lookup_table") || key.ends_with(".mul1"))
                            ? -1

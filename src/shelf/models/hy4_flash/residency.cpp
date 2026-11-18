@@ -59,11 +59,11 @@ void Residency::reserve() {
         fprintf(stderr, "rank=%d device=%d isa=%s pci=%s\n", rank, device, props.gcnArchName, bus);
     }
     std::array<size_t, 3> available{}, overhead{};
-    std::array<int, 3> used{}, limit{};
+    std::array<int, 3> used{};
+    std::array<int64_t, 3> remaining{};
     for (const auto &row : model.owners)
         for (int r : row)
             ++used[r];
-    constexpr size_t expert_bytes = 3 * (1536ull * 1536 / 2 + 1536 * 4);
     for (int r = 0; r < 3; ++r) {
         check(hipSetDevice(physical[r]));
         size_t total = 0;
@@ -79,31 +79,30 @@ void Residency::reserve() {
         if (!r)
             for (const auto &[name, ignored] : folded)
                 overhead[0] += size_t(model.shape.at(name)[1]) * 512 * 2;
-        size_t fixed = align(model.bytes[r]) - used[r] * expert_bytes + overhead[r];
-        if (available[r] < fixed)
-            throw std::bad_alloc();
-        limit[r] = (available[r] - fixed) / expert_bytes;
+        remaining[r] = int64_t(available[r]) - int64_t(align(model.bytes[r]) + overhead[r]);
     }
-    if (limit[0] + limit[1] + limit[2] < 41 * 512)
+    if (remaining[0] + remaining[1] + remaining[2] < 0)
         throw std::bad_alloc();
     auto plan = model.owners;
     int moved = 0;
     for (int expert = 511; expert >= 0; --expert)
-        for (auto &row : plan) {
-            int from = row[expert];
-            if (used[from] <= limit[from])
+        for (int layer = 0; layer < 41; ++layer) {
+            int from = plan[layer][expert];
+            if (remaining[from] >= 0)
                 continue;
-            int dest = 0;
-            for (int r = 1; r < 3; ++r)
-                if (limit[r] - used[r] > limit[dest] - used[dest])
-                    dest = r;
-            if (dest == from || used[dest] >= limit[dest])
-                throw std::bad_alloc();
-            row[expert] = dest;
+            int64_t bytes = 3 * (1536ll * 1536 * model.expert_bits[layer][expert] / 8 + 1536 * 4);
+            int dest = std::max_element(remaining.begin(), remaining.end()) - remaining.begin();
+            if (remaining[dest] < bytes)
+                continue;
+            plan[layer][expert] = dest;
+            remaining[from] += bytes;
+            remaining[dest] -= bytes;
             --used[from];
             ++used[dest];
             ++moved;
         }
+    if (*std::min_element(remaining.begin(), remaining.end()) < 0)
+        throw std::bad_alloc();
     if (moved)
         model.relocate(plan);
     fprintf(stderr, "relocated_experts=%d rank_counts=%d,%d,%d\n", moved, used[0], used[1], used[2]);
@@ -157,7 +156,8 @@ void Residency::upload_experts(int r, int layer) {
                 auto name = key + suffix;
                 table[e * 3 + kind++] = {static_cast<const uint16_t *>(device(model.at(name + ".suh"))),
                                          static_cast<const uint16_t *>(device(model.at(name + ".svh"))),
-                                         static_cast<const uint32_t *>(device(model.at(name + ".trellis")))};
+                                         static_cast<const uint32_t *>(device(model.at(name + ".trellis"))),
+                                         model.at(name + ".trellis").spec.shape[2] / 16};
             }
         }
     check(hipMemcpy(matrices[r] + (layer - 1) * 1536, table.data(), table.size() * sizeof(table[0]),

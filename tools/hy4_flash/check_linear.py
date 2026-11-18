@@ -36,12 +36,12 @@ def main():
         weight = Projection(*(t.cuda() for t in tensors), marker, width)
         gpu_input = x.cuda()
         if args.grouped:
-            if weight.bits != 4 or x.size(1) != 1536 or width != 1536:
-                raise ValueError("grouped は 1536×1536 の 4 bit expert 専用です")
-            proj = torch.tensor([[weight.suh.data_ptr(), weight.svh.data_ptr(), weight.trellis.data_ptr()]]
+            if weight.bits not in (3,4) or x.size(1) != 1536 or width != 1536:
+                raise ValueError("grouped は 1536×1536 の 3/4 bit expert 専用です")
+            proj = torch.tensor([[weight.suh.data_ptr(), weight.svh.data_ptr(), weight.trellis.data_ptr(),weight.bits]]
                                 * args.rows, device="cuda",dtype=torch.int64)
             group = ops.library.shelf_hy4_expert_linear
-            group.argtypes = [ctypes.c_void_p]*2+[ctypes.c_int]+[ctypes.c_void_p]*4+[ctypes.c_int,ctypes.c_void_p,ctypes.c_void_p,ctypes.c_int,ctypes.c_int]
+            group.argtypes = [ctypes.c_void_p]*2+[ctypes.c_int]+[ctypes.c_void_p]*4+[ctypes.c_int,ctypes.c_void_p,ctypes.c_void_p,ctypes.c_int,ctypes.c_int,ctypes.c_int]
             group.restype = ctypes.c_int
             codes = torch.empty_like(gpu_input,dtype=torch.int8)
             scales = torch.empty(args.rows,12,device="cuda",dtype=torch.float32)
@@ -49,7 +49,7 @@ def main():
             output = torch.empty_like(gpu_input)
             def launch():
                 status = group(gpu_input.data_ptr(),proj.data_ptr(),1,codes.data_ptr(),scales.data_ptr(),
-                               partial.data_ptr(),output.data_ptr(),args.rows,None,None,0,0)
+                               partial.data_ptr(),output.data_ptr(),args.rows,None,None,0,0,int(weight.bits==3))
                 if status:
                     raise RuntimeError(f"grouped HIP 線形の起動失敗: {status}")
                 return output

@@ -2,6 +2,7 @@
 #include <shelf/quantization/exl3/exl3_int8.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <stdexcept>
@@ -56,8 +57,9 @@ Checkpoint::Checkpoint(const Path &model, const Path &engram, const Path &draft,
                 cfg.at("kv_lora_rank") == 512 && cfg.at("vocab_size") == 120832,
             "Hy4-flash の text 専用 checkpoint が必要です");
     const auto &quant = cfg.at("quantization_config");
-    require(quant.at("mul1_multiplier") == quantization::exl3::kExl3Mul24Multiplier && quant.at("bits") == 4 &&
-                quant.at("head_bits") == 6,
+    mixed = quant.at("bits") == 3.5;
+    require(quant.at("mul1_multiplier") == quantization::exl3::kExl3Mul24Multiplier &&
+                (mixed || quant.at("bits") == 4) && quant.at("head_bits") == 6,
             "量子化形式が不正です");
     require(std::filesystem::is_regular_file(model / "conversion_report.json"), "本体の組立が未完了です");
     for (int i = 0; i < 42; ++i) {
@@ -96,8 +98,11 @@ Checkpoint::Checkpoint(const Path &model, const Path &engram, const Path &draft,
     if (has_draft) {
         auto q = read_json(draft / "conversion_report.json");
         require(q.at("method") == "dfly" && q.at("bits") == 4, "DFly の変換結果が不正です");
+        const auto report = read_json(model / "conversion_report.json");
+        const auto &signature = report.at("assembly_signature");
         require(q.at("body_assembly_signature") ==
-                    read_json(model / "conversion_report.json").at("assembly_signature"),
+                        (mixed ? report.at("dfly_calibration_signature") : signature) &&
+                    (!mixed || q.at("body_report_sha256") == signature.at("body_report_sha256")),
                 "DFly と本体の校正元が一致しません");
         for (const auto &[name, dims] : q.at("linear_shapes").items())
             shape[name] = dims.get<std::array<int, 2>>();
@@ -110,6 +115,8 @@ Checkpoint::Checkpoint(const Path &model, const Path &engram, const Path &draft,
         const bool expert = name.find(".mlp.experts.") != std::string::npos;
         auto logical = expert ? std::array<int, 2>{1536, 1536} : shape.at(name);
         int k = logical[0], n = logical[1], bits = name == "lm_head" ? 6 : 4;
+        if (mixed && expert && w.spec.shape.size() == 3 && w.spec.shape[2] == 48)
+            bits = 3;
         require(k > 0 && n > 0 && k <= 120832 && n <= 120832, "線形の幅が不正です: " + name);
         size_t pk = (k + 127) / 128 * 128, pn = (n + 127) / 128 * 128;
         auto matrix = [&](const std::string &suffix, io::SType dtype, std::vector<size_t> dims) {
@@ -248,16 +255,43 @@ Checkpoint::Checkpoint(const Path &model, const Path &engram, const Path &draft,
     for (int i = 1; i < 42; ++i)
         for (int e = 0; e < 512; ++e) {
             auto stem = "model.layers." + std::to_string(i) + ".mlp.experts." + std::to_string(e) + ".";
-            for (auto name : {"gate_proj", "up_proj", "down_proj"})
-                at(stem + name + ".trellis");
+            int bits = at(stem + "gate_proj.trellis").spec.shape[2] / 16;
+            for (auto name : {"up_proj", "down_proj"})
+                require(at(stem + name + ".trellis").spec.shape[2] == size_t(bits * 16),
+                        "expert の 3 射影の bpw が一致しません");
+            expert_bits[i - 1][e] = bits;
         }
+    if (mixed) {
+        const auto plan = read_json(model / "mixed_plan.json");
+        const auto report = read_json(model / "conversion_report.json");
+        size_t count = 0;
+        for (int i = 0; i < 41; ++i) {
+            std::array<uint8_t, 512> expected;
+            expected.fill(4);
+            for (const auto &id : plan.at(std::to_string(i + 1))) {
+                int e = id.get<int>();
+                require(e >= 0 && e < 512 && expected[e] == 4, "mixed 計画に不正な expert ID があります");
+                expected[e] = 3;
+                ++count;
+            }
+            require(expert_bits[i] == expected, "mixed 計画と実 expert のビット幅が一致しません");
+        }
+        const auto elements = report.at("decoder_quantized_weights").get<uint64_t>();
+        require(elements > 0 && count == report.at("mixed_3bit_experts").get<size_t>(),
+                "mixed 変換の件数が report と一致しません");
+        const double bpw = 4.0 - double(count * 3ull * 1536 * 1536) / double(elements);
+        require(std::abs(bpw - 3.5) <= 0.0001 &&
+                    std::abs(bpw - report.at("decoder_code_bpw").get<double>()) < 1e-8,
+                "実重みに基づく平均 bpw が一致しません");
+    }
 }
 void Checkpoint::load(const Path &directory, bool draft) {
     auto index = read_json(directory / "model.safetensors.index.json").at("weight_map");
     std::map<std::string, std::vector<std::string>> shards;
     for (const auto &[key, file] : index.items()) {
         require(key.starts_with("model.dfly_layers.") == draft, "本体・DFly の index が混在しています");
-        if (key.ends_with(".multi_head_embedding.embedding.weight"))
+        if (key.ends_with(".multi_head_embedding.embedding.weight") ||
+            key.ends_with(".multi_head_embedding.embedding.weight.scale"))
             continue;
         shards[file.get<std::string>()].push_back(key);
     }

@@ -73,7 +73,7 @@ Mat grouped(Ops &op, Mat x, const Hy4Route *routes, int layer, int kind, const H
     auto partial = static_cast<float *>(op.arena.next(size_t(x.rows) * 1536 * 4));
     auto desc = op.gpu.matrices[op.rank] + (layer - 1) * 1536 + kind;
     checked(shelf_hy4_expert_linear(x.p, desc, 3, codes, scales, partial, y.p, x.rows, routes, batches, count,
-                                    wmma));
+                                    wmma, op.gpu.model.mixed));
     op.arena.cursor = mark;
     return y;
 }

@@ -16,7 +16,7 @@ def hadamard(x, width):
     return values.reshape(x.shape) * width ** -0.5
 
 
-@lru_cache(maxsize=2)
+@lru_cache(maxsize=3)
 def decode_table(bits):
     t = np.arange(256, dtype=np.uint32)
     bit = ((t + 1) * bits + 256 * bits - 16) % (256 * bits)
@@ -45,7 +45,7 @@ class Projection:
     def __init__(self, trellis, suh, svh, marker, width):
         k, n, size = trellis.shape
         self.bits = size // 16
-        if (marker != 0xDCD12D or self.bits not in (4, 6) or size != self.bits * 16
+        if (marker != 0xDCD12D or self.bits not in (3, 4, 6) or size != self.bits * 16
                 or k * 16 != suh.numel() or n * 16 != svh.numel()
                 or k % 8 or n % 8 or not 0 < width <= n * 16 or n * 16 - width >= 128
                 or suh.dtype != torch.float16 or svh.dtype != torch.float16 or trellis.dtype != torch.int16):

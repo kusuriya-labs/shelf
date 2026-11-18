@@ -28,8 +28,8 @@ class Weights:
         self.local = {}
         if work is None:
             q = cfg["quantization_config"]
-            if q["mul1_multiplier"] != 0xDCD12D or q["bits"] != 4 or q["head_bits"] != 6:
-                raise ValueError("本体 4 bit、head 6 bit の mul24 が必要です")
+            if q["mul1_multiplier"] != 0xDCD12D or q["bits"] not in (3.5,4) or q["head_bits"] != 6:
+                raise ValueError("本体 3.5/4 bpw、head 6 bit の mul24 が必要です")
             if not (model / "conversion_report.json").is_file():
                 raise ValueError("本体 checkpoint の組立が完了していません")
             self.shapes.update({name[:-7]: item["original_shape"] for name, item in q["linear_storage"].items()})

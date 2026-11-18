@@ -226,3 +226,11 @@ CPU logits 相対 L2 の初期目安 0.1 を超えた場合はその事実を結
 ## M2　3.5 bpw 変換の開始
 
 4 bpw の G3 完了後に V620 2 台を排他し、BF16 原本と同じ 128×1024 校正の hidden / router 選択から Hessian を再計算している。層ごとに利用頻度の低い expert を 3 bit にし、合計 10,931 本を選んだ。残り 10,061 本と本体の通常線形は 4 bit、共有 head は 6 bit、DFly は G2 の 4 bit を共用する。符号のみの目標平均は 3.499996 bpw。最終出力先は `hy4-flash-pilot/shelf-mixed/Hy4-flash-exl3-3.5bpw-mul24`。shard 単位で署名・SHA-256 を照合して再開でき、元の 4 bpw checkpoint を変更しない。
+
+## M3　3/4 bit 混在の読込と実層
+
+各 expert の 3 射影の幅を実 trellis から検証し、3/4 bit 混在では実バイト数で再配置する。R9700 WMMA と V620 dot4 は行または expert グループのビット幅に合わせて復号する。既存の 4 bit 専用経路は定数幅のままビルドする。3.5 bpw 版は元の校正署名で DFly と照合し、FP8 Engram の符号・スケールを checkpoint 自体に格納する。CPU loader と照合も混在幅に対応した。
+
+変換済みの層 1 は 3 bit expert 267 本。校正先頭 16 token の元の 256 選択には 3 bit が 71 件含まれた。R9700 で同じ mixed 層を実行し、CPU 基準への相対 L2 は 16 行一括 0.004823、逐次 1 行 0.005646。expert 4 の実 3 bit gate の grouped 6 行は相対 L2 0.0000283。両 ISA をビルドし、既存 4 bit + DFly の inspect と CPU CTest も通過した。全校正で 3 bit 化する expert の選択は 19,977,959 / 85,983,232 件（23.23%）。原本の routing から独立に再計算した選択リストの SHA-256 も変換計画と一致した。
+
+3.5 bpw の shard を検証しながら同じ 4 token の CPU 連続照合を追跡中。組立後は `build-hy4/mixed-accept.log` の手順で、同じ配置・pp2048・256 token の greedy 照合、CPU reorder 対照、EP=3 の実予約・速度を記録する。

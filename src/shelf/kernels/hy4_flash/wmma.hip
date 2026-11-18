@@ -35,19 +35,29 @@ hipError_t shelf_hy4_wmma(const int8_t *codes, const float *scales, const uint32
 }
 
 namespace {
+template <bool Mixed>
 __global__ void expert_batch(const int8_t *codes, const float *scales, const Hy4ExpertProjection *matrices,
                              const Hy4Route *routes, const Hy4ExpertBatch *batches, float *partial) {
     auto batch = batches[blockIdx.y];
     size_t first = batch.first;
-    auto weight = matrices[3 * routes[first].expert].trellis;
-    shelf::kernel::exl3_detail::mul24::group_body<4, 1, false, 4, false, true>(
-        codes + first * 1536, scales + first * 12, 1536, 12, weight, partial + first * 1536, batch.count,
-        nullptr, 1536, 1536, 12, 1, blockIdx.x, 0);
+    auto matrix = matrices[3 * routes[first].expert];
+    auto weight = matrix.trellis;
+    if (Mixed && matrix.bits == 3)
+        shelf::kernel::exl3_detail::mul24::group_body<3, 1, false, 4, false, true>(
+            codes + first * 1536, scales + first * 12, 1536, 12, weight, partial + first * 1536, batch.count,
+            nullptr, 1536, 1536, 12, 1, blockIdx.x, 0);
+    else
+        shelf::kernel::exl3_detail::mul24::group_body<4, 1, false, 4, false, true>(
+            codes + first * 1536, scales + first * 12, 1536, 12, weight, partial + first * 1536, batch.count,
+            nullptr, 1536, 1536, 12, 1, blockIdx.x, 0);
 }
 }
 hipError_t shelf_hy4_wmma_experts(const int8_t *codes, const float *scales, const Hy4ExpertProjection *matrices,
                                   const Hy4Route *routes, const Hy4ExpertBatch *batches, int count,
-                                  float *partial) {
-    expert_batch<<<dim3(24, count), 128>>>(codes, scales, matrices, routes, batches, partial);
+                                  float *partial, bool mixed) {
+    if (mixed)
+        expert_batch<true><<<dim3(24, count), 128>>>(codes, scales, matrices, routes, batches, partial);
+    else
+        expert_batch<false><<<dim3(24, count), 128>>>(codes, scales, matrices, routes, batches, partial);
     return hipGetLastError();
 }

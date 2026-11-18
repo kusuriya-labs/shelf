@@ -29,7 +29,9 @@ def run(args):
     torch.set_num_threads(1)
     if not 0 < args.tokens <= 128:
         raise ValueError("校正列の先頭 1〜128 token を指定してください")
-    w = Weights(args.model,args.engram,args.work)
+    source = Weights(args.model,args.engram,args.work)
+    mixed = args.body and read_json(args.body/"conversion_report.json")["decoder_code_bpw"] != 4
+    w = Weights(args.body,args.engram) if mixed else source
     if args.placement:
         w.owners = read_json(args.placement)
         w.devices = ["cpu"] * 3
@@ -38,6 +40,8 @@ def run(args):
         ids = f.get_slice("input_ids")[0,:args.tokens].tolist()
     signature = dict(model=str(args.model.resolve()),work=str(args.work.resolve()),engram=str(args.engram.resolve()),
                      settings=read_json(args.work/"settings.json"),ids=ids,owners=w.owners)
+    if mixed:
+        signature["mixed_body"] = read_json(args.body/"conversion_report.json")["assembly_signature"]
     if args.rounding_control:
         signature["rounding_control"] = "rdna-reduction-v1"
     settings = args.result/"input.json"
@@ -66,16 +70,16 @@ def run(args):
         tmp.replace(path)
         print("連続照合",i,error.item(),flush=True)
     if args.body and end == 42:
-        body = Weights(args.body,args.engram)
+        body = w if mixed else Weights(args.body,args.engram)
         prefix = "model.hc_head.hc_head_"
         h = decoder.collapse(x,*(body.raw(prefix+k) for k in ("fn","scale","base")))[0]
         logits = body.linear("lm_head",decoder.rms(h,body.raw("model.norm.weight")))
         save_file({"logits":logits,"input_ids":torch.tensor(ids)},args.result/"logits.safetensors")
         with safe_open(args.work/"layer-41/capture/next.safetensors",framework="pt") as f:
             original_streams = f.get_slice("hidden")[0,:len(ids)]
-        original_hidden = decoder.collapse(original_streams,*(w.raw(prefix+k) for k in ("fn","scale","base")))[0]
-        original_hidden = decoder.rms(original_hidden,w.raw("model.norm.weight")).float()
-        head = w.raw("lm_head.weight")
+        original_hidden = decoder.collapse(original_streams,*(source.raw(prefix+k) for k in ("fn","scale","base")))[0]
+        original_hidden = decoder.rms(original_hidden,source.raw("model.norm.weight")).float()
+        head = source.raw("lm_head.weight")
         original_logits = torch.cat([original_hidden @ block.float().T for block in head.split(2048)],dim=-1)
         log_p = original_logits.log_softmax(-1)
         log_q = logits.float().log_softmax(-1)
