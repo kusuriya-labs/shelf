@@ -170,11 +170,14 @@ int main() {
                mk(ElementwiseProfile::SwigluBf16, 36608u, 512u, 0)),
            O, "moe group rows 36608 (bucket 4096 capacity) -> Optimized");
     expect(select_elementwise_implementation(
-               mk(ElementwiseProfile::SwigluBf16, 36609u, 512u, 0)),
-           C, "moe group rows above the measured bound -> Correctness");
+               mk(ElementwiseProfile::SwigluBf16, 89600u, 512u, 0)),
+           O, "moe group rows 89600 (8192 token bucket) -> Optimized");
     expect(select_elementwise_implementation(
-               mk(ElementwiseProfile::SwigluBf16, 69632u, 512u, 0)),
-           C, "the 8192 token bucket is not enabled for grouped experts -> Correctness");
+               mk(ElementwiseProfile::SwigluBf16, 131072u, 512u, 0)),
+           O, "moe group rows at the measured bound -> Optimized");
+    expect(select_elementwise_implementation(
+               mk(ElementwiseProfile::SwigluBf16, 131073u, 512u, 0)),
+           C, "moe group rows above the measured bound -> Correctness");
     expect(select_elementwise_implementation(
                mk(ElementwiseProfile::SwigluBf16, 5120u, 128u, 0)),
            O, "moe group rows at width 128 -> Optimized");

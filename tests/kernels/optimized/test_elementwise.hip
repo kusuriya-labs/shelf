@@ -636,6 +636,8 @@ int main(int argc, char** argv) {
         // bucket is capped at 4096 tokens (36608 group rows), so production does not reach
         // these; they pin the kernel contract for a row domain above grid.y.
         {"swiglu-moe-group-r69632", Op::Swiglu, 512, 69632, 512, 512, 0, 0.0f, 264},
+        {"swiglu-moe-group-f640-r81920", Op::Swiglu, 640, 81920, 640, 640, 0, 0.0f, 266},
+        {"swiglu-moe-group-f640-r89600", Op::Swiglu, 640, 89600, 640, 640, 0, 0.0f, 267},
         // rows that do not split evenly over grid.z: the launch covers one extra row slot, so
         // this is the case that pins the row bound in the kernel (guard must stay untouched).
         {"swiglu-moe-group-r69633", Op::Swiglu, 128, 69633, 128, 128, 0, 0.0f, 265},

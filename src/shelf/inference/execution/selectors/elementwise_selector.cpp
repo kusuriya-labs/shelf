@@ -14,10 +14,12 @@ struct Rule {
 
 // The elementwise kernels address rows with blockIdx.y + blockIdx.z * gridDim.y, so the
 // hardware bound on grid.y (65535) is not the limit here. Group rows grow with tokens * top_k,
-// so the MoE FFN needs a bound above the token row cap: 36608 is the group-row capacity of the
-// largest MoE row bucket (4096 token rows, experts 256, top_k 8) and is measured. Raising the
-// bucket above 4096 tokens has to come with a measurement of that bucket, not with this bound.
-constexpr uint32_t kMeasuredMaxGroupRows = 36608u;
+// so the MoE FFN needs a bound above the token row cap. 131072 covers the 8192 token bucket
+// (Qwen4Exp: experts 512, top_k 10 -> 89600 group rows) and was measured with the SwiGLU
+// kernel: p50 571 us at 89600 rows / 640 features, linear in rows and ~5.8x faster than the
+// correctness path. Raising the bucket above 8192 tokens has to come with a measurement of
+// that bucket, not with this bound.
+constexpr uint32_t kMeasuredMaxGroupRows = 131072u;
 
 constexpr Rule kRules[] = {
     // PLaMo 3 BF16 residuals, SwiGLU components and contiguous halves.
