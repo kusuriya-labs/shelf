@@ -2,6 +2,7 @@
 #include <shelf/models/hy4_flash/attention.h>
 #include <shelf/models/hy4_flash/absorbed.h>
 #include <shelf/kernels/fused/detail/octave_common.h>
+#include <shelf/kernels/fused/detail/radix_select.h>
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/decode.h>
 #include <algorithm>
 #include <numeric>
@@ -127,7 +128,10 @@ __global__ void save_pending(Mat k, int start, uint16_t *pending) {
     int row = k.rows - 1 - blockIdx.x;
     pending[((start + row) % 12) * 128 + threadIdx.x] = k.p[row * 128 + threadIdx.x];
 }
-__global__ void index_scores(Mat q, Mat weights, const uint16_t *groups, int row, int count, float *scores) {
+__global__ void index_scores(Mat q, Mat weights, const uint16_t *groups, int first, int start, int stride,
+                             float *scores) {
+    int row = first + blockIdx.y;
+    int count = (start + row) / 4;
     int group = blockIdx.x * 4 + threadIdx.x / 32;
     int lane = threadIdx.x % 32;
     if (group >= count)
@@ -142,7 +146,14 @@ __global__ void index_scores(Mat q, Mat weights, const uint16_t *groups, int row
         sum += fmaxf(dot, 0) * bv(weights, row, h);
     }
     if (!lane)
-        scores[group] = sum;
+        scores[size_t(blockIdx.y) * stride + group] = sum;
+}
+__global__ void index_topk(const float *scores, int first, int start, int stride, int *selected) {
+    __shared__ uint32_t histogram[256], state[4];
+    int row = blockIdx.x;
+    unsigned count = (start + first + row) / 4;
+    ::shelf::kernel::detail::radix_select<3>(scores + size_t(row) * stride, count, 511, histogram, state,
+                                             selected + row * 511, nullptr, 0);
 }
 Selection select(Ops &op, const std::string &p, int layer, int start, Mat x, Mat qres) {
     int end = start + x.rows;
@@ -164,23 +175,30 @@ Selection select(Ops &op, const std::string &p, int layer, int start, Mat x, Mat
         if (end > 2048) {
             Mat q = op.rope(op.linear(p + "query_projection", qres), 16, start, 1e7f);
             Mat w = op.linear(p + "head_weight_projection", x);
-            auto buffer = static_cast<float *>(op.arena.next(size_t(end / 4) * 4));
-            for (int i = std::max(0, 2048 - start); i < x.rows; ++i) {
-                int pos = start + i, count = pos / 4;
-                index_scores<<<(count + 3) / 4, 128>>>(q, w, groups, i, count, buffer);
+            int begin = std::max(0, 2048 - start), stride = (end - 1) / 4;
+            int batch = std::min(16, x.rows - begin);
+            auto buffer = static_cast<float *>(op.arena.next(size_t(stride) * batch * 4));
+            auto top = static_cast<int *>(op.arena.next(batch * 511 * 4));
+            std::vector<int> ids(batch * 511);
+            for (int first = begin; first < x.rows; first += batch) {
+                int rows = std::min(batch, x.rows - first);
+                index_scores<<<dim3((stride + 3) / 4, rows), 128>>>(q, w, groups, first, start, stride, buffer);
                 checked(hipGetLastError());
-                std::vector<float> scores(count);
-                op.copy(scores.data(), buffer, count * 4, hipMemcpyDeviceToHost);
-                std::vector<int> ids(count);
-                std::iota(ids.begin(), ids.end(), 0);
-                std::partial_sort(ids.begin(), ids.begin() + 511, ids.end(), [&](int a, int b) {
-                    return scores[a] == scores[b] ? a < b : scores[a] > scores[b];
-                });
-                for (int g = 0; g < 511; ++g)
-                    for (int j = 0; j < 4; ++j)
-                        selected[i].push_back(ids[g] * 4 + j);
-                for (int j = count * 4; j <= pos; ++j)
-                    selected[i].push_back(j);
+                index_topk<<<rows, 256>>>(buffer, first, start, stride, top);
+                checked(hipGetLastError());
+                op.copy(ids.data(), top, size_t(rows) * 511 * 4, hipMemcpyDeviceToHost);
+                for (int j = 0; j < rows; ++j) {
+                    auto &tokens = selected[first + j];
+                    tokens.reserve(2048);
+                    auto groups_begin = ids.begin() + j * 511;
+                    std::sort(groups_begin, groups_begin + 511);
+                    for (auto it = groups_begin; it != groups_begin + 511; ++it)
+                        for (int k = 0; k < 4; ++k)
+                            tokens.push_back(*it * 4 + k);
+                    int pos = start + first + j;
+                    for (int k = (pos / 4) * 4; k <= pos; ++k)
+                        tokens.push_back(k);
+                }
             }
         }
     }
@@ -255,20 +273,40 @@ Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidd
     auto cache = op.gpu.cache[layer];
     for (int i = 0; i < hidden.rows;) {
         size_t save = op.arena.cursor;
-        int n = (start + hidden.rows <= 2048 || sliding || draft) ? hidden.rows - i : 1;
-        std::vector<int> ids;
+        bool contiguous = sliding || start + hidden.rows <= 2048;
+        int n = hidden.rows - i;
+        if (!contiguous && !draft && start + hidden.rows > 4096)
+            n = std::min(n, op.gpu.folded.empty() ? 4 : 16);
         int stride = 0;
-        for (int r = i; r < i + n; ++r) {
-            ids.insert(ids.end(), selected[r].begin(), selected[r].end());
+        for (int r = i; r < i + n; ++r)
             stride = std::max(stride, int(selected[r].size()));
+        std::vector<int> ids, offsets(n * stride, -1);
+        if (n == 1 || draft) {
+            ids = selected[i + n - 1];
+            for (int r = 0; r < n; ++r)
+                std::iota(offsets.begin() + r * stride, offsets.begin() + r * stride + selected[i + r].size(),
+                          0);
+        } else if (contiguous) {
+            int first = selected[i][0];
+            ids.resize(selected[i + n - 1].back() + 1 - first);
+            std::iota(ids.begin(), ids.end(), first);
+            for (int r = 0; r < n; ++r)
+                std::iota(offsets.begin() + r * stride, offsets.begin() + r * stride + selected[i + r].size(),
+                          selected[i + r][0] - first);
+        } else {
+            std::vector<int> remap(start + i + n, -1);
+            for (int r = i; r < i + n; ++r)
+                for (int slot : selected[r])
+                    remap[slot] = 0;
+            for (int slot = 0; slot < int(remap.size()); ++slot)
+                if (remap[slot] == 0) {
+                    remap[slot] = ids.size();
+                    ids.push_back(slot);
+                }
+            for (int r = 0; r < n; ++r)
+                for (size_t t = 0; t < selected[i + r].size(); ++t)
+                    offsets[r * stride + t] = remap[selected[i + r][t]];
         }
-        std::sort(ids.begin(), ids.end());
-        ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
-        std::vector<int> offsets(stride * n, -1);
-        for (int r = 0; r < n; ++r)
-            for (size_t t = 0; t < selected[i + r].size(); ++t)
-                offsets[r * stride + t] =
-                    std::lower_bound(ids.begin(), ids.end(), selected[i + r][t]) - ids.begin();
         auto positions = op.indices(ids);
         Mat a = op.mat(ids.size(), 512), b = op.mat(ids.size(), 64);
         unpack<256, 29><<<dim3(2, ids.size()), 256>>>(cache, fresh, positions, start, slots, a, 0);
