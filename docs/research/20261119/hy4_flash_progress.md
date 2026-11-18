@@ -105,3 +105,7 @@ QSA にあった GPU radix 選択を共通化し、Hy4 の上位 511 完了グ�
 DFly の target/draft 分布から受理または補正 token を選ぶ本番関数を R9700 で検査した。一致する分布と支持集合が重ならない分布を各 slot に置き、受理長 0〜5 の全ケースで確定列と bonus が一致した。実際のドラフト重みによる受理長は変換後に測る。量子化用コンテナは GPU デバイスを渡さずに起動し、ホストと同じ UID で quant_dfly と乗数 0xDCD12D の量子化モジュールを import できた。
 
 実予約は要求量に加えて rank 別の committed と確保後の空き容量を出す。各生成では rank 別の expert 選択件数と PCIe 経由の latent・部分和の byte 数を prefill/decode に分けて記録する。
+
+## B1　fork の既定構成
+
+専用構成を既定にし、既存のテキスト・PSKLDTOK 入力読込を共有した。gfx1030 と gfx1201 を明示した新規ビルドでも shelf-compute がリンクできた。テキストとバイナリから同じ 3 ID を読み、CPU テストも通過。legacy 構成は SHELF_HY4_ONLY=OFF で選択できる。WMMA を使わない grouped 4 行版は R9700 上でも実層 2 の 64 行で CPU 相対 L2 0.004853 を確認した。V620 実機での成否は別途判定する。

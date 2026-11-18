@@ -26,6 +26,7 @@ shelf_set_hip_archs(shelf_gpu)
 
 # File I/O.
 add_library(shelf_io STATIC
+    src/shelf/io/token_ids.cpp
     src/shelf/io/safetensors_reader.cpp
     src/shelf/io/safetensors_writer.cpp
 )

@@ -1,7 +1,8 @@
 #include <shelf/models/hy4_flash/cli.h>
 #include <shelf/models/hy4_flash/residency.h>
 #include <shelf/models/hy4_flash/generate.h>
-#include <fstream>
+#include <algorithm>
+#include <shelf/io/token_ids.h>
 #include <cmath>
 #include <charconv>
 #include <cstdio>
@@ -12,19 +13,21 @@ namespace shelf::hy4 {
 int compute(int argc, char **argv) {
     try {
         if (argc == 1 || std::string_view(argv[1]) == "--help") {
-            puts("shelf-compute hy4 inspect|reserve|generate --model-dir PATH --engram-dir PATH --placement "
-                 "PATH [--dfly-dir PATH] [--max-seq-len N] [--input-ids-file PATH] [--max-new-tokens N] "
-                 "[--chunk N] [--temperature T] [--seed N] [--dump-logits PATH] [--repeats N]");
+            puts(
+                "shelf-compute [hy4] [inspect|reserve|generate] --model-dir PATH --engram-dir PATH --placement "
+                "PATH [--dfly-dir PATH] [--max-seq-len N] [--input-ids-file PATH] [--max-new-tokens N] "
+                "[--chunk N] [--temperature T] [--seed N] [--dump-logits PATH] [--repeats N]");
             return 0;
         }
-        std::string_view mode = argv[1];
+        bool implicit = std::string_view(argv[1]).starts_with("--");
+        std::string_view mode = implicit ? "generate" : argv[1];
         Path model, engram, draft, placement;
         size_t tokens = mode == "reserve" ? 2097152 : 4096;
         Path input, logits_file;
         int count = 32, chunk = 64, repeats = 1;
         float temperature = 0;
         uint64_t seed = 0;
-        for (int i = 2; i < argc; i += 2) {
+        for (int i = implicit ? 1 : 2; i < argc; i += 2) {
             if (i + 1 >= argc)
                 throw std::runtime_error("引数の値がありません");
             std::string_view key = argv[i], value = argv[i + 1];
@@ -73,16 +76,10 @@ int compute(int argc, char **argv) {
             return 0;
         std::vector<int> ids;
         if (mode == "generate") {
-            std::ifstream file(input);
-            if (!file)
-                throw std::runtime_error("入力 ID ファイルが必要です");
-            int id;
-            while (file >> id) {
-                if (id < 0 || id >= 120832 || ids.size() >= tokens)
-                    throw std::runtime_error("入力 ID が範囲外です");
-                ids.push_back(id);
-            }
-            if (!file.eof() || ids.empty() || ids.size() + count > tokens || tokens > 1048576 || chunk > 128)
+            ids = io::read_input_ids(input.string());
+            if (std::any_of(ids.begin(), ids.end(), [](int id) { return id < 0 || id >= 120832; }))
+                throw std::runtime_error("入力 ID が範囲外です");
+            if (ids.empty() || ids.size() + count > tokens || tokens > 1048576 || chunk > 128)
                 throw std::runtime_error("入力列または生成長が不正です");
         }
         for (;;) {

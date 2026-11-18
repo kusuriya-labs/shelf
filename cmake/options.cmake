@@ -106,7 +106,13 @@ add_link_options(
 # explicitly. Any other architecture is rejected at configure time.
 # ---------------------------------------------------------------------------
 
-if(NOT CMAKE_HIP_ARCHITECTURES STREQUAL "gfx1201")
+if(SHELF_HY4_ONLY)
+    foreach(arch IN LISTS CMAKE_HIP_ARCHITECTURES)
+        if(NOT arch MATCHES "^gfx(1030|1201)$")
+            message(FATAL_ERROR "Hy4-flash の対象は gfx1030 と gfx1201 です: ${arch}")
+        endif()
+    endforeach()
+elseif(NOT CMAKE_HIP_ARCHITECTURES STREQUAL "gfx1201")
     message(
         FATAL_ERROR
         "Shelf targets gfx1201 (AMD Radeon AI PRO R9700) only. "
@@ -173,7 +179,9 @@ find_package(hip REQUIRED CONFIG)
 # translation units with the default libstdc++ and break the link
 # against the libc++-compiled C++ objects.
 function(shelf_set_hip_archs target)
-    target_compile_options("${target}" PRIVATE "--offload-arch=${CMAKE_HIP_ARCHITECTURES}")
+    foreach(arch IN LISTS CMAKE_HIP_ARCHITECTURES)
+        target_compile_options("${target}" PRIVATE "--offload-arch=${arch}")
+    endforeach()
 endfunction()
 
 # ROCTx detection (optional). Used by benches only.

@@ -4,6 +4,11 @@ cmake_minimum_required(VERSION 3.24)
 # toolchain clang++ before project() selects a compiler.
 include(cmake/rocm_root.cmake)
 
+option(SHELF_HY4_ONLY "Hy4-flash 専用の shelf-compute を構築する" ON)
+if(SHELF_HY4_ONLY AND NOT DEFINED CMAKE_HIP_ARCHITECTURES)
+    set(CMAKE_HIP_ARCHITECTURES gfx1201 CACHE STRING "Hy4-flash のホスト側 HIP ターゲット")
+endif()
+
 project(
     Shelf
     VERSION 0.1.0
@@ -14,8 +19,6 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Build options and platform detection.
 include(cmake/options.cmake)
-option(SHELF_HY4_ONLY "Hy4-flash 専用の shelf-compute を構築する" OFF)
-
 
 # Production / library targets.
 include(cmake/targets.cmake)

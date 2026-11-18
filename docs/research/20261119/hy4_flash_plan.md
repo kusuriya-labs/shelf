@@ -29,7 +29,7 @@
 
 ## このホストでのビルドと入力
 
-専用の実行形式は worktree 直下で次のように作る。
+この fork の既定は Hy4-flash 専用構成である。実行形式は worktree 直下で次のように作る。
 
 ```bash
 cmake -S . -B build-hy4 -G Ninja \
@@ -67,4 +67,4 @@ python3 tools/hy4_flash/locked.py ep3 build-hy4/shelf-compute hy4 generate \
   --input-ids-file prompt-ids.txt --max-new-tokens 128
 ```
 
-入力は空白区切りの token ID。本体単独との比較は --dfly-dir を省く。速度比較の候補は SHELF_HY4_WMMA、SHELF_HY4_DOT4、SHELF_HY4_ABSORB、SHELF_HY4_GROUP_ROWS を個別に 1 にして検査する。GROUP_ROWS は同じ expert を選んだ行を GPU ごとにまとめ、復号した重みを共有する候補。層 2 の校正先頭 128 行では 2048 選択が 411 expert に集中した。
+入力は空白区切りの token ID または既存の PSKLDTOK 形式。専用構成では shelf-compute に直接オプションを渡すと generate を実行する。本体単独との比較は --dfly-dir を省く。速度比較の候補は SHELF_HY4_WMMA、SHELF_HY4_DOT4、SHELF_HY4_ABSORB、SHELF_HY4_GROUP_ROWS を個別に 1 にして検査する。GROUP_ROWS は同じ expert を選んだ行を GPU ごとにまとめ、復号した重みを共有する候補。層 2 の校正先頭 128 行では 2048 選択が 411 expert に集中した。
