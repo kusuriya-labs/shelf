@@ -137,3 +137,7 @@ SHELF_HY4_PROFILE_EP=1 のときだけ、各 rank で routed expert の gather �
 
 1. SHELF_HY4_WMMA、SHELF_HY4_DOT4、SHELF_HY4_ABSORB、SHELF_HY4_GROUP_ROWS は実機比較のための一時スイッチとする。EP=3 で重み・入力・配置・chunk・seed を固定し、各候補の有無を変えて CPU 基準との logits 誤差、greedy 列、pp2048・decode の反復時間を比較する。GROUP_ROWS は WMMA または dot4 と組み合わせて使うため、採用予定の組合せから外した場合も調べる。各候補の採否、適用する ISA・行数、測定記録の場所をこの文書に残す。不採用の専用 kernel、分岐、フラグ、専用の試験設定を削除する。採用した経路は適用条件を通常の dispatch に組み込み、比較専用フラグを外して再度ビルド・受入検査を行う。
 2. SHELF_HY4_ONLY=OFF は受入中の共通部品の比較ビルドに使っている。EP=3 受入後に継続利用する呼び出し元と検査を確認し、今後の用途がなければ legacy 構成の入口を整理する。現時点では検証対象を同時に変えないため削除を保留した。
+
+## 毎時レビュー第 3 回
+
+第 2 回の 2 件は、実機比較後の候補削除方針と legacy 構成を保留する理由が確認され、解消となった。01:23 JST 時点で量子化側の last_layer は 37（0 始まり）、head_complete と最終 report は未生成。本体の両完了条件を確認してから DFly を追加量子化する。DFly 完成後、EP=3 の実予約、生成照合、pp2048・decode 測定の順で受け入れる。
