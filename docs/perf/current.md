@@ -13,6 +13,9 @@ R9700 と V620 2 台を使用する。V620 は routed expert を担当する。D
 | 本体の decoder 符号平均 | pp2048 (tok/s) | DFly2 decode (tok/s) | 予約 token 数 | 通常生成と DFly2 の greedy 一致 |
 |---|---:|---:|---:|---:|
 | 4 bpw | 676.62 | 50.65 | 2,097,152 | 256/256 |
+| 3.5 bpw | 641.54 | 25.06 | 2,097,152 | 256/256 |
+
+3.5 bpw では DFly2 が 127 token の間に 54 回の検証で 74 候補を受理した。4 bpw の同区間は 33 回で 94 候補。3.5 bpw の decode は基準の 40 tok/s を下回り、最終 logits の CPU 相対 L2 も 0.153211 で CPU 対照の 0.151771 を超えた。この結果は `hy4-flash-pilot/shelf-qualification-mixed/ep3-4dhwfvw5` に保存した。
 
 4 bpw の測定バイナリの SHA-256 は `a7365f79d3684159121c4cef1d162c2b7757ed6874c9657bdfe9113c357763db`。入力 ID、配置、実行条件、各反復の時間と受理長分布は `hy4-flash-pilot/shelf-qualification/ep3-9ao7j7r7` に保存した。[再現手順](../research/20261119/hy4_flash_plan.md)・[受入記録](../research/20261119/hy4_flash_progress.md)
 

@@ -94,3 +94,7 @@ python3 tools/hy4_flash/locked.py v620-pair docker run --rm --pull=never --netwo
 ```
 
 組立後は --model-dir と --engram-dir に同じ mixed ディレクトリを渡す。DFly は校正署名が一致する既存 sidecar を指定する。4 bpw と同じ配置・入力・chunk 1024・seed の測定条件で比較する。
+
+## 実施結果
+
+4 bpw は 2Mi 予約・生成照合・速度の受入を完了した。3.5 bpw も同じ配置・入力で実機測定を終えた。2Mi 予約と 256 token の通常生成・DFly 照合は成功し、decode と CPU logits は 4 bpw と同じ基準に届かなかった。最終 checkpoint と項目別の結果は[進捗記録の M6・M7](hy4_flash_progress.md)と[性能記録](../../perf/current.md#hy4-flash-専用-fork-の-ep3)に記載した。

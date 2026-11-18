@@ -4,7 +4,7 @@ origin/main の 14a23730 から専用 worktree を作成した。原本の confi
 
 ## 現在の状態
 
-11 月 19 日 03:26 JST に 4 bpw の最終受入を完了した。採用版は 2Mi 予約、pp2048 676.62 tok/s、DFly decode 50.65 tok/s、候補撤去前後と通常生成・DFly の 256 token 全一致を確認済み。03:28 JST に別出力で 3.5 bpw の変換を開始し、06:01 JST に組立を完了した。EP=3 での受入を実施中。
+11 月 19 日 03:26 JST に 4 bpw の最終受入を完了した。採用版は 2Mi 予約、pp2048 676.62 tok/s、DFly decode 50.65 tok/s、候補撤去前後と通常生成・DFly の 256 token 全一致を確認済み。03:28 JST に別出力で 3.5 bpw の変換を開始し、06:01 JST に組立を完了した。06:16 JST に同じ条件の EP=3 測定を完了した。3.5 bpw は 2Mi 予約・256 token 照合に成功し、pp2048 は 641.54 tok/s、decode は 25.06 tok/s。decode と CPU logits の未達項目は M7 に記録した。
 
 | 作業 | 完了を確認する場所 |
 |---|---|
@@ -266,3 +266,18 @@ CPU logits 相対 L2 の初期目安 0.1 を超えた場合はその事実を結
 06:01 JST に `hy4-flash-pilot/shelf-mixed/Hy4-flash-exl3-3.5bpw-mul24/conversion_report.json` が生成された。SHA-256 は `d8fb8cd76845e4a6cc7d810a8771c3711763450a61411237b92d9d85cd2a6d74`。1,161 shard の実 header から独立に数え、tensor 合計 134,017,854,504 byte、FP8 Engram（スケール込み）64,680,628,768 byte、3 bit expert 10,931 本、4 bit expert 10,061 本を照合した。decoder の符号平均は **3.499996188 bpw**、量子化線形の補助 tensor 込みで 3.520701 bpw、未量子化の線形も含めると 3.522850 bpw。head は 6 bit、DFly は同じ 4 bit。校正サンプル数不足による Hessian の代替は 17 expert。固定配置で 3 bit 化された本数は R9700 / V620 / V620 の順に 0 / 5,464 / 5,467。量子化する expert と GPU 配置をともに校正頻度から決めた結果である。
 
 同一配置の CPU 参照で原本と同じ 4 token の head 出力を比較した。BF16 の top-1 は順に 220、2122、6357、12286。4 bpw の top-1 は 3/4 一致、3.5 bpw は 2/4 一致。4 行全体の logits 相対 L2 は順に 0.270555 と 0.255197。3.5 bpw の各位置の KL（BF16 から量子化版）は 0.10038、1.36883、0.17389、0.28065。これは短い校正列の測定である。EP=3 と同じ量子化重みの CPU 参照との比較は別途実施する。
+
+## M7　最終実行形式での 4 bpw 再現と 3.5 bpw の実機結果
+
+3.5 bpw の測定は `hy4-flash-pilot/shelf-qualification-mixed/ep3-4dhwfvw5`。設定 JSON を比較し、GPU の順序、DFly、配置表、入力 ID の SHA-256、chunk 1024、候補スイッチなしを G3 と照合した。温度 0 の通常生成と DFly は短い列で 24/24、pp2048 に続く長い列で **256/256 一致**。温度 0.8・seed 20261119 で 24 token を 2 回生成し、列が一致した。両精度で 2,097,152 token 分の実予約に成功した。長い生成照合は pp2048 後に実施し、2Mi は予約のみ確認した。
+
+| 本体 | EP=3 / CPU 最終 logits 相対 L2 | CPU reorder 対照 | 次 ID（両方） | 通常 / DFly 列一致 | pp2048 tok/s | decode tok/s |
+|---|---:|---:|---:|---:|---:|---:|
+| 4 bpw 採用版 | 0.133337 | 0.139013 | 12286 | 256/256 | 676.62 | 50.65 |
+| 3.5 bpw 混在版 | 0.153211 | 0.151771 | 12286 | 256/256 | 641.54 | 25.06 |
+
+3.5 bpw は pp2048 の 500 tok/s を超え、decode は 40 tok/s を下回った。初回を除く 3 回の速度は pp2048 が 641.54、636.04、645.43、decode が 25.11、25.06、25.05 tok/s。初回は prefill が 65.95 秒で、温まった後の約 3.2 秒と異なる。各反復で実際に decode した区間は 127 token。4 bpw では検証 33 回中 94 候補を受理し、3.5 bpw では 54 回中 74 候補を受理した。受理長 0〜5 の回数は順に 4 bpw が 5・5・5・3・5・10、3.5 bpw が 26・8・7・5・3・5。量子化版どうしの greedy 列は 1 token 目が同じで 2 token 目から異なる。
+
+3.5 bpw の主参照との相対 L2 は事前の CPU 対照変動を **0.001440 超過**し、`within_cpu_limit=false`。この位置の CPU と EP=3 の上位 5 ID は順序まで一致し、KL（CPU から EP=3）は 0.044101。初期目安 0.1、積和対照、速度の基準は維持した。qualify.py は全結果を保存した後に速度未達で終了した。4 bpw は受入済み、3.5 bpw は変換・生成・測定済みで、同じ受入基準では decode と logits が未達である。
+
+混在幅対応後の実行形式（SHA-256 `e5e4e11de55f7df44888b43cf1ffcdf427ce0730e7624cabea78cf6a093b2015`）で 4 bpw も再実行した。撤去前の全候補有効版と 256/256 一致した記録は `hy4-flash-pilot/shelf-qualification/shared-4-b2qg1oxc/results.json`。3.5 bpw の 2Mi 実予約時の committed は順に 34,130,434,816、24,501,647,360、24,498,993,152 byte。最後に正規ビルドの CPU CTest が通過し、実機検査後に 3 台の lock が解放された。
