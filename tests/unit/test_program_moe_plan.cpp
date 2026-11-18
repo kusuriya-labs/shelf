@@ -250,7 +250,7 @@ void check_plan_scratch(const rt::Program& program) {
           "scratch sizes match the grouped row capacity");
     check(plan.row_token_offset > plan.group_count_offset &&
               plan.slot_row_of_offset > plan.row_token_offset &&
-              plan.capacity_units == plan.slot_row_of_offset + plan.slots,
+              plan.capacity_units == plan.miss_count_offset + 1u,
           "scratch regions are laid out end to end");
 
     size_t scratch_ranges = 0;

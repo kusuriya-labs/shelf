@@ -59,6 +59,12 @@ shelf::weights::MatrixWeight experts(std::uint32_t rows, std::uint32_t cols) {
     return w;
 }
 
+shelf::weights::MatrixWeight empty_host(std::uint32_t rows, std::uint32_t cols) {
+    shelf::weights::MatrixWeight w = matrix(rows, cols);
+    w.experts = 0u;
+    return w;
+}
+
 shelf::qwen4exp::Qwen4ExpHyperConnectionWeights hyper() {
     shelf::qwen4exp::Qwen4ExpHyperConnectionWeights w;
     w.input_mix_down = matrix(kLowrank, kWidth);
@@ -138,6 +144,9 @@ int main() {
         layer.mlp.up_experts = experts(kIntermediate, kHidden);
         layer.mlp.down_experts = experts(kHidden, kIntermediate);
         layer.mlp.experts = {kExperts, kExperts, 0u};
+        layer.mlp.gate_experts_host = empty_host(kIntermediate, kHidden);
+        layer.mlp.up_experts_host = empty_host(kIntermediate, kHidden);
+        layer.mlp.down_experts_host = empty_host(kHidden, kIntermediate);
         if (config.layer_has_ple(li)) {
             layer.ple.present = true;
             layer.ple.key_proj = matrix(kWidth, kHidden);
@@ -272,6 +281,9 @@ int main() {
             layer.mlp.down_experts = experts(kHidden, kIntermediate);
             layer.mlp.down_experts.experts = lexperts;
             layer.mlp.experts = {kExperts, lexperts, 0u};
+            layer.mlp.gate_experts_host = empty_host(kIntermediate, kHidden);
+            layer.mlp.up_experts_host = empty_host(kIntermediate, kHidden);
+            layer.mlp.down_experts_host = empty_host(kHidden, kIntermediate);
             if (tp_config.layer_has_ple(li)) {
                 layer.ple.present = true;
                 layer.ple.key_proj = matrix(kWidth, kHidden);

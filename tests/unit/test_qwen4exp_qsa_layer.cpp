@@ -49,6 +49,15 @@ shelf::weights::MatrixWeight matrix(std::uint32_t rows, std::uint32_t cols) {
     return w;
 }
 
+shelf::weights::MatrixWeight empty_host(std::uint32_t rows, std::uint32_t cols) {
+    shelf::weights::MatrixWeight w;
+    w.rows = rows;
+    w.cols = cols;
+    w.k_padded = cols;
+    w.experts = 0u;
+    return w;
+}
+
 void set_site(shelf::qwen4exp::HyperConnectionSiteWeights& out,
               shelf::weights::MatrixWeight& down, shelf::weights::MatrixWeight& up,
               shelf::weights::MatrixWeight& inject) {
@@ -89,6 +98,9 @@ int main() {
     moe.down_experts = matrix(kHidden, kIntermediate);
     moe.down_experts.experts = kExperts;
     moe.experts = {kExperts, kExperts, 0u};
+    moe.gate_experts_host = empty_host(kIntermediate, kHidden);
+    moe.up_experts_host = empty_host(kIntermediate, kHidden);
+    moe.down_experts_host = empty_host(kHidden, kIntermediate);
 
     const auto add_weight = [&](std::uint32_t rows, std::uint32_t cols) {
         graph.weight_table.push_back(rt::MatrixwiseShapeKey{rows, cols});
