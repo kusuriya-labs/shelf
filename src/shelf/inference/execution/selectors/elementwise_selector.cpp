@@ -87,6 +87,7 @@ constexpr Rule kRules[] = {
     {ElementwiseProfile::SigmoidBf16, 10240u, 0u, 1u, kOptimizedMaxRows},
     {ElementwiseProfile::SigmoidBf16, 4u, 0u, 1u, kOptimizedMaxRows},
     {ElementwiseProfile::SigmoidBf16, 1u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SigmoidF32, 1u, 0u, 1u, kOptimizedMaxRows},
     {ElementwiseProfile::SigmoidBf16, 2560u, 0u, 1u, kOptimizedMaxRows},
     {ElementwiseProfile::SiluBf16, 320u, 0u, 1u, kOptimizedMaxRows},
     {ElementwiseProfile::SiluBf16, 2560u, 0u, 1u, kOptimizedMaxRows},

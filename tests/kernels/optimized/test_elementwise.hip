@@ -199,6 +199,7 @@ enum class Op {
     Residual,
     Swiglu,
     Sigmoid,
+    SigmoidF32,
     SiluB2F,
     SiluF2B,
     Mul,
@@ -227,8 +228,10 @@ bool run_case(const Case& c, size_t* mm_out) {
     const uint32_t seed = c.seed;
     const bool split = (c.op == Op::SplitHalves || c.op == Op::SplitInterleaved);
     const uint32_t f_in = split ? 2u * f : f;
-    const bool f32_out = (c.op == Op::Sigmoid || c.op == Op::SiluB2F || c.op == Op::Scale);
-    const bool f32_a = (c.op == Op::SiluF2B || c.op == Op::Mul || c.op == Op::Scale);
+    const bool f32_out = (c.op == Op::Sigmoid || c.op == Op::SigmoidF32 ||
+                          c.op == Op::SiluB2F || c.op == Op::Scale);
+    const bool f32_a = (c.op == Op::SiluF2B || c.op == Op::Mul || c.op == Op::Scale ||
+                        c.op == Op::SigmoidF32);
     const bool b_is_bf16 = (c.op == Op::Residual || c.op == Op::Swiglu);
 
     auto gen_f = [&](uint32_t n, uint32_t tag) {
@@ -318,7 +321,8 @@ bool run_case(const Case& c, size_t* mm_out) {
             binding.output_slots[0] = 1;
             binding.input_count = 1;
             binding.output_count = 1;
-            if (c.op == Op::Sigmoid) binding.kernel_id = ::shelf::runtime::KernelId::SIGMOID;
+            if (c.op == Op::Sigmoid || c.op == Op::SigmoidF32)
+                binding.kernel_id = ::shelf::runtime::KernelId::SIGMOID;
             else if (c.op == Op::SiluB2F || c.op == Op::SiluF2B)
                 binding.kernel_id = ::shelf::runtime::KernelId::SILU;
             else {
@@ -361,6 +365,10 @@ bool run_case(const Case& c, size_t* mm_out) {
                 break;
             case Op::Sigmoid:
                 ok = ::shelf::kernel::launch_sigmoid_bf16_f32((const ::shelf::bf16_t*)a.dev,
+                    c.in_stride, (float*)o0.dev, c.out_stride, rows, f, nullptr) == hipSuccess;
+                break;
+            case Op::SigmoidF32:
+                ok = ::shelf::kernel::launch_sigmoid_f32((const float*)a.dev,
                     c.in_stride, (float*)o0.dev, c.out_stride, rows, f, nullptr) == hipSuccess;
                 break;
             case Op::SiluB2F:
@@ -644,6 +652,7 @@ int main(int argc, char** argv) {
         {"swiglu-moe-group-f128", Op::Swiglu, 128, 5120, 128, 128, 0, 0.0f, 262},
         {"swiglu-tail", Op::Swiglu, 31, 4, 31, 31, 0, 0.0f, 105},
         {"sigmoid", Op::Sigmoid, 2048, 16, 2048, 2048, 0, 0.0f, 106},
+        {"sigmoid-f32", Op::SigmoidF32, 1, 8192, 1, 1, 0, 0.0f, 268},
         {"sigmoid-tail", Op::Sigmoid, 5, 4, 5, 5, 0, 0.0f, 107},
         {"silu-b2f", Op::SiluB2F, 2048, 16, 2048, 2048, 0, 0.0f, 108},
         {"silu-b2f-pad", Op::SiluB2F, 2048, 8, 2064, 2064, 0, 0.0f, 109},
