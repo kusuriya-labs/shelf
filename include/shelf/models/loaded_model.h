@@ -7,6 +7,7 @@
 #include <shelf/models/qwen35/runtime/mtp_drafter.h>
 #include <shelf/models/qwen35moe/model/qwen35moe_model.h>
 #include <shelf/models/qwen4exp/model/qwen4exp_model.h>
+#include <shelf/models/qwen4exp/runtime/moe_expert_cache.h>
 #include <shelf/models/qwen35qsa/model/qwen35qsa_model.h>
 #include <shelf/weights/matrix_weight.h>
 
@@ -162,6 +163,7 @@ private:
     std::unique_ptr<shelf::qwen35::Qwen35Model> owns_dense_;
     std::unique_ptr<shelf::qwen35moe::Qwen35MoeModel> owns_moe_;
     std::unique_ptr<shelf::qwen4exp::Qwen4ExpModel> owns_qwen4exp_;
+    std::shared_ptr<shelf::qwen4exp::MoeExpertCache> moe_cache_;
     std::unique_ptr<shelf::qwen35qsa::Qwen35QsaModel> owns_qsa_;
     const shelf::qwen35::Qwen35Model* dense_ = nullptr;
     const shelf::qwen35moe::Qwen35MoeModel* moe_ = nullptr;

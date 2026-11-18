@@ -91,6 +91,10 @@ Result<LoadedModel> LoadedModel::load(
             std::make_unique<shelf::qwen4exp::Qwen4ExpModel>(loaded.release());
         out.qwen4exp_ = out.owns_qwen4exp_.get();
         out.model_dir_ = model_dir;
+        if (out.qwen4exp_->weights().host_experts != 0u) {
+            out.moe_cache_ =
+                shelf::qwen4exp::MoeExpertCache::create(out.qwen4exp_->weights());
+        }
         return out;
     }
     if (family_result.value() == ModelFamily::Qsa) {
@@ -276,8 +280,15 @@ Result<shelf::qwen35::Executor> LoadedModel::create_executor(
     }
     if (qwen4exp_ != nullptr) {
         auto ple_table = shelf::models::get_qwen4exp_ple_table(model_dir_);
-        return shelf::models::create_qwen4exp_model_executor(
+        auto created = shelf::models::create_qwen4exp_model_executor(
             *qwen4exp_, ple_table, sequence_pool, gdn_state_pool, kv_pool, arena, config);
+        if (created.ok() && moe_cache_ != nullptr) {
+            auto cache = moe_cache_;
+            created.value().after_batch = [cache](hipStream_t stream) {
+                return cache->step(stream);
+            };
+        }
+        return created;
     }
     if (qsa_ != nullptr) {
         if (config.tp != nullptr && config.tp->tp_size > 1u) {
