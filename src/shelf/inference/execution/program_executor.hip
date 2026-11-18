@@ -516,6 +516,10 @@ Status execute_program_range(
                 i += count;
                 continue;
             }
+            if (optimized.value().kind == OptimizedLaunchKind::Skipped) {
+                i += optimized.value().dispatch_count;
+                continue;
+            }
         }
         const FallbackDomain domain = fallback_domain(program, binding, ctx);
         if (domain.grouped) {

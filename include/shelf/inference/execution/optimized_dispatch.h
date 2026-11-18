@@ -23,6 +23,7 @@ Result<KernelMode> read_kernel_mode();
 enum class OptimizedLaunchKind : uint8_t {
     NotApplicable,
     Launched,
+    Skipped,
 };
 
 struct OptimizedLaunchResult {

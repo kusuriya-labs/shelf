@@ -967,7 +967,7 @@ Result<OptimizedLaunchResult> try_launch_linear_bf16(
     if (resolved.value() == PhysicalResolveStatus::NotApplicable)
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     if (resolved.value() == PhysicalResolveStatus::Skipped)
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
+        return OptimizedLaunchResult{OptimizedLaunchKind::Skipped, 1u};
     constexpr uint32_t kLtMinRows = 128u;
     hipError_t herr = hipErrorNotSupported;
     if (launch.rows >= kLtMinRows) {
