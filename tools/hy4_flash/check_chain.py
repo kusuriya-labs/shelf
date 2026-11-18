@@ -61,7 +61,22 @@ def main():
         h = collapse(x,*(body.raw(prefix+k) for k in ("fn","scale","base")))[0]
         logits = body.linear("lm_head",rms(h,body.raw("model.norm.weight")))
         save_file({"logits":logits,"input_ids":torch.tensor(ids)},args.result/"logits.safetensors")
-        print("次 token",logits[-1].argmax().item())
+        with safe_open(args.work/"layer-41/capture/next.safetensors",framework="pt") as f:
+            original_streams = f.get_slice("hidden")[0,:len(ids)]
+        original_hidden = collapse(original_streams,*(w.raw(prefix+k) for k in ("fn","scale","base")))[0]
+        original_hidden = rms(original_hidden,w.raw("model.norm.weight")).float()
+        head = w.raw("lm_head.weight")
+        original_logits = torch.cat([original_hidden @ block.float().T for block in head.split(2048)],dim=-1)
+        log_p = original_logits.log_softmax(-1)
+        log_q = logits.float().log_softmax(-1)
+        metrics = {
+            "relative_l2":((logits-original_logits).norm()/original_logits.norm()).item(),
+            "kl_bf16_to_quant":(log_p.exp()*(log_p-log_q)).sum(-1).tolist(),
+            "bf16_top1":original_logits.argmax(-1).tolist(),
+            "quant_top1":logits.argmax(-1).tolist(),
+        }
+        (args.result/"head_comparison.json").write_text(json.dumps(metrics,allow_nan=False,indent=2))
+        print("head 照合",metrics,flush=True)
 
 
 if __name__ == "__main__":

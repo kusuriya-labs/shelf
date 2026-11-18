@@ -141,3 +141,7 @@ SHELF_HY4_PROFILE_EP=1 のときだけ、各 rank で routed expert の gather �
 ## 毎時レビュー第 3 回
 
 第 2 回の 2 件は、実機比較後の候補削除方針と legacy 構成を保留する理由が確認され、解消となった。01:23 JST 時点で量子化側の last_layer は 37（0 始まり）、head_complete と最終 report は未生成。本体の両完了条件を確認してから DFly を追加量子化する。DFly 完成後、EP=3 の実予約、生成照合、pp2048・decode 測定の順で受け入れる。
+
+## H1　head 完成時の比較条件
+
+最終層と head の完成後、校正時の最終 BF16 hidden に原本の iHC head・norm・FP32 に展開した lm_head を適用する。4 token それぞれについて連続実行した 4 bit 本体・6 bit head との top-1、KL、logits 相対 L2 を CPU で記録する。native 対 CPU の実装差と、この原本対量子化の差を別々に判定する。
