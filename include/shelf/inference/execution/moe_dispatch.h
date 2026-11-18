@@ -28,6 +28,16 @@ struct MoePlanArrays {
     uint32_t* group_count = nullptr;
     int32_t* row_token = nullptr;
     int32_t* slot_row_of = nullptr;
+    // Original-group split: hits use VRAM slots, misses use host slots. `base` is the
+    // original group index, so both launches write the same group-row layout.
+    uint32_t* hit_slot = nullptr;
+    uint32_t* hit_rows = nullptr;
+    uint32_t* hit_base = nullptr;
+    uint32_t* hit_count = nullptr;
+    uint32_t* miss_slot = nullptr;
+    uint32_t* miss_rows = nullptr;
+    uint32_t* miss_base = nullptr;
+    uint32_t* miss_count = nullptr;
 };
 
 // The scratch arrays plus the capacity this call actually carries. The capacity comes from

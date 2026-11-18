@@ -35,6 +35,13 @@ void check(bool condition, const char* what) {
     }
 }
 
+float from_bf16_bits(std::uint16_t bits) {
+    const std::uint32_t wide = static_cast<std::uint32_t>(bits) << 16u;
+    float value = 0.0f;
+    std::memcpy(&value, &wide, sizeof(value));
+    return value;
+}
+
 std::string shard_for_tensor(const std::string& model_dir, const std::string& tensor) {
     std::ifstream file(model_dir + "/model.safetensors.index.json");
     if (!file.is_open()) return {};
@@ -80,7 +87,20 @@ void verify_expert_sample(const std::string& model_dir, const shelf::qwen4exp::Q
                           std::uint32_t rank, hipStream_t stream) {
     const auto& layer0 = w.layers[0];
     const auto& gate = layer0.mlp.gate_experts;
+    const auto& gate_host = layer0.mlp.gate_experts_host;
     const auto& range = layer0.mlp.experts;
+    if (gate.encoding != shelf::weights::MatrixEncoding::Exl3) {
+        check(gate.experts + gate_host.experts == range.local_experts,
+              "MOE expert split covers the local expert range");
+        if (gate_host.experts != 0u) {
+            check(gate_host.host_resident && gate_host.host_codes != nullptr &&
+                      gate_host.host_scales != nullptr &&
+                      gate_host.host_row_ref != nullptr &&
+                      w.expert_slot_map.ndim() != 0u,
+                  "MOE host expert planes are resident");
+        }
+        return;
+    }
     const std::uint64_t sample_bytes =
         std::min<std::uint64_t>(4096u, gate.codes_batch_stride_bytes);
     const std::uint32_t first_expert = range.expert_begin;
@@ -105,29 +125,100 @@ void verify_expert_sample(const std::string& model_dir, const shelf::qwen4exp::Q
           label);
 }
 
-void verify_ple(const std::string& model_dir, const shelf::qwen4exp::PleTable& table,
-                const shelf::qwen4exp::Qwen4ExpTextConfig& config) {
-    check(table.rows() == 320001536u, "PLE row count is 320001536");
-    check(table.row_width() == 160u, "PLE row width is 160");
-    check(table.k_bits() == 8u, "PLE trellis K is 8");
-    check(table.row_bytes() == 162u, "PLE row stride is 162 bytes");
-    check(table.shard_count() == 128u, "PLE shard count is 128");
-    check(table.head_count() == 16u, "PLE head count is 16");
-
+void verify_int6_source_rows(const std::string& model_dir,
+                             const shelf::qwen4exp::PleTable& table,
+                             const shelf::qwen4exp::Qwen4ExpTextConfig& config) {
     const std::uint64_t rows_to_check[] = {
-        0u, 1u, 123456u, 2500011u, 2500012u, 123456789u, table.rows() - 1u};
+        0u, 1u, 123456u, 2500011u, 2500012u, table.rows() - 1u};
+    const std::vector<std::size_t> ple_layers = config.ple_layers();
+    if (ple_layers.size() != 1u) return;
     for (const std::uint64_t row : rows_to_check) {
-        auto source = table.read_source_row(model_dir, row);
-        if (!source.ok()) {
-            std::fprintf(stderr, "PLE source row %llu failed\n",
+        const std::uint64_t shard = row / table.shard_rows();
+        const std::string name =
+            "model.language_model.layers." + std::to_string(ple_layers[0]) +
+            ".ple.ple_embedding.ngram_embedding.shard_" + std::to_string(shard) +
+            ".weight";
+        const std::string file = shard_for_tensor(model_dir, name);
+        if (file.empty()) {
+            std::fprintf(stderr, "missing PLE shard index entry: %s\n", name.c_str());
+            ++failures;
+            continue;
+        }
+        auto reader = shelf::io::SafetensorsReader::open(model_dir + "/" + file);
+        if (!reader.ok()) {
+            std::fprintf(stderr, "cannot open PLE shard %s\n", name.c_str());
+            ++failures;
+            continue;
+        }
+        std::size_t bytes = 0;
+        auto data = reader.value().tensor_data(name, bytes);
+        if (!data.ok() ||
+            bytes != static_cast<std::size_t>(table.shard_rows()) * 160u * 2u) {
+            std::fprintf(stderr, "cannot read PLE shard %s\n", name.c_str());
+            ++failures;
+            continue;
+        }
+        const auto* source = static_cast<const shelf::bf16_t*>(data.value()) +
+                             (row % table.shard_rows()) * 160u;
+        auto decoded = table.decode_row(row, false);
+        if (!decoded.ok() || decoded.value().size() != 160u) {
+            std::fprintf(stderr, "PLE INT6 decode failed for row %llu\n",
                          static_cast<unsigned long long>(row));
             ++failures;
             continue;
         }
-        const std::uint8_t* resident = table.row_ptr(row);
-        check(resident != nullptr && std::memcmp(resident, source.value().data(),
-                                                 table.row_bytes()) == 0,
-              "PLE packaged row matches source");
+        bool bounded = true;
+        for (std::uint32_t group = 0; group < 5u; ++group) {
+            float amax = 0.0f;
+            for (std::uint32_t i = 0; i < 32u; ++i) {
+                amax = std::max(amax, std::fabs(from_bf16_bits(
+                    source[group * 32u + i].data)));
+            }
+            for (std::uint32_t i = 0; i < 32u; ++i) {
+                const float expected =
+                    from_bf16_bits(source[group * 32u + i].data);
+                const float error =
+                    std::fabs(decoded.value()[group * 32u + i] - expected);
+                bounded = bounded && error <= amax / 62.0f + amax / 1000.0f + 1e-6f;
+            }
+        }
+        check(bounded, "PLE INT6 decode stays within the W32 error bound");
+    }
+}
+
+void verify_ple(const std::string& model_dir, const shelf::qwen4exp::PleTable& table,
+                const shelf::qwen4exp::Qwen4ExpTextConfig& config) {
+    check(table.rows() == 320001536u, "PLE row count is 320001536");
+    check(table.row_width() == 160u, "PLE row width is 160");
+    check(table.head_count() == 16u, "PLE head count is 16");
+    const bool int6 = table.int6_w32_fp16();
+    if (int6) {
+        check(table.k_bits() == 0u, "PLE INT6 W32 has no trellis K");
+        check(table.row_bytes() == 130u, "PLE INT6 W32 row stride is 130 bytes");
+        check(table.shard_count() == 128u, "PLE shard count is 128");
+        verify_int6_source_rows(model_dir, table, config);
+    } else {
+        check(table.k_bits() >= 1u && table.k_bits() <= 16u,
+              "PLE trellis K is in range");
+        check(table.row_bytes() == 2u + 20u * table.k_bits(),
+              "PLE trellis row stride matches K");
+        check(table.shard_count() == 128u, "PLE shard count is 128");
+
+        const std::uint64_t rows_to_check[] = {
+            0u, 1u, 123456u, 2500011u, 2500012u, 123456789u, table.rows() - 1u};
+        for (const std::uint64_t row : rows_to_check) {
+            auto source = table.read_source_row(model_dir, row);
+            if (!source.ok()) {
+                std::fprintf(stderr, "PLE source row %llu failed\n",
+                             static_cast<unsigned long long>(row));
+                ++failures;
+                continue;
+            }
+            const std::uint8_t* resident = table.row_ptr(row);
+            check(resident != nullptr && std::memcmp(resident, source.value().data(),
+                                                     table.row_bytes()) == 0,
+                  "PLE packaged row matches source");
+        }
     }
 
     auto row = table.decode_row(0u);
@@ -255,6 +346,10 @@ int main(int argc, char** argv) {
         shelf::qwen4exp::Qwen4ExpLoadOptions options;
         options.tp_size = 2;
         options.tp_rank = rank;
+        if (const char* host_experts = std::getenv("SHELF_MOE_HOST_EXPERTS")) {
+            options.moe_host_experts =
+                static_cast<std::uint32_t>(std::strtoul(host_experts, nullptr, 10));
+        }
         auto loaded = shelf::qwen4exp::load_qwen4exp_rank(model_dir, *arenas[index],
                                                           streams[index], options);
         if (!loaded.ok()) {

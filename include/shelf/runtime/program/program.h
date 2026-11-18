@@ -87,6 +87,7 @@ struct DispatchBinding {
     uint32_t workspace_slot = kNoWorkspace;
     uint32_t descriptor_slot = 0;
     uint32_t weight_index = kNoWeight;
+    uint32_t host_weight_index = kNoWeight;
     float scalar_a = 1.0f;
     float scalar_b = 0.0f;
     uint32_t rotary_dim = 0;

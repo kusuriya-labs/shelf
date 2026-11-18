@@ -10,7 +10,8 @@ canonical payload の stream / metadata / size formula / native preshuffle は
 
 本 repository は **量子化 artifact の読込専用**である。量子化 artifact を生成する
 offline pipeline / CLI は含まない。HF の FP8 checkpoint、および外部で生成した
-self-contained quantized safetensors を直接ロードする。
+self-contained quantized safetensors を直接ロードする。load 時に BF16 checkpoint を
+量子化する経路（PLE n-gram table の INT6 W32 FP16）はこれに含まれない。
 
 ## フォーマット
 
@@ -23,6 +24,12 @@ self-contained quantized safetensors を直接ロードする。
   `manifest/quantized_manifest.h` の `QuantizedEncoding` が唯一の on-disk encoding enum である。
   各formatの canonical stream、metadata、preshuffle は
   [canonical_soa_payload.md](canonical_soa_payload.md) を参照。
+- PLE n-gram table の INT6 W32 FP16 は manifest を持たない load 時変換である。
+  HF shard の BF16 table を 32 値ごとに符号付き 6-bit code（-32..31）と FP16 scale
+  へ変換し、code 24 byte + scale 2 byte の 26 byte/group で保持する。scale は
+  `max(max_positive / 31, -min_negative / 32)` である。詳細は
+  [qwen4exp.md](qwen4exp.md) を参照。
+  codec は `shelf_quant_reference` の `shelf/quantization/int6/int6_w32.h` にある。
 - self-contained quantized safetensors — `shelf_quantization.json` manifest 付きの
   quantized safetensors。`shelf-compute` が直接ロード可能。
   各tensorに `QuantSpecId` / `ComputeSpecId` / CRC32 payloadを保持する。

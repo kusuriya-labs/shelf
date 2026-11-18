@@ -13,11 +13,13 @@
 #include <shelf/kernels/optimized/qsa.h>
 #include <shelf/models/qwen35/runtime/executor_footprint.h>
 #include <shelf/models/qwen4exp/runtime/ple_input.h>
+#include <shelf/models/qwen4exp/runtime/moe_expert_cache.h>
 #include <shelf/runtime/execution/row_bucket.h>
 #include <shelf/runtime/graph/grouped_row_shape.h>
 #include <shelf/runtime/program/moe_plan_scratch.h>
 
 #include <memory>
+#include <cstdlib>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -189,7 +191,11 @@ public:
                         std::uint32_t max_context_tokens,
                         std::shared_ptr<const qwen4exp::PleTable> ple_table)
         : model_(std::move(model)), context_(context),
-          max_context_tokens_(max_context_tokens), ple_table_(std::move(ple_table)) {}
+          max_context_tokens_(max_context_tokens), ple_table_(std::move(ple_table)) {
+        if (model_.weights().host_experts != 0u) {
+            cache_ = qwen4exp::MoeExpertCache::create(model_.weights());
+        }
+    }
 
     const qhy::QwenHybridConfig& hybrid_config() const override {
         return model_.text_config();
@@ -238,6 +244,10 @@ public:
             }
         }
         return total;
+    }
+
+    std::uint64_t host_pinned_bytes() const override {
+        return model_.weights().host_expert_bytes();
     }
 
     std::size_t token_row_ffn_size() const override {
@@ -315,8 +325,15 @@ public:
         q35::SequenceSlotPool& sequence_pool, q35::GdnStatePool& gdn_state_pool,
         q35::PagedKVPool& kv_pool, gpu::GpuArena& arena,
         const q35::ExecutorConfig& config) const override {
-        return create_qwen4exp_model_executor(model_, ple_table_, sequence_pool,
-                                              gdn_state_pool, kv_pool, arena, config);
+        auto created = create_qwen4exp_model_executor(
+            model_, ple_table_, sequence_pool, gdn_state_pool, kv_pool, arena, config);
+        if (created.ok() && cache_ != nullptr) {
+            auto cache = cache_;
+            created.value().after_batch = [cache](hipStream_t stream) {
+                return cache->step(stream);
+            };
+        }
+        return created;
     }
 
     const qwen4exp::Qwen4ExpModel* qwen4exp_model() const override { return &model_; }
@@ -352,6 +369,7 @@ private:
     qhy::TensorParallelContext context_;
     std::uint32_t max_context_tokens_ = 512u;
     std::shared_ptr<const qwen4exp::PleTable> ple_table_;
+    std::shared_ptr<qwen4exp::MoeExpertCache> cache_;
 };
 
 }  // namespace
@@ -485,6 +503,10 @@ Result<std::unique_ptr<TpRankModel>> build_qwen4exp_tp_rank_model(
     const auto& cfg = text_config.value();
     qwen4exp::Qwen4ExpLoadOptions load_options;
     load_options.load_mtp = config.load_mtp_layers;
+    if (const char* host_experts = std::getenv("SHELF_MOE_HOST_EXPERTS")) {
+        load_options.moe_host_experts =
+            static_cast<std::uint32_t>(std::strtoul(host_experts, nullptr, 10));
+    }
     auto model = qwen4exp::Qwen4ExpModel::load_from_safetensors(
         config.model_dir, config.tp_size, config.tp_rank, arena, stream,
         load_options);

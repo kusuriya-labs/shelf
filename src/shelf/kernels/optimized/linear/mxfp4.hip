@@ -803,10 +803,12 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_mxfp4_w4a8_grouped_kern
     const uint32_t output_row_stride,
     const uint32_t* __restrict__ group_expert,
     const uint32_t* __restrict__ group_rows,
+    const uint32_t* __restrict__ group_row_base,
     const uint32_t* __restrict__ group_count) {
     const uint32_t g = blockIdx.y;
     if (g >= group_count[0])
         return;
+    const uint32_t base = group_row_base != nullptr ? group_row_base[g] : g;
     (void)out_features;
     const uint32_t tid = threadIdx.x;
     const uint32_t m_lane = tid & 15u;
@@ -829,7 +831,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_mxfp4_w4a8_grouped_kern
         static_cast<size_t>(expert) * static_cast<size_t>(scales_batch_stride) +
         static_cast<size_t>(o_self) * weight_scale_stride;
     const uint8_t* arow = activation_codes +
-        static_cast<size_t>(g) * (static_cast<size_t>(activation_code_stride) * 16u) +
+        static_cast<size_t>(base) * (static_cast<size_t>(activation_code_stride) * 16u) +
         static_cast<size_t>(tid) * kFragLaneBytes;
 
     __shared__ uint2 mag_lds[16];
@@ -885,7 +887,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_mxfp4_w4a8_grouped_kern
         const uint32_t inside = 8u * k_group + static_cast<uint32_t>(j);
         if (inside >= rows_here)
             continue;
-        const uint32_t r = g * kTileRow + inside;
+        const uint32_t r = base * kTileRow + inside;
         float v = acc[j];
         if constexpr (kFold)
             v *= epi;
@@ -1119,7 +1121,7 @@ hipError_t launch_gemm_mxfp4_w4a8_auto(
         output_row_stride, stream);
 }
 
-hipError_t launch_gemm_mxfp4_w4a8_grouped(
+hipError_t launch_gemm_mxfp4_w4a8_grouped_split(
     const uint8_t* weight_codes,
     const uint8_t* weight_scales,
     const uint8_t* weight_ref,
@@ -1138,6 +1140,7 @@ hipError_t launch_gemm_mxfp4_w4a8_grouped(
     uint32_t output_row_stride,
     const uint32_t* group_expert,
     const uint32_t* group_rows,
+    const uint32_t* group_row_base,
     const uint32_t* group_count,
     uint32_t group_capacity,
     hipStream_t stream) {
@@ -1174,7 +1177,7 @@ hipError_t launch_gemm_mxfp4_w4a8_grouped(
             weight_codes_batch_stride_bytes, weight_scales_batch_stride_bytes,          \
             weight_rows, weight_scale_stride_bytes, activation_code_stride_bytes,       \
             activation_scale_stride_bytes, output_row_stride, group_expert, group_rows, \
-            group_count
+            group_row_base, group_count
     if (weight_ref != nullptr)
         gemm_mxfp4_w4a8_grouped_kernel<true>
             <<<grid, kThreadsPerBlock, 0, stream>>>(MXFP4_GROUPED_ARGS);
@@ -1183,6 +1186,36 @@ hipError_t launch_gemm_mxfp4_w4a8_grouped(
             <<<grid, kThreadsPerBlock, 0, stream>>>(MXFP4_GROUPED_ARGS);
     #undef MXFP4_GROUPED_ARGS
     return hipGetLastError();
+}
+
+hipError_t launch_gemm_mxfp4_w4a8_grouped(
+    const uint8_t* weight_codes,
+    const uint8_t* weight_scales,
+    const uint8_t* weight_ref,
+    const int8_t* activation_codes,
+    const float* activation_scales,
+    void* output,
+    Mxfp4GemmOutputDType output_dtype,
+    uint32_t out_features,
+    uint32_t k_padded,
+    uint32_t weight_rows,
+    uint64_t weight_codes_batch_stride_bytes,
+    uint64_t weight_scales_batch_stride_bytes,
+    uint32_t weight_scale_stride_bytes,
+    uint32_t activation_code_stride_bytes,
+    uint32_t activation_scale_stride_bytes,
+    uint32_t output_row_stride,
+    const uint32_t* group_expert,
+    const uint32_t* group_rows,
+    const uint32_t* group_count,
+    uint32_t group_capacity,
+    hipStream_t stream) {
+    return launch_gemm_mxfp4_w4a8_grouped_split(
+        weight_codes, weight_scales, weight_ref, activation_codes, activation_scales, output,
+        output_dtype, out_features, k_padded, weight_rows, weight_codes_batch_stride_bytes,
+        weight_scales_batch_stride_bytes, weight_scale_stride_bytes,
+        activation_code_stride_bytes, activation_scale_stride_bytes, output_row_stride,
+        group_expert, group_rows, nullptr, group_count, group_capacity, stream);
 }
 
 #undef MXFP4_ARGS

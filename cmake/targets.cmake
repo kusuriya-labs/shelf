@@ -425,6 +425,7 @@ set(
     src/shelf/models/qwen4exp/model/qsa_lowering.cpp
     src/shelf/models/qwen4exp/weights/ple_table.cpp
     src/shelf/models/qwen4exp/runtime/ple_input.cpp
+    src/shelf/models/qwen4exp/runtime/moe_expert_cache.cpp
     src/shelf/models/qwen4exp/runtime/executor_footprint.cpp
     src/shelf/models/qwen4exp/runtime/ple_input.cpp
     src/shelf/models/qwen4exp/weights/qwen4exp_load.cpp
@@ -533,6 +534,7 @@ add_library(shelf_quant_reference STATIC
     src/shelf/quantization/mxfp4/mxfp4_native.cpp
     src/shelf/quantization/exl3/exl3.cpp
     src/shelf/quantization/exl3/exl3_int8.cpp
+    src/shelf/quantization/int6/int6_w32.cpp
 )
 set_source_files_properties(
     src/shelf/quantization/fp8/fp8.cpp

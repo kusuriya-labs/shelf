@@ -13,11 +13,19 @@
 namespace shelf {
 namespace qwen4exp {
 
-// Host-resident PLE n-gram table. The 128 shards are read with pread into anonymous
-// RAM; no GPU allocation and no pinned host allocation are made here. The table is
-// shared by the tensor-parallel rank threads, which live in the same process.
+// Host-resident PLE n-gram table. Shards are read into anonymous RAM and shared by the
+// tensor-parallel rank threads, which live in the same process. The EXL3 file path reads
+// with pread; the HF shard path maps the checkpoint tensors and copies or converts them
+// into anonymous RAM.
 class PleTable {
 public:
+    // Packaged row layout held in host RAM.
+    enum class TableFormat : std::uint8_t {
+        Exl3Trellis = 0,
+        Fp8E4M3 = 1,
+        Int6W32Fp16 = 2,
+    };
+
     static Result<PleTable> load(const std::string& model_dir,
                                  const Qwen4ExpTextConfig& config,
                                  bool fadvise_dontneed = true);
@@ -32,6 +40,10 @@ public:
     [[nodiscard]] std::uint64_t rows() const noexcept { return rows_; }
     [[nodiscard]] std::uint32_t row_width() const noexcept { return row_width_; }
     [[nodiscard]] std::uint32_t row_bytes() const noexcept { return row_bytes_; }
+    [[nodiscard]] TableFormat format() const noexcept { return format_; }
+    [[nodiscard]] bool int6_w32_fp16() const noexcept {
+        return format_ == TableFormat::Int6W32Fp16;
+    }
     [[nodiscard]] std::uint32_t k_bits() const noexcept { return k_bits_; }
     [[nodiscard]] std::uint32_t shard_count() const noexcept { return shard_count_; }
     [[nodiscard]] std::uint32_t shard_rows() const noexcept { return shard_rows_; }
@@ -49,12 +61,15 @@ public:
         return layer_multipliers_;
     }
 
-    // One 162-byte (K=8) packed row. Returns nullptr for an out-of-range row.
+    // One packaged row. Returns nullptr for an out-of-range row. The row layout depends
+    // on `format()`: EXL3 trellis, FP8 E4M3, or INT6 W32 FP16.
     [[nodiscard]] const std::uint8_t* row_ptr(std::uint64_t row) const noexcept;
 
     // CPU reference decode of one row: 160 f32 values. Used by load validation and by
-    // the initial CPU-gather path before the GPU-side gather exists.
-    Result<std::vector<float>> decode_row(std::uint64_t row) const;
+    // the initial CPU-gather path before the GPU-side gather exists. `include_head_bias`
+    // applies the per-head bias stored with the checkpoint table.
+    Result<std::vector<float>> decode_row(std::uint64_t row,
+                                          bool include_head_bias = true) const;
 
     // Token history -> global table row ids. history carries the (ngram_size - 1)
     // context tokens followed by the current input; out_len says how many trailing
@@ -76,12 +91,13 @@ public:
                                                       std::uint64_t row) const;
 
 private:
-    static Result<PleTable> load_fp8(const std::string& model_dir,
-                                     const Qwen4ExpTextConfig& config,
-                                     bool fadvise_dontneed);
+    static Result<PleTable> load_index_shards(const std::string& model_dir,
+                                              const Qwen4ExpTextConfig& config,
+                                              bool fadvise_dontneed);
 
-    enum class TableMode : std::uint8_t { Exl3Trellis = 0, Fp8E4M3 = 1 };
-    TableMode mode_ = TableMode::Exl3Trellis;
+    std::size_t head_for_row(std::uint64_t row) const noexcept;
+
+    TableFormat format_ = TableFormat::Exl3Trellis;
     float fp8_scale_ = 1.0f;
 
     struct FreeDeleter {

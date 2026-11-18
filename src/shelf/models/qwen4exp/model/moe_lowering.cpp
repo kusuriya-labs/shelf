@@ -21,9 +21,14 @@ Status require_matrix(const MatrixWeight& weight, std::uint32_t rows, std::uint3
     return Status::make_ok();
 }
 
-Status require_experts(const MatrixWeight& weight, std::uint32_t local_experts,
-                       std::uint32_t rows, std::uint32_t cols, const char* what) {
-    if (weight.experts != local_experts || weight.rows != rows || weight.cols != cols) {
+Status require_experts(const MatrixWeight& weight, const MatrixWeight& host,
+                       std::uint32_t local_experts, std::uint32_t rows,
+                       std::uint32_t cols, const char* what) {
+    if (weight.experts + host.experts != local_experts || weight.rows != rows ||
+        weight.cols != cols || host.rows != rows || host.cols != cols ||
+        (host.experts != 0u &&
+         (!host.host_resident || host.host_codes == nullptr ||
+          host.host_scales == nullptr || host.host_row_ref == nullptr))) {
         return Status::invalid_argument(
             (std::string("Qwen4Exp MoE expert plane mismatch: ") + what).c_str(), __FILE__,
             __LINE__);
@@ -72,14 +77,17 @@ Result<RT::ValueId> emit_qwen4exp_moe(Emitter& em,
     st = require_matrix(weights.shared_down_proj, geometry.hidden,
                         geometry.shared_intermediate, "shared_down_proj");
     if (!st.ok()) return st;
-    st = require_experts(weights.gate_experts, geometry.local_experts,
-                         geometry.intermediate, geometry.hidden, "gate_experts");
+    st = require_experts(weights.gate_experts, weights.gate_experts_host,
+                         geometry.local_experts, geometry.intermediate, geometry.hidden,
+                         "gate_experts");
     if (!st.ok()) return st;
-    st = require_experts(weights.up_experts, geometry.local_experts,
-                         geometry.intermediate, geometry.hidden, "up_experts");
+    st = require_experts(weights.up_experts, weights.up_experts_host,
+                         geometry.local_experts, geometry.intermediate, geometry.hidden,
+                         "up_experts");
     if (!st.ok()) return st;
-    st = require_experts(weights.down_experts, geometry.local_experts, geometry.hidden,
-                         geometry.intermediate, "down_experts");
+    st = require_experts(weights.down_experts, weights.down_experts_host,
+                         geometry.local_experts, geometry.hidden, geometry.intermediate,
+                         "down_experts");
     if (!st.ok()) return st;
 
     const RT::ValueId logits = em.linear(weights.router, indices.w_router, post_norm,
@@ -91,6 +99,8 @@ Result<RT::ValueId> emit_qwen4exp_moe(Emitter& em,
         route.top_k = geometry.top_k;
         route.local_experts = geometry.local_experts;
         route.expert_begin = geometry.expert_begin;
+        route.slot_map_parameter_index = indices.p_expert_slot_map;
+        route.route_freq_parameter_index = indices.p_route_freq;
         em.emit(RT::PrimitiveNode{route}, {logits}, {});
     }
 
@@ -99,6 +109,7 @@ Result<RT::ValueId> emit_qwen4exp_moe(Emitter& em,
         RT::MoeGroupedLinearNode n;
         n.shape = RT::MatrixwiseShapeKey{geometry.intermediate, geometry.hidden};
         n.weight_index = indices.w_gate_experts;
+        n.host_weight_index = indices.w_gate_experts_host;
         n.out_dtype = RT::ValueDType::BF16;
         em.emit(RT::PrimitiveNode{n}, {post_norm}, {gate});
     }
@@ -107,6 +118,7 @@ Result<RT::ValueId> emit_qwen4exp_moe(Emitter& em,
         RT::MoeGroupedLinearNode n;
         n.shape = RT::MatrixwiseShapeKey{geometry.intermediate, geometry.hidden};
         n.weight_index = indices.w_up_experts;
+        n.host_weight_index = indices.w_up_experts_host;
         n.out_dtype = RT::ValueDType::BF16;
         em.emit(RT::PrimitiveNode{n}, {post_norm}, {up});
     }
@@ -120,6 +132,7 @@ Result<RT::ValueId> emit_qwen4exp_moe(Emitter& em,
         RT::MoeGroupedLinearNode n;
         n.shape = RT::MatrixwiseShapeKey{geometry.hidden, geometry.intermediate};
         n.weight_index = indices.w_down_experts;
+        n.host_weight_index = indices.w_down_experts_host;
         n.out_dtype = RT::ValueDType::BF16;
         em.emit(RT::PrimitiveNode{n}, {act}, {expert_out});
         em.pg.nodes.back().debug_name = std::string(debug_prefix) + "moe_expert_out";

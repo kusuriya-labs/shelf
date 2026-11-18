@@ -143,4 +143,31 @@ hipError_t launch_gemm_mxfp4_w4a8_grouped(
     uint32_t group_capacity,
     hipStream_t stream);
 
+// Split variant. `group_row_base[g]` is the original group index, so a hit plan and a
+// miss plan writing disjoint groups still share the activation and output group-row
+// layout. A null `group_row_base` is the identity.
+hipError_t launch_gemm_mxfp4_w4a8_grouped_split(
+    const uint8_t* weight_codes,
+    const uint8_t* weight_scales,
+    const uint8_t* weight_ref,
+    const int8_t* activation_codes,
+    const float* activation_scales,
+    void* output,
+    Mxfp4GemmOutputDType output_dtype,
+    uint32_t out_features,
+    uint32_t k_padded,
+    uint32_t weight_rows,
+    uint64_t weight_codes_batch_stride_bytes,
+    uint64_t weight_scales_batch_stride_bytes,
+    uint32_t weight_scale_stride_bytes,
+    uint32_t activation_code_stride_bytes,
+    uint32_t activation_scale_stride_bytes,
+    uint32_t output_row_stride,
+    const uint32_t* group_expert,
+    const uint32_t* group_rows,
+    const uint32_t* group_row_base,
+    const uint32_t* group_count,
+    uint32_t group_capacity,
+    hipStream_t stream);
+
 }  // namespace shelf::kernel

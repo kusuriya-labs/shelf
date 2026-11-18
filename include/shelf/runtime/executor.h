@@ -344,6 +344,9 @@ struct Executor {
     std::unique_ptr<::shelf::state::PleConvStatePool> ple_conv_state_pool;
     ExternalInputPreparer external_input_preparer;
     ExternalPrefixRestoreHandler external_prefix_restore;
+    // Runs after a batch has completed and before the next one is submitted. The Qwen4Exp
+    // expert cache uses it to update residency from the routing the batch produced.
+    std::function<Status(hipStream_t)> after_batch;
 
     ExecutorConfig config;
 

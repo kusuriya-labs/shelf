@@ -40,6 +40,9 @@ struct LayerWeightIndices {
     std::uint32_t gate_experts = 0;
     std::uint32_t up_experts = 0;
     std::uint32_t down_experts = 0;
+    std::uint32_t gate_experts_host = UINT32_MAX;
+    std::uint32_t up_experts_host = UINT32_MAX;
+    std::uint32_t down_experts_host = UINT32_MAX;
     std::uint32_t ple_key = 0;
     std::uint32_t ple_value = 0;
 };
@@ -59,6 +62,8 @@ struct LayerParamIndices {
     std::uint32_t ple_norm_query = UINT32_MAX;
     std::uint32_t ple_norm_conv = UINT32_MAX;
     std::uint32_t ple_conv = UINT32_MAX;
+    std::uint32_t expert_slot_map = UINT32_MAX;
+    std::uint32_t route_freq = UINT32_MAX;
 };
 
 std::uint32_t tensor_elements(const gpu::Tensor& t) {
@@ -167,6 +172,15 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
         lowered.parameters.push_back(s);
         return static_cast<std::uint32_t>(lowered.parameters.size() - 1);
     };
+    auto reg_raw_param = [&](const void* ptr, std::uint32_t elements,
+                             RT::ValueDType dtype) -> std::uint32_t {
+        RT::StaticParameterSlot s{};
+        s.device_ptr = ptr;
+        s.elements = elements;
+        s.dtype = dtype;
+        lowered.parameters.push_back(s);
+        return static_cast<std::uint32_t>(lowered.parameters.size() - 1);
+    };
 
     const std::uint32_t embed_index = add_weight(weights.embed_tokens);
     const std::uint32_t lm_index = add_weight(weights.lm_head);
@@ -197,12 +211,27 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
         idx.gate_experts = add_weight(lw.mlp.gate_experts);
         idx.up_experts = add_weight(lw.mlp.up_experts);
         idx.down_experts = add_weight(lw.mlp.down_experts);
+        if (weights.host_experts != 0u) {
+            idx.gate_experts_host = add_weight(lw.mlp.gate_experts_host);
+            idx.up_experts_host = add_weight(lw.mlp.up_experts_host);
+            idx.down_experts_host = add_weight(lw.mlp.down_experts_host);
+        }
         if (lw.ple.present) {
             idx.ple_key = add_weight(lw.ple.key_proj);
             idx.ple_value = add_weight(lw.ple.value_proj);
         }
 
         auto& lp = layer_params[li];
+        if (weights.host_experts != 0u) {
+            lp.expert_slot_map = reg_raw_param(
+                weights.expert_slot_map.data<std::int32_t>() +
+                    static_cast<std::size_t>(li) * local_experts,
+                local_experts, RT::ValueDType::I32);
+            lp.route_freq = reg_raw_param(
+                weights.expert_route_freq.data<std::int32_t>() +
+                    static_cast<std::size_t>(li) * local_experts,
+                local_experts, RT::ValueDType::I32);
+        }
         lp.attn_norm = reg_param(lw.attn_hyper_connection.hc_norm);
         lp.mlp_norm = reg_param(lw.mlp_hyper_connection.hc_norm);
         if (lw.attention.is_gdn) {
@@ -385,6 +414,11 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
             idx.gate_experts,
             idx.up_experts,
             idx.down_experts,
+            idx.gate_experts_host,
+            idx.up_experts_host,
+            idx.down_experts_host,
+            lp.expert_slot_map,
+            lp.route_freq,
         };
 
         if (lw.ple.present) {

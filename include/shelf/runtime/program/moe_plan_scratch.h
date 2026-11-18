@@ -36,6 +36,14 @@ struct MoePlanScratch {
     uint32_t group_count_offset = 0;
     uint32_t row_token_offset = 0;
     uint32_t slot_row_of_offset = 0;
+    uint32_t hit_slot_offset = 0;
+    uint32_t hit_rows_offset = 0;
+    uint32_t hit_base_offset = 0;
+    uint32_t hit_count_offset = 0;
+    uint32_t miss_slot_offset = 0;
+    uint32_t miss_rows_offset = 0;
+    uint32_t miss_base_offset = 0;
+    uint32_t miss_count_offset = 0;
 
     uint32_t capacity_units = 0;
 
@@ -76,6 +84,22 @@ struct MoePlanScratch {
         at += s.row_capacity;
         s.slot_row_of_offset = at;
         at += s.slots;
+        s.hit_slot_offset = at;
+        at += s.group_capacity;
+        s.hit_rows_offset = at;
+        at += s.group_capacity;
+        s.hit_base_offset = at;
+        at += s.group_capacity;
+        s.hit_count_offset = at;
+        at += 1u;
+        s.miss_slot_offset = at;
+        at += s.group_capacity;
+        s.miss_rows_offset = at;
+        at += s.group_capacity;
+        s.miss_base_offset = at;
+        at += s.group_capacity;
+        s.miss_count_offset = at;
+        at += 1u;
         s.capacity_units = at;
         return s;
     }

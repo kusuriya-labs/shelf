@@ -229,6 +229,11 @@ struct MoeRouterNode {
     uint32_t top_k = 0;
     uint32_t local_experts = 0;
     uint32_t expert_begin = 0;
+    // Static parameter index of int32 [local_experts]: >= 0 is a VRAM slot, -1 - slot is
+    // a host slot. kNoParameter keeps every expert in VRAM.
+    uint32_t slot_map_parameter_index = UINT32_MAX;
+    // Static parameter index of uint32 [local_experts]: routes observed in this batch.
+    uint32_t route_freq_parameter_index = UINT32_MAX;
 
     // A node that states no range owns every expert.
     uint32_t owned_experts() const noexcept { return local_experts != 0u ? local_experts : experts; }
@@ -241,6 +246,9 @@ struct MoeRouterNode {
 struct MoeGroupedLinearNode {
     MatrixwiseShapeKey shape;
     uint32_t weight_index = 0;
+    // Weight slot of the host plane for experts the slot map marks as misses.
+    // kNoWeight means every selected expert is served by the VRAM plane.
+    uint32_t host_weight_index = UINT32_MAX;
     ValueDType out_dtype = ValueDType::BF16;
 };
 

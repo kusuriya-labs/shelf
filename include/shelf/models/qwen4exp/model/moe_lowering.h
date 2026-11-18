@@ -31,6 +31,11 @@ struct Qwen4ExpMoeLoweringIndices {
     std::uint32_t w_gate_experts = 0;
     std::uint32_t w_up_experts = 0;
     std::uint32_t w_down_experts = 0;
+    std::uint32_t w_gate_experts_host = UINT32_MAX;
+    std::uint32_t w_up_experts_host = UINT32_MAX;
+    std::uint32_t w_down_experts_host = UINT32_MAX;
+    std::uint32_t p_expert_slot_map = UINT32_MAX;
+    std::uint32_t p_route_freq = UINT32_MAX;
 };
 
 // Qwen4Exp MoE FFN: global top-k routing, separate gate/up/down EXL3 expert planes,

@@ -856,9 +856,11 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
             rb.input_count = 1;
             rb.scratch_logit_experts = n.experts;
             rb.scratch_expert_begin = n.expert_begin;
+            rb.parameter_index1 = n.route_freq_parameter_index;
             c.use_moe_scratch(rb);
             c.push(rb);
             DispatchBinding sb = base_binding(KernelId::MOE_PLAN_SCAN);
+            sb.parameter_index0 = n.slot_map_parameter_index;
             c.use_moe_scratch(sb);
             c.push(sb);
             DispatchBinding tb = base_binding(KernelId::MOE_PLAN_SCATTER);
@@ -876,6 +878,14 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
                 return fail("moe grouped linear weight is not a rank-3 expert plane");
             if (w.rows != n.shape.output_features || w.cols != n.shape.input_features)
                 return fail("moe grouped linear weight shape mismatch");
+            if (n.host_weight_index != ::shelf::runtime::kNoWeight) {
+                if (n.host_weight_index >= c.weights.count)
+                    return fail("moe grouped host weight index exceeds view");
+                const auto wh = c.weights.at(n.host_weight_index);
+                if (wh.experts < 2u || wh.rows != w.rows || wh.cols != w.cols ||
+                    wh.encoding != w.encoding)
+                    return fail("moe grouped host weight plane mismatch");
+            }
             const Result<ResolvedLinearQuantContract> resolved =
                 resolve_linear_quant_contract(w.encoding, w.compute_spec);
             if (!resolved.ok()) return resolved.status();
@@ -973,6 +983,7 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
 
             DispatchBinding b = base_binding(KernelId::LINEAR_MXFP4_W4A8_GROUPED);
             b.weight_index = n.weight_index;
+            b.host_weight_index = n.host_weight_index;
             b.compute_spec = w.compute_spec;
             b.flags = c.graph->value_dtype(node.outputs[0]) == ValueDType::F32 ? 1u : 0u;
             auto& aw = c.activation_workspaces[c.activation_ws_by_input[act_ws_key]];

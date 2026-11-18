@@ -29,6 +29,11 @@ struct MatrixWeight {
     // A tied embedding stays in VRAM: the lm_head reads it as a matrix.
     bool host_resident = false;
     const void* host_payload = nullptr;
+    // Quantized rank-3 expert plane in pinned host memory. `codes` / `scales` / `row_ref`
+    // stay empty; the GPU reads these pointers through the unified address space.
+    const void* host_codes = nullptr;
+    const void* host_scales = nullptr;
+    const void* host_row_ref = nullptr;
     gpu::Tensor data;
     gpu::Tensor codes;
     gpu::Tensor scales;

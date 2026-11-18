@@ -83,6 +83,14 @@ Result<MoePlanView> resolve_moe_plan(const Program& program, const DispatchBindi
     view.arrays.group_count = base + capacity.group_count_offset;
     view.arrays.row_token = reinterpret_cast<int32_t*>(base + capacity.row_token_offset);
     view.arrays.slot_row_of = reinterpret_cast<int32_t*>(base + capacity.slot_row_of_offset);
+    view.arrays.hit_slot = base + capacity.hit_slot_offset;
+    view.arrays.hit_rows = base + capacity.hit_rows_offset;
+    view.arrays.hit_base = base + capacity.hit_base_offset;
+    view.arrays.hit_count = base + capacity.hit_count_offset;
+    view.arrays.miss_slot = base + capacity.miss_slot_offset;
+    view.arrays.miss_rows = base + capacity.miss_rows_offset;
+    view.arrays.miss_base = base + capacity.miss_base_offset;
+    view.arrays.miss_count = base + capacity.miss_count_offset;
     return view;
 }
 
@@ -104,11 +112,20 @@ Result<OptimizedLaunchResult> try_launch_moe_router(const Program& program,
     if (in.ptr == nullptr) return bad("moe router: logits unbound");
     if (in.row_stride < in.feature_count) return bad("moe router: logits row stride");
 
+    uint32_t* route_freq = nullptr;
+    if (b.parameter_index1 != ::shelf::runtime::kNoParameter) {
+        if (ctx.host_parameters == nullptr ||
+            b.parameter_index1 >= ctx.host_parameter_count) {
+            return bad("moe router: route frequency parameter out of range");
+        }
+        route_freq = reinterpret_cast<uint32_t*>(
+            const_cast<void*>(ctx.host_parameters[b.parameter_index1].device_ptr));
+    }
     const hipError_t herr = ::shelf::kernel::launch_moe_router(
         static_cast<const float*>(in.ptr), in.row_stride, plan.value().arrays.sel_expert,
         plan.value().arrays.sel_weight, plan.value().arrays.tile_counts, plan.value().tokens,
         plan.value().logit_experts, plan.value().top_k, plan.value().expert_begin,
-        plan.value().experts, ctx.error_word, stream);
+        plan.value().experts, ctx.error_word, stream, route_freq);
     if (herr != hipSuccess)
         return Status::hip_error("moe router launch", hipGetErrorString(herr), __FILE__,
                                  __LINE__);
@@ -125,10 +142,21 @@ Result<OptimizedLaunchResult> try_launch_moe_plan_scan(const Program& program,
     if (!plan.ok()) return plan.status();
     if (b.input_count != 0u) return bad("moe plan scan: input_count != 0");
     const auto& a = plan.value().arrays;
-    const hipError_t herr = ::shelf::kernel::launch_moe_slot_scan(
+    const int32_t* expert_slot = nullptr;
+    if (b.parameter_index0 != ::shelf::runtime::kNoParameter) {
+        if (ctx.host_parameters == nullptr ||
+            b.parameter_index0 >= ctx.host_parameter_count) {
+            return bad("moe plan scan: slot map parameter out of range");
+        }
+        expert_slot = static_cast<const int32_t*>(
+            ctx.host_parameters[b.parameter_index0].device_ptr);
+        if (expert_slot == nullptr) return bad("moe plan scan: slot map is unbound");
+    }
+    const hipError_t herr = ::shelf::kernel::launch_moe_slot_scan_split(
         a.tile_counts, a.expert_row_begin, a.tile_base, a.expert_group_begin, a.group_expert,
-        a.group_rows, a.group_count, a.row_token, plan.value().tokens, plan.value().experts,
-        plan.value().top_k, stream);
+        a.group_rows, a.group_count, a.row_token, expert_slot, a.hit_slot, a.hit_rows,
+        a.hit_base, a.hit_count, a.miss_slot, a.miss_rows, a.miss_base, a.miss_count,
+        plan.value().tokens, plan.value().experts, plan.value().top_k, stream);
     if (herr != hipSuccess)
         return Status::hip_error("moe plan scan launch", hipGetErrorString(herr), __FILE__,
                                  __LINE__);
@@ -220,21 +248,53 @@ Result<OptimizedLaunchResult> try_launch_moe_grouped_linear(const Program& progr
     const uint8_t* acodes = reinterpret_cast<const uint8_t*>(range_base + layout.codes_offset);
     const float* ascales = reinterpret_cast<const float*>(range_base + layout.scales_offset);
 
-    const hipError_t herr = ::shelf::kernel::launch_gemm_mxfp4_w4a8_grouped(
-        static_cast<const uint8_t*>(e.codes), static_cast<const uint8_t*>(e.scales),
-        e.row_ref_exact && e.row_ref != nullptr ? static_cast<const uint8_t*>(e.row_ref)
-                                               : nullptr,
-        reinterpret_cast<const int8_t*>(acodes), ascales, out.ptr,
-        out.dtype == ValueDType::BF16 ? ::shelf::kernel::Mxfp4GemmOutputDType::BF16
-                                     : ::shelf::kernel::Mxfp4GemmOutputDType::F32,
-        e.rows, wkp, e.rows, e.codes_batch_stride_bytes, e.scales_batch_stride_bytes,
-        e.scale_row_stride_bytes, b.activation_code_stride, b.activation_scale_stride,
-        out.row_stride, plan.value().arrays.group_expert, plan.value().arrays.group_rows,
-        plan.value().arrays.group_count, plan.value().group_capacity, stream);
+    auto launch_plane = [&](const WeightSlot& plane, const uint32_t* slot,
+                            const uint32_t* rows, const uint32_t* base,
+                            const uint32_t* count) -> hipError_t {
+        return ::shelf::kernel::launch_gemm_mxfp4_w4a8_grouped_split(
+            static_cast<const uint8_t*>(plane.codes),
+            static_cast<const uint8_t*>(plane.scales),
+            plane.row_ref_exact && plane.row_ref != nullptr
+                ? static_cast<const uint8_t*>(plane.row_ref)
+                : nullptr,
+            reinterpret_cast<const int8_t*>(acodes), ascales, out.ptr,
+            out.dtype == ValueDType::BF16 ? ::shelf::kernel::Mxfp4GemmOutputDType::BF16
+                                         : ::shelf::kernel::Mxfp4GemmOutputDType::F32,
+            plane.rows, wkp, plane.rows, plane.codes_batch_stride_bytes,
+            plane.scales_batch_stride_bytes, plane.scale_row_stride_bytes,
+            b.activation_code_stride, b.activation_scale_stride, out.row_stride, slot, rows,
+            base, count, plan.value().group_capacity, stream);
+    };
+
+    hipError_t herr = launch_plane(e, plan.value().arrays.hit_slot, plan.value().arrays.hit_rows,
+                                   plan.value().arrays.hit_base,
+                                   plan.value().arrays.hit_count);
     if (herr == hipErrorNotSupported) return kNone;
     if (herr != hipSuccess)
         return Status::hip_error("moe grouped gemm launch", hipGetErrorString(herr), __FILE__,
                                  __LINE__);
+
+    if (b.host_weight_index != ::shelf::runtime::kNoWeight) {
+        if (b.host_weight_index >= ctx.weight_count)
+            return bad("moe grouped linear: host weight_index invalid");
+        const WeightSlot host = ctx.weights[b.host_weight_index];
+        if (host.encoding != 3u || host.codes == nullptr || host.scales == nullptr ||
+            host.experts < 2u || !host.preshuffled || host.weight_scale_group != 32u ||
+            host.rows != e.rows || host.k_padded != wkp ||
+            host.codes_row_stride_bytes != e.codes_row_stride_bytes ||
+            host.scale_row_stride_bytes != e.scale_row_stride_bytes ||
+            host.storage_scale_stride_bytes != e.storage_scale_stride_bytes ||
+            host.codes_batch_stride_bytes != e.codes_batch_stride_bytes ||
+            host.scales_batch_stride_bytes != e.scales_batch_stride_bytes)
+            return bad("moe grouped linear: host expert plane mismatch");
+        herr = launch_plane(host, plan.value().arrays.miss_slot,
+                            plan.value().arrays.miss_rows, plan.value().arrays.miss_base,
+                            plan.value().arrays.miss_count);
+        if (herr == hipErrorNotSupported) return kNone;
+        if (herr != hipSuccess)
+            return Status::hip_error("moe grouped host gemm launch",
+                                     hipGetErrorString(herr), __FILE__, __LINE__);
+    }
     record_physical_launch(1u);
     record_optimized_op();
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};

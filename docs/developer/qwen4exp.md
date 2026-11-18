@@ -3,7 +3,8 @@
 Qwen3.8-Flash-Next の `model_type=qwen4_exp` checkpoint を読み、text-only で実行する
 ための現在の contract である。対象は TP=2 / TP=4、BF16 KV、48 層、PLE 有効、
 checkpoint は `models/Qwen3.8-Flash-Next-Quark-MXFP4`（routed / shared expert は
-MXFP4、attention / GDN は per-channel FP8、PLE は per-tensor FP8）。
+MXFP4、attention / GDN は per-channel FP8、PLE は BF16 shard を load 時に
+INT6 W32 FP16 へ変換）。
 
 ## 1. identity と起動
 
@@ -23,21 +24,35 @@ PLE の n-gram history を復元 prefix で再 seed する。MTP は無効であ
 | routed expert | MXFP4 E2M1 / E8M0 group32 | expert 軸で 512 を tp_size 分割し、rank-3 `MatrixWeight` |
 | shared expert | MXFP4 | 全 rank に複製 |
 | attention / GDN | FP8 E4M3 per-channel + F32 `[n]` | 全 rank に複製、preshuffle して WMMA fragment order |
-| PLE table（MXFP4 checkpoint） | FP8 E4M3 per-tensor + BF16 `[1]` | CPU RAM に 1 個を共有 |
-| PLE table（EXL3 checkpoint） | `ngram_embedding.safetensors` の trellis（`mul1`、K=8、row stride 162 B） | CPU RAM に 1 個を共有 |
+| PLE table（BF16 shard checkpoint） | HF shard 内の BF16 `[2500012, 160]`。load 時に INT6 W32 FP16 へオンライン変換して CPU RAM に保持 | CPU RAM に 1 個を共有 |
+| PLE table（FP8 shard checkpoint） | FP8 E4M3 per-tensor + BF16 `[1]` | CPU RAM に 1 個を共有 |
+| PLE table（EXL3 checkpoint） | `ngram_embedding.safetensors` の trellis（`mul1`、K は metadata） | CPU RAM に 1 個を共有 |
 | embed / lm_head / hyper / router | BF16 | 全 rank に複製 |
 
 - routed expert は `preshuffle_mxfp4_native` で 16 出力 x 32 K の 256 バイト block に
   repack する。E8M0 scale は row-major、row reference は行ごとの最大 E8M0 byte。
+- routed expert は既定で全 local expert を VRAM に置く。`SHELF_MOE_HOST_EXPERTS=N`
+  （layer あたり）を設定すると、各 layer の N expert を pinned host の plane に置き、
+  残りを VRAM の slot に置く。host plane は `hipHostMallocMapped` で、GPU の grouped
+  GEMM が PCIe 越しに読む。expert ごとの配置は device の slot map
+  `int32 [layers][local_experts]` が持つ（`>= 0` は VRAM slot、`-1 - slot` は host slot）。
+  EXL3 expert の host offload は未対応で、`SHELF_MOE_HOST_EXPERTS>0` は
+  `Status::unsupported` で停止する。
 - attention / GDN は `preshuffle_fp8_native` で gfx1201 の FP8 WMMA fragment order に
   する。活性は per-token dynamic FP8（`scale = amax / 448`）で、GEMM の epilogue で
   `weight_scale[o] * activation_scale[row]` を 1 回だけ適用する。
-- PLE table は checkpoint の形式で 2 経路ある。`ngram_embedding.safetensors` を持つ
+- PLE table は checkpoint の形式で 3 経路ある。`ngram_embedding.safetensors` を持つ
   EXL3 checkpoint は `pread` で読み、`row = mul1_codebook` の trellis で復号する。
-  `models/Qwen3.8-Flash-Next-Quark-MXFP4` の PLE は HF shard 内の **FP8 E4M3
-  per-tensor** で、E4M3 code × per-tensor scale で復号する（`weight_scale` は BF16）。
-  FP8 経路は 128 シャードを最大 16 worker で読み、EXL3 経路は従来の `pread` のままである。
-  どちらも起動時は rank の weight load と並行に prefetch する。
+  HF shard 内の BF16 table は load 時に **INT6 W32 FP16** へオンライン変換する。
+  HF shard 内の FP8 E4M3 per-tensor table は E4M3 code × per-tensor scale で復号する
+  （`weight_scale` は BF16）。インデックス経路はいずれも 128 シャードを最大 16 worker で
+  読み、EXL3 経路は従来の `pread` のままである。すべて起動時は rank の weight load と
+  並行に prefetch する。
+- INT6 W32 FP16 は 32 値ごとに符号付き 6-bit code（-32..31）と FP16 scale を持ち、
+  1 group を 24 byte の code と 2 byte の scale で表す。160 値の行は 130 byte
+  （6.5 bit/value）になる。scale は group の `max(max_positive / 31,
+  -min_negative / 32)` で、両側の極値を飽和させない。全 zero の group は scale 1 と
+  code 0 にする。BF16 table はオンライン変換後、元の BF16 shard を保持しない。
 - MXFP4 / FP8 の preshuffle staging は関数ローカルの buffer を非同期コピーしない。
   同期コピーで device へ移してから buffer を破棄する。
 
@@ -83,6 +98,15 @@ lm_head (final norm なし)
   bitmap がある場合、fp8 KV と行数の少ない chunk は tiled prefill を選ばない。
 - MoE は router（global 512、top-10）、gate/up/down の 3 grouped linear、shared expert、
   combine で構成する。shared expert の gate は sigmoid。
+- expert の slot map がある場合、router 後の plan scan は元の group を VRAM hit と
+  host miss に分ける。gate/up/down はそれぞれ hit 用と miss 用の grouped GEMM を 2 回
+  起動し、`group_row_base` で元の group 行へ書く。activation plane と combine の
+  group row は 1 本のままである。miss は host plane の重みを PCIe 越しに読む。
+- slot の入れ替えは step 間だけで行う。router は local expert ごとの route 数を
+  `expert_route_freq` に積み、batch 完了後に frequency の高い host expert と、その step
+  で使われていない低頻度の VRAM expert を交換する。`SHELF_MOE_CACHE_INSERTS`
+  （既定 4）が 1 step の交換上限、`SHELF_MOE_CACHE_DECAY`（既定 4096）が frequency を
+  半分にする閾値である。
 - PLE は layer 1 の attention site の前に注入する。key_proj / value_proj /
   norm_key / norm_query / norm_conv / short conv を使う。
 
@@ -99,10 +123,11 @@ RMS_NORM -> LINEAR(down) -> SILU(1/hc) -> LINEAR(up) -> HYPER_MIX
 
 ### PLE
 
-`PleTable::decode_row` は checkpoint の形式に応じて 2 経路を復号する。MXFP4
-checkpoint は E4M3 code × per-tensor BF16 scale、EXL3 checkpoint は
-`mul1_codebook` の trellis である。`ngram_rows` は 16 head（bigram 8 + trigram 8）の
-行番号を返し、
+`PleTable::decode_row` は checkpoint の形式に応じて 3 経路を復号する。BF16 shard
+checkpoint は INT6 W32 FP16、FP8 shard checkpoint は E4M3 code × per-tensor BF16
+scale、EXL3 checkpoint は `mul1_codebook` の trellis である。INT6 W32 FP16 は
+BF16 table の不可逆変換であり、PLE 入力の数値 class は BF16 と一致しない。
+`ngram_rows` は 16 head（bigram 8 + trigram 8）の行番号を返し、
 `PleInputRuntime` が sequence ごとの token history から 16 行を gather する。
 1 token あたり 16 行 = 2,560 要素である。
 
@@ -126,6 +151,8 @@ block tile 単位で書き、選択は tile ごとの radix select で上位 k �
 `create_qwen4exp_model_executor` が QSA key state、PLE conv state、PLE input runtime を
 作る。新しい sequence の最初の step（`position == 0`）で QSA / PLE state を zero に
 する。prefix cache は無効である。
+expert offload が有効な場合、`Executor::after_batch` が batch 完了後に
+`MoeExpertCache::step` を呼び、routing の収集と slot 交換を行う。
 
 ### DFlash2 target tap
 
@@ -168,6 +195,18 @@ BF16/F32 の raw ファイルと `.meta` に書き出す。ファイル名は
 `QSA MASKED` ケースが、bitmap を消費する bf16 tiled prefill と bf16 / fp8 decode を
 CPU 参照と突き合わせる。`test_executor_state_reserve` は state pool の予約 byte 数が
 arena の実消費と一致することを検証する。
+
+expert offload の E2E（TP=2）:
+
+```bash
+SHELF_MOE_HOST_EXPERTS=96 ./build/shelf-compute \
+  --model-dir models/Qwen3.8-Flash-Next-Quark-MXFP4 \
+  --input-ids-file <prompt.ids> --max-new-tokens 8 --max-seq-len 128 \
+  --device 2,3 --tensor-parallel 2 --prefix-cache 0 --kv-cache-dtype bf16 \
+  --temperature 0 --arena-gib 30
+```
+
+`SHELF_MOE_CACHE_LOG_INTERVAL=1` で step ごとの hit rate と swap 数を stderr に出す。
 
 実 checkpoint の E2E:
 

@@ -102,7 +102,8 @@ hipError_t launch_moe_router(
     uint32_t expert_begin,
     uint32_t owned_experts,
     uint32_t* error_word,
-    hipStream_t stream);
+    hipStream_t stream,
+    uint32_t* route_freq = nullptr);
 
 hipError_t launch_moe_slot_scan(
     uint32_t* tile_counts,
@@ -113,6 +114,33 @@ hipError_t launch_moe_slot_scan(
     uint32_t* group_rows,
     uint32_t* group_count,
     int32_t* row_token,
+    uint32_t rows,
+    uint32_t experts,
+    uint32_t top_k,
+    hipStream_t stream);
+
+// Split variant. `expert_slot` maps a local expert to a VRAM slot (>= 0) or a host
+// slot (-1 - slot); a null map serves every expert from VRAM. `hit_*` and `miss_*`
+// carry the original `group base` so both grouped GEMMs write the same group-row
+// layout.
+hipError_t launch_moe_slot_scan_split(
+    uint32_t* tile_counts,
+    uint32_t* expert_row_begin,
+    uint32_t* tile_base,
+    uint32_t* expert_group_begin,
+    uint32_t* group_expert,
+    uint32_t* group_rows,
+    uint32_t* group_count,
+    int32_t* row_token,
+    const int32_t* expert_slot,
+    uint32_t* hit_slot,
+    uint32_t* hit_rows,
+    uint32_t* hit_base,
+    uint32_t* hit_count,
+    uint32_t* miss_slot,
+    uint32_t* miss_rows,
+    uint32_t* miss_base,
+    uint32_t* miss_count,
     uint32_t rows,
     uint32_t experts,
     uint32_t top_k,

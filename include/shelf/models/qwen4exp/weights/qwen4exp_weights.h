@@ -5,6 +5,7 @@
 #include <shelf/core/status.h>
 #include <shelf/models/qwen4exp/model/qwen4exp_config.h>
 #include <shelf/weights/matrix_weight.h>
+#include <shelf/weights/pinned_host_arena.h>
 
 #include <hip/hip_runtime.h>
 
@@ -79,6 +80,11 @@ struct Qwen4ExpMoeWeights {
     shelf::weights::MatrixWeight gate_experts;
     shelf::weights::MatrixWeight up_experts;
     shelf::weights::MatrixWeight down_experts;
+    // Cold experts of the same layer. Empty when the rank keeps every expert in VRAM.
+    // A host plane's expert index is the local expert index minus `vram_experts`.
+    shelf::weights::MatrixWeight gate_experts_host;
+    shelf::weights::MatrixWeight up_experts_host;
+    shelf::weights::MatrixWeight down_experts_host;
     Qwen4ExpExpertRange experts;
 };
 
@@ -107,8 +113,19 @@ struct Qwen4ExpRankWeights {
     std::vector<Qwen4ExpLayerWeights> layers;
     // The draft head is a rank-local copy on rank 0. It is not sharded by the TP plan.
     Qwen4ExpMtpWeights mtp;
+    // Cold routed experts of every layer. Pinned host memory, device-readable.
+    shelf::weights::PinnedHostArena expert_host;
+    // Device int32 [layers][local_experts]: >= 0 is a VRAM slot, -1 - slot is a host
+    // slot. Empty when no expert is offloaded.
+    shelf::gpu::Tensor expert_slot_map;
+    // Device uint32 [layers][local_experts]: routes observed in the current batch.
+    // The expert cache reads and clears it between steps.
+    shelf::gpu::Tensor expert_route_freq;
+    std::uint32_t vram_experts = 0;
+    std::uint32_t host_experts = 0;
 
     [[nodiscard]] std::uint64_t resident_bytes() const noexcept;
+    [[nodiscard]] std::uint64_t host_expert_bytes() const noexcept;
 };
 
 inline void note_exl3_linear(const Qwen4ExpHyperConnectionWeights& w,
@@ -189,6 +206,9 @@ struct Qwen4ExpLoadOptions {
     // Load the embedding table, LM head and MTP block only. Used by the MTP draft-head
     // test and by a rank that does not need the trunk.
     bool mtp_only = false;
+    // Routed experts kept in pinned host memory per layer. 0 keeps every expert in VRAM.
+    // The remaining local experts stay in VRAM and are addressed by the slot map.
+    std::uint32_t moe_host_experts = 0;
 };
 
 // Logical checkpoint names this rank asks the HF reader for. Exposed for tests and for

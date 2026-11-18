@@ -31,9 +31,15 @@ RT::WeightSlot make_weight_slot(const W::MatrixWeight& w) {
     } else {
         s.device_ptr = nullptr;
         s.bytes = 0;
-        s.codes = w.codes.ndim() != 0 ? w.codes.data<void>() : nullptr;
-        s.scales = w.scales.ndim() != 0 ? w.scales.data<void>() : nullptr;
-        s.row_ref = w.row_ref.ndim() != 0 ? w.row_ref.data<void>() : nullptr;
+        if (w.host_resident) {
+            s.codes = w.host_codes;
+            s.scales = w.host_scales;
+            s.row_ref = w.host_row_ref;
+        } else {
+            s.codes = w.codes.ndim() != 0 ? w.codes.data<void>() : nullptr;
+            s.scales = w.scales.ndim() != 0 ? w.scales.data<void>() : nullptr;
+            s.row_ref = w.row_ref.ndim() != 0 ? w.row_ref.data<void>() : nullptr;
+        }
         s.row_ref_exact = w.row_ref_exact;
         s.storage_scale_stride_bytes = w.storage_scale_stride_bytes;
         s.compute_codes = w.compute_codes.ndim() != 0 ? w.compute_codes.data<void>() : nullptr;

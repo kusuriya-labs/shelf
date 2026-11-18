@@ -32,7 +32,8 @@ __global__ void __launch_bounds__(kRouterThreads) moe_router_kernel(
     uint32_t tiles,
     uint32_t expert_begin,
     uint32_t owned_experts,
-    uint32_t* error_word) {
+    uint32_t* error_word,
+    uint32_t* route_freq) {
     const uint32_t t = blockIdx.x;
     if (t >= rows)
         return;
@@ -175,10 +176,9 @@ __global__ void __launch_bounds__(kRouterThreads) moe_router_kernel(
             owned ? e - static_cast<int32_t>(expert_begin) : kMoeSlotNotOwned;
         sel_weight[static_cast<size_t>(t) * top_k + tid] = w;
         if (owned) {
-            atomicAdd(&tile_counts[static_cast<size_t>(e - static_cast<int32_t>(expert_begin)) *
-                                       tiles +
-                                   tile],
-                      1u);
+            const uint32_t local = static_cast<uint32_t>(e - expert_begin);
+            atomicAdd(&tile_counts[static_cast<size_t>(local) * tiles + tile], 1u);
+            if (route_freq != nullptr) atomicAdd(&route_freq[local], 1u);
         }
     }
 }
@@ -192,6 +192,15 @@ __global__ void __launch_bounds__(kScanThreads) moe_slot_scan_kernel(
     uint32_t* __restrict__ group_rows,
     uint32_t* __restrict__ group_count,
     int32_t* __restrict__ row_token,
+    const int32_t* __restrict__ expert_slot,
+    uint32_t* __restrict__ hit_slot,
+    uint32_t* __restrict__ hit_rows,
+    uint32_t* __restrict__ hit_base,
+    uint32_t* __restrict__ hit_count,
+    uint32_t* __restrict__ miss_slot,
+    uint32_t* __restrict__ miss_rows,
+    uint32_t* __restrict__ miss_base,
+    uint32_t* __restrict__ miss_count,
     uint32_t experts,
     uint32_t tiles,
     uint32_t group_capacity) {
@@ -210,8 +219,13 @@ __global__ void __launch_bounds__(kScanThreads) moe_slot_scan_kernel(
     if (tid == 0u) {
         uint32_t slots = 0u;
         uint32_t groups = 0u;
+        uint32_t hit_groups = 0u;
+        uint32_t miss_groups = 0u;
+        const bool split = hit_count != nullptr;
         for (uint32_t e = 0u; e < experts; ++e) {
             const uint32_t expert_total = s_total[e];
+            const int32_t location = expert_slot != nullptr ? expert_slot[e]
+                                                            : static_cast<int32_t>(e);
             expert_row_begin[e] = slots;
             expert_group_begin[e] = groups;
             uint32_t at = slots;
@@ -222,9 +236,24 @@ __global__ void __launch_bounds__(kScanThreads) moe_slot_scan_kernel(
             for (uint32_t done = 0u; done < expert_total; done += kGroupRows) {
                 if (groups >= group_capacity)
                     break;
-                group_expert[groups] = e;
-                group_rows[groups] =
+                const uint32_t rows_here =
                     expert_total - done < kGroupRows ? expert_total - done : kGroupRows;
+                group_expert[groups] = e;
+                group_rows[groups] = rows_here;
+                if (split) {
+                    if (location >= 0) {
+                        hit_slot[hit_groups] = static_cast<uint32_t>(location);
+                        hit_rows[hit_groups] = rows_here;
+                        hit_base[hit_groups] = groups;
+                        ++hit_groups;
+                    } else {
+                        miss_slot[miss_groups] =
+                            static_cast<uint32_t>(-1 - location);
+                        miss_rows[miss_groups] = rows_here;
+                        miss_base[miss_groups] = groups;
+                        ++miss_groups;
+                    }
+                }
                 ++groups;
             }
             slots += expert_total;
@@ -232,6 +261,10 @@ __global__ void __launch_bounds__(kScanThreads) moe_slot_scan_kernel(
         expert_row_begin[experts] = slots;
         expert_group_begin[experts] = groups;
         group_count[0] = groups;
+        if (split) {
+            hit_count[0] = hit_groups;
+            miss_count[0] = miss_groups;
+        }
     }
     __syncthreads();
 
@@ -305,7 +338,8 @@ hipError_t launch_moe_router(
     uint32_t expert_begin,
     uint32_t owned_experts,
     uint32_t* error_word,
-    hipStream_t stream) {
+    hipStream_t stream,
+    uint32_t* route_freq) {
     if (logits == nullptr || sel_expert == nullptr || sel_weight == nullptr || tile_counts == nullptr)
         return hipErrorInvalidValue;
     if (rows == 0u || experts == 0u || experts > kMoeRouterMaxExperts)
@@ -321,7 +355,49 @@ hipError_t launch_moe_router(
     const uint32_t tiles = moe_slot_tile_count(rows);
     moe_router_kernel<<<rows, kRouterThreads, 0, stream>>>(
         logits, logits_row_stride, sel_expert, sel_weight, tile_counts, rows, experts, top_k,
-        tiles, expert_begin, owned_experts, error_word);
+        tiles, expert_begin, owned_experts, error_word, route_freq);
+    return hipGetLastError();
+}
+
+hipError_t launch_moe_slot_scan_split(
+    uint32_t* tile_counts,
+    uint32_t* expert_row_begin,
+    uint32_t* tile_base,
+    uint32_t* expert_group_begin,
+    uint32_t* group_expert,
+    uint32_t* group_rows,
+    uint32_t* group_count,
+    int32_t* row_token,
+    const int32_t* expert_slot,
+    uint32_t* hit_slot,
+    uint32_t* hit_rows,
+    uint32_t* hit_base,
+    uint32_t* hit_count,
+    uint32_t* miss_slot,
+    uint32_t* miss_rows,
+    uint32_t* miss_base,
+    uint32_t* miss_count,
+    uint32_t rows,
+    uint32_t experts,
+    uint32_t top_k,
+    hipStream_t stream) {
+    if (tile_counts == nullptr || expert_row_begin == nullptr || tile_base == nullptr ||
+        expert_group_begin == nullptr || group_expert == nullptr || group_rows == nullptr ||
+        group_count == nullptr || row_token == nullptr || hit_slot == nullptr ||
+        hit_rows == nullptr || hit_base == nullptr || hit_count == nullptr ||
+        miss_slot == nullptr || miss_rows == nullptr || miss_base == nullptr ||
+        miss_count == nullptr)
+        return hipErrorInvalidValue;
+    if (rows == 0u || experts == 0u || experts > kMoeRouterMaxExperts)
+        return hipErrorInvalidValue;
+    if (top_k == 0u || top_k > kMoeRouterMaxTopK || top_k > experts)
+        return hipErrorInvalidValue;
+    const uint32_t tiles = moe_slot_tile_count(rows);
+    const uint32_t group_capacity = moe_group_count_upper_bound(rows, experts, top_k);
+    moe_slot_scan_kernel<<<1, kScanThreads, 0, stream>>>(
+        tile_counts, expert_row_begin, tile_base, expert_group_begin, group_expert, group_rows,
+        group_count, row_token, expert_slot, hit_slot, hit_rows, hit_base, hit_count,
+        miss_slot, miss_rows, miss_base, miss_count, experts, tiles, group_capacity);
     return hipGetLastError();
 }
 
@@ -338,20 +414,10 @@ hipError_t launch_moe_slot_scan(
     uint32_t experts,
     uint32_t top_k,
     hipStream_t stream) {
-    if (tile_counts == nullptr || expert_row_begin == nullptr || tile_base == nullptr ||
-        expert_group_begin == nullptr || group_expert == nullptr || group_rows == nullptr ||
-        group_count == nullptr || row_token == nullptr)
-        return hipErrorInvalidValue;
-    if (rows == 0u || experts == 0u || experts > kMoeRouterMaxExperts)
-        return hipErrorInvalidValue;
-    if (top_k == 0u || top_k > kMoeRouterMaxTopK || top_k > experts)
-        return hipErrorInvalidValue;
-    const uint32_t tiles = moe_slot_tile_count(rows);
-    const uint32_t group_capacity = moe_group_count_upper_bound(rows, experts, top_k);
-    moe_slot_scan_kernel<<<1, kScanThreads, 0, stream>>>(
-        tile_counts, expert_row_begin, tile_base, expert_group_begin, group_expert, group_rows,
-        group_count, row_token, experts, tiles, group_capacity);
-    return hipGetLastError();
+    return launch_moe_slot_scan_split(
+        tile_counts, expert_row_begin, tile_base, expert_group_begin, group_expert,
+        group_rows, group_count, row_token, nullptr, nullptr, nullptr, nullptr, nullptr,
+        nullptr, nullptr, nullptr, nullptr, rows, experts, top_k, stream);
 }
 
 hipError_t launch_moe_slot_scatter(

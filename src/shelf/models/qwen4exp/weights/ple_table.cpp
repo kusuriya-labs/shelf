@@ -1,6 +1,7 @@
 #include <shelf/models/qwen4exp/weights/ple_table.h>
 
 #include <shelf/quantization/exl3/exl3.h>
+#include <shelf/quantization/int6/int6_w32.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -189,9 +190,9 @@ void PleTable::FreeDeleter::operator()(void* p) const noexcept {
 }
 
 
-Result<PleTable> PleTable::load_fp8(const std::string& model_dir,
-                                    const Qwen4ExpTextConfig& config,
-                                    bool fadvise_dontneed) {
+Result<PleTable> PleTable::load_index_shards(const std::string& model_dir,
+                                             const Qwen4ExpTextConfig& config,
+                                             bool fadvise_dontneed) {
     (void)fadvise_dontneed;
     const std::vector<std::size_t> ple_layers = config.ple_layers();
     if (ple_layers.size() != 1u) {
@@ -233,7 +234,7 @@ Result<PleTable> PleTable::load_fp8(const std::string& model_dir,
         shards.emplace(id, name);
     }
     if (shards.size() != config.ple.split_ngram_parts) {
-        return Status::invalid_argument("PLE FP8 shard count differs from split_ngram_parts",
+        return Status::invalid_argument("PLE shard count differs from split_ngram_parts",
                                         __FILE__, __LINE__);
     }
     const auto head_sizes = qwen4exp_ple_head_vocab_sizes(config, 0u);
@@ -244,15 +245,12 @@ Result<PleTable> PleTable::load_fp8(const std::string& model_dir,
                                         __FILE__, __LINE__);
     }
     PleTable table;
-    table.mode_ = TableMode::Fp8E4M3;
     table.file_path_ = index_path;
     auto padded_rows = qwen4exp_ple_padded_rows(config, 0u);
     if (!padded_rows.ok()) return padded_rows.status();
     table.rows_ = padded_rows.value();
     table.row_width_ = kExpectedRowWidth;
-    table.row_bytes_ = kExpectedRowWidth;
     table.shard_count_ = static_cast<std::uint32_t>(shards.size());
-    table.shard_rows_ = 2500012u;
     table.ngram_size_ = static_cast<std::uint32_t>(config.ple.ngram_size);
     table.heads_per_ngram_ = static_cast<std::uint32_t>(config.ple.heads_per_ngram);
     table.eos_token_id_ = config.ple.eos_token_id;
@@ -274,65 +272,120 @@ Result<PleTable> PleTable::load_fp8(const std::string& model_dir,
         return inserted.first->second.get();
     };
 
-    auto scale_name = prefix + "ngram_embedding.weight_scale";
-    auto scale_it = weight_map.find(scale_name);
-    if (scale_it == weight_map.end()) {
-        return Status::invalid_argument("PLE FP8 weight_scale is missing", __FILE__,
+    auto first_shard_it = weight_map.find(shards.begin()->second);
+    if (first_shard_it == weight_map.end()) {
+        return Status::invalid_argument("PLE shard is missing from the index", __FILE__,
                                         __LINE__);
     }
-    auto scale_reader = reader_for(scale_it.value().get<std::string>());
-    if (!scale_reader.ok()) return scale_reader.status();
-    auto scale_spec = scale_reader.value()->tensor_spec(scale_name);
-    if (!scale_spec.ok() || scale_spec.value().dtype != shelf::io::SType::BF16) {
-        return Status::invalid_argument("PLE FP8 weight_scale is not BF16", __FILE__,
+    auto first_reader = reader_for(first_shard_it.value().get<std::string>());
+    if (!first_reader.ok()) return first_reader.status();
+    auto first_spec = first_reader.value()->tensor_spec(shards.begin()->second);
+    if (!first_spec.ok() || first_spec.value().shape.size() != 2u ||
+        first_spec.value().shape[1] != kExpectedRowWidth) {
+        return Status::invalid_argument("PLE shard shape is invalid", __FILE__, __LINE__);
+    }
+    const shelf::io::SType source_dtype = first_spec.value().dtype;
+    table.shard_rows_ = static_cast<std::uint32_t>(first_spec.value().shape[0]);
+    if (table.shard_rows_ == 0u ||
+        static_cast<std::uint64_t>(table.shard_rows_) * table.shard_count_ != table.rows_) {
+        return Status::invalid_argument(
+            "PLE shard rows do not cover the padded row count", __FILE__, __LINE__);
+    }
+    const std::uint32_t groups = table.row_width_ / 32u;
+    if (groups == 0u || table.row_width_ % 32u != 0u) {
+        return Status::invalid_argument("PLE row width is not a W32 multiple", __FILE__,
                                         __LINE__);
     }
-    std::size_t scale_bytes = 0;
-    auto scale_data = scale_reader.value()->tensor_data(scale_name, scale_bytes);
-    if (!scale_data.ok() || scale_bytes != 2u) {
-        return Status::invalid_argument("PLE FP8 weight_scale size is invalid", __FILE__,
-                                        __LINE__);
+
+    if (source_dtype == shelf::io::SType::BF16) {
+        table.format_ = TableFormat::Int6W32Fp16;
+        table.row_bytes_ = groups * shelf::quantization::int6::kGroupBytes;
+        table.k_bits_ = 0u;
+    } else if (source_dtype == shelf::io::SType::F8_E4M3) {
+        table.format_ = TableFormat::Fp8E4M3;
+        table.row_bytes_ = table.row_width_;
+        table.k_bits_ = 0u;
+    } else {
+        return Status::unsupported(
+            "PLE shards are neither BF16 nor FP8 E4M3", __FILE__, __LINE__);
     }
-    const std::uint16_t scale_bits = *static_cast<const std::uint16_t*>(scale_data.value());
-    table.fp8_scale_ = bf16_bits_to_f32(scale_bits);
+
+    if (table.format_ == TableFormat::Fp8E4M3) {
+        auto scale_name = prefix + "ngram_embedding.weight_scale";
+        auto scale_it = weight_map.find(scale_name);
+        if (scale_it == weight_map.end()) {
+            return Status::invalid_argument("PLE FP8 weight_scale is missing", __FILE__,
+                                            __LINE__);
+        }
+        auto scale_reader = reader_for(scale_it.value().get<std::string>());
+        if (!scale_reader.ok()) return scale_reader.status();
+        auto scale_spec = scale_reader.value()->tensor_spec(scale_name);
+        if (!scale_spec.ok() || scale_spec.value().dtype != shelf::io::SType::BF16) {
+            return Status::invalid_argument("PLE FP8 weight_scale is not BF16", __FILE__,
+                                            __LINE__);
+        }
+        std::size_t scale_bytes = 0;
+        auto scale_data = scale_reader.value()->tensor_data(scale_name, scale_bytes);
+        if (!scale_data.ok() || scale_bytes != 2u) {
+            return Status::invalid_argument("PLE FP8 weight_scale size is invalid", __FILE__,
+                                            __LINE__);
+        }
+        const std::uint16_t scale_bits = *static_cast<const std::uint16_t*>(scale_data.value());
+        table.fp8_scale_ = bf16_bits_to_f32(scale_bits);
+    }
 
     table.shards_.resize(table.shard_count_);
     auto load_shard = [&](std::uint32_t id) -> Status {
         auto name_it = shards.find(id);
         if (name_it == shards.end()) {
-            return Status::invalid_argument("PLE FP8 shard index is not contiguous",
+            return Status::invalid_argument("PLE shard index is not contiguous",
                                             __FILE__, __LINE__);
         }
         auto shard_it = weight_map.find(name_it->second);
         if (shard_it == weight_map.end()) {
-            return Status::invalid_argument("PLE FP8 shard is missing from the index",
+            return Status::invalid_argument("PLE shard is missing from the index",
                                             __FILE__, __LINE__);
         }
         auto reader = reader_for(shard_it.value().get<std::string>());
         if (!reader.ok()) return reader.status();
         auto spec = reader.value()->tensor_spec(name_it->second);
-        if (!spec.ok() || spec.value().dtype != shelf::io::SType::F8_E4M3 ||
+        if (!spec.ok() || spec.value().dtype != source_dtype ||
             spec.value().shape.size() != 2u ||
             spec.value().shape[0] != table.shard_rows_ ||
             spec.value().shape[1] != table.row_width_) {
-            return Status::invalid_argument("PLE FP8 shard shape is invalid", __FILE__,
+            return Status::invalid_argument("PLE shard shape is invalid", __FILE__,
                                             __LINE__);
         }
         std::size_t bytes = 0;
         auto data = reader.value()->tensor_data(name_it->second, bytes);
-        if (!data.ok() || bytes != static_cast<std::size_t>(table.shard_rows_) *
-                                     table.row_width_) {
-            return Status::invalid_argument("PLE FP8 shard byte count is invalid", __FILE__,
+        if (!data.ok()) return data.status();
+        const std::size_t row_bytes_in =
+            static_cast<std::size_t>(table.row_width_) *
+            (source_dtype == shelf::io::SType::BF16 ? 2u : 1u);
+        if (bytes != static_cast<std::size_t>(table.shard_rows_) * row_bytes_in) {
+            return Status::invalid_argument("PLE shard byte count is invalid", __FILE__,
                                             __LINE__);
         }
+        const std::size_t out_bytes =
+            static_cast<std::size_t>(table.shard_rows_) * table.row_bytes_;
         void* memory = nullptr;
-        if (::posix_memalign(&memory, 64u, bytes) != 0) {
-            return Status::insufficient_memory("cannot allocate PLE FP8 shard", __FILE__,
+        if (::posix_memalign(&memory, 64u, out_bytes) != 0) {
+            return Status::insufficient_memory("cannot allocate PLE shard", __FILE__,
                                                __LINE__);
         }
-        std::memcpy(memory, data.value(), bytes);
+        if (table.format_ == TableFormat::Int6W32Fp16) {
+            const auto* source = static_cast<const shelf::bf16_t*>(data.value());
+            auto* out = static_cast<std::uint8_t*>(memory);
+            for (std::uint32_t row = 0; row < table.shard_rows_; ++row) {
+                shelf::quantization::int6::quantize_bf16_row(
+                    source + static_cast<std::size_t>(row) * table.row_width_, groups,
+                    out + static_cast<std::size_t>(row) * table.row_bytes_);
+            }
+        } else {
+            std::memcpy(memory, data.value(), bytes);
+        }
         table.shards_[id].data.reset(static_cast<std::uint8_t*>(memory));
-        table.shards_[id].bytes = bytes;
+        table.shards_[id].bytes = out_bytes;
         return Status::make_ok();
     };
     const std::uint32_t worker_count =
@@ -366,7 +419,7 @@ Result<PleTable> PleTable::load(const std::string& model_dir,
     const std::string path = model_dir + "/ngram_embedding.safetensors";
     const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
-        return load_fp8(model_dir, config, fadvise_dontneed);
+        return load_index_shards(model_dir, config, fadvise_dontneed);
     }
 
     struct stat st {};
@@ -721,38 +774,50 @@ const std::uint8_t* PleTable::row_ptr(std::uint64_t row) const noexcept {
            static_cast<std::size_t>(local) * row_bytes_;
 }
 
-Result<std::vector<float>> PleTable::decode_row(std::uint64_t row) const {
+std::size_t PleTable::head_for_row(std::uint64_t row) const noexcept {
+    const std::size_t heads = head_offsets_.size();
+    if (heads == 0u) return 0u;
+    auto upper = std::upper_bound(head_offsets_.begin(), head_offsets_.end(),
+                                  static_cast<std::int64_t>(row));
+    std::size_t head = 0u;
+    if (upper != head_offsets_.begin()) {
+        head = static_cast<std::size_t>(upper - head_offsets_.begin() - 1);
+    }
+    if (head >= heads) head = heads - 1u;
+    return head;
+}
+
+Result<std::vector<float>> PleTable::decode_row(std::uint64_t row,
+                                                bool include_head_bias) const {
     const std::uint8_t* packed = row_ptr(row);
     if (packed == nullptr) {
         return Status::out_of_range("PLE row is out of range", __FILE__, __LINE__);
     }
-    if (mode_ == TableMode::Fp8E4M3) {
+    if (format_ == TableFormat::Fp8E4M3) {
         std::vector<float> out(row_width_);
-        const std::uint32_t heads = static_cast<std::uint32_t>(head_offsets_.size());
-        std::uint32_t head = 0;
-        if (heads != 0u) {
-            auto upper = std::upper_bound(head_offsets_.begin(), head_offsets_.end(),
-                                          static_cast<std::int64_t>(row));
-            if (upper != head_offsets_.begin())
-                head = static_cast<std::uint32_t>(upper - head_offsets_.begin() - 1);
-            if (head >= heads) head = heads - 1;
-        }
+        const std::size_t head = head_for_row(row);
         for (std::uint32_t i = 0; i < row_width_; ++i) {
             float value = e4m3_to_f32(packed[i]) * fp8_scale_;
-            if (!head_bias_f16_.empty())
+            if (include_head_bias && !head_bias_f16_.empty())
                 value += shelf::quantization::exl3::f32_from_f16_bits(
-                    head_bias_f16_[static_cast<std::size_t>(head) * row_width_ + i]);
+                    head_bias_f16_[head * row_width_ + i]);
             out[i] = value;
         }
         return out;
     }
-    auto upper = std::upper_bound(head_offsets_.begin(), head_offsets_.end(),
-                                  static_cast<std::int64_t>(row));
-    std::size_t head = 0;
-    if (upper != head_offsets_.begin()) {
-        head = static_cast<std::size_t>(upper - head_offsets_.begin() - 1);
+    if (format_ == TableFormat::Int6W32Fp16) {
+        std::vector<float> out(row_width_);
+        shelf::quantization::int6::dequantize_row(packed, row_width_ / 32u, out.data());
+        if (include_head_bias && !head_bias_f16_.empty()) {
+            const std::size_t head = head_for_row(row);
+            for (std::uint32_t i = 0; i < row_width_; ++i) {
+                out[i] += shelf::quantization::exl3::f32_from_f16_bits(
+                    head_bias_f16_[head * row_width_ + i]);
+            }
+        }
+        return out;
     }
-    if (head >= head_offsets_.size()) head = head_offsets_.size() - 1;
+    const std::size_t head = head_for_row(row);
 
     std::uint16_t scale_bits = 0;
     std::memcpy(&scale_bits, packed, sizeof(scale_bits));
@@ -792,9 +857,11 @@ Result<std::vector<float>> PleTable::decode_row(std::uint64_t row) const {
                 static_cast<std::uint16_t>(state & 0xFFFFu));
         const float value =
             shelf::quantization::exl3::f32_from_f16_bits(codebook_bits) * scale;
-        const std::uint16_t bias_bits =
-            head_bias_f16_[head * row_width_ + i];
-        out[i] = value + shelf::quantization::exl3::f32_from_f16_bits(bias_bits);
+        const float bias = head_bias_f16_.empty()
+            ? 0.0f
+            : shelf::quantization::exl3::f32_from_f16_bits(
+                  head_bias_f16_[head * row_width_ + i]);
+        out[i] = value + (include_head_bias ? bias : 0.0f);
     }
     return out;
 }
@@ -887,6 +954,10 @@ Result<std::vector<bf16_t>> PleTable::gather_bf16(
 
 Result<std::vector<std::uint8_t>> PleTable::read_source_row(const std::string& model_dir,
                                                             std::uint64_t row) const {
+    if (format_ != TableFormat::Exl3Trellis) {
+        return Status::unsupported(
+            "read_source_row needs the EXL3 packaged table", __FILE__, __LINE__);
+    }
     if (row >= rows_ || shard_rows_ == 0u) {
         return Status::out_of_range("PLE row is out of range", __FILE__, __LINE__);
     }

@@ -1340,6 +1340,7 @@ Executor::Executor(Executor&& other) noexcept
       ple_conv_state_pool(std::move(other.ple_conv_state_pool)),
       external_input_preparer(std::move(other.external_input_preparer)),
       external_prefix_restore(std::move(other.external_prefix_restore)),
+      after_batch(std::move(other.after_batch)),
       config(other.config),
       batch_context_storage(std::move(other.batch_context_storage)),
       batch_context(nullptr),
@@ -1474,6 +1475,7 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         ple_conv_state_pool = std::move(other.ple_conv_state_pool);
         external_input_preparer = std::move(other.external_input_preparer);
         external_prefix_restore = std::move(other.external_prefix_restore);
+        after_batch = std::move(other.after_batch);
         config = other.config;
         batch_context_storage = std::move(other.batch_context_storage);
         if (batch_context_storage.device_struct.allocation_base() != nullptr) {
@@ -1591,6 +1593,7 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         other.ple_conv_state_pool.reset();
         other.external_input_preparer = nullptr;
         other.external_prefix_restore = nullptr;
+        other.after_batch = nullptr;
         other.batch_context_storage = ::shelf::runtime::DeviceBatchContextStorage{};
         other.input_ids = gpu::Tensor{};
         other.input_hidden = gpu::Tensor{};
@@ -2737,6 +2740,10 @@ Result<BatchExecutionOutput> complete_batch(
     }
 
     executor.active_submission_id = 0u;
+    if (executor.after_batch) {
+        Status after = executor.after_batch(stream);
+        if (!after.ok()) return after;
+    }
     BatchExecutionOutput out = std::move(pending.output);
     pending.commits = nullptr;
     pending.commit_count = 0;
