@@ -518,3 +518,29 @@ OPENBLAS_NUM_THREADS=1 /tmp/shelfvenv/bin/python docs/research/20261111/gdn_recu
 再現ビルドの適用・復元は再実行して成功し、`test_quality_metrics` も通過した。
 同テストの最初の実行は `LD_LIBRARY_PATH` の指定漏れで起動に失敗し、環境を
 設定して再実行した。
+
+### 外れ値を除いた KL と追加の解析（`gdn_recurrence_outliers.json`）
+
+上の mean KL は少数の位置に支配されるため、外れ値を除いた trimmed mean KL と top-5 位置の寄与も
+`gdn_recurrence_outliers.json` に保存した（`quality_outliers.py` が dump から作成、`quality_outlier_table.py`
+が表にまとめる）。基準は同じ非投機・同時 1。
+
+| corpus | 経路 | mean KL | trimmed mean KL | top-5 位置の KL 寄与 |
+| --- | --- | ---: | ---: | ---: |
+| prose | chunk | 7.33e-4 | 6.30e-4 | 14% |
+| code | chunk | 3.64e-4 | 3.22e-4 | 12% |
+| japanese | chunk | 4.72e-4 | 4.59e-4 | 3% |
+| reasoning | serial | 1.35e-4 | 2.48e-5 | 82% |
+| reasoning | chunk | 2.53e-3 | 1.46e-3 | 42% |
+| reasoning | exact | 7.49e-3 | 1.43e-3 | 81% |
+| reasoning | serial（同時 8） | 3.12e-3 | 1.33e-3 | 57% |
+| reasoning | exact（同時 8） | 2.05e-3 | 1.29e-3 | 37% |
+
+外れ値を除くと reasoning の chunk / exact / 同時 8 は 1.3e-3〜1.5e-3 に近づく。exact の mean KL が
+大きいのは少数位置の寄与による。chunk と、同時 8 の serial（4 corpus 平均 1.16e-3、chunk は 1.03e-3）は
+同じ桁であり、この記録だけでは chunk 固有の劣化と同時数の影響を切り分けられない。
+
+同じ commit に、追加の品質実験用のスクリプトを置いた（`build_long_quality.sh`、`build_nosplit_quality.sh`、
+`build_prefill_quality.sh`、`run_nosplit_quality.sh`、`run_prefill_quality.sh`、`run_outlier_experiments.sh`、
+`quality_boundaries.py`、`quality_overlap.py`）。長い文脈（2040 / 4080）、paged attention の split なし、
+prefill 経路での比較を実行するもので、これらの実行結果の要約はまだ文書化していない。
