@@ -90,6 +90,8 @@ Checkpoint::Checkpoint(const Path& model,const Path& engram,const Path& draft,co
     if(has_draft) {
         auto q=read_json(draft/"conversion_report.json");
         require(q.at("method")=="dfly" && q.at("bits")==4,"DFly の変換結果が不正です");
+        require(q.at("body_assembly_signature")==read_json(model/"conversion_report.json").at("assembly_signature"),
+                "DFly と本体の校正元が一致しません");
         for(const auto& [name,dims]:q.at("linear_shapes").items())
             shape[name]=dims.get<std::array<int,2>>();
         load(draft,true);
