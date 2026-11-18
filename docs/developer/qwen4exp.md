@@ -31,6 +31,8 @@ PLE の n-gram history を復元 prefix で再 seed する。MTP は無効であ
 
 - routed expert は `preshuffle_mxfp4_native` で 16 出力 x 32 K の 256 バイト block に
   repack する。E8M0 scale は row-major、row reference は行ごとの最大 E8M0 byte。
+- Qwen4Exp は TP=1 / 2 / 4 で実行できる。TP=1 は単一 GPU 構成で、`shelf-bench tg` と
+  同じ配置（`--moe-host-experts` で expert を host に退避）を使う。
 - lm_head は load 時に BF16 から INT8 W32 へオンライン量子化する
   （`--lm-head-int8 0` / `SHELF_LM_HEAD_INT8=0` で無効化）。量子化すると
   vocab-parallel head は `Int8W32`、DFlash2 の sharded proposal も `Int8W32` 経路で

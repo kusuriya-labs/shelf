@@ -81,6 +81,32 @@ miss expert の重みは host の pinned plane から GPU が PCIe 越しに読�
 [../research/20261118/moe_expert_offload.md](../research/20261118/moe_expert_offload.md)
 に置く。
 
+## 2026-11-18 Qwen3.8-Flash-Next MXFP4 DFlash2 decode
+
+`models/Qwen3.8-Flash-Next-Quark-MXFP4` に `models/Qwen3.8-Flash-Next-DFlash2` を
+drafter として付け、単一リクエストで decode を測った。prompt は同一 token（id=1）を
+4096 個並べたもので、受理率は実運用より高く出る。
+
+- measurement revision: 2026-11-18 の working tree（DFlash2 有効化 `0e29803`）
+- GPU: Radeon AI PRO R9700（TP=1 は 1 枚、TP=2 は 2 枚）
+- `--max-new-tokens 64`、`--kv-cache-dtype octave:c5v5`、drafts 6、tree-budget 0
+- `--moe-host-experts` は TP=1 で 448、TP=2 で 224
+- spec なしの TP=1 は `shelf-bench tg --context 4096 --tokens 64 --moe-host-experts 384`
+
+| 構成 | decode | 受理（full / 平均 drafts） |
+| --- | ---: | --- |
+| TP=1 spec なし | 40.2 ms/token（24.9 tok/s） | - |
+| TP=1 DFlash2 | 21.5 ms/token（46.6 tok/s） | 0.889 / 5.33 |
+| TP=2 spec なし | 65.8 ms/token（15.2 tok/s） | - |
+| TP=2 DFlash2（lm_head INT8W32） | 25.8 ms/token（38.7 tok/s） | 0.636 / 4.18 |
+| TP=2 DFlash2（`--lm-head-int8 0`） | 35.8 ms/token（28.0 tok/s） | - |
+
+- `shelf-bench tg` は DFlash2 の drafter を読み込まないため、DFlash2 の行は
+  `shelf-compute` の単一リクエスト経路で測った。
+- lm_head の INT8W32 化で TP=2 の DFlash2 は 28.0 → 38.7 tok/s になる
+  （drafter の head GEMM が短くなるため）。
+- TP=2 の `DFLASH2_D2H_MS` は 11 round で 111 ms。host token ids の往復が次の削減対象。
+
 ## 2026-11-18 Qwen3.8-27B MXFP4 decode GEMV
 
 `models/Qwen3.8-27B-Quark-AWQ-MXFP4` の decode linear に GEMV variant を足し、
