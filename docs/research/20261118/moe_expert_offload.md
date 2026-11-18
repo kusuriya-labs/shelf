@@ -28,7 +28,7 @@ routed expert の一部を pinned host へ逃がし、VRAM の slot と頻度で
 - `frequency += batch routes`、peak が `SHELF_MOE_CACHE_DECAY`（既定 4096）を超えたら
   全体を半分にする。
 - hot host expert と、その step に使われていない cold VRAM expert を交換する。
-  1 step の交換数は `SHELF_MOE_CACHE_INSERTS`（既定 4）。
+  1 step の交換数は `SHELF_MOE_CACHE_INSERTS`（既定 0 = 交換しない）。
 - 交換は「demoted を VRAM から host へ退避 → promoted を host から VRAM へ upload →
   demoted を host slot へ書く」の順で行う。VRAM slot と host slot は同じ index で
   gate/up/down の 3 plane をそろえる。
@@ -69,8 +69,35 @@ step=1 hit=61.09% swaps=4
 step=8 hit=62.82% swaps=32
 ```
 
-VRAM 在籍率 160/256 = 62.5% とほぼ同じで、8 step では頻度 swap の効果がまだ出ていない。
-長い decode か `SHELF_MOE_CACHE_INSERTS` の増加で再評価が必要である。
+VRAM 在籍率 160/256 = 62.5% とほぼ同じで、8 step では頻度 swap の効果はまだ出ていない。
+
+### 長い decode での再評価（TP=1）
+
+`host_experts=384`（VRAM 128 / host 384）、context 3072、128 token を 152 step 回し、
+`SHELF_MOE_CACHE_INSERTS` を変えて比較した。1 step の routing は 48 層 × top_k 10 ×
+128 token = 61 440。
+
+| INSERTS | hit | swaps | wall_us_per_token | tok/s |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 21.2 % | 0 | 68 939 | 14.51 |
+| 4 | 21.3 % | 608 | 72 092 | 13.87 |
+| 64 | 20.3 % | 2 115 | 75 796 | 13.19 |
+
+ヒット率は VRAM 在籍率 128/512 = 25 % を下回ったまま動かない。512 expert / top_k 10 の
+routing は層あたり 512 通りに広がり、頻度の偏りが swap の判定に必要な差を作らない。
+交換は PCIe 転送を足すだけで、ヒット率を上げない。
+
+- ACCEPT: hit/miss を plan で分けて host plane を PCIe 越しに読む構成。offload した
+  expert を CPU で計算せずに済み、TP=1 でも 170 GiB のモデルを動かせる。
+- ACCEPT: ヒット率と swap 数を stderr に出す計測口。
+- REJECT: 既定での頻度 swap。ヒット率を上げず 1 トークンあたり 4.6 %（INSERTS=4）/
+  10 %（INSERTS=64）遅くする。既定を `SHELF_MOE_CACHE_INSERTS=0` にした。
+- REJECT: INSERTS を増やしてヒット率を上げる方向。上限 64 でも改善しない。
+- 未検証: expert の初期配置を頻度順に選ぶ方式。現在は先頭 `vram_experts` 個が VRAM に
+  残るだけで、在籍率がそのままヒット率の上限になる。
+
+offload がある限り decode は PCIe 律速で、TP=1 は 14.5 tok/s、TP=2 + host 64 で
+17.0 tok/s である。
 
 ## 制約
 

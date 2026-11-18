@@ -42,7 +42,7 @@ MoeExpertCache::MoeExpertCache(const Qwen4ExpRankWeights& weights) : weights_(&w
     vram_experts_ = weights.vram_experts;
     host_experts_ = weights.host_experts;
     experts_ = vram_experts_ + host_experts_;
-    inserts_ = std::min<std::uint32_t>(env_u32("SHELF_MOE_CACHE_INSERTS", 4u), 64u);
+    inserts_ = std::min<std::uint32_t>(env_u32("SHELF_MOE_CACHE_INSERTS", 0u), 64u);
     decay_at_ = std::max<std::uint32_t>(env_u32("SHELF_MOE_CACHE_DECAY", 4096u), 1u);
     log_interval_ = std::max<std::uint32_t>(
         env_u32("SHELF_MOE_CACHE_LOG_INTERVAL", 64u), 1u);

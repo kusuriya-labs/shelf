@@ -49,6 +49,50 @@ date・build・GPU 割り当て・生成結果の一致アンカーとともに�
 | カテゴリ別 serving | `vendor/BetterBench`（methodology §9） | decode t/s、TTFT p50 |
 | fp8 KV の数値品質 | `tools/quality_gate.py` / `shelf-bench quality` | ppl 差、mean KL、top-1 一致率 |
 
+## 2026-11-18 Qwen3.8-Flash-Next MXFP4 host offload decode と expert cache ヒット率
+
+`models/Qwen3.8-Flash-Next-Quark-MXFP4`（48 層・experts 512・top_k 10）は 170 GiB で
+1 枚の 32 GiB GPU に収まらないため、`SHELF_MOE_HOST_EXPERTS=384`（512 中 384）を
+host に退避した TP=1 で decode を測った。`MoeExpertCache` は
+`SHELF_MOE_CACHE_INSERTS` を変えて、ヒット率（routing が VRAM 常駐 expert に当たった
+割合）と 1 トークン時間を比較した。
+
+- measurement revision: 2026-11-18 の working tree（TP=1 `LoadedModel` への cache 配線と、
+  既定 `SHELF_MOE_CACHE_INSERTS=0` の変更を含む）
+- GPU: Radeon AI PRO R9700 × 1（`--device 0`、sclk 1735 MHz）
+- command: `SHELF_MOE_HOST_EXPERTS=384 SHELF_MOE_CACHE_INSERTS=<0|4|64>
+  SHELF_MOE_CACHE_LOG_INTERVAL=8 shelf-bench tg --model-dir models/Qwen3.8-Flash-Next-Quark-MXFP4
+  --device 0 --warmup 1 --context 3072 --tokens 128 --kv-cache-dtype fp8`
+- 1 step = 128 token、1 step の routing は 48 層 × 10 × 128 = 61440
+
+| `SHELF_MOE_CACHE_INSERTS` | ヒット率 | swaps（152 step） | wall_us_per_token | tok/s |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 21.2 % | 0 | 68 939 | 14.51 |
+| 4（旧既定） | 21.3 % | 608 | 72 092 | 13.87 |
+| 64 | 20.3 % | 2 115 | 75 796 | 13.19 |
+
+ヒット率はスワップ数によらずほぼ一定で、一様 routing の期待値
+（`vram_experts / experts` = 25 %）をわずかに下回る。スワップは滞在 expert の
+入れ替えに過ぎずヒット率を上げないため、増やすほど PCIe 転送だけが増える。
+既定を 0 にした理由はこの表である。
+
+同じモデルの TP 構成による差（同一 command、`--tokens 8`）:
+
+| 構成 | wall_us_per_token | tok/s |
+| --- | ---: | ---: |
+| TP=1 + offload 384 | 68 844 | 14.53 |
+| TP=2 + offload 64 | 58 755 | 17.02 |
+
+TP=4 は `num_key_value_heads=2` が 4 で割り切れず実行できない
+（`TpCoordinator::create` が `unsupported` を返す）。
+
+1 トークンの内訳（概算）は、backbone 約 10.6 GiB が VRAM 帯域（実測 640 GB/s）で約 16.5 ms、
+active expert のうち host 常駐分（75 %）が PCIe で約 35 ms、残りが attention と起動である。
+offload した expert の読み出しが支配的なので、この構成の decode は
+DRAM ではなく PCIe 律速になる。採否判断は
+[../research/20261118/moe_expert_offload.md](../research/20261118/moe_expert_offload.md)
+に置く。
+
 ## 2026-11-18 Qwen3.8-27B MXFP4 decode GEMV
 
 `models/Qwen3.8-27B-Quark-AWQ-MXFP4` の decode linear に GEMV variant を足し、
