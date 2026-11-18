@@ -1095,6 +1095,8 @@ shelf-compute --model-dir models/Qwen3.6-35B-A3B-Quark-AWQ-MXFP4 \\
 | scalar + mmap | 23.33 s | 32.46 s | 206.5 s | 23.2 s | 未測定 |
 | AVX512 + mmap | **19.07 s** | **28.42 s** | **24.4 s** | 26.8 s | 未測定 |
 | AVX512 + streaming pread | 31.51 s | 31.89 s | 24.1 s | 36.6 s | **39.24 GiB** |
+| AVX512 + streaming mmap 20 MiB | **30.16 s** | - | 22.9 s | **23.5 s** | **39.25 GiB** |
+| AVX512 + streaming O_DIRECT 20 MiB | 30.42 s | - | **19.9 s** | **17.8 s** | 未測定 |
 
 in-memory 量子化（1,048,576 行、入力 1 GiB）:
 
@@ -1108,8 +1110,9 @@ in-memory 量子化（1,048,576 行、入力 1 GiB）:
 - warm の wall は BF16 shard の読み込みと page fault が支配的で、量子化の CPU 時間は
   ほぼなくなった。page cache の状態を制御した benchmark ではない。
 - mmap 経路は BF16 95.37 GiB が page cache に載り得る。streaming 経路は処理済み範囲を
-  `posix_fadvise(DONTNEED)` で落とし、peak RSS を 39.24 GiB に抑える。その代わり
-  warm でも disk 読み込みが残る。
+  `madvise` / `posix_fadvise(DONTNEED)` で落とし、peak RSS を約 39.2 GiB に抑える。
+  `SHELF_PLE_STREAM_IO=pread|mmap|direct` で切り替え、既定は mmap window。wall は
+  disk 帯域で決まり、方式差は 1 s 未満だった（mmap / O_DIRECT は各 1 回）。
 - full model load、GPU 実行、生成品質はこの計測に含まない。
 
 ## 記録規則

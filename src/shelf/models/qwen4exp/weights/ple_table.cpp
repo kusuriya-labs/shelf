@@ -14,6 +14,7 @@
 #include <vector>
 
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -376,8 +377,25 @@ Result<PleTable> PleTable::load_index_shards(const std::string& model_dir,
                 return Status::invalid_argument("PLE shard byte count is invalid", __FILE__,
                                                 __LINE__);
             }
-            const int fd = ::open(shard_path.c_str(), O_RDONLY | O_CLOEXEC);
+            enum class StreamIo { Pread, Mmap, Direct };
+            StreamIo io_mode = StreamIo::Mmap;
+            if (const char* value = std::getenv("SHELF_PLE_STREAM_IO")) {
+                const std::string mode(value);
+                if (mode == "pread") io_mode = StreamIo::Pread;
+                else if (mode == "mmap") io_mode = StreamIo::Mmap;
+                else if (mode == "direct") io_mode = StreamIo::Direct;
+            }
+            int flags = O_RDONLY | O_CLOEXEC;
+#ifdef O_DIRECT
+            if (io_mode == StreamIo::Direct) flags |= O_DIRECT;
+#endif
+            const int fd = ::open(shard_path.c_str(), flags);
             if (fd < 0) {
+                if (io_mode == StreamIo::Direct) {
+                    return Status::unsupported(
+                        (std::string("cannot open PLE shard with O_DIRECT: ") +
+                         std::strerror(errno)).c_str(), __FILE__, __LINE__);
+                }
                 return Status::invalid_argument(
                     (std::string("cannot open PLE shard: ") + std::strerror(errno)).c_str(),
                     __FILE__, __LINE__);
@@ -393,34 +411,104 @@ Result<PleTable> PleTable::load_index_shards(const std::string& model_dir,
             std::vector<std::uint8_t> chunk(
                 static_cast<std::size_t>(kChunkRows) * row_bytes_in);
             const long page_size = ::sysconf(_SC_PAGESIZE);
+            const std::uint64_t map_page =
+                page_size > 0 ? static_cast<std::uint64_t>(page_size) : 4096u;
+            constexpr std::uint64_t kDirectAlign = 4096u;
+            std::uint8_t* direct_buffer = nullptr;
+            const std::size_t direct_capacity =
+                static_cast<std::size_t>(kChunkRows) * row_bytes_in + kDirectAlign;
+            if (io_mode == StreamIo::Direct) {
+                void* aligned = nullptr;
+                if (::posix_memalign(&aligned, kDirectAlign, direct_capacity) != 0) {
+                    std::free(memory);
+                    ::close(fd);
+                    return Status::insufficient_memory(
+                        "cannot allocate PLE direct IO buffer", __FILE__, __LINE__);
+                }
+                direct_buffer = static_cast<std::uint8_t*>(aligned);
+            }
+            auto cleanup = [&]() {
+                std::free(memory);
+                std::free(direct_buffer);
+                ::close(fd);
+            };
             for (std::uint32_t row = 0; row < table.shard_rows_; row += kChunkRows) {
                 const std::uint32_t rows =
                     std::min(kChunkRows, table.shard_rows_ - row);
                 const std::size_t chunk_bytes = static_cast<std::size_t>(rows) * row_bytes_in;
                 const std::uint64_t chunk_offset =
                     tensor_offset + static_cast<std::uint64_t>(row) * row_bytes_in;
-                Status read = read_exact_at(fd, chunk_offset, chunk.data(), chunk_bytes);
-                if (!read.ok()) {
-                    std::free(memory);
-                    ::close(fd);
-                    return read;
+                const shelf::bf16_t* source = nullptr;
+                void* mapped = nullptr;
+                std::size_t mapped_bytes = 0;
+
+                if (io_mode == StreamIo::Mmap) {
+                    const std::uint64_t aligned_offset = chunk_offset & ~(map_page - 1u);
+                    const std::uint64_t delta = chunk_offset - aligned_offset;
+                    const std::uint64_t length =
+                        (delta + chunk_bytes + map_page - 1u) & ~(map_page - 1u);
+                    void* candidate = ::mmap(nullptr, static_cast<std::size_t>(length),
+                                             PROT_READ, MAP_PRIVATE, fd,
+                                             static_cast<off_t>(aligned_offset));
+                    if (candidate != MAP_FAILED) {
+                        mapped = candidate;
+                        mapped_bytes = static_cast<std::size_t>(length);
+                        source = reinterpret_cast<const shelf::bf16_t*>(
+                            static_cast<const std::uint8_t*>(candidate) + delta);
+                    }
                 }
-                const auto* source = reinterpret_cast<const shelf::bf16_t*>(chunk.data());
+
+                if (source == nullptr && io_mode == StreamIo::Direct) {
+                    const std::uint64_t aligned_offset = chunk_offset & ~(kDirectAlign - 1u);
+                    const std::uint64_t delta = chunk_offset - aligned_offset;
+                    const std::uint64_t length =
+                        (delta + chunk_bytes + kDirectAlign - 1u) & ~(kDirectAlign - 1u);
+                    if (length > direct_capacity) {
+                        cleanup();
+                        return Status::invalid_state(
+                            "PLE direct IO buffer is too small", __FILE__, __LINE__);
+                    }
+                    const ssize_t got = ::pread(fd, direct_buffer,
+                                                static_cast<std::size_t>(length),
+                                                static_cast<off_t>(aligned_offset));
+                    if (got < 0 || static_cast<std::uint64_t>(got) < delta + chunk_bytes) {
+                        cleanup();
+                        return Status::invalid_argument(
+                            (std::string("cannot read PLE shard with O_DIRECT: ") +
+                             std::strerror(errno)).c_str(), __FILE__, __LINE__);
+                    }
+                    source = reinterpret_cast<const shelf::bf16_t*>(direct_buffer + delta);
+                }
+
+                if (source == nullptr) {
+                    Status read = read_exact_at(fd, chunk_offset, chunk.data(), chunk_bytes);
+                    if (!read.ok()) {
+                        cleanup();
+                        return read;
+                    }
+                    source = reinterpret_cast<const shelf::bf16_t*>(chunk.data());
+                }
+
                 for (std::uint32_t local_row = 0; local_row < rows; ++local_row) {
                     shelf::quantization::int6::quantize_bf16_row(
                         source + static_cast<std::size_t>(local_row) * table.row_width_, groups,
                         out + static_cast<std::size_t>(row + local_row) * table.row_bytes_);
                 }
-                if (fadvise_dontneed && page_size > 0) {
-                    const std::uint64_t page = static_cast<std::uint64_t>(page_size);
-                    const std::uint64_t begin = chunk_offset & ~(page - 1u);
+
+                if (mapped != nullptr) {
+                    (void)::madvise(mapped, mapped_bytes, MADV_DONTNEED);
+                    (void)::munmap(mapped, mapped_bytes);
+                }
+                if (fadvise_dontneed && io_mode != StreamIo::Direct && page_size > 0) {
+                    const std::uint64_t begin = chunk_offset & ~(map_page - 1u);
                     const std::uint64_t end =
-                        (chunk_offset + chunk_bytes + page - 1u) & ~(page - 1u);
+                        (chunk_offset + chunk_bytes + map_page - 1u) & ~(map_page - 1u);
                     (void)::posix_fadvise(fd, static_cast<off_t>(begin),
                                           static_cast<off_t>(end - begin),
                                           POSIX_FADV_DONTNEED);
                 }
             }
+            std::free(direct_buffer);
             ::close(fd);
             table.shards_[id].data.reset(out);
             table.shards_[id].bytes = out_bytes;

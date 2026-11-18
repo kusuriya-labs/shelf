@@ -53,9 +53,10 @@ PLE の n-gram history を復元 prefix で再 seed する。MTP は無効であ
   （6.5 bit/value）になる。scale は group の `max(max_positive / 31,
   -min_negative / 32)` で、両側の極値を飽和させない。全 zero の group は scale 1 と
   code 0 にする。量子化器は AVX512F/BW/VL/BMI2 がある CPU では AVX512 経路、
-  それ以外は scalar 経路を使う。BF16 shard は shard ごとに `pread` で 64 Ki 行ずつ
-  読み、量子化後に `posix_fadvise(POSIX_FADV_DONTNEED)` で page cache を落とす。
-  BF16 table 全体を anonymous RAM にも page cache にも保持しない。
+  それ以外は scalar 経路を使う。BF16 shard は 20 MiB の窓で読み、量子化後に
+  `madvise(MADV_DONTNEED)` と `posix_fadvise(DONTNEED)` で page cache を落とす。
+  I/O は `SHELF_PLE_STREAM_IO=pread|mmap|direct` で選ぶ（既定 mmap、direct は
+  O_DIRECT）。BF16 table 全体を anonymous RAM にも page cache にも保持しない。
 - MXFP4 / FP8 の preshuffle staging は関数ローカルの buffer を非同期コピーしない。
   同期コピーで device へ移してから buffer を破棄する。
 

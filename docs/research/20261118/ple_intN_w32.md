@@ -172,20 +172,25 @@ shard ごとの `pread` に変更した。
 ## ストリーミング読み込み
 
 - shard ごとに `SafetensorsReader` で tensor の絶対 offset だけを取得し、reader は即座に破棄する。
-- 64 Ki 行（約 20 MiB）ずつ `pread` し、AVX512 で量子化する。
-- 処理済み範囲を `posix_fadvise(POSIX_FADV_DONTNEED)` で page cache から落とす。
+- 既定は 20 MiB の mmap window（64 Ki 行）で読み、AVX512 で量子化する。
+- window を `madvise(MADV_DONTNEED)` + `munmap` し、`posix_fadvise(DONTNEED)` で
+  page cache も落とす。
+- `SHELF_PLE_STREAM_IO=pread|mmap|direct` で切り替える。`direct` は `O_DIRECT` を使い、
+  page cache を経由しない。
 - BF16 table 全体を anonymous RAM にも page cache にも保持しない。残るのは INT6 出力
-  38.743 GiB と worker あたり約 20 MiB の chunk だけである。
+  38.743 GiB と worker あたり約 20 MiB の window だけである。
 
-`test_qwen4exp_load --skip-gpu ...` の実測:
+`test_qwen4exp_load --skip-gpu ...` の I/O 方式比較（各 1 回、他プロセスの bench と同居）:
 
-| 経路 | wall（1 回目） | wall（warm） | user | sys | peak RSS |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| AVX512 + mmap | 28.42 s | 19.07 s | 24.4 s | 26.8 s | 未測定（source 95.37 GiB が page cache に載り得る） |
-| AVX512 + streaming | 31.89 s | 31.51 s | 24.1 s | 36.6 s | **39.24 GiB** |
+| 方式 | wall | user | sys | peak RSS |
+| --- | ---: | ---: | ---: | ---: |
+| pread 20 MiB | 30.86 s | 21.5 s | 31.1 s | 39.24 GiB（別計測） |
+| mmap window 20 MiB | **30.16 s** | 22.9 s | **23.5 s** | **39.25 GiB** |
+| O_DIRECT 20 MiB | 30.42 s | **19.9 s** | **17.8 s** | 未測定 |
 
-streaming は page cache を毎回捨てるため warm でも disk 読み込みが残り、mmap より
-約 12 s 遅い。代わりに peak RSS は出力サイズ + 約 0.5 GiB に収まる。
+wall は disk 帯域で決まり、方式差は 1 s 未満だった。mmap window は pread より sys が
+小さく、O_DIRECT を要求しないため既定にした。O_DIRECT は opt-in とし、io_uring は
+依存を増やさないため使っていない。
 
 ## 起動時間
 
