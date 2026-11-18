@@ -158,6 +158,8 @@ Mat moe(Ops &op, int layer, Mat x) {
         offsets[r].push_back(count);
         int *offsets_gpu = rank.indices(offsets[r]);
         Mat a = rank.mat(count, 1536);
+        if (op.gpu.expert_begin[r])
+            checked(hipEventRecord(op.gpu.expert_begin[r]));
         gather_route<<<dim3(6, count), 256>>>(input, gpu_routes, a);
         checked(hipGetLastError());
         Mat g = grouped(rank, a, gpu_routes, layer, 0, batches, num_batches, use_wmma),
@@ -166,6 +168,8 @@ Mat moe(Ops &op, int layer, Mat x) {
         result[r] = rank.mat(x.rows, 1536);
         weighted<<<dim3(6, x.rows), 256>>>(v, gpu_routes, offsets_gpu, inverse, result[r]);
         checked(hipGetLastError());
+        if (op.gpu.expert_end[r])
+            checked(hipEventRecord(op.gpu.expert_end[r]));
     }
     checked(hipSetDevice(op.gpu.physical[0]));
     Mat shared = feedforward(op, p + "shared_experts", x), combined{};
@@ -178,6 +182,17 @@ Mat moe(Ops &op, int layer, Mat x) {
             }
             combined = combined.p ? op.add(combined, local) : local;
         }
+    if (op.gpu.expert_begin[0]) {
+        for (int r = 0; r < 3; ++r)
+            if (result[r].p) {
+                checked(hipSetDevice(op.gpu.physical[r]));
+                checked(hipEventSynchronize(op.gpu.expert_end[r]));
+                float ms;
+                checked(hipEventElapsedTime(&ms, op.gpu.expert_begin[r], op.gpu.expert_end[r]));
+                op.gpu.expert_ms[r] += ms;
+            }
+        checked(hipSetDevice(op.gpu.physical[0]));
+    }
     return op.norm(op.add(shared, op.linear(p + "routed_expert_up_proj", combined)),
                    p + "combine_output_norm.weight");
 }

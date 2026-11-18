@@ -25,6 +25,11 @@ struct Residency {
     std::array<uint8_t *, 42> cache{};
     std::array<uint16_t *, 42> index_keys{};
     explicit Residency(Checkpoint &model, size_t tokens);
+    ~Residency() noexcept;
+    Residency(const Residency &) = delete;
+    Residency &operator=(const Residency &) = delete;
+    std::array<hipEvent_t, 3> expert_begin{}, expert_end{};
+    std::array<double, 3> expert_ms{};
     void reserve();
     void upload();
     void upload_experts(int rank, int layer);

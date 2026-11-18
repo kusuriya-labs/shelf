@@ -109,9 +109,11 @@ def main():
     p.add_argument("--capacity", type=float, nargs=3, default=[32,32,32])
     p.add_argument("--speed", type=float, nargs=3, default=[640,512,512])
     p.add_argument("--workspace", type=float, nargs=3, default=[2,0.5,0.5])
-    p.add_argument("--tokens", type=int, choices=(1048576,2097152), default=2097152)
+    p.add_argument("--tokens", type=int, default=2097152)
     p.add_argument("--output", type=Path)
     args = p.parse_args()
+    if not 0 < args.tokens <= 2097152:
+        raise ValueError("KV の予約長が範囲外です")
     fixed, draft = fixed_estimate(args.model, args.work)
     kv, indexer = cache_bytes(args.tokens)
     capacities = [int((c - w) * GIB) for c,w in zip(args.capacity, args.workspace)]

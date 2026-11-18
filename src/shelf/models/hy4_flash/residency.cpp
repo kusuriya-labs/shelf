@@ -29,6 +29,13 @@ Residency::Residency(Checkpoint &model, size_t tokens) : model(model), tokens(to
     if (!tokens || tokens > 2097152)
         throw std::runtime_error("KV の予約長が範囲外です");
 }
+Residency::~Residency() noexcept {
+    try {
+        shutdown();
+    } catch (const std::exception &e) {
+        fprintf(stderr, "Hy4 の解放エラー: %s\n", e.what());
+    }
+}
 void Residency::reserve() {
     int count = 0;
     check(hipGetDeviceCount(&count));
@@ -156,6 +163,7 @@ void Residency::upload_experts(int r, int layer) {
                     hipMemcpyHostToDevice));
 }
 void Residency::upload() {
+    auto profile = std::getenv("SHELF_HY4_PROFILE_EP");
     for (int dst = 0; dst < 3; ++dst)
         for (int src = 0; src < 3; ++src) {
             if (src == dst || (dst && src))
@@ -176,6 +184,10 @@ void Residency::upload() {
         }
     for (int r = 0; r < 3; ++r) {
         check(hipSetDevice(physical[r]));
+        if (profile && std::string_view(profile) == "1") {
+            check(hipEventCreate(&expert_begin[r]));
+            check(hipEventCreate(&expert_end[r]));
+        }
         for (const auto &[name, w] : model.weights)
             if (w.rank == r)
                 check(hipMemcpy(weight_base[r] + w.offset, w.host, w.bytes, hipMemcpyHostToDevice));
@@ -211,6 +223,18 @@ void Residency::shutdown() {
         if (e != hipSuccess)
             errors += std::string(hipGetErrorString(e)) + "\n";
     };
+    for (int r = 0; r < 3; ++r)
+        if (expert_begin[r] || expert_end[r]) {
+            auto status = hipSetDevice(physical[r]);
+            collect(status);
+            if (status == hipSuccess) {
+                if (expert_begin[r])
+                    collect(hipEventDestroy(expert_begin[r]));
+                if (expert_end[r])
+                    collect(hipEventDestroy(expert_end[r]));
+            }
+            expert_begin[r] = expert_end[r] = nullptr;
+        }
     if (staging) {
         collect(hipHostFree(staging));
         staging = nullptr;

@@ -115,6 +115,7 @@ struct Target {
             draft_probs = static_cast<float *>(op.arena.next(5 * 120832 * 4));
         }
         gpu.routed_rows = {};
+        gpu.expert_ms = {};
         gpu.transfer_bytes = {};
         state = op.mat(6, 3072);
         base = op.arena.cursor;
@@ -301,6 +302,7 @@ void generate(Residency &gpu, const std::vector<int> &ids, int count, int chunk,
     }
     auto prefill = now();
     auto pp_routes = gpu.routed_rows;
+    auto pp_expert_ms = gpu.expert_ms;
     auto pp_bytes = gpu.transfer_bytes;
     std::vector<int> generated{next};
     int rounds = 0, accepted = 0;
@@ -339,6 +341,9 @@ void generate(Residency &gpu, const std::vector<int> &ids, int count, int chunk,
         fprintf(stderr, "rank=%d prefill_choices=%llu decode_choices=%llu", r,
                 static_cast<unsigned long long>(pp_routes[r]),
                 static_cast<unsigned long long>(gpu.routed_rows[r] - pp_routes[r]));
+        if (gpu.expert_begin[r])
+            fprintf(stderr, " prefill_expert_ms=%.4f decode_expert_ms=%.4f", pp_expert_ms[r],
+                    gpu.expert_ms[r] - pp_expert_ms[r]);
         if (r)
             fprintf(stderr, " prefill_pcie_bytes=%llu decode_pcie_bytes=%llu",
                     static_cast<unsigned long long>(pp_bytes[0][r] + pp_bytes[r][0]),
