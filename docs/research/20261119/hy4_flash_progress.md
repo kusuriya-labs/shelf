@@ -63,3 +63,9 @@ SHELF_HY4_ABSORB=1 で、KV 射影の出力側 H128 とスケールを読み込�
 V620 の量子化中に R9700 の lock を取得できた。load average の 3 指標が 8 未満であることを確認し、R9700 の UUID だけを公開した。層 1 expert 0 の実 gate、入力 17 行の CPU 基準に対する出力相対 L2 は、通常の HIP 経路が 0.000001927、K-major WMMA が 0.000002726。コンテナ内で libc++abi の相対リンクが解決しない最初の試行は、toolchain の usr/lib 全体を読み取り専用で bind して解消した。V620 の確認・3 GPU の統合測定は未実施。
 
 DFly 変換を段階別に再開できるようにした。各段階の shard と次の校正 hidden の SHA-256、本体・原本・校正条件を照合し、完了した段階の再量子化を省く。
+
+## K5　R9700 での候補の単体比較
+
+同じ lock と UUID 制限で、実重みの出力を CPU と比較した後、ウォームアップ済みの HIP event を各 7 回測定した。層 2 の kv_b_proj、64 行では通常経路 2.8515 ms、WMMA 0.1155 ms、WMMA の CPU 相対 L2 は 0.0000346。出力 576 の kv_a_proj、5 行も WMMA 相対 L2 0.0000122。層 1 expert 0 の grouped 射影、6 行では通常 0.0691 ms、dot4 0.0337 ms、いずれも相対 L2 0.0000134。これらは R9700 の単体測定で、V620 や pp2048 の達成値には用いない。
+
+EP 転送は両方向の peer access を確認し、利用できない経路では 128 行分の固定 pinned host buffer を経由する。起動時に実際の転送方式を記録し、所有する peer access と buffer を shutdown で解放する。
