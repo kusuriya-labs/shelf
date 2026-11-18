@@ -26,3 +26,45 @@
 2. 本体の head_complete と実出力の conversion_report.json を確認し、原本、組立済み本体、校正 work、DFly 出力先をこの順に quant_dfly.py に渡す。量子化側と同じ mul24 用 rocm_exl3 の Python 環境で実行する。コンテナ使用時はホストで locked.py v620 を取り、docker run に -e ROCR_VISIBLE_DEVICES を渡す。
 3. ホストで locked.py ep3 を経由して qualify.py を起動する。引数は shelf-compute、本体、Engram ディレクトリ、DFly、配置 JSON、CPU 照合結果ディレクトリ、校正 safetensors、実測記録先。温度 0 の logits と生成列、正の温度で同じ seed の DFly 生成の再現性、実予約の順に検査する。
 4. 同一常駐モデルで pp2048 と decode を 4 回測定し、初回を除いて中央値を取る。PCIe 転送・top-k のホスト同期、kv_b_proj の再展開、R9700 上の行列演算を分けて評価する。直列にかかる時間が支配的な部分から高速化し、各変更後に CPU 照合を繰り返す。
+
+## このホストでのビルドと入力
+
+専用の実行形式は worktree 直下で次のように作る。
+
+```bash
+cmake -S . -B build-hy4 -G Ninja \
+  -DSHELF_HY4_ONLY=ON -DSHELF_BUILD_TESTS=ON \
+  -DSHELF_ROCM_ROOT=/opt/rocm/core-7.14 \
+  -DCMAKE_HIP_COMPILER=/opt/rocm/core-7.14/lib/llvm/bin/clang++ \
+  -DCMAKE_HIP_ARCHITECTURES=gfx1201 \
+  -DSHELF_LIBCXX_LLVM_ROOT="$HOME/coding-local/sLLM/.local-artifacts/phaseshift-draft-vocab/toolchain/root/usr/lib/llvm-23"
+cmake --build build-hy4 --target shelf-compute test_hy4_flash_layer -j1
+ctest --test-dir build-hy4 -R '^hy4_flash_cpu$' --output-on-failure
+```
+
+専用 linear とモデル演算の HIP ターゲットは gfx1030 と gfx1201 の両方を生成する。WMMA の translation unit は gfx1201 だけでコンパイルする。rank の割り当ては実行時に ISA を照合する。
+
+```bash
+original="$HOME/datapool/ai_models/safetensors/Hy4-flash"
+quantroot="$HOME/datapool/rocm-exl3-rdna2"
+pilot="$quantroot/hy4-flash-pilot"
+work="$pilot/pipeline-v620-128x1024"
+body="$quantroot/models/Hy4-flash-exl3-4bpw-mul24"
+draft="$pilot/shelf-dfly/Hy4-flash-dfly-4bpw"
+engram="$pilot/engram-e4m3fn"
+```
+
+Engram の新規生成には `python3 tools/hy4_flash/convert_engram.py "$original" "$engram"` を使う。このホストでは 4 表を作成済み。本体完了後は配置表を新しい出力名で生成する。CPU 連続照合の再開には、その照合を始めた時点と同じ配置表が必要である。
+
+```bash
+python3 tools/hy4_flash/placement.py "$original" "$work" --output build-hy4/final-owners.json
+options=(--model-dir "$body" --engram-dir "$engram" --placement build-hy4/final-owners.json)
+build-hy4/shelf-compute hy4 inspect "${options[@]}" --dfly-dir "$draft"
+python3 tools/hy4_flash/locked.py ep3 build-hy4/shelf-compute hy4 reserve \
+  "${options[@]}" --dfly-dir "$draft" --max-seq-len 2097152
+python3 tools/hy4_flash/locked.py ep3 build-hy4/shelf-compute hy4 generate \
+  "${options[@]}" --dfly-dir "$draft" --max-seq-len 4096 \
+  --input-ids-file prompt-ids.txt --max-new-tokens 128
+```
+
+入力は空白区切りの token ID。本体単独との比較は --dfly-dir を省く。速度比較の候補は SHELF_HY4_WMMA、SHELF_HY4_DOT4、SHELF_HY4_ABSORB、SHELF_HY4_GROUP_ROWS を個別に 1 にして検査する。GROUP_ROWS は同じ expert を選んだ行を GPU ごとにまとめ、復号した重みを共有する候補。層 2 の校正先頭 128 行では 2048 選択が 411 expert に集中した。
