@@ -22,6 +22,7 @@ struct ComputeOptions {
     unsigned long page_tokens = 16;
     unsigned long max_concurrent_requests = 4;
     unsigned long max_num_batched_tokens = 2048;
+    unsigned long prefill_chunk = 512;
     std::vector<int> devices = {0};
     unsigned long tp = 1;
     unsigned long pipeline_parallel = 1;

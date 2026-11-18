@@ -251,7 +251,10 @@ int main(int argc, char** argv) {
                     static_cast<uint32_t>(dflash_config.target_layer_ids[t]);
             }
         } else {
-            unsigned long rows = std::max<unsigned long>(prompt_ids.size() + 1UL, 16UL);
+            const unsigned long chunk = std::max<unsigned long>(opt.prefill_chunk, 16UL);
+            unsigned long rows =
+                std::min<unsigned long>(prompt_ids.size() + 1UL, chunk);
+            rows = std::max<unsigned long>(rows, 16UL);
             if (opt.mtp) {
                 rows = std::max<unsigned long>(rows, opt.mtp_drafts + 1UL);
             }

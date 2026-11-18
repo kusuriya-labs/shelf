@@ -26,6 +26,7 @@ TP、pipeline parallel、MTP、DFlash2、2048 token 超の長文は未対応。
 | `--page-tokens N` | paged KV page size in tokens (default 16) |
 | `--max-concurrent-requests N` | max in-flight requests (default 4) |
 | `--max-num-batched-tokens N` | token budget per scheduled step; also sets the executor row bucket (default 2048) |
+| `--prefill-chunk N` | prompt tokens per prefill step; also caps the row bucket of a single request (default 512) |
 | `--ple-prefetch 0\|1` | prefetch the next PLE rows during prefill (default 1) |
 | `--device N\|N,M` | GPU device(s); count must match --tensor-parallel or --pipeline-parallel (default 0) |
 | `--tensor-parallel N` | tensor parallel degree 1 \| 2 \| 4 (default 1) |
@@ -48,12 +49,12 @@ TP、pipeline parallel、MTP、DFlash2、2048 token 超の長文は未対応。
 | `--moe-cache-burst N` | max burst swaps (default 512) |
 | `--moe-cache-min-gain N` | minimum frequency gain to swap (default 150) |
 | `--moe-cache-rebalance-steps N` | rebalance interval in steps (default 4) |
-| `--moe-cache-rebalance-routes N` | rebalance interval in routes (0 = auto) |
+| `--moe-cache-rebalance-routes N rebalance interval in routes (0 = auto)` |  |
 | `--moe-cache-decay N` | halve expert frequency at this count (default 4096) |
 | `--moe-cache-log-interval N` | expert cache hit-rate log interval (default 64) |
 | `--moe-cache-oracle 0\|1` | log cache oracle decisions (default 0) |
-| `--ple-artifact 0\|1` | write/read `<model_dir>/quanted_ple.bin` (default 1) |
-| `--ple-stream-io MODE` | `pread` \| `mmap` \| `direct` PLE source I/O (default mmap) |
+| `--ple-artifact 0\|1` | write/read <model_dir>/quanted_ple.bin (default 1) |
+| `--ple-stream-io MODE` | pread \| mmap \| direct (default mmap) |
 | `--lm-head-int8 0\|1` | quantize the BF16 lm head to INT8 W32 on load (default 1) |
 | `--pcie-frac F` | share of PCIe the runtime may use (default 0.25) |
 | `--pcie-gbps F` | assumed PCIe bandwidth in GB/s (default 25) |

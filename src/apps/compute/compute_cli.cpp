@@ -89,6 +89,8 @@ void compute_usage(const char* prog) {
     printf("  --max-concurrent-requests N  max in-flight requests (default 4)\n");
     printf("  --max-num-batched-tokens N   token budget per scheduled step; also sets\n");
     printf("                         the executor row bucket (default 2048)\n");
+    printf("  --prefill-chunk N      prompt tokens per prefill step; also caps the row\n"
+           "                         bucket of a single request (default 512)\n");
     printf("  --ple-prefetch 0|1      prefetch the next PLE rows during prefill (default 1)\n");
     printf("  --device N|N,M         GPU device(s); count must match --tensor-parallel or --pipeline-parallel (default 0)\n");
     printf("  --tensor-parallel N    tensor parallel degree 1 | 2 | 4 (default 1)\n");
@@ -221,6 +223,7 @@ int parse_compute_options(int argc, char** argv, ComputeOptions& opt) {
     auto& arena_gib_auto = opt.arena_gib_auto;
     auto& page_tokens = opt.page_tokens;
         auto& max_num_batched_tokens = opt.max_num_batched_tokens;
+        auto& prefill_chunk = opt.prefill_chunk;
 auto& max_concurrent_requests = opt.max_concurrent_requests;
     auto& devices = opt.devices;
     auto& tp = opt.tp;
@@ -287,6 +290,12 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
             if (!parse_uint(argv[++i], max_num_batched_tokens) || max_num_batched_tokens < 16u ||
                 max_num_batched_tokens > 8192u) {
                 fprintf(stderr, "bad --max-num-batched-tokens (16..8192)\n");
+                return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--prefill-chunk") == 0 && i + 1 < argc) {
+            if (!parse_uint(argv[++i], prefill_chunk) || prefill_chunk < 16u ||
+                prefill_chunk > 8192u) {
+                fprintf(stderr, "bad --prefill-chunk (16..8192)\n");
                 return kComputeParseError;
             }
         } else if (std::strcmp(argv[i], "--device") == 0 && i + 1 < argc) {
