@@ -110,10 +110,30 @@ def build_compute_argv(opts) -> list[str]:
             argv.append("--dflash2-adaptive")
         if opts.dflash2_max_sessions > 0:
             argv += ["--dflash2-max-sessions", str(opts.dflash2_max_sessions)]
+        if opts.dflash2_prefill_rows is not None:
+            argv += ["--dflash2-prefill-rows", str(opts.dflash2_prefill_rows)]
+        if opts.dflash2_radix_topn is not None:
+            argv += ["--dflash2-radix-topn", str(opts.dflash2_radix_topn)]
     if opts.mtp:
         argv += ["--mtp", "--mtp-drafts", str(opts.mtp_drafts)]
     if opts.tensor_parallel > 1:
         argv += ["--tensor-parallel", str(opts.tensor_parallel)]
+    if opts.moe_host_experts is not None:
+        argv += ["--moe-host-experts", str(opts.moe_host_experts)]
+    if opts.moe_cpu_miss is not None:
+        argv += ["--moe-cpu-miss", str(opts.moe_cpu_miss)]
+    if opts.moe_cpu_miss_rows is not None:
+        argv += ["--moe-cpu-miss-rows", str(opts.moe_cpu_miss_rows)]
+    if opts.cpu_expert_threads is not None:
+        argv += ["--cpu-expert-threads", str(opts.cpu_expert_threads)]
+    if opts.pcie_frac is not None:
+        argv += ["--pcie-frac", str(opts.pcie_frac)]
+    if opts.pcie_gbps is not None:
+        argv += ["--pcie-gbps", str(opts.pcie_gbps)]
+    if opts.ple_prefetch is not None:
+        argv += ["--ple-prefetch", str(opts.ple_prefetch)]
+    if opts.tp_transport is not None:
+        argv += ["--tp-transport", opts.tp_transport]
     if opts.verify_weights:
         argv += ["--verify-weights", "1"]
     return argv
@@ -546,12 +566,32 @@ def parse_args(argv=None):
     parser.add_argument("--dflash2-max-sessions", type=int, default=0,
                         help="requests that may speculate at once; the rest decode "
                              "without speculation (0 = min(--max-concurrent-requests, 8))")
+    parser.add_argument("--dflash2-prefill-rows", type=int, default=None,
+                        help="drafter prefill rows（default は model 側）")
+    parser.add_argument("--dflash2-radix-topn", type=int, default=None,
+                        help="drafter の radix top-n 幅（default は code 側）")
     parser.add_argument("--mtp", action="store_true",
                         help="checkpoint の MTP block を drafter として使う"
                              "（複数 request を同時に処理する）")
     parser.add_argument("--mtp-drafts", type=int, default=4,
                         help="MTP の draft tokens per round（default 4）")
 
+    parser.add_argument("--moe-host-experts", type=int, default=None,
+                        help="層あたり host に退避する routed expert 数（default 0）")
+    parser.add_argument("--moe-cpu-miss", type=int, default=None, choices=(0, 1),
+                        help="host 常駐 expert を CPU で計算する（default 0）")
+    parser.add_argument("--moe-cpu-miss-rows", type=int, default=None,
+                        help="1 batch で CPU 経路が受け持つ行数（default 64）")
+    parser.add_argument("--cpu-expert-threads", type=int, default=None,
+                        help="CPU expert のスレッド数（default は物理コア半分）")
+    parser.add_argument("--pcie-frac", type=float, default=None,
+                        help="runtime が使ってよい PCIe の割合（default 0.25）")
+    parser.add_argument("--pcie-gbps", type=float, default=None,
+                        help="想定する PCIe 帯域 GB/s（default 25）")
+    parser.add_argument("--ple-prefetch", type=int, default=None, choices=(0, 1),
+                        help="prefill 中に次の PLE 行を先読みする（default 1）")
+    parser.add_argument("--tp-transport", default=None,
+                        help="tensor parallel transport の選択")
     parser.add_argument("--verify-weights", action="store_true",
                         help="verify quantized payload CRC32 on load")
     opts = parser.parse_args(argv)

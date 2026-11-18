@@ -94,8 +94,18 @@ Ready.
 | `--dflash2-tree-budget N\|auto` | tree verify rows: auto uses 10 for one decoding request if speculative, 8 otherwise (default auto; 0 disables) |
 | `--dflash2-adaptive` | batch と受理数に応じて投機を制御する |
 | `--dflash2-max-sessions DFLASH2_MAX_SESSIONS` | requests that may speculate at once; the rest decode without speculation (0 = min(--max-concurrent- requests, 8)) |
+| `--dflash2-prefill-rows DFLASH2_PREFILL_ROWS` | drafter prefill rows（default は model 側） |
+| `--dflash2-radix-topn DFLASH2_RADIX_TOPN` | drafter の radix top-n 幅（default は code 側） |
 | `--mtp` | checkpoint の MTP block を drafter として使う（複数 request を同時に処理する） |
 | `--mtp-drafts MTP_DRAFTS` | MTP の draft tokens per round（default 4） |
+| `--moe-host-experts MOE_HOST_EXPERTS` | 層あたり host に退避する routed expert 数（default 0） |
+| `--moe-cpu-miss {0,1}` | host 常駐 expert を CPU で計算する（default 0） |
+| `--moe-cpu-miss-rows MOE_CPU_MISS_ROWS` | 1 batch で CPU 経路が受け持つ行数（default 64） |
+| `--cpu-expert-threads CPU_EXPERT_THREADS` | CPU expert のスレッド数（default は物理コア半分） |
+| `--pcie-frac PCIE_FRAC` | runtime が使ってよい PCIe の割合（default 0.25） |
+| `--pcie-gbps PCIE_GBPS` | 想定する PCIe 帯域 GB/s（default 25） |
+| `--ple-prefetch {0,1}` | prefill 中に次の PLE 行を先読みする（default 1） |
+| `--tp-transport TP_TRANSPORT` | tensor parallel transport の選択 |
 | `--verify-weights` | verify quantized payload CRC32 on load |
 <!-- /cli:server -->
 

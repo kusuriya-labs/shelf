@@ -23,6 +23,18 @@ bool parse_uint(const char* s, unsigned long& out) {
     return end != s && *end == '\0';
 }
 
+void apply_env_u32(const char* name, unsigned long value) {
+    char buffer[32];
+    std::snprintf(buffer, sizeof(buffer), "%lu", value);
+    setenv(name, buffer, 1);
+}
+
+void apply_env_double(const char* name, double value) {
+    char buffer[32];
+    std::snprintf(buffer, sizeof(buffer), "%g", value);
+    setenv(name, buffer, 1);
+}
+
 bool parse_float(const char* s, float& out) {
     if (s == nullptr || *s == '\0') return false;
     char* end = nullptr;
@@ -73,6 +85,7 @@ void compute_usage(const char* prog) {
     printf("  --max-concurrent-requests N  max in-flight requests (default 4)\n");
     printf("  --max-num-batched-tokens N   token budget per scheduled step; also sets\n");
     printf("                         the executor row bucket (default 2048)\n");
+    printf("  --ple-prefetch 0|1      prefetch the next PLE rows during prefill (default 1)\n");
     printf("  --device N|N,M         GPU device(s); count must match --tensor-parallel or --pipeline-parallel (default 0)\n");
     printf("  --tensor-parallel N    tensor parallel degree 1 | 2 | 4 (default 1)\n");
     printf("  --pipeline-parallel N  pipeline-parallel stage count (default 1; requires --tensor-parallel 1)\n");
@@ -88,11 +101,18 @@ void compute_usage(const char* prog) {
     printf("                          hidden capture; dump to SHELF_DEBUG_HIDDEN_FILE\n");
     printf("  --tensor-parallel-combine-f32 0|1  keep row-parallel combine output in f32 (default 0 =\n");
     printf("                          bf16 round as today; tp only)\n");
+    printf("  --tp-transport NAME     tensor parallel transport selection\n");
     printf("  --temperature F        sampling temperature (default 0 = greedy)\n");
     printf("  --top-p F              nucleus sampling threshold in (0, 1] (default 1)\n");
     printf("  --min-p F              min-p threshold in [0, 1] (default 0 = disabled)\n");
     printf("  --top-k N              keep the N highest logits (default 0 = disabled)\n");
     printf("  --seed N               sampling seed (default 0)\n");
+    printf("  --moe-host-experts N    routed experts per layer kept in host memory (default 0)\n");
+    printf("  --moe-cpu-miss 0|1      compute host-resident experts on the CPU (default 0)\n");
+    printf("  --moe-cpu-miss-rows N   rows per batch the CPU path may take (default 64)\n");
+    printf("  --cpu-expert-threads N  CPU expert threads (default half the physical cores)\n");
+    printf("  --pcie-frac F           share of PCIe the runtime may use (default 0.25)\n");
+    printf("  --pcie-gbps F           assumed PCIe bandwidth in GB/s (default 25)\n");
     printf("  --dflash2-model-dir PATH  DFlash2 draft model directory; enables\n");
     printf("                            speculative decoding (greedy / stochastic)\n");
     printf("  --dflash2-tree-budget N|auto  tree verify rows (default auto; 0 disables)\n");
@@ -100,6 +120,8 @@ void compute_usage(const char* prog) {
     printf("  --dflash2-tree-extra B  enable experimental tree verification (B=0,1,2,4)\n");
     printf("  --dflash2-drafts N     speculative draft tokens per round (default 7)\n");
     printf("  --dflash2-adaptive     control speculation with a batch policy\n");
+    printf("  --dflash2-prefill-rows N  drafter prefill rows (default from the model)\n");
+    printf("  --dflash2-radix-topn N  radix top-n width for the drafter (default from code)\n");
     printf("  --dflash2-max-sessions N  requests that may speculate at once (serve; default\n");
     printf("                            min(--max-concurrent-requests, 8)); the rest decode\n");
     printf("                            without speculation\n");
@@ -412,6 +434,71 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
             }
         } else if (std::strcmp(argv[i], "--serve-stdio") == 0) {
             serve_stdio = true;
+        } else if (std::strcmp(argv[i], "--moe-host-experts") == 0 && i + 1 < argc) {
+            unsigned long value = 0;
+            if (!parse_uint(argv[++i], value)) {
+                fprintf(stderr, "bad --moe-host-experts\n");
+                return kComputeParseError;
+            }
+            apply_env_u32("SHELF_MOE_HOST_EXPERTS", value);
+        } else if (std::strcmp(argv[i], "--moe-cpu-miss") == 0 && i + 1 < argc) {
+            unsigned long value = 0;
+            if (!parse_uint(argv[++i], value) || value > 1u) {
+                fprintf(stderr, "bad --moe-cpu-miss (expected 0 or 1)\n");
+                return kComputeParseError;
+            }
+            apply_env_u32("SHELF_MOE_CPU_MISS", value);
+        } else if (std::strcmp(argv[i], "--moe-cpu-miss-rows") == 0 && i + 1 < argc) {
+            unsigned long value = 0;
+            if (!parse_uint(argv[++i], value) || value == 0u) {
+                fprintf(stderr, "bad --moe-cpu-miss-rows\n");
+                return kComputeParseError;
+            }
+            apply_env_u32("SHELF_MOE_CPU_MISS_ROWS", value);
+        } else if (std::strcmp(argv[i], "--cpu-expert-threads") == 0 && i + 1 < argc) {
+            unsigned long value = 0;
+            if (!parse_uint(argv[++i], value) || value == 0u || value > 64u) {
+                fprintf(stderr, "bad --cpu-expert-threads (expected 1..64)\n");
+                return kComputeParseError;
+            }
+            apply_env_u32("SHELF_CPU_EXPERT_THREADS", value);
+        } else if (std::strcmp(argv[i], "--pcie-frac") == 0 && i + 1 < argc) {
+            float value = 0.0f;
+            if (!parse_float(argv[++i], value) || value <= 0.0f || value > 1.0f) {
+                fprintf(stderr, "bad --pcie-frac (expected 0 < F <= 1)\n");
+                return kComputeParseError;
+            }
+            apply_env_double("SHELF_PCIE_FRAC", value);
+        } else if (std::strcmp(argv[i], "--pcie-gbps") == 0 && i + 1 < argc) {
+            float value = 0.0f;
+            if (!parse_float(argv[++i], value) || value <= 0.0f) {
+                fprintf(stderr, "bad --pcie-gbps\n");
+                return kComputeParseError;
+            }
+            apply_env_double("SHELF_PCIE_GBPS", value);
+        } else if (std::strcmp(argv[i], "--ple-prefetch") == 0 && i + 1 < argc) {
+            unsigned long value = 0;
+            if (!parse_uint(argv[++i], value) || value > 1u) {
+                fprintf(stderr, "bad --ple-prefetch (expected 0 or 1)\n");
+                return kComputeParseError;
+            }
+            apply_env_u32("SHELF_PLE_PREFETCH", value);
+        } else if (std::strcmp(argv[i], "--dflash2-prefill-rows") == 0 && i + 1 < argc) {
+            unsigned long value = 0;
+            if (!parse_uint(argv[++i], value) || value == 0u) {
+                fprintf(stderr, "bad --dflash2-prefill-rows\n");
+                return kComputeParseError;
+            }
+            apply_env_u32("SHELF_DFLASH2_PREFILL_ROWS", value);
+        } else if (std::strcmp(argv[i], "--dflash2-radix-topn") == 0 && i + 1 < argc) {
+            unsigned long value = 0;
+            if (!parse_uint(argv[++i], value) || value == 0u) {
+                fprintf(stderr, "bad --dflash2-radix-topn\n");
+                return kComputeParseError;
+            }
+            apply_env_u32("SHELF_DFLASH2_RADIX_TOPN", value);
+        } else if (std::strcmp(argv[i], "--tp-transport") == 0 && i + 1 < argc) {
+            setenv("SHELF_TP_TRANSPORT", argv[++i], 1);
         } else {
             fprintf(stderr, "unknown argument: %s\n", argv[i]);
             compute_usage(argv[0]);

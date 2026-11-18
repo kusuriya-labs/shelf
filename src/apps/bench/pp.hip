@@ -67,6 +67,8 @@ void print_usage(FILE* out) {
         "Usage: shelf-bench pp [options]\n"
         "  --prompt-tokens N            (default 128)\n"
         "  --prefill-chunk N            (default 0 = up to 8192 tokens per batch)\n"
+        "  --ple-prefetch 0|1         prefetch the next PLE rows during prefill (default 1)\n"
+
         "  --gap-keepalive US           (default 0 = off; keep the CP awake)\n"
         "  --gap-keepalive-flags N      (default hipEventDisableSystemFence;\n"
         "                                -1 = hipEventCreate)\n"
@@ -78,6 +80,13 @@ void print_usage(FILE* out) {
         "  --page-tokens N              (default 16)\n"
         "  --kv-cache-dtype bf16|fp8|octave:FORMAT (default bf16)\n"
         "  --arena-gib N                (default auto = free VRAM minus 0.5 GiB)\n"
+        "  --moe-host-experts N       routed experts per layer kept in host memory (default 0)\n"
+        "  --moe-cpu-miss 0|1         compute host-resident experts on the CPU (default 0)\n"
+        "  --moe-cpu-miss-rows N      rows per batch the CPU path may take (default 64)\n"
+        "  --cpu-expert-threads N     CPU expert threads (default half the physical cores)\n"
+        "  --pcie-frac F              share of PCIe the runtime may use (default 0.25)\n"
+        "  --pcie-gbps F              assumed PCIe bandwidth in GB/s (default 25)\n"
+
         "  --runs N                     (default 3)\n"
         "  --warmup N                   (default 0)\n"
         "  --tokens-file PATH           PSKLDTOK corpus file used as the prompt\n"
@@ -85,7 +94,31 @@ void print_usage(FILE* out) {
         "  --perf-stats-output PATH     (default none; per-kernel dispatch counters JSON,\n"
         "                                needs SHELF_QWEN35_PERF_STATS=1)\n"
         "  --decode-backend TYPE        hip (default)\n"
+
         "  --output PATH                (default none)\n");
+}
+
+
+static bool apply_env_u32(const std::string& raw, const char* name) {
+    char* end = nullptr;
+    const unsigned long value = std::strtoul(raw.c_str(), &end, 10);
+    if (end == raw.c_str() || *end != '\0') {
+        fprintf(stderr, "invalid value for %s\n", name);
+        return false;
+    }
+    setenv(name, raw.c_str(), 1);
+    return true;
+}
+
+static bool apply_env_double(const std::string& raw, const char* name) {
+    char* end = nullptr;
+    const double value = std::strtod(raw.c_str(), &end);
+    if (end == raw.c_str() || *end != '\0' || value <= 0.0) {
+        fprintf(stderr, "invalid value for %s\n", name);
+        return false;
+    }
+    setenv(name, raw.c_str(), 1);
+    return true;
 }
 
 bool parse_int(const std::string& value, int& out) {
@@ -230,6 +263,20 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
             opts.output = need_value();
         } else if (key == "--perf-stats-output") {
             opts.perf_stats_output = need_value();
+        } else if (key == "--moe-host-experts") {
+            if (!apply_env_u32(need_value(), "SHELF_MOE_HOST_EXPERTS")) return false;
+        } else if (key == "--moe-cpu-miss") {
+            if (!apply_env_u32(need_value(), "SHELF_MOE_CPU_MISS")) return false;
+        } else if (key == "--moe-cpu-miss-rows") {
+            if (!apply_env_u32(need_value(), "SHELF_MOE_CPU_MISS_ROWS")) return false;
+        } else if (key == "--cpu-expert-threads") {
+            if (!apply_env_u32(need_value(), "SHELF_CPU_EXPERT_THREADS")) return false;
+        } else if (key == "--pcie-frac") {
+            if (!apply_env_double(need_value(), "SHELF_PCIE_FRAC")) return false;
+        } else if (key == "--pcie-gbps") {
+            if (!apply_env_double(need_value(), "SHELF_PCIE_GBPS")) return false;
+        } else if (key == "--ple-prefetch") {
+            if (!apply_env_u32(need_value(), "SHELF_PLE_PREFETCH")) return false;
         } else if (key == "--help" || key == "-h") {
             print_usage(stdout);
             exit(0);

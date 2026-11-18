@@ -53,6 +53,7 @@ detail and is not a `--variant` value.
 | --- | --- |
 | `--prompt-tokens N` | (default 128) |
 | `--prefill-chunk N` | (default 0 = up to 8192 tokens per batch) |
+| `--ple-prefetch 0\|1` | prefetch the next PLE rows during prefill (default 1) |
 | `--gap-keepalive US` | (default 0 = off; keep the CP awake) |
 | `--gap-keepalive-flags N` | (default hipEventDisableSystemFence; -1 = hipEventCreate) |
 | `--mode forward\|greedy` | (default forward) |
@@ -62,6 +63,12 @@ detail and is not a `--variant` value.
 | `--page-tokens N` | (default 16) |
 | `--kv-cache-dtype bf16\|fp8\|octave:FORMAT (default bf16)` |  |
 | `--arena-gib N` | (default auto = free VRAM minus 0.5 GiB) |
+| `--moe-host-experts N` | routed experts per layer kept in host memory (default 0) |
+| `--moe-cpu-miss 0\|1` | compute host-resident experts on the CPU (default 0) |
+| `--moe-cpu-miss-rows N` | rows per batch the CPU path may take (default 64) |
+| `--cpu-expert-threads N` | CPU expert threads (default half the physical cores) |
+| `--pcie-frac F` | share of PCIe the runtime may use (default 0.25) |
+| `--pcie-gbps F` | assumed PCIe bandwidth in GB/s (default 25) |
 | `--runs N` | (default 3) |
 | `--warmup N` | (default 0) |
 | `--tokens-file PATH` | PSKLDTOK corpus file used as the prompt |
@@ -118,6 +125,12 @@ backbone kernel の allowlist に登録済みで、prefill の throughput は TP
 | `--page-tokens N` | (default 16) |
 | `--kv-cache-dtype bf16\|fp8\|octave:FORMAT (default bf16)` |  |
 | `--arena-gib N` | (default auto = free VRAM minus 0.5 GiB) |
+| `--moe-host-experts N` | routed experts per layer kept in host memory (default 0) |
+| `--moe-cpu-miss 0\|1` | compute host-resident experts on the CPU (default 0) |
+| `--moe-cpu-miss-rows N` | rows per batch the CPU path may take (default 64) |
+| `--cpu-expert-threads N` | CPU expert threads (default half the physical cores) |
+| `--pcie-frac F` | share of PCIe the runtime may use (default 0.25) |
+| `--pcie-gbps F` | assumed PCIe bandwidth in GB/s (default 25) |
 | `--output PATH` | (default none) |
 | `--gap-keepalive US` | (default 0 = off; keep the CP awake) |
 | `--gap-keepalive-flags N` | (default hipEventDisableSystemFence; -1 = hipEventCreate) |

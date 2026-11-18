@@ -26,6 +26,7 @@ TP、pipeline parallel、MTP、DFlash2、2048 token 超の長文は未対応。
 | `--page-tokens N` | paged KV page size in tokens (default 16) |
 | `--max-concurrent-requests N` | max in-flight requests (default 4) |
 | `--max-num-batched-tokens N` | token budget per scheduled step; also sets the executor row bucket (default 2048) |
+| `--ple-prefetch 0\|1` | prefetch the next PLE rows during prefill (default 1) |
 | `--device N\|N,M` | GPU device(s); count must match --tensor-parallel or --pipeline-parallel (default 0) |
 | `--tensor-parallel N` | tensor parallel degree 1 \| 2 \| 4 (default 1) |
 | `--pipeline-parallel N` | pipeline-parallel stage count (default 1; requires --tensor-parallel 1) |
@@ -36,16 +37,25 @@ TP、pipeline parallel、MTP、DFlash2、2048 token 超の長文は未対応。
 | `--dump-logits PATH` | append per-step sampled logits rows (raw f32) to PATH row k aligns with GENERATED_IDS[k] (prefill row first) |
 | `--hidden-taps LIST` | comma separated layer ids (max 8) for intermediate hidden capture; dump to SHELF_DEBUG_HIDDEN_FILE |
 | `--tensor-parallel-combine-f32 0\|1` | keep row-parallel combine output in f32 (default 0 = bf16 round as today; tp only) |
+| `--tp-transport NAME` | tensor parallel transport selection |
 | `--temperature F` | sampling temperature (default 0 = greedy) |
 | `--top-p F` | nucleus sampling threshold in (0, 1] (default 1) |
 | `--min-p F` | min-p threshold in [0, 1] (default 0 = disabled) |
 | `--top-k N` | keep the N highest logits (default 0 = disabled) |
 | `--seed N` | sampling seed (default 0) |
+| `--moe-host-experts N` | routed experts per layer kept in host memory (default 0) |
+| `--moe-cpu-miss 0\|1` | compute host-resident experts on the CPU (default 0) |
+| `--moe-cpu-miss-rows N` | rows per batch the CPU path may take (default 64) |
+| `--cpu-expert-threads N` | CPU expert threads (default half the physical cores) |
+| `--pcie-frac F` | share of PCIe the runtime may use (default 0.25) |
+| `--pcie-gbps F` | assumed PCIe bandwidth in GB/s (default 25) |
 | `--dflash2-model-dir PATH` | DFlash2 draft model directory; enables speculative decoding (greedy / stochastic) |
 | `--dflash2-tree-budget N\|auto` | tree verify rows (default auto; 0 disables) auto: 10 for one decoding request if speculative, else 8 |
 | `--dflash2-tree-extra B` | enable experimental tree verification (B=0,1,2,4) |
 | `--dflash2-drafts N` | speculative draft tokens per round (default 7) |
 | `--dflash2-adaptive` | control speculation with a batch policy |
+| `--dflash2-prefill-rows N` | drafter prefill rows (default from the model) |
+| `--dflash2-radix-topn N` | radix top-n width for the drafter (default from code) |
 | `--dflash2-max-sessions N` | requests that may speculate at once (serve; default min(--max-concurrent-requests, 8)); the rest decode without speculation |
 | `--dflash2-stats 0\|1` | print speculative decode statistics (default 1) |
 | `--mtp` | enable the checkpoint's MTP block as the drafter |
