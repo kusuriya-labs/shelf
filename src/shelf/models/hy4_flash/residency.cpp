@@ -1,4 +1,5 @@
 #include <shelf/models/hy4_flash/residency.h>
+#include <shelf/models/hy4_flash/absorbed.h>
 #include <algorithm>
 #include <cstdio>
 #include <stdexcept>
@@ -18,6 +19,9 @@ void* Region::next(size_t length) {
     return base+start;
 }
 Residency::Residency(Checkpoint& model,size_t tokens):model(model),tokens(tokens) {
+    auto mode=std::getenv("SHELF_HY4_ABSORB");
+    if(mode && std::string_view(mode)=="1")
+        for(const auto& [name,dims]:model.shape) if(name.ends_with(".self_attn.kv_b_proj")) folded[name]=nullptr;
     if(!tokens || tokens>2097152) throw std::runtime_error("KV の予約長が範囲外です");
 }
 void Residency::reserve() {
@@ -42,6 +46,7 @@ void Residency::reserve() {
             overhead[r]+=align(294*(sparse?tokens:std::min(tokens,size_t(518))));
             if(sparse) overhead[r]+=align((tokens/4+12)*256);
         }
+        if(!r) for(const auto& [name,ignored]:folded) overhead[0]+=size_t(model.shape.at(name)[1])*512*2;
         size_t fixed=align(model.bytes[r])-used[r]*expert_bytes+overhead[r];
         if(available[r]<fixed) throw std::bad_alloc();
         limit[r]=(available[r]-fixed)/expert_bytes;
@@ -84,6 +89,7 @@ void Residency::reserve() {
             cache[i]=static_cast<uint8_t*>(buffer.next(294*(sparse?tokens:std::min(tokens,size_t(518)))));
             if(sparse) index_keys[i]=static_cast<uint16_t*>(buffer.next((tokens/4+12)*256));
         }
+        if(!r) for(auto& [name,ptr]:folded) ptr=buffer.next(size_t(model.shape.at(name)[1])*512*2);
         workspace[r]={static_cast<uint8_t*>(buffer.next(work)),work};
     }
     check(hipSetDevice(0));
@@ -95,6 +101,7 @@ void Residency::upload() {
             if(w.rank==r) check(hipMemcpy(weight_base[r]+w.offset,w.host,w.bytes,hipMemcpyHostToDevice));
     }
     check(hipSetDevice(0));
+    if(!folded.empty()) fold_kv_weights(*this);
 }
 void Residency::shutdown() {
     std::string errors;

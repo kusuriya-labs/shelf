@@ -49,6 +49,7 @@ add_library(shelf_hy4_model STATIC
     src/shelf/models/hy4_flash/residency.cpp
     src/shelf/models/hy4_flash/ops.hip
     src/shelf/models/hy4_flash/attention.hip
+    src/shelf/models/hy4_flash/absorbed.hip
     src/shelf/models/hy4_flash/engram.hip
     src/shelf/models/hy4_flash/moe.hip
     src/shelf/models/hy4_flash/generate.hip

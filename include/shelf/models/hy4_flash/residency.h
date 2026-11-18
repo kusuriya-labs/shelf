@@ -17,6 +17,7 @@ struct Residency {
     std::vector<gpu::GpuArena> arenas;
     std::array<uint8_t*,3> weight_base{};
     std::array<Region,3> workspace{};
+    std::map<std::string,void*> folded;
     std::array<uint8_t*,42> cache{};
     std::array<uint16_t*,42> index_keys{};
     explicit Residency(Checkpoint& model, size_t tokens);

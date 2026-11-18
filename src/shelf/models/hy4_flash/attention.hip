@@ -1,5 +1,6 @@
 #include <hip/hip_fp16.h>
 #include <shelf/models/hy4_flash/attention.h>
+#include <shelf/models/hy4_flash/absorbed.h>
 #include <shelf/kernels/fused/detail/octave_common.h>
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/decode.h>
 #include <algorithm>
@@ -245,11 +246,16 @@ Mat attention(Ops& op,const std::string& prefix,int layer,int start,Mat hidden,S
         checked(hipGetLastError());
         unpack<64,11><<<dim3(1,ids.size()),64>>>(cache,fresh,positions,start,slots,b,260);
         checked(hipGetLastError());
-        Mat expanded=op.linear(p+"kv_b_proj",a);
         auto offsets_gpu=op.indices(offsets);
-        attend<<<dim3(heads,n),256,stride*sizeof(float)>>>(q.row(i,n),expanded,b,offsets_gpu,stride,
-            op.param(p+"learnable_sink_param"),gate.row(i,n),out.row(i,n));
-        checked(hipGetLastError());
+        if(!op.gpu.folded.empty()) {
+            attend_absorbed(op,p+"kv_b_proj",a,b,q.row(i,n),gate.row(i,n),offsets_gpu,stride,
+                            op.param(p+"learnable_sink_param"),out.row(i,n));
+        } else {
+            Mat expanded=op.linear(p+"kv_b_proj",a);
+            attend<<<dim3(heads,n),256,stride*sizeof(float)>>>(q.row(i,n),expanded,b,offsets_gpu,stride,
+                op.param(p+"learnable_sink_param"),gate.row(i,n),out.row(i,n));
+            checked(hipGetLastError());
+        }
         op.arena.cursor=save;
         i+=n;
     }
