@@ -52,6 +52,7 @@ MoeExpertCache::MoeExpertCache(const Qwen4ExpRankWeights& weights) : weights_(&w
     log_interval_ = std::max<std::uint32_t>(
         env_u32("SHELF_MOE_CACHE_LOG_INTERVAL", 64u), 1u);
     oracle_ = env_u32("SHELF_MOE_CACHE_ORACLE", 0u) != 0u;
+    pcie_ = shelf::PcieBudget::from_env();
 
     const std::size_t route_slots =
         static_cast<std::size_t>(layers_) * experts_;
@@ -145,9 +146,12 @@ Status MoeExpertCache::step(hipStream_t stream) {
         if (due || periodic) plan();
     }
     const std::uint64_t batched_routes = static_cast<std::uint64_t>(layers_) * experts_;
-    const std::uint32_t budget = step_routes > batched_routes ? burst_ : budget_;
+    const bool batched = step_routes > batched_routes;
+    const std::uint32_t budget = batched ? burst_ : budget_;
+    const std::uint64_t move_bytes = swap_bytes();
     for (std::uint32_t index = 0; index < budget && pending_head_ < pending_.size();
          ++index, ++pending_head_) {
+        if (!batched && !pcie_.try_acquire(move_bytes)) break;
         const Move move = pending_[pending_head_];
         st = swap(move.layer, move.host_slot, move.vram_slot, stream);
         if (!st.ok()) return st;
@@ -166,6 +170,21 @@ Status MoeExpertCache::step(hipStream_t stream) {
         if (oracle_) log_oracle();
     }
     return Status::make_ok();
+}
+
+std::uint64_t MoeExpertCache::swap_bytes() const {
+    if (weights_ == nullptr || weights_->layers.empty()) return 0u;
+    const Qwen4ExpMoeWeights& mlp = weights_->layers[0].mlp;
+    const MatrixWeight* planes[] = {&mlp.gate_experts, &mlp.up_experts, &mlp.down_experts};
+    const MatrixWeight* hosts[] = {&mlp.gate_experts_host, &mlp.up_experts_host,
+                                   &mlp.down_experts_host};
+    std::uint64_t bytes = 0u;
+    for (std::uint32_t index = 0; index < 3u; ++index) {
+        bytes += planes[index]->codes_batch_stride_bytes;
+        bytes += planes[index]->scales_batch_stride_bytes;
+        bytes += hosts[index]->rows;
+    }
+    return 2u * bytes;
 }
 
 void MoeExpertCache::plan() {

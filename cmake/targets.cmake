@@ -174,7 +174,6 @@ add_library(shelf_runtime STATIC
     src/shelf/runtime/dflash2_spec_decoder.cpp
     src/shelf/runtime/continuous_batcher.cpp
     src/shelf/runtime/cpu_team.cpp
-    src/shelf/runtime/pcie_budget.cpp
     src/shelf/runtime/prefix_cache.cpp
     src/shelf/runtime/graph/primitive_graph.cpp
     src/shelf/runtime/stream_bridge.cpp
@@ -309,6 +308,7 @@ add_library(shelf_inference_execution STATIC
     src/shelf/inference/execution/kv_append_dispatch.hip
     src/shelf/inference/execution/kv_calib_dump.cpp
     src/shelf/inference/execution/linear_input_dump.cpp
+    src/shelf/inference/execution/moe_cpu_miss.cpp
     src/shelf/inference/execution/moe_dispatch.hip
     src/shelf/inference/execution/hyper_connection_dispatch.hip
     src/shelf/inference/execution/ple_dispatch.hip
@@ -325,7 +325,7 @@ add_library(shelf_inference_execution STATIC
 target_compile_features(shelf_inference_execution PRIVATE cxx_std_20)
 target_include_directories(shelf_inference_execution PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 find_library(SHELF_HIPBLASLT_LIBRARY NAMES hipblaslt PATHS "${SHELF_ROCM_ROOT}/lib" NO_DEFAULT_PATH)
-target_link_libraries(shelf_inference_execution PUBLIC shelf_core shelf_gpu shelf_runtime shelf_inference_state shelf_inference_scheduling shelf_kernels_optimized shelf_kernels_correctness)
+target_link_libraries(shelf_inference_execution PUBLIC shelf_core shelf_gpu shelf_runtime shelf_inference_state shelf_inference_scheduling shelf_kernels_optimized shelf_kernels_correctness shelf_quant_reference)
 if(SHELF_HIPBLASLT_LIBRARY)
     target_link_libraries(shelf_inference_execution PUBLIC "${SHELF_HIPBLASLT_LIBRARY}")
 else()

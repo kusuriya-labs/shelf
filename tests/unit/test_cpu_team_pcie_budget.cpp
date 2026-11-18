@@ -1,5 +1,5 @@
 #include <shelf/runtime/cpu_team.h>
-#include <shelf/runtime/pcie_budget.h>
+#include <shelf/core/pcie_budget.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -38,7 +38,7 @@ int main() {
     check_team(1u, "serial team covers every index exactly once");
     check_team(4u, "parallel team covers every index exactly once");
 
-    shelf::runtime::PcieBudget budget(0.25, 20.0);
+    shelf::PcieBudget budget(0.25, 20.0);
     check(budget.bytes_for(1000u) == 5000000000ull, "bytes_for scales with the share");
     check(budget.fraction() == 0.25 && budget.gbps() == 20.0, "fraction and rate are kept");
     check(budget.try_acquire(1000000u), "a small copy fits the initial burst");
@@ -46,12 +46,12 @@ int main() {
     check(budget.deferred() == 1u, "deferrals are counted");
     check(budget.available() <= 10000000ull, "the burst is bounded by the share");
 
-    shelf::runtime::PcieBudget tight(0.05, 20.0);
-    shelf::runtime::PcieBudget open(1.0, 20.0);
+    shelf::PcieBudget tight(0.05, 20.0);
+    shelf::PcieBudget open(1.0, 20.0);
     check(open.bytes_for(1000u) > tight.bytes_for(1000u), "a larger share admits more bytes");
     check(tight.fraction() == 0.05 && open.fraction() == 1.0, "shares are kept");
 
-    shelf::runtime::PcieBudget clamped(0.0, -1.0);
+    shelf::PcieBudget clamped(0.0, -1.0);
     check(clamped.fraction() >= 0.05 && clamped.gbps() > 0.0, "invalid settings are clamped");
 
     if (failures == 0) {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <shelf/core/pcie_budget.h>
 #include <shelf/core/status.h>
 #include <shelf/models/qwen4exp/weights/qwen4exp_weights.h>
 
@@ -47,6 +48,7 @@ private:
 
     Status swap(std::uint32_t layer, std::uint32_t host_slot, std::uint32_t vram_slot,
                 hipStream_t stream);
+    std::uint64_t swap_bytes() const;
     void plan();
     void log_oracle() const;
 
@@ -64,6 +66,7 @@ private:
     std::uint64_t rebalance_routes_ = 0;
     std::uint64_t next_rebalance_routes_ = 0;
     std::uint64_t last_plan_step_ = 0;
+    shelf::PcieBudget pcie_{0.25, 25.0};
     bool oracle_ = false;
 
     std::vector<Move> pending_;
