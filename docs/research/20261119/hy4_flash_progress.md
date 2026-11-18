@@ -166,3 +166,11 @@ DFly は 49 射影を量子化し、sidecar は index・report 込みで 424,485
 
 1. 9b0d483a の共通部変更後に、別の build-hy4-default を SHELF_HY4_ONLY=OFF、CMAKE_HIP_ARCHITECTURES=gfx1201 で再構成し、shelf_gpu と既存 shelf-compute の main.hip・compute_runtime.hip を比較ビルドした。6 ステップすべて成功した。既存の引数を省略する ScopedDevice / GpuArena 呼び出しは既定の DeviceArch::gfx1201 を使用し、Hy4 worker の確保だけが gfx1030 を明示する。これは legacy のコンパイル確認であり、既存モデルの生成試験とは区別する。記録は `build-hy4/legacy-arena-config.log` と `build-hy4/legacy-arena-build.log`。
 2. EP=3 の同一入力・温度 0 の target-only と DFly の token 列を全件比較する。最終位置の top-1 だけではこの受入条件を通さない。現在は通常生成用の実重みを 3 台へ転送している。
+
+## N3　EP=3 転送の順序を修正し greedy 列を照合
+
+最初の 3 GPU 実行では全語彙の logit が 0 になった。各層の出力を採取すると層 2 から非有限値を含んだ。peer コピー前に送信元の default stream を同期し、宛先 device でコピーを発行するようにした。同じ重み・入力で全 42 層が有限になり、実行時の次 token は CPU と同じ 12286。V620 単体でも実 expert の 6 行 grouped 射影が CPU と相対 L2 0.0000134 で一致した。
+
+修正後の EP=3 では温度 0 の通常生成と実 DFly の生成列が 24 token すべて一致した。4 token 入力の最終 logits は吸収形で CPU 基準に対する相対 L2 0.136028、直接展開で 0.134239。いずれも上位 5 ID は同一だった。相対 L2 は事前の受入目安 0.1 を超えているため、各層に同じ hidden を戻す照合も進めている。記録は `shelf-qualification/ep3-sync-check/`。pp2048 と decode の時間は生成列一致後に独立の計測を開始した。
+
+多数の小さい H2D コピーを避けるため、shard 内の保存順に 3 rank の重みを読み、rank ごとの 16 MiB pinned buffer からまとめて転送する。ウォームキャッシュで測定した重み転送時間は約 20 秒。転送順を変えた場合にも、送信元 stream の同期を外すと非有限値を再現した。調査用の hidden ダンプは本番経路から撤去した。

@@ -264,6 +264,7 @@ void Checkpoint::load(const Path &directory, bool draft) {
     for (const auto &[file, keys] : shards) {
         require(Path(file).filename() == file, "shard ファイル名が不正です");
         auto reader = take(io::SafetensorsReader::open((directory / file).string()));
+        size_t first = upload_order.size();
         for (const auto &key : keys) {
             int rank = 0;
             if (key.find(".mlp.experts.") != std::string::npos) {
@@ -278,13 +279,17 @@ void Checkpoint::load(const Path &directory, bool draft) {
             size_t length;
             auto ptr = take(reader.tensor_data(key, length));
             auto spec = take(reader.tensor_spec(key));
-            size_t offset = 0;
-            if (rank >= 0) {
-                offset = (bytes[rank] + 15) & ~size_t(15);
-                bytes[rank] = offset + length;
-            }
-            require(weights.emplace(key, Weight{std::move(spec), ptr, length, rank, offset}).second,
-                    "tensor 名の重複");
+            auto [entry, inserted] = weights.emplace(key, Weight{std::move(spec), ptr, length, rank, 0});
+            require(inserted, "tensor 名の重複");
+            if (rank >= 0)
+                upload_order.push_back(&entry->second);
+        }
+        std::sort(upload_order.begin() + first, upload_order.end(),
+                  [](const Weight *a, const Weight *b) { return a->spec.data_begin < b->spec.data_begin; });
+        for (size_t i = first; i < upload_order.size(); ++i) {
+            auto &w = *upload_order[i];
+            w.offset = (bytes[w.rank] + 15) & ~size_t(15);
+            bytes[w.rank] = w.offset + w.bytes;
         }
         files.push_back(std::move(reader));
     }
@@ -300,8 +305,10 @@ void Checkpoint::relocate(const Owners &layout) {
                 throw std::runtime_error("expert 名の解析に失敗しました");
             w.rank = layout.at(layer - 1).at(e);
         }
-        w.offset = (bytes[w.rank] + 15) & ~size_t(15);
-        bytes[w.rank] = w.offset + w.bytes;
+    }
+    for (auto *w : upload_order) {
+        w->offset = (bytes[w->rank] + 15) & ~size_t(15);
+        bytes[w->rank] = w->offset + w->bytes;
     }
     owners = layout;
 }

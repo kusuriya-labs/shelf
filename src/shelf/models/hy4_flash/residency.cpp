@@ -1,6 +1,8 @@
 #include <shelf/models/hy4_flash/residency.h>
 #include <shelf/models/hy4_flash/absorbed.h>
 #include <algorithm>
+#include <chrono>
+#include <cstring>
 #include <cstdio>
 #include <stdexcept>
 #include <string_view>
@@ -115,7 +117,8 @@ void Residency::reserve() {
         size_t bytes = align(model.bytes[r]) + overhead[r];
         fprintf(stderr, "rank=%d weight=%zu workspace=%zu request=%zu free=%zu total=%zu\n", r, model.bytes[r],
                 work, bytes, free, total);
-        auto result = gpu::GpuArena::create(physical[r], bytes, r ? gpu::DeviceArch::gfx1030 : gpu::DeviceArch::gfx1201);
+        auto result =
+            gpu::GpuArena::create(physical[r], bytes, r ? gpu::DeviceArch::gfx1030 : gpu::DeviceArch::gfx1201);
         if (!result.ok()) {
             if (result.status().code() == Status::Code::insufficient_memory)
                 throw std::bad_alloc();
@@ -182,15 +185,51 @@ void Residency::upload() {
                 check(hipHostMalloc(&staging, 128u * 1536u * 2u, hipHostMallocPortable));
             fprintf(stderr, "transfer=%d->%d method=%s\n", src, dst, peer[dst][src] ? "peer" : "host");
         }
+    const auto begin = std::chrono::steady_clock::now();
+    constexpr size_t chunk = 16ull << 20;
+    void *buffer = nullptr;
+    check(hipHostMalloc(&buffer, 3 * chunk, hipHostMallocPortable));
+    try {
+        std::memset(buffer, 0, 3 * chunk);
+        std::array<size_t, 3> base{}, used{};
+        auto flush = [&](int r) {
+            if (!used[r])
+                return;
+            check(hipSetDevice(physical[r]));
+            check(hipMemcpy(weight_base[r] + base[r], static_cast<uint8_t *>(buffer) + r * chunk, used[r],
+                            hipMemcpyHostToDevice));
+            used[r] = 0;
+        };
+        for (const auto *w : model.upload_order) {
+            const int r = w->rank;
+            for (size_t n = 0; n < w->bytes;) {
+                size_t pos = w->offset + n, first = pos / chunk * chunk;
+                if (first != base[r]) {
+                    flush(r);
+                    base[r] = first;
+                }
+                size_t local = pos - first, bytes = std::min(chunk - local, w->bytes - n);
+                std::memcpy(static_cast<uint8_t *>(buffer) + r * chunk + local,
+                            static_cast<const uint8_t *>(w->host) + n, bytes);
+                used[r] = local + bytes;
+                n += bytes;
+            }
+        }
+        for (int r = 0; r < 3; ++r)
+            flush(r);
+    } catch (...) {
+        check(hipHostFree(buffer));
+        throw;
+    }
+    check(hipHostFree(buffer));
+    fprintf(stderr, "weight_upload_s=%.3f\n",
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count());
     for (int r = 0; r < 3; ++r) {
         check(hipSetDevice(physical[r]));
         if (profile && std::string_view(profile) == "1") {
             check(hipEventCreate(&expert_begin[r]));
             check(hipEventCreate(&expert_end[r]));
         }
-        for (const auto &[name, w] : model.weights)
-            if (w.rank == r)
-                check(hipMemcpy(weight_base[r] + w.offset, w.host, w.bytes, hipMemcpyHostToDevice));
         for (int layer = 1; layer < 42; ++layer)
             upload_experts(r, layer);
     }
@@ -201,6 +240,9 @@ void Residency::upload() {
 void Residency::transfer(void *dst, int destination, const void *src, int source, size_t bytes) {
     transfer_bytes[source][destination] += bytes;
     if (peer[destination][source]) {
+        check(hipSetDevice(physical[source]));
+        check(hipStreamSynchronize(nullptr));
+        check(hipSetDevice(physical[destination]));
         check(hipMemcpyPeer(dst, physical[destination], src, physical[source], bytes));
         return;
     }

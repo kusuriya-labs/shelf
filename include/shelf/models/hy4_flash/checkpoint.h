@@ -27,6 +27,7 @@ struct Checkpoint {
     void load(const Path &directory, bool draft);
     std::vector<io::SafetensorsReader> files;
     std::map<std::string, Weight> weights;
+    std::vector<Weight *> upload_order;
     std::array<size_t, 3> bytes{};
     std::map<std::string, std::array<int, 2>> shape;
     std::array<std::array<int, 16>, 4> moduli{};
