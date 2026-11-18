@@ -5,8 +5,19 @@
 #   shelf-server    OpenAI-compatible serving product (aiohttp adapter)
 #   shelf-bench     E2E benchmark (pp / tg) + GEMM kernel micro-benchmark
 
+option(SHELF_HY4_ONLY "Hy4-flash 専用の shelf-compute を構築する" OFF)
+if(SHELF_HY4_ONLY)
+    add_executable(shelf-compute src/apps/compute/hy4_compute.cpp)
+    target_compile_definitions(shelf-compute PRIVATE SHELF_HY4_ONLY=1)
+    target_link_libraries(shelf-compute PRIVATE shelf_hy4_model)
+    shelf_set_rocm_rpath(shelf-compute)
+    set_property(TARGET shelf-compute APPEND PROPERTY BUILD_RPATH "${SHELF_LIBCXX_LLVM_ROOT}/lib")
+    return()
+endif()
+
 # Inference engine (raw token IDs in, GENERATED_IDS out).
 add_executable(shelf-compute
+    src/apps/compute/hy4_compute.cpp
     src/apps/compute/main.hip
     src/apps/compute/compute_cli.cpp
     src/apps/compute/single_request.hip
@@ -17,7 +28,7 @@ shelf_set_rocm_rpath(shelf-compute)
 target_compile_features(shelf-compute PRIVATE cxx_std_20)
 target_include_directories(shelf-compute SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
 target_include_directories(shelf-compute PRIVATE "${CMAKE_SOURCE_DIR}/src")
-target_link_libraries(shelf-compute PRIVATE shelf)
+target_link_libraries(shelf-compute PRIVATE shelf shelf_hy4_model)
 shelf_set_hip_archs(shelf-compute)
 
 # Server product: Python entrypoint plus the OpenAI protocol adapter, the async

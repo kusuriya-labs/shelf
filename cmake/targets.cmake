@@ -550,3 +550,10 @@ add_library(shelf_hy4_flash SHARED src/shelf/kernels/hy4_flash/linear.hip)
 target_link_libraries(shelf_hy4_flash PRIVATE shelf_core hip::host)
 set_target_properties(shelf_hy4_flash PROPERTIES HIP_ARCHITECTURES "gfx1030;gfx1201")
 shelf_set_rocm_rpath(shelf_hy4_flash)
+
+add_library(shelf_hy4_model STATIC
+    src/shelf/models/hy4_flash/checkpoint.cpp
+    src/shelf/models/hy4_flash/residency.cpp
+)
+target_include_directories(shelf_hy4_model SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
+target_link_libraries(shelf_hy4_model PUBLIC shelf_io shelf_gpu shelf_hy4_flash)
