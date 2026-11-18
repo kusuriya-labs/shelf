@@ -21,6 +21,12 @@ __global__ void score_tiles(const uint16_t *q, const uint16_t *kv, const uint16_
     int slot = kb + lo, row = rb + lo;
     if (kb >= pitch)
         return;
+    if (first + kb > start + rb + 15 || (sliding && first + kb + 15 <= start + rb - 512)) {
+        if (row < rows)
+            for (int j = 0; j < 8; ++j)
+                scores[(size_t(row) * heads + h) * pitch + kb + hi * 8 + j] = -INFINITY;
+        return;
+    }
     F8 acc{};
     for (int d = 0; d < 256; d += 16) {
         int offset = d + hi * 4;
@@ -85,11 +91,14 @@ __global__ void normalize(float *scores, uint16_t *probs, const void *sinks, boo
         probs[base + i] = f32_to_bf16_rne_device(scores[base + i] / sum);
 }
 __global__ void value_tiles(const uint16_t *probs, const uint16_t *kv, const uint16_t *gate, uint16_t *out,
-                            int rows, int heads, int slots, int pitch) {
+                            int rows, int heads, int slots, int pitch, int first, int start, bool sliding) {
     int lane = threadIdx.x % 32, lo = lane % 16, hi = lane / 16, h = blockIdx.z;
     int cb = blockIdx.x * 64 + (threadIdx.x / 32) * 16, row = blockIdx.y * 16 + lo;
     F8 acc{};
-    for (int base = 0; base < pitch; base += 16) {
+    int rb = blockIdx.y * 16;
+    int from = sliding ? max(0, start + rb - 511 - first) / 16 * 16 : 0;
+    int end = min(pitch, (start + rb + 16 - first + 15) / 16 * 16);
+    for (int base = from; base < end; base += 16) {
         B8 a{}, b{};
 #pragma unroll
         for (int j = 0; j < 8; ++j) {
@@ -124,7 +133,8 @@ hipError_t shelf_hy4_mla_prefill(const uint16_t *q, const uint16_t *kv, const ui
     status = hipGetLastError();
     if (status != hipSuccess)
         return status;
-    value_tiles<<<dim3(4, rb, heads), 128>>>(probs, kv, gate, out, rows, heads, slots, pitch);
+    value_tiles<<<dim3(4, rb, heads), 128>>>(probs, kv, gate, out, rows, heads, slots, pitch, first_key,
+                                             first_query, sliding);
     return hipGetLastError();
 }
 

@@ -184,3 +184,11 @@ DFly は 49 射影を量子化し、sidecar は index・report 込みで 424,485
 ## P3　実測に合わせた prefill の改善
 
 連続・sliding の prefill は R9700 で直接展開した KV を 16 行ずつ WMMA に掛け、sink を含む softmax と value 積を計算する。chunk 128 の attention 時間は約 9.51 秒から 1.77 秒に短縮した。R9700 と V620 の実効速度比を重く見て、短文脈用の配置表を作成。校正先頭 2048 token で予測した R9700 の選択比率は 34.2% から 62.4% へ増加した。chunk 512 とこの配置で、V620 の同一 expert 最大 16 行を LDS の int8 タイルで処理する。計測同期を含む試行 `ep3-lds16` の 2 回目は pp2048 が 4.615 秒（443.7 tok/s）、47 token の decode が 1.891 秒（24.9 tok/s）。これは初回を除く 1 回の参考値で、最終受入の中央値ではない。decode の吸収形 MLA の score・value 内積も head を 16 本ずつまとめて WMMA に掛け、別途比較中。
+
+## P4　速度目標に達した実測と残る受入
+
+512 window をまたぐ長い prefill では必要な最後のリング行だけを保存するようにし、chunk 1024 を実行した。不可視の QK / PV タイルを省略し、6 bit head にも WMMA を適用。rank 間は送信元の system-release event を宛先 stream で待ってから peer copy を発行し、同じ層の routing 情報を一つの pinned packet にまとめた。短い入力の EP=3 通常生成・DFly 列は 24/24 一致した。
+
+小さい行数で出力タイル数が少ない射影を split-K にした `shelf-qualification/ep3-split/bench.log` では、初回を除く 3 回の中央値が **pp2048 676.35 tok/s、DFly decode 50.64 tok/s**。decode は 128 生成のうち prefill で得た先頭を除く 127 token で測った。33 検証ラウンドで 94 候補を受理。直前の event 版は 47 ラウンド・79 候補受理で 676.75 / 27.55 tok/s。decode の差には計算時間の短縮と生成列・受理長の変化の両方が含まれる。固定配置での候補ごとの logits・生成列・時間比較と、採用時の通常 dispatch への組み込みは未完了。
+
+CPU logits 相対 L2 の初期目安 0.1 を超えた場合はその事実を結果 JSON に保存し、独立した greedy 列と throughput の検査も最後まで実施する。閾値を超えた実行をこの判定の合格にしない。pp2048 後の 128 token についても、温度 0 の target-only と DFly の全列を比較する。

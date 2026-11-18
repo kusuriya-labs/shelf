@@ -181,6 +181,11 @@ void Residency::upload() {
                 if (status != hipSuccess)
                     (void)hipGetLastError();
             }
+            if (peer[dst][src]) {
+                check(hipSetDevice(physical[src]));
+                check(
+                    hipEventCreateWithFlags(&ready[src][dst], hipEventDisableTiming | hipEventReleaseToSystem));
+            }
             if (!peer[dst][src] && !staging)
                 check(hipHostMalloc(&staging, max_prefill_chunk * 1536u * 2u, hipHostMallocPortable));
             fprintf(stderr, "transfer=%d->%d method=%s\n", src, dst, peer[dst][src] ? "peer" : "host");
@@ -244,9 +249,10 @@ void Residency::transfer(void *dst, int destination, const void *src, int source
         begin = std::chrono::steady_clock::now();
     if (peer[destination][source]) {
         check(hipSetDevice(physical[source]));
-        check(hipStreamSynchronize(nullptr));
+        check(hipEventRecord(ready[source][destination], nullptr));
         check(hipSetDevice(physical[destination]));
-        check(hipMemcpyPeer(dst, physical[destination], src, physical[source], bytes));
+        check(hipStreamWaitEvent(nullptr, ready[source][destination], 0));
+        check(hipMemcpyPeerAsync(dst, physical[destination], src, physical[source], bytes, nullptr));
     } else {
         if (!staging || bytes > max_prefill_chunk * 1536u * 2u)
             throw std::runtime_error("転送作業域の範囲外です");
@@ -258,6 +264,16 @@ void Residency::transfer(void *dst, int destination, const void *src, int source
     if (expert_begin[0])
         transfer_ms +=
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
+}
+void *Residency::route_buffer(int rank, size_t bytes) {
+    constexpr size_t capacity =
+        max_prefill_chunk * (16 * (sizeof(Hy4Route) + sizeof(Hy4ExpertBatch) + sizeof(int)) + sizeof(int)) +
+        sizeof(int);
+    if (bytes > capacity)
+        throw std::runtime_error("routing 情報が作業域の上限を超えました");
+    if (!route_host[rank])
+        check(hipHostMalloc(&route_host[rank], capacity, hipHostMallocPortable));
+    return route_host[rank];
 }
 void Residency::shutdown() {
     std::string errors;
@@ -283,6 +299,20 @@ void Residency::shutdown() {
             }
             expert_begin[r] = expert_end[r] = nullptr;
         }
+    for (int r = 0; r < 3; ++r) {
+        if (route_host[r]) {
+            collect(hipHostFree(route_host[r]));
+            route_host[r] = nullptr;
+        }
+        for (auto &event : ready[r])
+            if (event) {
+                auto status = hipSetDevice(physical[r]);
+                collect(status);
+                if (status == hipSuccess)
+                    collect(hipEventDestroy(event));
+                event = nullptr;
+            }
+    }
     if (staging) {
         collect(hipHostFree(staging));
         staging = nullptr;

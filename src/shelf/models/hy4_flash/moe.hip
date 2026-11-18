@@ -1,6 +1,7 @@
 #include <shelf/models/hy4_flash/decoder.h>
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/decode.h>
 #include <algorithm>
+#include <cstring>
 #include <numeric>
 
 namespace shelf::hy4 {
@@ -127,18 +128,17 @@ Mat moe(Ops &op, int layer, Mat x) {
             auto v = std::getenv("SHELF_HY4_WMMA");
             return v && std::string_view(v) == "1";
         }();
-        Hy4ExpertBatch *batches = nullptr;
-        int *inverse = nullptr;
-        int num_batches = 0;
+        std::vector<Hy4ExpertBatch> groups;
+        std::vector<int> undo;
         bool use_wmma = !r && wmma;
         if (batch_rows && x.rows >= 8) {
             auto &route = routes[r];
-            std::vector<int> order(count), undo(count);
+            std::vector<int> order(count);
+            undo.resize(count);
             std::iota(order.begin(), order.end(), 0);
             std::stable_sort(order.begin(), order.end(),
                              [&](int i, int j) { return route[i].expert < route[j].expert; });
             std::vector<Hy4Route> sorted(count);
-            std::vector<Hy4ExpertBatch> groups;
             for (int j = 0; j < count; ++j) {
                 sorted[j] = route[order[j]];
                 undo[order[j]] = j;
@@ -147,15 +147,28 @@ Mat moe(Ops &op, int layer, Mat x) {
                 ++groups.back().count;
             }
             route.swap(sorted);
-            inverse = rank.indices(undo);
-            num_batches = groups.size();
-            batches = static_cast<Hy4ExpertBatch *>(rank.arena.next(groups.size() * sizeof(groups[0])));
-            rank.copy(batches, groups.data(), groups.size() * sizeof(groups[0]), hipMemcpyHostToDevice);
         }
-        auto gpu_routes = static_cast<Hy4Route *>(rank.arena.next(sizeof(Hy4Route) * count));
-        rank.copy(gpu_routes, routes[r].data(), sizeof(Hy4Route) * count, hipMemcpyHostToDevice);
         offsets[r].push_back(count);
-        int *offsets_gpu = rank.indices(offsets[r]);
+        size_t route_bytes = count * sizeof(Hy4Route), offset_bytes = offsets[r].size() * sizeof(int);
+        size_t undo_bytes = undo.size() * sizeof(int), group_bytes = groups.size() * sizeof(Hy4ExpertBatch);
+        size_t total = route_bytes + offset_bytes + undo_bytes + group_bytes;
+        auto host = static_cast<uint8_t *>(op.gpu.route_buffer(r, total));
+        std::memcpy(host, routes[r].data(), route_bytes);
+        std::memcpy(host + route_bytes, offsets[r].data(), offset_bytes);
+        if (undo_bytes)
+            std::memcpy(host + route_bytes + offset_bytes, undo.data(), undo_bytes);
+        if (group_bytes)
+            std::memcpy(host + route_bytes + offset_bytes + undo_bytes, groups.data(), group_bytes);
+        auto dev = static_cast<uint8_t *>(rank.arena.next(total));
+        checked(hipMemcpyAsync(dev, host, total, hipMemcpyHostToDevice));
+        auto gpu_routes = reinterpret_cast<const Hy4Route *>(dev);
+        auto offsets_gpu = reinterpret_cast<const int *>(dev + route_bytes);
+        auto inverse = undo_bytes ? reinterpret_cast<const int *>(dev + route_bytes + offset_bytes) : nullptr;
+        auto batches =
+            group_bytes
+                ? reinterpret_cast<const Hy4ExpertBatch *>(dev + route_bytes + offset_bytes + undo_bytes)
+                : nullptr;
+        int num_batches = groups.size();
         Mat a = rank.mat(count, 1536);
         if (op.gpu.expert_begin[r])
             checked(hipEventRecord(op.gpu.expert_begin[r]));

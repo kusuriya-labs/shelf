@@ -90,7 +90,7 @@ __global__ void hc_mix(Mat x, Param fn, Param scale, Param base, float *gates, i
     }
     float f = blocksum(dot, s1) * rsqrtf(blocksum(norm, s2) / x.cols + 1e-5f);
     if (threadIdx.x == 0) {
-        float v = f * read(scale, gate / 4) + read(base, gate);
+        float v = __fadd_rn(__fmul_rn(f, read(scale, gate / 4)), read(base, gate));
         gates[row * count + gate] = (gate < 4 ? 1.f : 2.f) / (1.f + expf(-v)) + 1e-6f;
     }
 }
@@ -101,7 +101,8 @@ __global__ void hc_reduce(Mat x, Mat y, const float *gates, int count) {
     int row = i / y.cols, c = i % y.cols;
     float acc = 0;
     for (int h = 0; h < 4; ++h)
-        acc += gates[row * count + h] * value(x, size_t(row) * x.cols + h * y.cols + c);
+        acc =
+            __fadd_rn(acc, __fmul_rn(gates[row * count + h], value(x, size_t(row) * x.cols + h * y.cols + c)));
     y.p[i] = f32_to_bf16_rne_device(acc);
 }
 __global__ void hc_expand(Mat x, Mat y, const float *post, Mat z) {
@@ -109,8 +110,8 @@ __global__ void hc_expand(Mat x, Mat y, const float *post, Mat z) {
     if (i >= size_t(x.rows) * x.cols)
         return;
     int r = i / x.cols, h = (i / y.cols) % 4;
-    z.p[i] =
-        f32_to_bf16_rne_device(value(x, i) + post[r * 8 + 4 + h] * value(y, size_t(r) * y.cols + i % y.cols));
+    z.p[i] = f32_to_bf16_rne_device(
+        __fadd_rn(value(x, i), __fmul_rn(post[r * 8 + 4 + h], value(y, size_t(r) * y.cols + i % y.cols))));
 }
 __global__ void rotary(Mat x, Mat y, int heads, int start, float theta) {
     size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -165,16 +166,20 @@ Mat Ops::linear(const std::string &name, Mat x) {
     int pk = it->second.spec.shape[0] * 16, pn = it->second.spec.shape[1] * 16;
     auto codes = static_cast<int8_t *>(arena.next(size_t(x.rows) * pk));
     auto scales = static_cast<float *>(arena.next(size_t(x.rows) * pk / 128 * 4));
-    auto partial = static_cast<float *>(arena.next(size_t(x.rows) * pn * 4));
     static const bool wmma = [] {
         auto v = std::getenv("SHELF_HY4_WMMA");
         return v && std::string_view(v) == "1";
     }();
+    int splits = 1;
+    if (!rank && wmma && x.rows <= 16)
+        while (splits < 16 && (pn / 64) * splits < 128 && (pk / 128) % (2 * splits) == 0)
+            splits *= 2;
+    auto partial = static_cast<float *>(arena.next(size_t(x.rows) * pn * 4 * splits));
     checked(shelf_hy4_linear(x.p, static_cast<const uint16_t *>(param(name + ".suh").p),
                              static_cast<const uint16_t *>(param(name + ".svh").p),
                              static_cast<const uint32_t *>(param(name + ".trellis").p), codes, scales, partial,
                              y.p, x.rows, x.cols, y.cols, pk, pn, it->second.spec.shape[2] / 16, nullptr,
-                             rank == 0 && wmma));
+                             rank == 0 && wmma, splits));
     arena.cursor = save;
     return y;
 }

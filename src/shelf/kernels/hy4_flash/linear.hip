@@ -3,7 +3,7 @@
 #include <shelf/quantization/exl3/exl3_int8.h>
 
 hipError_t shelf_hy4_wmma(const int8_t *, const float *, const uint32_t *, float *, int, int, int, int,
-                          hipStream_t);
+                          hipStream_t, int);
 
 hipError_t shelf_hy4_wmma_experts(const int8_t *, const float *, const Hy4ExpertProjection *, const Hy4Route *,
                                   const Hy4ExpertBatch *, int, float *);
@@ -139,13 +139,16 @@ __global__ void expert_batch16(const int8_t *codes, const float *scales, const H
 }
 __global__ void rotate_output(const float *partial, const uint16_t *svh, uint16_t *output, int width,
                               int padded, const Hy4ExpertProjection *group = nullptr, int stride = 0,
-                              float *logits = nullptr, const Hy4Route *routes = nullptr) {
+                              float *logits = nullptr, const Hy4Route *routes = nullptr, int splits = 1) {
     if (group)
         svh = group[(routes ? routes[blockIdx.y].expert : blockIdx.y) * stride].svh;
     const int base = blockIdx.x * 128 + threadIdx.x * 4;
     float v[4];
     for (int i = 0; i < 4; ++i)
         v[i] = partial[size_t(blockIdx.y) * padded + base + i];
+    for (int s = 1; s < splits; ++s)
+        for (int i = 0; i < 4; ++i)
+            v[i] += partial[(size_t(s) * gridDim.y + blockIdx.y) * padded + base + i];
     fwht128(v[0], v[1], v[2], v[3], threadIdx.x);
     for (int i = 0; i < 4 && base + i < width; ++i) {
         float value = v[i] * kInvSqrt128 * f16_bits_to_f32(svh[base + i]);
@@ -162,10 +165,12 @@ extern "C" hipError_t shelf_hy4_linear(const uint16_t *input, const uint16_t *su
                                        const uint32_t *trellis, int8_t *codes, float *scales, float *partial,
                                        uint16_t *output, int rows, int input_width, int output_width,
                                        int padded_input, int padded_output, int bits, hipStream_t stream,
-                                       int wmma) {
+                                       int wmma, int splits) {
     if (!input || !suh || !svh || !trellis || !codes || !scales || !partial || !output || rows < 1 ||
         rows > 65535 || input_width < 1 || output_width < 1 || padded_input < input_width ||
         padded_output < output_width || padded_input % 128 || padded_output % 128 || (bits != 4 && bits != 6))
+        return hipErrorInvalidValue;
+    if (splits < 1 || splits > padded_input / 128 || (!wmma && splits != 1))
         return hipErrorInvalidValue;
     rotate_input<<<dim3(padded_input / 128, rows), 32, 0, stream>>>(input, suh, codes, scales, input_width,
                                                                     padded_input);
@@ -174,8 +179,8 @@ extern "C" hipError_t shelf_hy4_linear(const uint16_t *input, const uint16_t *su
         return status;
     const dim3 grid(padded_output / 16, rows);
     if (wmma) {
-        status =
-            shelf_hy4_wmma(codes, scales, trellis, partial, rows, padded_input, padded_output, bits, stream);
+        status = shelf_hy4_wmma(codes, scales, trellis, partial, rows, padded_input, padded_output, bits,
+                                stream, splits);
         if (status != hipSuccess)
             return status;
     } else if (bits == 4)
@@ -185,8 +190,8 @@ extern "C" hipError_t shelf_hy4_linear(const uint16_t *input, const uint16_t *su
     status = hipGetLastError();
     if (status != hipSuccess)
         return status;
-    rotate_output<<<dim3(padded_output / 128, rows), 32, 0, stream>>>(partial, svh, output, output_width,
-                                                                      padded_output);
+    rotate_output<<<dim3(padded_output / 128, rows), 32, 0, stream>>>(
+        partial, svh, output, output_width, padded_output, nullptr, 0, nullptr, nullptr, splits);
     return hipGetLastError();
 }
 
@@ -234,8 +239,16 @@ hipError_t shelf_hy4_head(const uint16_t *x, const uint16_t *suh, const uint16_t
     auto status = hipGetLastError();
     if (status != hipSuccess)
         return status;
-    multiply<6><<<dim3(7552, rows), 128>>>(codes, scales, trellis, partial, 3072, 120832);
-    status = hipGetLastError();
+    static const bool wmma = [] {
+        auto v = std::getenv("SHELF_HY4_WMMA");
+        return v && v[0] == '1' && !v[1];
+    }();
+    if (wmma)
+        status = shelf_hy4_wmma(codes, scales, trellis, partial, rows, 3072, 120832, 6, nullptr, 1);
+    else {
+        multiply<6><<<dim3(7552, rows), 128>>>(codes, scales, trellis, partial, 3072, 120832);
+        status = hipGetLastError();
+    }
     if (status != hipSuccess)
         return status;
     rotate_output<<<dim3(944, rows), 32>>>(partial, svh, nullptr, 120832, 120832, nullptr, 0, logits);

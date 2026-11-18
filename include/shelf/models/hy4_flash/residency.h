@@ -5,7 +5,7 @@
 #include <shelf/models/hy4_flash/checkpoint.h>
 
 namespace shelf::hy4 {
-inline constexpr int max_prefill_chunk = 512;
+inline constexpr int max_prefill_chunk = 1024;
 
 struct Region {
     uint8_t *base = nullptr;
@@ -41,6 +41,9 @@ struct Residency {
     void transfer(void *dst, int destination, const void *src, int source, size_t bytes);
     std::array<std::array<bool, 3>, 3> peer{}, owns_peer{};
     void *staging = nullptr;
+    std::array<std::array<hipEvent_t, 3>, 3> ready{};
+    std::array<void *, 3> route_host{};
+    void *route_buffer(int rank, size_t bytes);
     void shutdown();
     const void *device(const Weight &w) const;
 };

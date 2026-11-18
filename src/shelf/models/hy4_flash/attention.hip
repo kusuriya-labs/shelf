@@ -85,7 +85,7 @@ __global__ void unpack(const uint8_t *cache, const uint8_t *fresh, const int *id
     out.p[size_t(row) * out.cols + sub * Width + c] = f32_to_bf16_rne_device(value);
 }
 __global__ void save_records(uint8_t *cache, const uint8_t *fresh, int rows, int start, int slots) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int i = (rows - min(rows, slots)) * 294 + blockIdx.x * blockDim.x + threadIdx.x;
     if (i < 294 * rows)
         cache[size_t((start + i / 294) % slots) * 294 + i % 294] = fresh[i];
 }
@@ -347,7 +347,8 @@ Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidd
         i += n;
     }
     if (!draft) {
-        save_records<<<(hidden.rows * 294 + 255) / 256, 256>>>(cache, fresh, hidden.rows, start, slots);
+        save_records<<<(std::min(hidden.rows, slots) * 294 + 255) / 256, 256>>>(cache, fresh, hidden.rows,
+                                                                                start, slots);
         checked(hipGetLastError());
     }
     return op.norm(op.linear(p + "o_proj", out), p + "post_proj_norm.weight");

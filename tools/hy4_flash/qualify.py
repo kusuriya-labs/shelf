@@ -28,7 +28,7 @@ def main():
     p = argparse.ArgumentParser(description="Hy4-flash の EP=3 一致・予約・実効速度を検証する")
     for field in ("executable", "body", "engram", "draft", "placement", "reference", "calibration", "results"):
         p.add_argument(field, type=Path)
-    p.add_argument("--chunk",type=int,choices=(32,64,128,256,512),default=64)
+    p.add_argument("--chunk",type=int,choices=(32,64,128,256,512,1024),default=64)
     args = p.parse_args()
     visible = os.environ.get("ROCR_VISIBLE_DEVICES")
     if visible != "GPU-a8e9ddefa2d60f55,GPU-08b2ddcbd6e6b36c,GPU-76a08c022586fed6":
@@ -68,8 +68,13 @@ def main():
     base = sequence(run("generate","target",[*flags,"--dump-logits",dump],False))
     actual = np.fromfile(dump,dtype="<f4")
     error = float(np.linalg.norm(actual-expected) / np.linalg.norm(expected))
-    if not np.isfinite(error) or error > 0.1 or base[0] != int(expected.argmax()):
+    if not np.isfinite(error) or not np.any(actual) or base[0] != int(expected.argmax()):
         raise ValueError(f"CPU logits と不一致: 相対 L2={error}, 保存先={output}")
+    quality = dict(relative_l2=error,within_initial_l2_limit=error<=0.1,
+                   cpu_top1=int(expected.argmax()),ep3_top1=base[0])
+    (output/"logits-check.json").write_text(json.dumps(quality,indent=2))
+    if error>0.1:
+        print(f"CPU logits 相対 L2 は当初目安 0.1 を超過: {error:.6f}。独立した生成列・時間の検査を続けます",flush=True)
     if sequence(run("generate","dfly",flags,True)) != base:
         raise ValueError("DFly と通常生成の greedy 列が一致しません")
     sample = [*flags,"--temperature","0.8","--seed","20261119"]
@@ -79,6 +84,11 @@ def main():
     prompt.write_text(" ".join(map(str,ids)))
     bench = run("generate","bench",["--input-ids-file",prompt,"--max-seq-len","2304","--max-new-tokens","128",
                                     "--chunk",str(args.chunk),"--repeats","4"],True)
+    steady_target = sequence(run("generate","bench-target",["--input-ids-file",prompt,"--max-seq-len","2304",
+                                 "--max-new-tokens","128","--chunk",str(args.chunk)],False))
+    outputs = [list(map(int,ids.split(","))) for ids in re.findall(r"^GENERATED_IDS=([0-9,]+)$",bench,re.MULTILINE)]
+    if len(outputs)!=4 or any(tokens!=steady_target for tokens in outputs):
+        raise ValueError("pp2048 後の通常生成と DFly の全生成列が一致しません")
     rows = re.findall(r"prefill_tokens=(\d+) prefill_s=([\d.]+) decode_tokens=(\d+) decode_s=([\d.]+)",bench)
     if len(rows) != 4 or any(int(n)!=2048 or int(t)<1 for n,_,t,_ in rows):
         raise ValueError("ベンチ結果の反復数または token 数が不正です")
@@ -87,12 +97,14 @@ def main():
     histograms = [list(map(int,h.split(","))) for h in re.findall(r"^accepted_histogram=([0-9,]+)$",bench,re.MULTILINE)]
     if len(histograms)!=4 or any(len(h)!=6 for h in histograms):
         raise ValueError("DFly の受理長分布が不足しています")
-    result = dict(acceptance_histograms=histograms[1:],logits_relative_l2=error,reserved_tokens=reserved,pp2048=pp,decode=tg,
+    result = dict(within_initial_l2_limit=error<=0.1,acceptance_histograms=histograms[1:],logits_relative_l2=error,reserved_tokens=reserved,pp2048=pp,decode=tg,
                   prefill_median=statistics.median(pp),decode_median=statistics.median(tg))
     (output/"results.json").write_text(json.dumps(result,indent=2))
     print(output,result,flush=True)
     if result["prefill_median"] < 500 or result["decode_median"] < 40:
         raise SystemExit("スループット目標未達")
+    if error>0.1:
+        raise SystemExit("CPU logits の初期比較基準は未達")
 
 
 if __name__ == "__main__":
