@@ -4,7 +4,7 @@ origin/main の 14a23730 から専用 worktree を作成した。原本の confi
 
 ## 現在の待機状態
 
-11 月 19 日 01:54 JST に decoder 全 42 層の量子化と CPU 連続照合が完了した。最終層の校正 hidden に対する 4 token の相対 L2 は 0.248071。6 bit head と checkpoint 組立の完了を待っている。
+11 月 19 日 02:13 JST に本体の最終 report と head_complete を確認した。組立済み checkpoint の native inspect が成功し、V620 1 台の排他下で DFly の追加量子化を実行中。CPU は最終配置表で全層の連続照合を進めている。
 
 | 作業 | 完了を確認する場所 |
 |---|---|
@@ -149,3 +149,7 @@ SHELF_HY4_PROFILE_EP=1 のときだけ、各 rank で routed expert の gather �
 ## H2　6 bit head の実重み
 
 01:55 JST に head の 6 bit 行列が保存された。SHA-256 と marker を照合し、組立前の実重みで H1 を実施した。先頭 4 token の logits 相対 L2 は原本比 0.236716。BF16 から量子化版への KL は順に 0.02584、1.57486、0.12229、0.26750 で、2 番目の位置の分布差が大きい。top-1 は両者とも 220、2122、6357、12286 だった。これは短い 1 列の結果であり、一般の生成品質の判定には用いない。最終 report と head_complete を確認するまで DFly 量子化は待機する。
+
+## G2　本体組立と DFly 開始
+
+本体は 1161 shard。decoder の符号は 4.0 bpw、量子化線形の実保存量は 4.020704 bpw、未量子化線形を含む値は 4.022769 bpw。head は 6 bit、expert の Hessian fallback は変換 report 上で 17 件。BF16 Engram を含む元の組立済み tensor は 205,729,506,824 B。native loader は必要行だけを読む別の FP8 表を使い、BF16 Engram は常駐させない。最終配置による本体の rank 別の重みは 22,771,088,864 / 28,117,499,904 / 28,117,499,904 B（DFly・作業域・KV を除く）。02:14 JST に DFly の slot 0 融合射影の校正・量子化完了を確認した。
