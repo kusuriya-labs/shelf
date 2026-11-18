@@ -106,6 +106,8 @@ shelf_add_test(NAME test_mxfp4_codec SOURCE unit/test_mxfp4_codec.cpp LABELS "cp
 shelf_add_test(NAME test_exl3_mul1_codec SOURCE unit/test_exl3_mul1_codec.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_quant_reference)
 shelf_add_test(NAME test_exl3_mul24_codec_decode SOURCE unit/test_exl3_mul24_codec_decode.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_quant_reference)
 shelf_add_test(NAME test_int6_w32_codec SOURCE unit/test_int6_w32_codec.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_quant_reference)
+shelf_add_test(NAME test_mxfp4_cpu_expert SOURCE unit/test_mxfp4_cpu_expert.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_quant_reference)
+shelf_add_test(NAME test_cpu_team_pcie_budget SOURCE unit/test_cpu_team_pcie_budget.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_runtime)
 shelf_add_test(NAME test_exl3_contracts SOURCE unit/test_exl3_contracts.cpp LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_exl3_mul24_workspace SOURCE unit/test_exl3_mul24_workspace.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_exl3_launch_plan SOURCE unit/test_exl3_launch_plan.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_kernels_optimized shelf_gpu)
