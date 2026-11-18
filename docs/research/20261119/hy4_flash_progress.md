@@ -145,3 +145,7 @@ SHELF_HY4_PROFILE_EP=1 のときだけ、各 rank で routed expert の gather �
 ## H1　head 完成時の比較条件
 
 最終層と head の完成後、校正時の最終 BF16 hidden に原本の iHC head・norm・FP32 に展開した lm_head を適用する。4 token それぞれについて連続実行した 4 bit 本体・6 bit head との top-1、KL、logits 相対 L2 を CPU で記録する。native 対 CPU の実装差と、この原本対量子化の差を別々に判定する。
+
+## H2　6 bit head の実重み
+
+01:55 JST に head の 6 bit 行列が保存された。SHA-256 と marker を照合し、組立前の実重みで H1 を実施した。先頭 4 token の logits 相対 L2 は原本比 0.236716。BF16 から量子化版への KL は順に 0.02584、1.57486、0.12229、0.26750 で、2 番目の位置の分布差が大きい。top-1 は両者とも 220、2122、6357、12286 だった。これは短い 1 列の結果であり、一般の生成品質の判定には用いない。最終 report と head_complete を確認するまで DFly 量子化は待機する。
