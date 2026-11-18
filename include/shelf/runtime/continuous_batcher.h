@@ -81,6 +81,7 @@ struct DFlash2BatcherBinding {
     uint32_t num_drafts = 7u;
     uint32_t tree_budget = 0u;
     bool adaptive = false;
+    bool host_token_ids = false;
     DFlash2BatcherStats* stats = nullptr;
     const std::vector<DFlash2GdnRankBinding>* rank_bindings = nullptr;
 };

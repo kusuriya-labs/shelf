@@ -75,6 +75,7 @@ void print_usage(FILE* out) {
         "  --kv-cache-dtype bf16|fp8|octave:FORMAT (default bf16)\n"
         "  --arena-gib N                (default auto = free VRAM minus 0.5 GiB)\n"
         "  --moe-host-experts N       routed experts per layer kept in host memory (default 0)\n"
+        "  --lm-head-int8 0|1         quantize the BF16 lm head to INT8 W32 on load (default 1)\n"
         "  --pcie-frac F              share of PCIe the runtime may use (default 0.25)\n"
         "  --pcie-gbps F              assumed PCIe bandwidth in GB/s (default 25)\n"
 
@@ -273,6 +274,8 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
             }
         } else if (key == "--moe-host-experts") {
             if (!apply_env_u32(need_value(), "SHELF_MOE_HOST_EXPERTS")) return false;
+        } else if (key == "--lm-head-int8") {
+            if (!apply_env_u32(need_value(), "SHELF_LM_HEAD_INT8")) return false;
         } else if (key == "--pcie-frac") {
             if (!apply_env_double(need_value(), "SHELF_PCIE_FRAC")) return false;
         } else if (key == "--pcie-gbps") {

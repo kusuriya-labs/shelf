@@ -44,6 +44,7 @@ TP、pipeline parallel、MTP、DFlash2、2048 token 超の長文は未対応。
 | `--top-k N` | keep the N highest logits (default 0 = disabled) |
 | `--seed N` | sampling seed (default 0) |
 | `--moe-host-experts N` | routed experts per layer kept in host memory (default 0) |
+| `--lm-head-int8 0\|1` | quantize the BF16 lm head to INT8 W32 on load (default 1) |
 | `--pcie-frac F` | share of PCIe the runtime may use (default 0.25) |
 | `--pcie-gbps F` | assumed PCIe bandwidth in GB/s (default 25) |
 | `--dflash2-model-dir PATH` | DFlash2 draft model directory; enables speculative decoding (greedy / stochastic) |

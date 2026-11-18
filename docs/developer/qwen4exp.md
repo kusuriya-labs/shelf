@@ -31,6 +31,11 @@ PLE の n-gram history を復元 prefix で再 seed する。MTP は無効であ
 
 - routed expert は `preshuffle_mxfp4_native` で 16 出力 x 32 K の 256 バイト block に
   repack する。E8M0 scale は row-major、row reference は行ごとの最大 E8M0 byte。
+- lm_head は load 時に BF16 から INT8 W32 へオンライン量子化する
+  （`--lm-head-int8 0` / `SHELF_LM_HEAD_INT8=0` で無効化）。量子化すると
+  vocab-parallel head は `Int8W32`、DFlash2 の sharded proposal も `Int8W32` 経路で
+  動く。無効にすると BF16 のままになり、DFlash2 の sharded proposal は
+  BF16 用の exact-rows GEMM 経路を使う。
 - routed expert は既定で全 local expert を VRAM に置く。`SHELF_MOE_HOST_EXPERTS=N`
   （layer あたり）を設定すると、各 layer の N expert を pinned host の plane に置き、
   残りを VRAM の slot に置く。host plane は `hipHostMallocMapped` で、GPU の grouped

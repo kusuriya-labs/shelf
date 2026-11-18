@@ -4,6 +4,7 @@
 #include <shelf/kernels/dflash2/topk.h>
 #include <shelf/kernels/fused/exl3/decode.h>
 #include <shelf/kernels/fused/exl3/rotate_quantize.h>
+#include <shelf/kernels/optimized/linear/bf16.h>
 #include <shelf/kernels/optimized/linear/lm_head_int8.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
 #include <shelf/runtime/program/int8_activation_workspace.h>
@@ -160,7 +161,8 @@ Result<ProposalShardBuffers> create_proposal_shard_buffers(
         return Status::invalid_argument("proposal shard head does not match the shard",
                                         __FILE__, __LINE__);
     }
-    if (head.encoding != MatrixEncoding::Int8W32 && head.encoding != MatrixEncoding::Exl3) {
+    if (head.encoding != MatrixEncoding::Int8W32 && head.encoding != MatrixEncoding::Exl3 &&
+        head.encoding != MatrixEncoding::Bf16) {
         return Status::unsupported("proposal shard head encoding is unsupported", __FILE__,
                                    __LINE__);
     }
@@ -252,7 +254,8 @@ Status proposal_shard_compute(
         return Status::invalid_argument("proposal shard rows out of range", __FILE__,
                                         __LINE__);
     }
-    if (head.encoding != MatrixEncoding::Int8W32 && head.encoding != MatrixEncoding::Exl3) {
+    if (head.encoding != MatrixEncoding::Int8W32 && head.encoding != MatrixEncoding::Exl3 &&
+        head.encoding != MatrixEncoding::Bf16) {
         return Status::unsupported("proposal shard head encoding is unsupported", __FILE__,
                                    __LINE__);
     }
@@ -264,6 +267,29 @@ Status proposal_shard_compute(
     if (head.encoding == MatrixEncoding::Exl3) {
         Status st = proposal_shard_exl3(head, buffers, hidden, hidden_stride, rows, stream);
         if (!st.ok()) return st;
+        return proposal_shard_finish(buffers, rows, vocab_offset, stream);
+    }
+    if (head.encoding == MatrixEncoding::Bf16) {
+        const void* weight = head.bf16.ndim() != 0u ? head.bf16.data<void>() : nullptr;
+        if (weight == nullptr) {
+            return Status::invalid_argument("proposal shard head payload missing", __FILE__,
+                                            __LINE__);
+        }
+        shelf::kernel::Bf16GemmConfig config;
+        if (rows <= shelf::kernel::kBf16GemmExactRowsKernelMax) {
+            config.id = shelf::kernel::Bf16GemmConfigId::ExactRows;
+            config.exact_rows = static_cast<std::uint8_t>(rows);
+        } else {
+            config.id = shelf::kernel::Bf16GemmConfigId::Wmma;
+        }
+        const hipError_t herr = shelf::kernel::launch_gemm_bf16(
+            config, static_cast<const bf16_t*>(weight), hidden, buffers.logits.data<float>(),
+            shelf::kernel::Bf16GemmOutputDType::F32, rows, head.rows, head.cols,
+            hidden_stride, buffers.local_vocab, stream);
+        if (herr != hipSuccess) {
+            return Status::hip_error("proposal shard bf16 launch", hipGetErrorString(herr),
+                                     __FILE__, __LINE__);
+        }
         return proposal_shard_finish(buffers, rows, vocab_offset, stream);
     }
     if (head.codes.ndim() == 0 || head.scales.ndim() == 0) {

@@ -721,6 +721,7 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
     decoder_config.tree_extra = static_cast<uint32_t>(dflash2_tree_extra);
     decoder_config.tree_budget = static_cast<uint32_t>(dflash2_tree_budget);
     decoder_config.eos_tokens = text_config.stop_tokens;
+    decoder_config.host_token_ids = runtime.dflash2_host_token_ids();
     auto decoder_result = shelf::qwen35::runtime::create_dflash2_spec_decoder(
         executor, draft, context, sequence, gdn_pool, arena, decoder_config, stream,
         rank_bindings.empty() ? nullptr : &rank_bindings, tp_coord);

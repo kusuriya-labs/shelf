@@ -164,10 +164,7 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
                 return Status::unsupported("plamo3: parallel and speculative execution are not supported", __FILE__, __LINE__);
         }
         if (family.value() == shelf::models::ModelFamily::Qwen4Exp) {
-            if (config_.tp < 2) {
-                return Status::unsupported(
-                    "Qwen4Exp requires --tensor-parallel 2 or 4", __FILE__, __LINE__);
-            }
+            config_.dflash2_host_token_ids = true;
             // The Qwen4Exp rank already holds a complete replicated lm_head / embedding, so
             // the drafter borrows those instead of loading a second private copy.
             config_.private_target_weights = false;

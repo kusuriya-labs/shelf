@@ -1111,8 +1111,10 @@ Result<Qwen4ExpRankWeights> load_qwen4exp_rank(const std::string& model_dir,
     Status st = load_matrix(reader, "model.language_model.embed_tokens.weight", arena, stream,
                             weight_options, out.embed_tokens);
     if (!st.ok()) return st;
+    WeightLoadOptions lm_head_options = weight_options;
+    lm_head_options.quantize_int8_w32 = options.quantize_lm_head_int8_w32;
     st = load_matrix(reader, "model.language_model.lm_head.weight", arena, stream,
-                     weight_options, out.lm_head);
+                     lm_head_options, out.lm_head);
     if (!st.ok()) return st;
     if (!options.mtp_only) {
         st = load_mixer(reader, arena, stream, weight_options, out.mixer);
@@ -1252,6 +1254,13 @@ Status expect_matrix(const MatrixWeight& weight, std::uint32_t rows, std::uint32
         if (weight.k_padded < cols || (weight.k_padded % 128u) != 0u) {
             return Status::invalid_argument(
                 (std::string("Qwen4Exp EXL3 k_padded is invalid: ") + what).c_str(),
+                __FILE__, __LINE__);
+        }
+    } else if (weight.encoding == shelf::weights::MatrixEncoding::Int8W32) {
+        if (weight.k_padded != cols || weight.codes.ndim() == 0 ||
+            weight.scales.ndim() == 0 || weight.scales.dim(0) != rows) {
+            return Status::invalid_argument(
+                (std::string("Qwen4Exp INT8 W32 weight is invalid: ") + what).c_str(),
                 __FILE__, __LINE__);
         }
     } else if (weight.encoding != shelf::weights::MatrixEncoding::Bf16) {
@@ -1439,9 +1448,10 @@ Status validate_qwen4exp_rank(const Qwen4ExpRankWeights& weights,
     st = expect_matrix(weights.lm_head, expected_lm_rows, hidden, "lm_head");
     if (!st.ok()) return st;
     if (weights.lm_head.encoding != shelf::weights::MatrixEncoding::Exl3 &&
-        weights.lm_head.encoding != shelf::weights::MatrixEncoding::Bf16) {
-        return Status::invalid_argument("Qwen4Exp lm_head is not EXL3 or BF16", __FILE__,
-                                        __LINE__);
+        weights.lm_head.encoding != shelf::weights::MatrixEncoding::Bf16 &&
+        weights.lm_head.encoding != shelf::weights::MatrixEncoding::Int8W32) {
+        return Status::invalid_argument("Qwen4Exp lm_head is not EXL3, BF16 or INT8 W32",
+                                        __FILE__, __LINE__);
     }
     if (lm_head_sharded) {
         const auto& part = weights.lm_head.partition.value();

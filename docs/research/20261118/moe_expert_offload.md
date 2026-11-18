@@ -181,3 +181,25 @@ AVX512 GEMV と同期経路は GPU 経路とビット一致まで詰めたが、
 4. `hipExtMallocWithFlags(..., hipMallocSignalMemory)` はこの環境で
    `invalid argument` を返す（`hipDeviceAttributeCanUseStreamWaitValue` は 1）。
    signal memory を使う `hipStreamWaitValue32` 方式は採れない。
+
+## Qwen4Exp で DFlash2 を動かすまでの修正
+
+このモデル（Qwen3.8-Flash-Next）で DFlash2 を有効にすると、次の 4 箇所で止まった。
+
+| 症状 | 原因 | 対応 |
+| --- | --- | --- |
+| `proposal shard head encoding is unsupported`（TP=2） | lm_head が BF16。sharded proposal は Int8W32 / Exl3 のみ | lm_head を load 時に INT8 W32 化（既定 ON、`--lm-head-int8 0` で無効）＋ shard に BF16 exact-rows 経路を追加 |
+| `Qwen4Exp matrix has an unexpected encoding: lm_head`、`lm_head is not EXL3 or BF16` | Qwen4Exp の load 検証が Int8W32 を拒否 | 検証を Int8W32 許容に拡張 |
+| `the PLE input gather needs host token ids`（TP=1） | speculative verify の batch が device 側 token ids を使う | PLE モデルでは host token ids を強制（`DFlash2SpecDecoderConfig::host_token_ids` を Qwen4Exp で有効化） |
+| `Qwen4Exp requires --tensor-parallel 2 or 4` | compute runtime の制限 | TP=1 を許可（tg と同じ単 GPU 構成） |
+
+結果（prompt 4096、`octave:c5v5`、drafts 6、tree-budget 0、単一リクエスト）:
+
+| 構成 | decode | 受理 |
+| --- | ---: | ---: |
+| TP=2 spec なし | 15.19 tok/s（65.8 ms/token） | - |
+| TP=2 DFlash2 | 38.70 tok/s（25.8 ms/token） | full 0.636 / 平均 4.18 drafts |
+| TP=1 DFlash2 | 46.58 tok/s（21.5 ms/token） | full 0.889 / 平均 5.33 drafts |
+
+prompt が同一 token の繰り返し（id=1）なので受理率は実運用より高い。TP=2 の DFlash2 は
+`DFLASH2_D2H_MS` が 11 round で 111 ms あり、host token ids の往復が次の削減対象である。

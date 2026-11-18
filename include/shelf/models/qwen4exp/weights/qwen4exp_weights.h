@@ -209,6 +209,8 @@ struct Qwen4ExpLoadOptions {
     // Routed experts kept in pinned host memory per layer. 0 keeps every expert in VRAM.
     // The remaining local experts stay in VRAM and are addressed by the slot map.
     std::uint32_t moe_host_experts = 0;
+    // Quantize the BF16 lm head to INT8 W32 while loading. Disabled by SHELF_LM_HEAD_INT8=0.
+    bool quantize_lm_head_int8_w32 = true;
 };
 
 // Logical checkpoint names this rank asks the HF reader for. Exposed for tests and for

@@ -1487,6 +1487,7 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
         batcher_binding.num_drafts = dflash.drafts;
         batcher_binding.tree_budget = runtime.config().dflash2_tree_budget;
         batcher_binding.adaptive = dflash.adaptive;
+        batcher_binding.host_token_ids = runtime.dflash2_host_token_ids();
         batcher_binding.stats = &dflash.stats;
         batcher_binding.rank_bindings = serve_rank_ptr;
         const shelf::Status bind_st = runtime.set_dflash2_batcher(batcher_binding);

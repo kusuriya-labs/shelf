@@ -84,6 +84,10 @@ Result<LoadedModel> LoadedModel::load(
             load_options.moe_host_experts =
                 static_cast<std::uint32_t>(std::strtoul(host_experts, nullptr, 10));
         }
+        if (const char* lm_head_int8 = std::getenv("SHELF_LM_HEAD_INT8")) {
+            load_options.quantize_lm_head_int8_w32 =
+                std::strtoul(lm_head_int8, nullptr, 10) != 0u;
+        }
         auto loaded = shelf::qwen4exp::Qwen4ExpModel::load_from_safetensors(
             model_dir, 1u, 0u, arena, stream, load_options);
         if (!loaded.ok()) return loaded.status();

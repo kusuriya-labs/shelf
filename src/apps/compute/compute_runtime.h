@@ -56,6 +56,7 @@ struct Qwen35RuntimeConfig {
         return want < cap ? want : cap;
     }
     uint32_t dflash2_prefill_rows = 0;
+    bool dflash2_host_token_ids = false;
     bool mtp = false;
     bool mtp_serve = false;
     uint32_t mtp_drafts = 7;
@@ -137,6 +138,7 @@ class Qwen35ComputeRuntime {
     bool is_shutdown() const noexcept { return shutdown_; }
 
     const Qwen35RuntimeConfig& config() const noexcept { return config_; }
+    bool dflash2_host_token_ids() const noexcept { return config_.dflash2_host_token_ids; }
 
     const shelf::models::LoadedModel& model() const
     {

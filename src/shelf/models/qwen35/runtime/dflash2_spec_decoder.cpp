@@ -232,7 +232,7 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
     decoder.config = config;
     decoder.hidden_size = static_cast<uint32_t>(dcfg.hidden_size);
     decoder.device_token_bridge =
-        env_flag_enabled("SHELF_DFLASH2_DEVICE_TOKEN_BRIDGE", true);
+        !config.host_token_ids && env_flag_enabled("SHELF_DFLASH2_DEVICE_TOKEN_BRIDGE", true);
     decoder.host_proposal_visibility =
         env_flag_enabled("SHELF_DFLASH2_HOST_PROPOSAL_D2H", false);
     if (tp_hook != nullptr) decoder.device_token_bridge = false;

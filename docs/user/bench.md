@@ -64,6 +64,7 @@ detail and is not a `--variant` value.
 | `--kv-cache-dtype bf16\|fp8\|octave:FORMAT (default bf16)` |  |
 | `--arena-gib N` | (default auto = free VRAM minus 0.5 GiB) |
 | `--moe-host-experts N` | routed experts per layer kept in host memory (default 0) |
+| `--lm-head-int8 0\|1` | quantize the BF16 lm head to INT8 W32 on load (default 1) |
 | `--pcie-frac F` | share of PCIe the runtime may use (default 0.25) |
 | `--pcie-gbps F` | assumed PCIe bandwidth in GB/s (default 25) |
 | `--runs N` | (default 3) |
@@ -123,6 +124,7 @@ backbone kernel の allowlist に登録済みで、prefill の throughput は TP
 | `--kv-cache-dtype bf16\|fp8\|octave:FORMAT (default bf16)` |  |
 | `--arena-gib N` | (default auto = free VRAM minus 0.5 GiB) |
 | `--moe-host-experts N` | routed experts per layer kept in host memory (default 0) |
+| `--lm-head-int8 0\|1` | quantize the BF16 lm head to INT8 W32 on load (default 1) |
 | `--pcie-frac F` | share of PCIe the runtime may use (default 0.25) |
 | `--pcie-gbps F` | assumed PCIe bandwidth in GB/s (default 25) |
 | `--output PATH` | (default none) |

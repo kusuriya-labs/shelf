@@ -99,6 +99,7 @@ Ready.
 | `--mtp` | checkpoint の MTP block を drafter として使う（複数 request を同時に処理する） |
 | `--mtp-drafts MTP_DRAFTS` | MTP の draft tokens per round（default 4） |
 | `--moe-host-experts MOE_HOST_EXPERTS` | 層あたり host に退避する routed expert 数（default 0） |
+| `--lm-head-int8 {0,1}` | lm head を load 時に INT8 W32 へ量子化する（default 1） |
 | `--pcie-frac PCIE_FRAC` | runtime が使ってよい PCIe の割合（default 0.25） |
 | `--pcie-gbps PCIE_GBPS` | 想定する PCIe 帯域 GB/s（default 25） |
 | `--ple-prefetch {0,1}` | prefill 中に次の PLE 行を先読みする（default 1） |

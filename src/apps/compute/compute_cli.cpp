@@ -108,6 +108,7 @@ void compute_usage(const char* prog) {
     printf("  --top-k N              keep the N highest logits (default 0 = disabled)\n");
     printf("  --seed N               sampling seed (default 0)\n");
     printf("  --moe-host-experts N    routed experts per layer kept in host memory (default 0)\n");
+    printf("  --lm-head-int8 0|1      quantize the BF16 lm head to INT8 W32 on load (default 1)\n");
     printf("  --pcie-frac F           share of PCIe the runtime may use (default 0.25)\n");
     printf("  --pcie-gbps F           assumed PCIe bandwidth in GB/s (default 25)\n");
     printf("  --dflash2-model-dir PATH  DFlash2 draft model directory; enables\n");
@@ -438,6 +439,13 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
                 return kComputeParseError;
             }
             apply_env_u32("SHELF_MOE_HOST_EXPERTS", value);
+        } else if (std::strcmp(argv[i], "--lm-head-int8") == 0 && i + 1 < argc) {
+            unsigned long value = 0;
+            if (!parse_uint(argv[++i], value) || value > 1u) {
+                fprintf(stderr, "bad --lm-head-int8 (expected 0 or 1)\n");
+                return kComputeParseError;
+            }
+            apply_env_u32("SHELF_LM_HEAD_INT8", value);
         } else if (std::strcmp(argv[i], "--pcie-frac") == 0 && i + 1 < argc) {
             float value = 0.0f;
             if (!parse_float(argv[++i], value) || value <= 0.0f || value > 1.0f) {

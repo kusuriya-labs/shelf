@@ -12,6 +12,7 @@ struct DFlash2SpecDecoderConfig {
     bool tree = false;
     uint32_t tree_extra = 0u;
     uint32_t tree_budget = 0u;
+    bool host_token_ids = false;
     ::shelf::qwen_hybrid::StopTokens eos_tokens;
 };
 

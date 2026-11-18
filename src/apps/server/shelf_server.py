@@ -120,6 +120,8 @@ def build_compute_argv(opts) -> list[str]:
         argv += ["--tensor-parallel", str(opts.tensor_parallel)]
     if opts.moe_host_experts is not None:
         argv += ["--moe-host-experts", str(opts.moe_host_experts)]
+    if opts.lm_head_int8 is not None:
+        argv += ["--lm-head-int8", str(opts.lm_head_int8)]
     if opts.pcie_frac is not None:
         argv += ["--pcie-frac", str(opts.pcie_frac)]
     if opts.pcie_gbps is not None:
@@ -572,6 +574,8 @@ def parse_args(argv=None):
 
     parser.add_argument("--moe-host-experts", type=int, default=None,
                         help="層あたり host に退避する routed expert 数（default 0）")
+    parser.add_argument("--lm-head-int8", type=int, default=None, choices=(0, 1),
+                        help="lm head を load 時に INT8 W32 へ量子化する（default 1）")
     parser.add_argument("--pcie-frac", type=float, default=None,
                         help="runtime が使ってよい PCIe の割合（default 0.25）")
     parser.add_argument("--pcie-gbps", type=float, default=None,
