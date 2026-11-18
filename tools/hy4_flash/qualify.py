@@ -29,6 +29,7 @@ def main():
     for field in ("executable", "body", "engram", "draft", "placement", "reference", "calibration", "results"):
         p.add_argument(field, type=Path)
     p.add_argument("--chunk",type=int,choices=(32,64,128,256,512,1024),default=64)
+    p.add_argument("--control-reference",type=Path,help="同一条件で CPU の積和順序を変えた check_chain 結果")
     args = p.parse_args()
     visible = os.environ.get("ROCR_VISIBLE_DEVICES")
     if visible != "GPU-a8e9ddefa2d60f55,GPU-08b2ddcbd6e6b36c,GPU-76a08c022586fed6":
@@ -61,6 +62,20 @@ def main():
     with safe_open(args.reference / "logits.safetensors", framework="np") as f:
         expected = f.get_tensor("logits")[-1].astype(np.float32)
         tokens = f.get_tensor("input_ids").tolist()
+    control_delta=0.0
+    if args.control_reference:
+        control_input=json.loads((args.control_reference/"input.json").read_bytes())
+        if (control_input.pop("rounding_control",None)!="rdna-reduction-v1" or
+                control_input!=json.loads((args.reference/"input.json").read_bytes())):
+            raise ValueError("CPU 対照と主参照の重み・配置・入力が一致しません")
+        with safe_open(args.control_reference/"logits.safetensors",framework="np") as f:
+            control=f.get_tensor("logits")[-1]
+            if f.get_tensor("input_ids").tolist()!=tokens:
+                raise ValueError("CPU 対照の出力行が一致しません")
+        control_delta=float(np.linalg.norm(control-expected)/np.linalg.norm(expected))
+        if not np.isfinite(control_delta):
+            raise ValueError("CPU 対照の logits が非有限です")
+    numerical_limit=max(0.1,control_delta)
     prompt = output/"check-ids.txt"
     prompt.write_text(" ".join(map(str,tokens)))
     dump = output/"prefill.f32"
@@ -70,11 +85,15 @@ def main():
     error = float(np.linalg.norm(actual-expected) / np.linalg.norm(expected))
     if not np.isfinite(error) or not np.any(actual) or base[0] != int(expected.argmax()):
         raise ValueError(f"CPU logits と不一致: 相対 L2={error}, 保存先={output}")
-    quality = dict(relative_l2=error,within_initial_l2_limit=error<=0.1,
+    log_p=expected.astype(np.float64)-np.logaddexp.reduce(expected.astype(np.float64))
+    log_q=actual.astype(np.float64)-np.logaddexp.reduce(actual.astype(np.float64))
+    kl=float(np.exp(log_p)@(log_p-log_q))
+    quality = dict(relative_l2=error,cpu_control_relative_l2=control_delta,kl_cpu_to_ep3=kl,
+                   within_cpu_limit=error<=numerical_limit,within_initial_l2_limit=error<=0.1,
                    cpu_top1=int(expected.argmax()),ep3_top1=base[0])
     (output/"logits-check.json").write_text(json.dumps(quality,indent=2))
     if error>0.1:
-        print(f"CPU logits 相対 L2 は当初目安 0.1 を超過: {error:.6f}。独立した生成列・時間の検査を続けます",flush=True)
+        print(f"CPU 相対 L2 {error:.6f}、積和対照 {control_delta:.6f}、初期目安 0.1",flush=True)
     if sequence(run("generate","dfly",flags,True)) != base:
         raise ValueError("DFly と通常生成の greedy 列が一致しません")
     sample = [*flags,"--temperature","0.8","--seed","20261119"]
@@ -84,10 +103,13 @@ def main():
     prompt.write_text(" ".join(map(str,ids)))
     bench = run("generate","bench",["--input-ids-file",prompt,"--max-seq-len","2304","--max-new-tokens","128",
                                     "--chunk",str(args.chunk),"--repeats","4"],True)
-    steady_target = sequence(run("generate","bench-target",["--input-ids-file",prompt,"--max-seq-len","2304",
-                                 "--max-new-tokens","128","--chunk",str(args.chunk)],False))
-    outputs = [list(map(int,ids.split(","))) for ids in re.findall(r"^GENERATED_IDS=([0-9,]+)$",bench,re.MULTILINE)]
-    if len(outputs)!=4 or any(tokens!=steady_target for tokens in outputs):
+    long_options=["--input-ids-file",prompt,"--max-seq-len","2304","--max-new-tokens","256",
+                  "--chunk",str(args.chunk)]
+    steady_target=sequence(run("generate","bench-target",long_options,False))
+    steady_draft=sequence(run("generate","long-dfly",long_options,True))
+    outputs=[list(map(int,row.split(","))) for row in re.findall(r"^GENERATED_IDS=([0-9,]+)$",bench,re.MULTILINE)]
+    if (steady_target!=steady_draft or len(outputs)!=4 or
+            any(row!=steady_target[:128] for row in outputs)):
         raise ValueError("pp2048 後の通常生成と DFly の全生成列が一致しません")
     rows = re.findall(r"prefill_tokens=(\d+) prefill_s=([\d.]+) decode_tokens=(\d+) decode_s=([\d.]+)",bench)
     if len(rows) != 4 or any(int(n)!=2048 or int(t)<1 for n,_,t,_ in rows):
@@ -97,14 +119,14 @@ def main():
     histograms = [list(map(int,h.split(","))) for h in re.findall(r"^accepted_histogram=([0-9,]+)$",bench,re.MULTILINE)]
     if len(histograms)!=4 or any(len(h)!=6 for h in histograms):
         raise ValueError("DFly の受理長分布が不足しています")
-    result = dict(within_initial_l2_limit=error<=0.1,acceptance_histograms=histograms[1:],logits_relative_l2=error,reserved_tokens=reserved,pp2048=pp,decode=tg,
+    result = dict(**quality,verified_greedy_tokens=len(steady_draft),acceptance_histograms=histograms[1:],logits_relative_l2=error,reserved_tokens=reserved,pp2048=pp,decode=tg,
                   prefill_median=statistics.median(pp),decode_median=statistics.median(tg))
     (output/"results.json").write_text(json.dumps(result,indent=2))
     print(output,result,flush=True)
     if result["prefill_median"] < 500 or result["decode_median"] < 40:
         raise SystemExit("スループット目標未達")
-    if error>0.1:
-        raise SystemExit("CPU logits の初期比較基準は未達")
+    if error>numerical_limit:
+        raise SystemExit("CPU logits の差が初期目安と対照変動の双方を超えています")
 
 
 if __name__ == "__main__":

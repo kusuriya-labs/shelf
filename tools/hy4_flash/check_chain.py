@@ -7,7 +7,9 @@ from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 
 from checkpoint import Weights, read_json
-from decoder import DecoderLayer, collapse, rms
+import decoder
+from rounding_control import rounding_control
+from contextlib import nullcontext
 
 
 def main():
@@ -17,7 +19,13 @@ def main():
     p.add_argument("--tokens", type=int, default=4)
     p.add_argument("--placement", type=Path)
     p.add_argument("--body", type=Path)
+    p.add_argument("--rounding-control", action="store_true", help="同じ CPU 上で積和順序を切り替えて対照を作成")
     args = p.parse_args()
+    with rounding_control() if args.rounding_control else nullcontext():
+        run(args)
+
+
+def run(args):
     torch.set_num_threads(1)
     if not 0 < args.tokens <= 128:
         raise ValueError("校正列の先頭 1〜128 token を指定してください")
@@ -30,6 +38,8 @@ def main():
         ids = f.get_slice("input_ids")[0,:args.tokens].tolist()
     signature = dict(model=str(args.model.resolve()),work=str(args.work.resolve()),engram=str(args.engram.resolve()),
                      settings=read_json(args.work/"settings.json"),ids=ids,owners=w.owners)
+    if args.rounding_control:
+        signature["rounding_control"] = "rdna-reduction-v1"
     settings = args.result/"input.json"
     if settings.exists():
         if read_json(settings) != signature:
@@ -45,7 +55,7 @@ def main():
             if x.shape != (len(ids),4,3072) or not x.isfinite().all():
                 raise ValueError(f"保存状態が不正です: {path}")
             continue
-        x = DecoderLayer(w,i,len(ids))(x,[],ids)
+        x = decoder.DecoderLayer(w,i,len(ids))(x,[],ids)
         with safe_open(args.work/f"layer-{i:02d}/capture/next.safetensors",framework="pt") as f:
             expected = f.get_slice("hidden")[0,:len(ids)].float()
         error = (x.float()-expected).norm()/expected.norm()
@@ -58,13 +68,13 @@ def main():
     if args.body and end == 42:
         body = Weights(args.body,args.engram)
         prefix = "model.hc_head.hc_head_"
-        h = collapse(x,*(body.raw(prefix+k) for k in ("fn","scale","base")))[0]
-        logits = body.linear("lm_head",rms(h,body.raw("model.norm.weight")))
+        h = decoder.collapse(x,*(body.raw(prefix+k) for k in ("fn","scale","base")))[0]
+        logits = body.linear("lm_head",decoder.rms(h,body.raw("model.norm.weight")))
         save_file({"logits":logits,"input_ids":torch.tensor(ids)},args.result/"logits.safetensors")
         with safe_open(args.work/"layer-41/capture/next.safetensors",framework="pt") as f:
             original_streams = f.get_slice("hidden")[0,:len(ids)]
-        original_hidden = collapse(original_streams,*(w.raw(prefix+k) for k in ("fn","scale","base")))[0]
-        original_hidden = rms(original_hidden,w.raw("model.norm.weight")).float()
+        original_hidden = decoder.collapse(original_streams,*(w.raw(prefix+k) for k in ("fn","scale","base")))[0]
+        original_hidden = decoder.rms(original_hidden,w.raw("model.norm.weight")).float()
         head = w.raw("lm_head.weight")
         original_logits = torch.cat([original_hidden @ block.float().T for block in head.split(2048)],dim=-1)
         log_p = original_logits.log_softmax(-1)

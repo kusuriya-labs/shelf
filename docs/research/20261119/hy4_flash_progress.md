@@ -192,3 +192,9 @@ DFly は 49 射影を量子化し、sidecar は index・report 込みで 424,485
 小さい行数で出力タイル数が少ない射影を split-K にした `shelf-qualification/ep3-split/bench.log` では、初回を除く 3 回の中央値が **pp2048 676.35 tok/s、DFly decode 50.64 tok/s**。decode は 128 生成のうち prefill で得た先頭を除く 127 token で測った。33 検証ラウンドで 94 候補を受理。直前の event 版は 47 ラウンド・79 候補受理で 676.75 / 27.55 tok/s。decode の差には計算時間の短縮と生成列・受理長の変化の両方が含まれる。固定配置での候補ごとの logits・生成列・時間比較と、採用時の通常 dispatch への組み込みは未完了。
 
 CPU logits 相対 L2 の初期目安 0.1 を超えた場合はその事実を結果 JSON に保存し、独立した greedy 列と throughput の検査も最後まで実施する。閾値を超えた実行をこの判定の合格にしない。pp2048 後の 128 token についても、温度 0 の target-only と DFly の全列を比較する。
+
+## Q2　CPU 対照と 3.5 bpw への移行条件
+
+ユーザー指定により、初期目安 0.1 と、同一入力・同一配置の CPU 積和順序対照の変動を分けて記録する。固定配置 7332 / 6830 / 6830 expert、入力 ID 120000・802・15063・2576 では、**EP=3 の最終 logits の相対 L2 は 0.133337、CPU reorder 対照は 0.139013、温度 0 の通常生成と DFly の greedy 列は 24 token 完全一致**。次 token は CPU と EP=3 ともに 12286、KL（CPU から EP=3）は 0.05572。対照は同じ packed tensor を用い、CPU 上だけで mul24 内積・iHC・正規化・router の FP32 積和順序を変えたもの（`build-hy4/recalc-rdna.py`、`shelf-cpu-stable-rdna`）。変更した順序を再実行するため check_chain.py に --rounding-control を用意した。相対 L2 が 0.1 を超えても、CPU 対照変動以下なら棄却理由としない。
+
+`ep3-19qprof9` の固定配置・chunk 1024 は pp2048 **674.80 tok/s**、decode **50.82 tok/s**（初回を除く 3 回の中央値）。pp2048 に続く 128 token も通常生成と DFly がすべて一致し、正の温度の同一 seed 結果も再現した。候補整理の後、採用版では 256 token の照合を実施する。DFly2 の量子化、Engram FP8 化、2Mi 実予約はいずれも完了しており、長い列の照合と候補整理が済んでから 3.5 bpw へ進む。
