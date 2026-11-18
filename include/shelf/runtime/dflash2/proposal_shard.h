@@ -19,6 +19,8 @@ struct ProposalShardBuffers {
     uint32_t max_rows = 0;
     uint32_t local_vocab = 0;
     uint32_t top_k = 0;
+    // EXL3 mul24 keeps activations in INT8 and accumulates the pre-rotation logits in F32.
+    bool exl3_mul24 = false;
     gpu::Tensor logits;
     gpu::Tensor topk_ids;
     gpu::Tensor topk_logits;
@@ -26,10 +28,16 @@ struct ProposalShardBuffers {
     gpu::Tensor scratch_logits;
     // Row maximum and sum(exp(x - max)) over the local vocabulary.
     gpu::Tensor stats;
+    gpu::Tensor exl3_codes;
+    gpu::Tensor exl3_scales;
+    gpu::Tensor exl3_accum;
 };
 
+// The buffers are sized from the head that will use them: EXL3 mul24 needs an
+// activation workspace and a pre-rotation accumulation plane on top of the logits.
 Result<ProposalShardBuffers> create_proposal_shard_buffers(
     gpu::GpuArena& arena,
+    const shelf::weights::MatrixWeight& head,
     uint32_t max_rows,
     uint32_t local_vocab,
     uint32_t top_k);

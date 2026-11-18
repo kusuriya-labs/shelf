@@ -41,6 +41,65 @@ static void check_partition(const shelf::weights::MatrixWeight& w, std::uint32_t
     check(d.ranges == ranges, tag + " ranges");
 }
 
+static void check_head_fixture(const fs::path& dir, const std::string& tag,
+                               const tp_fixture::FixtureShape& shape,
+                               bool want_shard, shelf::gpu::GpuArena& arena,
+                               hipStream_t stream) {
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    shelf::Status built = tp_fixture::build_fixture(dir, shape);
+    if (!built.ok()) {
+        fail(tag + " fixture: " + built.message());
+        return;
+    }
+
+    shelf::qwen35::Qwen35LoadOptions options;
+    options.verify_quantized_payload_crc = true;
+    auto rank0 = shelf::qwen35::load_qwen35_weights_tensor_parallel_rank(
+        dir.string(), 2, 0, arena, stream, options);
+    auto rank1 = shelf::qwen35::load_qwen35_weights_tensor_parallel_rank(
+        dir.string(), 2, 1, arena, stream, options);
+    if (!rank0.ok() || !rank1.ok()) {
+        fail(tag + " load: " +
+             (rank0.ok() ? rank1.status().message() : rank0.status().message()));
+        return;
+    }
+
+    const shelf::weights::MatrixWeight& head0 = rank0.value().lm_head;
+    const shelf::weights::MatrixWeight& head1 = rank1.value().lm_head;
+    const std::uint64_t local = shape.vocab / 2u;
+    if (!want_shard) {
+        check(head0.rows == shape.vocab && !head0.partition.has_value(),
+              tag + " head stays replicated on rank0");
+        check(head1.rows == shape.vocab && !head1.partition.has_value(),
+              tag + " head stays replicated on rank1");
+        return;
+    }
+
+    check(head0.encoding == shelf::weights::MatrixEncoding::Exl3,
+          tag + " head keeps the EXL3 encoding");
+    check(head0.rows == local && head0.cols == shape.hidden,
+          tag + " head rows are the local vocabulary");
+    check(head0.k_padded == head0.cols, tag + " head k_padded matches K");
+    check_partition(head0, 0, 0,
+                    {static_cast<int64_t>(shape.vocab),
+                     static_cast<int64_t>(shape.hidden)},
+                    {{0, local}}, tag + " head rank0");
+    check_partition(head1, 0, 1,
+                    {static_cast<int64_t>(shape.vocab),
+                     static_cast<int64_t>(shape.hidden)},
+                    {{local, local}}, tag + " head rank1");
+
+    auto config_result = shelf::qwen35::read_qwen35_text_config(dir.string());
+    check(config_result.ok(), tag + " config");
+    if (config_result.ok()) {
+        check(shelf::qwen35::validate_qwen35_weights(rank0.value(), config_result.value()).ok(),
+              tag + " rank0 weights pass the model invariants");
+        check(shelf::qwen35::validate_qwen35_weights(rank1.value(), config_result.value()).ok(),
+              tag + " rank1 weights pass the model invariants");
+    }
+}
+
 int main() {
     int device_count = 0;
     if (hipGetDeviceCount(&device_count) != hipSuccess || device_count < 1) {
@@ -142,6 +201,12 @@ int main() {
         check(r1.embed_tokens.rows == 64 && r1.embed_tokens.partition.has_value() &&
                   r1.embed_tokens.partition->index == 1u,
               "rank1 embedding carries the other half");
+        check(r0.lm_head.rows == 64 && r0.lm_head.cols == 64,
+              "rank0 lm_head is the low half of the vocabulary");
+        check_partition(r0.lm_head, 0, 0, {128, 64}, {{0, 64}}, "rank0 lm_head");
+        check(r1.lm_head.rows == 64 && r1.lm_head.partition.has_value(),
+              "rank1 lm_head is the high half of the vocabulary");
+        check_partition(r1.lm_head, 0, 1, {128, 64}, {{64, 64}}, "rank1 lm_head");
         check(r0.layers[0].input_layernorm_weight.dim(0) == 64, "input norm replicated");
 
         // The model invariants are stated for the model, not for one rank: a rank holds an
@@ -172,6 +237,13 @@ int main() {
                   "a layer carrying both attentions is rejected");
         }
     }
+
+    check_head_fixture(dir / "exl3_sharded", "exl3 sharded head",
+                       tp_fixture::FixtureShape{256, 128, 128, true, 4}, true, arena,
+                       stream);
+    check_head_fixture(dir / "exl3_unaligned", "exl3 unaligned head",
+                       tp_fixture::FixtureShape{384, 128, 128, true, 4}, false, arena,
+                       stream);
 
     {
         shelf::qwen35::Qwen35LoadOptions bad;

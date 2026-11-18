@@ -219,6 +219,19 @@ weight を掛ける。
 - `create_dflash2_spec_decoder()` が target との shape 一致
   （`hidden_size` / `vocab_size` / `lm_head` shape）と target 層数 > 最大 tap を検証する。
 
+### tensor parallel proposal
+
+TP>1 では target head を rank ごとの語彙 shard に分割し、drafter は rank 0 に残す。
+
+- `DFlash2TpProposal` が `DFlash2ProposalDistributor` を実装する。rank 0 が final
+  hidden を各 rank に peer store し、各 rank が自分の語彙 shard の logits・局所 top-k・
+  行 logsumexp を計算する。rank 0 が候補と分母を merge して selector に渡す。
+- 対応する head encoding は Int8W32 と EXL3。EXL3 mul1 は W16A16 GEMM、mul24 は
+  activation の回転・INT8 量子化・INT8 GEMM・出力回転で計算する。mul24 のみ rank
+  ごとに activation workspace と `[max_rows, local_vocab]` F32 accum を確保する。
+- `create_proposal_shard_buffers()` は head から必要な workspace を決める。
+- 使用する語彙 shard は target head の `partition`（axis 0）から決まる。
+
 ### ownership
 
 - target tap buffer は `Executor` が所有し、`create_model_executor` で arena から確保、

@@ -134,8 +134,10 @@ global offset を kernel へ持ち込まない。
 RMSNorm / residual add / embedding / final norm は全 rank 同一計算。
 norm parameter・embedding は replicated（partition plan に entry なし）。
 lm_head は vocab-parallel（語彙軸を rank 分割。各 rank が担当列だけ計算し、
-非所有列を 0 埋めした full 幅 buffer を既存 SumHidden で結合する。tie 時と
-DFlash2 spec 経路では複製経路。`Qwen35LoadOptions::vocab_parallel_lm_head` で切替）。
+非所有列を 0 埋めした full 幅 buffer を既存 SumHidden で結合する）。BF16 と EXL3 の
+head が対象で、EXL3 は local vocab と K が 128 の倍数のときだけ分割し、満たさない
+checkpoint は複製経路へフォールバックする。tie 時は複製。
+`Qwen35LoadOptions::vocab_parallel_lm_head` で切替）。
 MTP の weight は partition しない（plan に entry なし）。rank0 の drafter と全 rank の
 target verify / GDN snapshot で分散実行する（[mtp.md](mtp.md) の Tensor parallel 節）。
 
@@ -253,7 +255,8 @@ per-step barrier でも peer 経路をそのまま使える。
   入るため、rank 間で token を持ち越さない。
 - lm_head は vocab-parallel（rank ごとに担当語彙列だけ計算し、SumHidden で
   結合した full logits から rank0 が sampling する。結果は identical、消費は
-  rank0 のみ。tie 時と DFlash2 spec 経路では複製経路）。
+  rank0 のみ。tie 時は複製。BF16 と EXL3 head が対象で、EXL3 の分割条件は
+  local vocab と K が 128 の倍数）。
 
 ## 8. TP arena の予算順序
 

@@ -4,6 +4,7 @@
 #include <shelf/core/memory/types.h>
 #include <shelf/kernels/dflash2/candidate_selector.h>
 #include <shelf/kernels/optimized/linear/lm_head_int8.h>
+#include <shelf/quantization/exl3/exl3_int8.h>
 #include <shelf/runtime/dflash2/proposal_shard.h>
 #include <hip/hip_runtime.h>
 
@@ -69,6 +70,63 @@ static Outputs read(const ProposalShardBuffers& buffers, uint32_t rows, uint32_t
     return out;
 }
 
+// Builds one vocabulary slice of an EXL3 head. The trellis is a deterministic pseudo-random
+// stream, which is enough: the proposal only has to reproduce the columns of the full head.
+static bool make_exl3_head(shelf::gpu::GpuArena& arena, uint32_t vocab, uint32_t k,
+                           uint32_t ka, bool mul24, uint32_t shard_index,
+                           uint32_t shard_vocab, shelf::weights::MatrixWeight& out) {
+    const uint32_t kt = k / 16u;
+    const uint32_t nt = vocab / 16u;
+    const uint32_t nt_local = shard_vocab / 16u;
+    const uint32_t words = 16u * ka;
+    std::vector<uint16_t> global(static_cast<std::size_t>(kt) * nt * words);
+    for (std::size_t i = 0; i < global.size(); ++i) {
+        global[i] = static_cast<uint16_t>(((i + 1u) * 2654435761u) >> 9);
+    }
+    std::vector<uint16_t> canonical(static_cast<std::size_t>(kt) * nt_local * words);
+    for (uint32_t tile_k = 0; tile_k < kt; ++tile_k) {
+        const std::size_t src =
+            (static_cast<std::size_t>(tile_k) * nt + shard_index * nt_local) * words;
+        const std::size_t dst = static_cast<std::size_t>(tile_k) * nt_local * words;
+        std::memcpy(canonical.data() + dst, global.data() + src,
+                    static_cast<std::size_t>(nt_local) * words * sizeof(uint16_t));
+    }
+    std::vector<uint16_t> resident = canonical;
+    if (mul24 &&
+        !shelf::quantization::exl3::exl3_tiles_to_nmajor(
+            canonical.data(), kt, nt_local, ka, resident.data(), 1u)) {
+        return false;
+    }
+    std::vector<uint16_t> suh(k, 0x3C00u);
+    std::vector<uint16_t> svh(shard_vocab, 0x3C00u);
+    shelf::gpu::Tensor codes;
+    shelf::gpu::Tensor suh_tensor;
+    shelf::gpu::Tensor svh_tensor;
+    const auto upload = [&](const std::vector<uint16_t>& src,
+                            shelf::gpu::Tensor& dst) -> bool {
+        if (!alloc<uint16_t>(arena, {src.size()}, dst)) return false;
+        return hipMemcpy(dst.data<void>(), src.data(),
+                         src.size() * sizeof(uint16_t), hipMemcpyHostToDevice) ==
+               hipSuccess;
+    };
+    if (!upload(resident, codes) || !upload(suh, suh_tensor) || !upload(svh, svh_tensor)) {
+        return false;
+    }
+    out = {};
+    out.encoding = shelf::weights::MatrixEncoding::Exl3;
+    out.quant_spec = mul24 ? shelf::quantization::QuantSpecId::EXL3_MUL24_INT8_V1
+                           : shelf::quantization::QuantSpecId::EXL3_W16A16_V1;
+    out.rows = shard_vocab;
+    out.cols = k;
+    out.k_padded = k;
+    out.exl3_ka = ka;
+    out.exl3_half = false;
+    out.codes = codes;
+    out.exl3_suh = suh_tensor;
+    out.exl3_svh = svh_tensor;
+    return true;
+}
+
 int main() {
     if (hipSetDevice(0) != hipSuccess) {
         std::printf("SKIP: no GPU\n");
@@ -128,8 +186,8 @@ int main() {
     full_head.codes = codes;
     full_head.scales = scales;
 
-    auto full_buffers_result =
-        shelf::runtime::dflash2::create_proposal_shard_buffers(arena, rows, vocab, top_k);
+    auto full_buffers_result = shelf::runtime::dflash2::create_proposal_shard_buffers(
+        arena, full_head, rows, vocab, top_k);
     check(full_buffers_result.ok(), "full buffers");
     if (!full_buffers_result.ok()) return 1;
     ProposalShardBuffers full = full_buffers_result.release();
@@ -138,15 +196,6 @@ int main() {
               stream).ok(),
           "full shard compute");
     const Outputs reference = read(full, rows, top_k);
-
-    auto shard_a_result = shelf::runtime::dflash2::create_proposal_shard_buffers(
-        arena, rows, shard_vocab, top_k);
-    auto shard_b_result = shelf::runtime::dflash2::create_proposal_shard_buffers(
-        arena, rows, shard_vocab, top_k);
-    check(shard_a_result.ok() && shard_b_result.ok(), "shard buffers");
-    if (!shard_a_result.ok() || !shard_b_result.ok()) return 1;
-    ProposalShardBuffers shard_a = shard_a_result.release();
-    ProposalShardBuffers shard_b = shard_b_result.release();
 
     auto codes_a = codes.slice(0, 0u, shard_vocab);
     auto codes_b = codes.slice(0, shard_vocab, shard_vocab);
@@ -163,6 +212,15 @@ int main() {
     head_b.rows = shard_vocab;
     head_b.codes = codes_b.value();
     head_b.scales = scales_b.value();
+
+    auto shard_a_result = shelf::runtime::dflash2::create_proposal_shard_buffers(
+        arena, head_a, rows, shard_vocab, top_k);
+    auto shard_b_result = shelf::runtime::dflash2::create_proposal_shard_buffers(
+        arena, head_b, rows, shard_vocab, top_k);
+    check(shard_a_result.ok() && shard_b_result.ok(), "shard buffers");
+    if (!shard_a_result.ok() || !shard_b_result.ok()) return 1;
+    ProposalShardBuffers shard_a = shard_a_result.release();
+    ProposalShardBuffers shard_b = shard_b_result.release();
 
     check(shelf::runtime::dflash2::proposal_shard_compute(
               head_a, shard_a, device_hidden.data<shelf::bf16_t>(), hidden, rows, 0u,
@@ -338,6 +396,67 @@ int main() {
     }
     check(sharded_matches_full,
           "sharded probabilities match the full-vocabulary tree probabilities");
+
+    // EXL3 heads: each vocabulary shard must reproduce exactly the columns of the full
+    // head, for both the mul1 W16A16 path and the mul24 INT8 path.
+    for (const bool mul24 : {false, true}) {
+        const std::string tag = mul24 ? "exl3 mul24" : "exl3 mul1";
+        constexpr uint32_t eKa = 4u;
+        shelf::weights::MatrixWeight full_head_exl3;
+        check(make_exl3_head(arena, vocab, k, eKa, mul24, 0u, vocab, full_head_exl3),
+              tag + " full head");
+        auto full_buffers_exl3 = shelf::runtime::dflash2::create_proposal_shard_buffers(
+            arena, full_head_exl3, rows, vocab, top_k);
+        check(full_buffers_exl3.ok(), tag + " full buffers");
+        if (!full_buffers_exl3.ok()) continue;
+        ProposalShardBuffers e_full = full_buffers_exl3.release();
+        check(e_full.exl3_mul24 == mul24, tag + " workspace selection");
+        check(shelf::runtime::dflash2::proposal_shard_compute(
+                  full_head_exl3, e_full, device_hidden.data<shelf::bf16_t>(), hidden,
+                  rows, 0u, stream).ok(),
+              tag + " full compute");
+        std::vector<float> full_logits(static_cast<std::size_t>(rows) * vocab);
+        check(hipMemcpy(full_logits.data(), e_full.logits.data<float>(),
+                        full_logits.size() * sizeof(float), hipMemcpyDeviceToHost) ==
+                  hipSuccess,
+              tag + " full logits copy");
+
+        for (uint32_t shard_index = 0; shard_index < 2u; ++shard_index) {
+            shelf::weights::MatrixWeight shard;
+            check(make_exl3_head(arena, vocab, k, eKa, mul24, shard_index, shard_vocab,
+                                 shard),
+                  tag + " shard head");
+            auto shard_buffers = shelf::runtime::dflash2::create_proposal_shard_buffers(
+                arena, shard, rows, shard_vocab, top_k);
+            check(shard_buffers.ok(), tag + " shard buffers");
+            if (!shard_buffers.ok()) continue;
+            ProposalShardBuffers part = shard_buffers.release();
+            check(shelf::runtime::dflash2::proposal_shard_compute(
+                      shard, part, device_hidden.data<shelf::bf16_t>(), hidden, rows,
+                      shard_index * shard_vocab, stream).ok(),
+                  tag + " shard compute");
+            std::vector<float> shard_logits(
+                static_cast<std::size_t>(rows) * shard_vocab);
+            check(hipMemcpy(shard_logits.data(), part.logits.data<float>(),
+                            shard_logits.size() * sizeof(float), hipMemcpyDeviceToHost) ==
+                      hipSuccess,
+                  tag + " shard logits copy");
+            std::size_t mismatches = 0;
+            for (uint32_t r = 0; r < rows; ++r) {
+                for (uint32_t c = 0; c < shard_vocab; ++c) {
+                    const float want =
+                        full_logits[static_cast<std::size_t>(r) * vocab +
+                                    shard_index * shard_vocab + c];
+                    const float got =
+                        shard_logits[static_cast<std::size_t>(r) * shard_vocab + c];
+                    const float tolerance = 1e-5f * (1.0f + std::fabs(want));
+                    if (std::fabs(got - want) > tolerance) ++mismatches;
+                }
+            }
+            check(mismatches == 0, tag + " shard logits match the full head (" +
+                                       std::to_string(mismatches) + ")");
+        }
+    }
 
     (void)hipStreamSynchronize(stream);
     (void)hipStreamDestroy(stream);

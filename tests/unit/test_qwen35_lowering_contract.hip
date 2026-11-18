@@ -2,6 +2,7 @@
 #include <shelf/core/memory/types.h>
 #include <shelf/models/qwen35/model/lower_to_primitives.h>
 #include <shelf/models/qwen35/model/qwen35_config.h>
+#include <shelf/models/qwen35/model/tensor_parallel_context.h>
 #include <shelf/models/qwen35/weights/model_weights.h>
 #include <shelf/runtime/graph/primitive_graph.h>
 #include <shelf/runtime/graph/primitive_node.h>
@@ -201,6 +202,86 @@ int main() {
                     check(rt::primitive_kind_of(producer->node) == rt::PrimitiveKind::RMS_NORM,
                           "normed token hidden: produced by RMS_NORM");
                 }
+            }
+        }
+    }
+
+    // A rank-local vocabulary slice of an EXL3 lm_head lowers through the same
+    // vocabulary-parallel head path as a BF16 head.
+    {
+        constexpr std::uint32_t vV = 256;
+        constexpr std::uint32_t vH = 128;
+        constexpr std::uint32_t vI = 128;
+        constexpr std::uint32_t vLocal = vV / 2;
+        constexpr std::uint32_t vConvF = 2 * (2 * 4) + 2 * 4;
+        constexpr std::uint32_t vZ = 2 * 4;
+
+        shelf::qwen35::Qwen35TextConfig vcfg;
+        vcfg.vocab_size = vV;
+        vcfg.hidden_size = vH;
+        vcfg.ffn.intermediate_size = vI;
+        vcfg.num_hidden_layers = 1;
+        vcfg.linear_num_key_heads = 4;
+        vcfg.linear_num_value_heads = 4;
+        vcfg.linear_key_head_dim = 4;
+        vcfg.linear_value_head_dim = 4;
+        vcfg.linear_conv_kernel_dim = 4;
+        vcfg.num_attention_heads = 4;
+        vcfg.num_key_value_heads = 2;
+        vcfg.attention_head_dim = 4;
+        vcfg.rms_norm_eps = kEps;
+        vcfg.rope_theta = 1e7f;
+        vcfg.partial_rotary_factor = 0.25f;
+        vcfg.tie_word_embeddings = false;
+        vcfg.layer_types = {0};
+
+        shelf::qwen35::Qwen35ModelWeights vw;
+        vw.lm_head_tied = false;
+        vw.embed_tokens = make_matrix(alloc({vV, vH}, "vocab embed"), vV, vH);
+        vw.final_norm_weight = alloc({vH}, "vocab final_norm");
+        vw.lm_head = make_matrix(alloc({vLocal, vH}, "vocab lm_head"), vLocal, vH);
+        vw.lm_head.encoding = shelf::weights::MatrixEncoding::Exl3;
+        vw.lm_head.k_padded = vH;
+        vw.lm_head.partition = shelf::weights::TensorPartitionDesc{
+            0, 1u, 2u, {vV, vH}, {{vLocal, vLocal}}};
+
+        shelf::qwen35::Qwen35LayerWeights vlayer;
+        vlayer.is_gdn = true;
+        vlayer.input_layernorm_weight = alloc({vH}, "vocab input_layernorm");
+        vlayer.post_attention_layernorm_weight = alloc({vH}, "vocab post_attention_layernorm");
+        vlayer.ffn.gate = make_matrix(alloc({vI / 2, vH}, "vocab mlp gate"), vI / 2, vH);
+        vlayer.ffn.up = make_matrix(alloc({vI / 2, vH}, "vocab mlp up"), vI / 2, vH);
+        vlayer.ffn.down = make_matrix(alloc({vH, vI / 2}, "vocab mlp down"), vH, vI / 2);
+        vlayer.attn_in_proj_qkv =
+            make_matrix(alloc({vConvF, vH}, "vocab gdn qkv"), vConvF, vH);
+        vlayer.attn_in_proj_z = make_matrix(alloc({vZ, vH}, "vocab gdn z"), vZ, vH);
+        vlayer.attn_in_proj_b = make_matrix(alloc({2, vH}, "vocab gdn b"), 2, vH);
+        vlayer.attn_in_proj_a = make_matrix(alloc({2, vH}, "vocab gdn a"), 2, vH);
+        vlayer.attn_out_proj = make_matrix(alloc({vH, vZ}, "vocab gdn out"), vH, vZ);
+        vlayer.attn_conv1d_weight = alloc({vConvF, 1, 4}, "vocab gdn conv1d");
+        vlayer.attn_norm_weight = alloc({vZ}, "vocab gdn norm");
+        vlayer.attn_dt_bias = alloc({2}, "vocab gdn dt_bias");
+        vlayer.attn_A_log = alloc({2}, "vocab gdn A_log");
+        vw.layers.push_back(std::move(vlayer));
+
+        auto vtp = shelf::qwen35::make_qwen35_tensor_parallel_context(vcfg, 2, 1, true);
+        check(vtp.ok(), "exl3 head: tp context builds");
+        if (alloc_ok && vtp.ok()) {
+            shelf::qwen35::Qwen35LowerOptions vopts;
+            vopts.tp = &vtp.value();
+            auto vlower = shelf::qwen35::lower_qwen35_to_primitives(vcfg, vw, vopts);
+            check(vlower.ok(), "exl3 head: vocabulary-parallel lowering succeeds");
+            if (vlower.ok()) {
+                std::uint32_t total = 0;
+                std::uint32_t offset = 0;
+                for (const auto& slot : vlower.value().weights) {
+                    if (slot.output_col_total != 0u) {
+                        total = slot.output_col_total;
+                        offset = slot.output_col_offset;
+                    }
+                }
+                check(total == vV, "exl3 head: logits cover the global vocabulary");
+                check(offset == vLocal, "exl3 head: rank1 writes the high half");
             }
         }
     }

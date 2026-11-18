@@ -213,7 +213,7 @@ target_include_directories(test_dflash2_bf16_geometry PRIVATE "${CMAKE_SOURCE_DI
 shelf_add_test(NAME test_dflash2_rope SOURCE unit/test_dflash2_rope.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_kernels_optimized)
 shelf_add_test(NAME test_dflash2_attention SOURCE unit/test_dflash2_attention.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_kernels_optimized)
 shelf_add_test(NAME test_dflash2_topk SOURCE unit/test_dflash2_topk.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_kernels_optimized)
-shelf_add_test(NAME test_dflash2_proposal_shard SOURCE unit/test_dflash2_proposal_shard.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_dflash2 shelf_kernels_optimized)
+shelf_add_test(NAME test_dflash2_proposal_shard SOURCE unit/test_dflash2_proposal_shard.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_dflash2 shelf_kernels_optimized shelf_quant_reference)
 shelf_add_test(NAME test_gdn_spec_history SOURCE unit/test_gdn_spec_history.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_qwen35_kernels_optimized shelf_qwen35_runtime)
 shelf_add_test(NAME test_prefix_cache SOURCE unit/test_prefix_cache.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_runtime)
 shelf_add_test(NAME test_prefix_cache_batcher SOURCE unit/test_prefix_cache_batcher.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_qwen35_runtime shelf_qwen35)

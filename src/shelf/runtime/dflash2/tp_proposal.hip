@@ -111,8 +111,9 @@ Result<DFlash2TpProposal> DFlash2TpProposal::create(const DFlash2TpProposalConfi
 
         auto scope = gpu::ScopedDevice::create(rank.device_id());
         if (!scope.ok()) return scope.status();
-        auto buffers = create_proposal_shard_buffers(rank.arena(), config.max_rows,
-                                                     config.local_vocab, config.top_k);
+        auto buffers = create_proposal_shard_buffers(
+            rank.arena(), *config.heads[r], config.max_rows, config.local_vocab,
+            config.top_k);
         if (!buffers.ok()) return buffers.status();
         out.shards_[r] = buffers.release();
         if (r == 0u) {

@@ -669,10 +669,12 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
         const uint64_t global_vocab = config.vocab_size;
         bool vocab_parallel = false;
         uint32_t lm_head_col_offset = 0;
+        const bool shardable_encoding =
+            lmw->encoding == shelf::weights::MatrixEncoding::Bf16 ||
+            lmw->encoding == shelf::weights::MatrixEncoding::Int8W32 ||
+            lmw->encoding == shelf::weights::MatrixEncoding::Exl3;
         if (!lm_tied && options.tp != nullptr &&
-            options.tp->vocab_parallel_lm_head &&
-            (lmw->encoding == shelf::weights::MatrixEncoding::Bf16 ||
-         lmw->encoding == shelf::weights::MatrixEncoding::Int8W32) &&
+            options.tp->vocab_parallel_lm_head && shardable_encoding &&
             lmw->partition.has_value()) {
             const auto& part = lmw->partition.value();
             vocab_parallel = part.axis == 0 && part.count == options.tp->tp_size &&

@@ -62,8 +62,8 @@ indexer は **replicated** のまま全 rank に置く。
 - lowering は backbone の attention / GDN / dense FFN を
   `Qwen35TensorParallelContext` の local geometry（local heads / local intermediate）で
   emit する。`o_proj` / `out_proj` / `mlp.down_proj` は `tp_combine` を持つ。
-- vocab-parallel `lm_head` は dense family と同じ条件（BF16 かつ plan に axis 0 の
-  entry がある）で使う。
+- vocab-parallel `lm_head` は dense family と同じ条件（BF16 または EXL3 で、plan に
+  axis 0 の entry がある）で使う。
 - MTP block は TP rank では load しない（`unsupported`）。
 
 ## lowering

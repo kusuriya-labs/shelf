@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -619,18 +620,43 @@ Result<Qwen35ModelWeights> load_qwen35_weights_from_quantized_safetensors(
 
 namespace {
 
-bool quantized_lm_head_is_bf16(const std::string& model_dir) {
+struct QuantizedLmHeadSummary {
+    quantization::manifest::QuantizedEncoding encoding =
+        quantization::manifest::QuantizedEncoding::Bf16;
+    std::uint64_t rows = 0;
+    std::uint64_t cols = 0;
+    std::uint64_t k_padded = 0;
+};
+
+bool fill_lm_head_summary(
+    const std::map<std::string, quantization::manifest::QuantizedTensorMetadata>& tensors,
+    const std::string& preferred, QuantizedLmHeadSummary& out) {
+    auto it = preferred.empty() ? tensors.end() : tensors.find(preferred);
+    if (it == tensors.end()) it = tensors.find("model.language_model.lm_head.weight");
+    if (it == tensors.end()) it = tensors.find("lm_head.weight");
+    if (it == tensors.end()) return false;
+    const auto& meta = it->second;
+    if (meta.logical_shape.size() != 2 || meta.logical_shape[0] <= 0 ||
+        meta.logical_shape[1] <= 0) {
+        return false;
+    }
+    out.encoding = meta.encoding;
+    out.rows = static_cast<std::uint64_t>(meta.logical_shape[0]);
+    out.cols = static_cast<std::uint64_t>(meta.logical_shape[1]);
+    out.k_padded = meta.k_padded;
+    return true;
+}
+
+bool read_quantized_lm_head_summary(const std::string& model_dir,
+                                    QuantizedLmHeadSummary& out) {
     namespace fqb = shelf::quantization::bundle;
     namespace fqm = shelf::quantization::manifest;
     if (!fs::exists(fs::path(model_dir) / fqm::kQuantizedMetadataFile)) {
         auto source_result = fqb::synthesize_hf_quantized_source(
             model_dir, {"model.language_model.lm_head.weight"}, true);
         if (!source_result.ok()) return false;
-        const auto& tensors = source_result.value().manifest.tensors;
-        auto it = tensors.find("lm_head.weight");
-        if (it == tensors.end()) it = tensors.find("model.language_model.lm_head.weight");
-        return it != tensors.end() &&
-               it->second.encoding == fqm::QuantizedEncoding::Bf16;
+        return fill_lm_head_summary(source_result.value().manifest.tensors, "lm_head.weight",
+                                    out);
     }
     auto reader_result = fqb::QuantizedModelReader::open(model_dir, false);
     if (!reader_result.ok()) return false;
@@ -638,11 +664,22 @@ bool quantized_lm_head_is_bf16(const std::string& model_dir) {
         reader_result.value().resolve_alias("model.language_model.lm_head.weight");
     const std::string canonical =
         alias_result.ok() ? alias_result.value() : std::string("lm_head.weight");
-    const auto& tensors = reader_result.value().manifest().tensors;
-    auto it = tensors.find(canonical);
-    if (it == tensors.end()) it = tensors.find("lm_head.weight");
-    if (it == tensors.end()) return false;
-    return it->second.encoding == fqm::QuantizedEncoding::Bf16;
+    return fill_lm_head_summary(reader_result.value().manifest().tensors, canonical, out);
+}
+
+// A vocabulary-sharded head is loaded through the same canonical partition as the body, and
+// the EXL3 kernels need the local output width and K on 128-element boundaries. A head that
+// does not fit those boundaries stays replicated on every rank.
+bool quantized_lm_head_shardable(const QuantizedLmHeadSummary& head,
+                                 std::uint32_t tp_size) {
+    namespace fqm = quantization::manifest;
+    if (tp_size < 2u) return false;
+    if (head.encoding == fqm::QuantizedEncoding::Bf16) return true;
+    if (head.encoding != fqm::QuantizedEncoding::Exl3) return false;
+    if ((head.rows % tp_size) != 0u) return false;
+    const std::uint64_t local_vocab = head.rows / tp_size;
+    return (local_vocab % 128u) == 0u && (head.cols % 128u) == 0u &&
+           head.k_padded == head.cols;
 }
 
 }
@@ -673,9 +710,11 @@ Result<Qwen35ModelWeights> load_qwen35_weights_tensor_parallel_rank(
         config, tp_size, tp_rank, options.vocab_parallel_lm_head);
     if (!context_result.ok()) return context_result.status();
 
+    QuantizedLmHeadSummary lm_head_summary;
     const bool shard_lm_head =
         context_result.value().vocab_parallel_lm_head &&
-        quantized_lm_head_is_bf16(model_dir);
+        read_quantized_lm_head_summary(model_dir, lm_head_summary) &&
+        quantized_lm_head_shardable(lm_head_summary, tp_size);
 
     auto plan_result =
         build_qwen35_tensor_partition_plan(config, tp_size, tp_rank, shard_lm_head);

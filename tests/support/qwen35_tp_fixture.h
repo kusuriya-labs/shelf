@@ -1,11 +1,13 @@
 #pragma once
 
 #include <shelf/io/safetensors_writer.h>
+#include <shelf/quantization/exl3/exl3_int8.h>
 #include <shelf/quantization/manifest/crc32.h>
 #include <shelf/quantization/manifest/quantized_manifest.h>
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <random>
@@ -25,6 +27,13 @@ inline void fail(const std::string& msg) {
     std::printf("FAIL %s\n", msg.c_str());
 }
 
+struct FixtureShape {
+    std::uint64_t vocab = 128;
+    std::uint64_t hidden = 64;
+    std::uint64_t intermediate = 128;
+    bool exl3_lm_head = false;
+    std::uint32_t exl3_ka = 4;
+};
 
 static void write_text(const std::string& path, const std::string& text) {
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
@@ -82,6 +91,63 @@ TensorPlan make_bf16_matrix(uint64_t rows, uint64_t k, const std::string& logica
     return plan;
 }
 
+TensorPlan make_exl3_matrix(uint64_t rows, uint64_t k, uint32_t ka,
+                            const std::string& logical) {
+    TensorPlan plan;
+    const uint64_t kt = k / 16u;
+    const uint64_t nt = rows / 16u;
+    const uint64_t words = 16u * ka;
+    std::vector<uint8_t> trellis(static_cast<std::size_t>(kt * nt * words * 2u));
+    auto* trellis16 = reinterpret_cast<uint16_t*>(trellis.data());
+    for (std::size_t i = 0; i < kt * nt * words; ++i) {
+        trellis16[i] = static_cast<uint16_t>(((i + 1u) * 2654435761u) >> 11);
+    }
+    std::vector<uint8_t> suh(static_cast<std::size_t>(k * 2u));
+    auto* suh16 = reinterpret_cast<uint16_t*>(suh.data());
+    for (std::size_t i = 0; i < k; ++i) suh16[i] = 0x3C00u;
+    std::vector<uint8_t> svh(static_cast<std::size_t>(rows * 2u));
+    auto* svh16 = reinterpret_cast<uint16_t*>(svh.data());
+    for (std::size_t i = 0; i < rows; ++i) svh16[i] = 0x3C00u;
+    std::vector<uint8_t> marker(4u);
+    const uint32_t mul1 = quantization::exl3::kExl3Mul1Multiplier;
+    std::memcpy(marker.data(), &mul1, sizeof(mul1));
+
+    plan.meta.role = "weight";
+    plan.meta.encoding = quantization::manifest::QuantizedEncoding::Exl3;
+    plan.meta.layout = quantization::manifest::kExl3LayoutName;
+    plan.meta.logical_shape = {static_cast<int64_t>(rows), static_cast<int64_t>(k)};
+    plan.meta.k_padded = k;
+    plan.meta.exl3_ka = ka;
+    plan.meta.exl3_half = false;
+    const auto add_payload = [&](const std::string& suffix, io::SType dtype,
+                                 std::vector<std::size_t> shape,
+                                 std::vector<uint8_t> bytes) -> PhysicalTensor {
+        PhysicalTensor phys;
+        phys.name = logical + suffix;
+        phys.dtype = dtype;
+        phys.shape = std::move(shape);
+        phys.bytes = std::move(bytes);
+        return phys;
+    };
+    PhysicalTensor codes =
+        add_payload(".__shelf_codes", io::SType::I16, {kt, nt, words}, std::move(trellis));
+    PhysicalTensor suh_tensor =
+        add_payload(".__shelf_suh", io::SType::F16, {k}, std::move(suh));
+    PhysicalTensor svh_tensor =
+        add_payload(".__shelf_svh", io::SType::F16, {rows}, std::move(svh));
+    PhysicalTensor marker_tensor =
+        add_payload(".__shelf_marker", io::SType::I32, {}, std::move(marker));
+    plan.meta.codes = {codes.name, "U8", crc_hex(codes.bytes)};
+    plan.meta.suh = {suh_tensor.name, "FP16", crc_hex(suh_tensor.bytes)};
+    plan.meta.svh = {svh_tensor.name, "FP16", crc_hex(svh_tensor.bytes)};
+    plan.meta.marker = {marker_tensor.name, "I32", crc_hex(marker_tensor.bytes)};
+    plan.physical.push_back(std::move(codes));
+    plan.physical.push_back(std::move(suh_tensor));
+    plan.physical.push_back(std::move(svh_tensor));
+    plan.physical.push_back(std::move(marker_tensor));
+    return plan;
+}
+
 TensorPlan make_bf16_small(const std::vector<std::size_t>& shape,
                            const std::string& logical, uint32_t seed) {
     TensorPlan plan;
@@ -106,34 +172,36 @@ TensorPlan make_bf16_small(const std::vector<std::size_t>& shape,
     return plan;
 }
 
-std::string config_json() {
+std::string config_json(const FixtureShape& shape) {
     return std::string(
                "{"
                "\"model_type\":\"qwen3_5\","
                "\"tie_word_embeddings\":false,"
                "\"text_config\":{"
                "\"model_type\":\"qwen3_5_text\","
-               "\"vocab_size\":128,"
-               "\"hidden_size\":64,"
-               "\"intermediate_size\":128,"
-               "\"num_hidden_layers\":4,"
-               "\"full_attention_interval\":2,"
-               "\"layer_types\":[\"linear_attention\",\"full_attention\",\"linear_attention\",\"full_attention\"],"
-               "\"num_attention_heads\":4,"
-               "\"num_key_value_heads\":2,"
-               "\"head_dim\":16,"
-               "\"rms_norm_eps\":1e-6,"
-               "\"rope_parameters\":{\"rope_theta\":10000000,\"partial_rotary_factor\":0.25},"
-               "\"linear_num_key_heads\":4,"
-               "\"linear_num_value_heads\":8,"
-               "\"linear_key_head_dim\":128,"
-               "\"linear_value_head_dim\":128,"
-               "\"linear_conv_kernel_dim\":4,"
-               "\"tie_word_embeddings\":false"
-               "}}");
+               "\"vocab_size\":") +
+           std::to_string(shape.vocab) +
+           ",\"hidden_size\":" + std::to_string(shape.hidden) +
+           ",\"intermediate_size\":" + std::to_string(shape.intermediate) +
+           ","
+           "\"num_hidden_layers\":4,"
+           "\"full_attention_interval\":2,"
+           "\"layer_types\":[\"linear_attention\",\"full_attention\",\"linear_attention\",\"full_attention\"],"
+           "\"num_attention_heads\":4,"
+           "\"num_key_value_heads\":2,"
+           "\"head_dim\":16,"
+           "\"rms_norm_eps\":1e-6,"
+           "\"rope_parameters\":{\"rope_theta\":10000000,\"partial_rotary_factor\":0.25},"
+           "\"linear_num_key_heads\":4,"
+           "\"linear_num_value_heads\":8,"
+           "\"linear_key_head_dim\":128,"
+           "\"linear_value_head_dim\":128,"
+           "\"linear_conv_kernel_dim\":4,"
+           "\"tie_word_embeddings\":false"
+           "}}";
 }
 
-Status build_fixture(const fs::path& dir) {
+Status build_fixture(const fs::path& dir, const FixtureShape& shape) {
     std::error_code ec;
     fs::create_directories(dir, ec);
 
@@ -154,34 +222,48 @@ Status build_fixture(const fs::path& dir) {
         manifest.tensors[logical] = plan.meta;
     };
 
-    add(p + "embed_tokens.weight", make_bf16_matrix(128, 64, p + "embed_tokens.weight"));
-    add(p + "lm_head.weight", make_bf16_matrix(128, 64, p + "lm_head.weight"));
-    add(p + "norm.weight", make_bf16_small({64}, p + "norm.weight", 11));
+    add(p + "embed_tokens.weight",
+        make_bf16_matrix(shape.vocab, shape.hidden, p + "embed_tokens.weight"));
+    if (shape.exl3_lm_head) {
+        add(p + "lm_head.weight",
+            make_exl3_matrix(shape.vocab, shape.hidden, shape.exl3_ka,
+                             p + "lm_head.weight"));
+    } else {
+        add(p + "lm_head.weight",
+            make_bf16_matrix(shape.vocab, shape.hidden, p + "lm_head.weight"));
+    }
+    add(p + "norm.weight",
+        make_bf16_small({static_cast<std::size_t>(shape.hidden)}, p + "norm.weight", 11));
 
     for (const std::string& layer : {l0, l1, l2, l3}) {
         add(layer + "input_layernorm.weight",
-            make_bf16_small({64}, layer + "input_layernorm.weight", 21));
+            make_bf16_small({static_cast<std::size_t>(shape.hidden)},
+                            layer + "input_layernorm.weight", 21));
         add(layer + "post_attention_layernorm.weight",
-            make_bf16_small({64}, layer + "post_attention_layernorm.weight", 22));
+            make_bf16_small({static_cast<std::size_t>(shape.hidden)},
+                            layer + "post_attention_layernorm.weight", 22));
         add(layer + "mlp.gate_proj.weight",
-            make_bf16_matrix(128, 64, layer + "mlp.gate_proj.weight"));
+            make_bf16_matrix(shape.intermediate, shape.hidden,
+                             layer + "mlp.gate_proj.weight"));
         add(layer + "mlp.up_proj.weight",
-            make_bf16_matrix(128, 64, layer + "mlp.up_proj.weight"));
+            make_bf16_matrix(shape.intermediate, shape.hidden,
+                             layer + "mlp.up_proj.weight"));
         add(layer + "mlp.down_proj.weight",
-            make_bf16_matrix(64, 128, layer + "mlp.down_proj.weight"));
+            make_bf16_matrix(shape.hidden, shape.intermediate,
+                             layer + "mlp.down_proj.weight"));
     }
 
     const auto add_linear_attn = [&](const std::string& lp) {
         add(lp + "linear_attn.in_proj_qkv.weight",
-            make_bf16_matrix(2048, 64, lp + "linear_attn.in_proj_qkv.weight"));
+            make_bf16_matrix(2048, shape.hidden, lp + "linear_attn.in_proj_qkv.weight"));
         add(lp + "linear_attn.in_proj_z.weight",
-            make_bf16_matrix(1024, 64, lp + "linear_attn.in_proj_z.weight"));
+            make_bf16_matrix(1024, shape.hidden, lp + "linear_attn.in_proj_z.weight"));
         add(lp + "linear_attn.in_proj_a.weight",
-            make_bf16_matrix(8, 64, lp + "linear_attn.in_proj_a.weight"));
+            make_bf16_matrix(8, shape.hidden, lp + "linear_attn.in_proj_a.weight"));
         add(lp + "linear_attn.in_proj_b.weight",
-            make_bf16_matrix(8, 64, lp + "linear_attn.in_proj_b.weight"));
+            make_bf16_matrix(8, shape.hidden, lp + "linear_attn.in_proj_b.weight"));
         add(lp + "linear_attn.out_proj.weight",
-            make_bf16_matrix(64, 1024, lp + "linear_attn.out_proj.weight"));
+            make_bf16_matrix(shape.hidden, 1024, lp + "linear_attn.out_proj.weight"));
         add(lp + "linear_attn.conv1d.weight",
             make_bf16_small({2048, 1, 4}, lp + "linear_attn.conv1d.weight", 31));
         add(lp + "linear_attn.norm.weight",
@@ -196,13 +278,13 @@ Status build_fixture(const fs::path& dir) {
 
     const auto add_full_attn = [&](const std::string& lp) {
         add(lp + "self_attn.q_proj.weight",
-            make_bf16_matrix(128, 64, lp + "self_attn.q_proj.weight"));
+            make_bf16_matrix(128, shape.hidden, lp + "self_attn.q_proj.weight"));
         add(lp + "self_attn.k_proj.weight",
-            make_bf16_matrix(32, 64, lp + "self_attn.k_proj.weight"));
+            make_bf16_matrix(32, shape.hidden, lp + "self_attn.k_proj.weight"));
         add(lp + "self_attn.v_proj.weight",
-            make_bf16_matrix(32, 64, lp + "self_attn.v_proj.weight"));
+            make_bf16_matrix(32, shape.hidden, lp + "self_attn.v_proj.weight"));
         add(lp + "self_attn.o_proj.weight",
-            make_bf16_matrix(64, 64, lp + "self_attn.o_proj.weight"));
+            make_bf16_matrix(shape.hidden, 64, lp + "self_attn.o_proj.weight"));
         add(lp + "self_attn.q_norm.weight",
             make_bf16_small({16}, lp + "self_attn.q_norm.weight", 41));
         add(lp + "self_attn.k_norm.weight",
@@ -244,9 +326,11 @@ Status build_fixture(const fs::path& dir) {
 
     write_text((dir / quantization::manifest::kQuantizedMetadataFile).string(),
                serialized.value());
-    write_text((dir / "config.json").string(), config_json());
+    write_text((dir / "config.json").string(), config_json(shape));
     return Status::make_ok();
 }
+
+Status build_fixture(const fs::path& dir) { return build_fixture(dir, FixtureShape{}); }
 
 }
 }
