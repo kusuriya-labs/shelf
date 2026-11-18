@@ -1,5 +1,7 @@
 #include <shelf/models/hy4_flash/cli.h>
 #include <shelf/models/hy4_flash/residency.h>
+#include <shelf/models/hy4_flash/generate.h>
+#include <fstream>
 #include <charconv>
 #include <cstdio>
 #include <stdexcept>
@@ -9,18 +11,26 @@ namespace shelf::hy4 {
 int compute(int argc,char** argv) {
     try {
         if(argc==1 || std::string_view(argv[1])=="--help") {
-            puts("shelf-compute hy4 inspect|reserve --model-dir PATH --engram-dir PATH --placement PATH [--dfly-dir PATH] [--max-seq-len N]");
+            puts("shelf-compute hy4 inspect|reserve|generate --model-dir PATH --engram-dir PATH --placement PATH [--dfly-dir PATH] [--max-seq-len N] [--input-ids-file PATH] [--max-new-tokens N] [--chunk N]");
             return 0;
         }
         std::string_view mode=argv[1];
         Path model,engram,draft,placement;
-        size_t tokens=1048576;
+        size_t tokens=mode=="reserve"?2097152:4096;
+        Path input;
+        int count=32,chunk=64;
         for(int i=2;i<argc;i+=2) {
             if(i+1>=argc) throw std::runtime_error("引数の値がありません");
             std::string_view key=argv[i],value=argv[i+1];
             if(key=="--model-dir") model=value;
             else if(key=="--engram-dir") engram=value;
             else if(key=="--dfly-dir") draft=value;
+            else if(key=="--input-ids-file") input=value;
+            else if(key=="--max-new-tokens" || key=="--chunk") {
+                auto& dest=key=="--chunk"?chunk:count;
+                auto [p,err]=std::from_chars(value.data(),value.data()+value.size(),dest);
+                if(p!=value.data()+value.size() || err!=std::errc{} || dest<=0) throw std::runtime_error("長さが不正です");
+            }
             else if(key=="--placement") placement=value;
             else if(key=="--max-seq-len") {
                 auto end=value.data()+value.size();
@@ -29,14 +39,27 @@ int compute(int argc,char** argv) {
                     throw std::runtime_error("予約長が不正です");
             } else throw std::runtime_error("未知の引数です: "+std::string(key));
         }
-        if(mode!="inspect" && mode!="reserve") throw std::runtime_error("未知の動作です");
+        if(mode!="inspect" && mode!="reserve" && mode!="generate") throw std::runtime_error("未知の動作です");
         if(model.empty() || engram.empty() || placement.empty()) throw std::runtime_error("重みと配置表が必要です");
         Checkpoint checkpoint(model,engram,draft,read_owners(placement));
         printf("DFly=%d weight_bytes=%zu,%zu,%zu\n",checkpoint.has_draft,checkpoint.bytes[0],checkpoint.bytes[1],checkpoint.bytes[2]);
         if(mode=="inspect") return 0;
+        std::vector<int> ids;
+        if(mode=="generate") {
+            std::ifstream file(input);
+            if(!file) throw std::runtime_error("入力 ID ファイルが必要です");
+            int id;
+            while(file>>id) {
+                if(id<0 || id>=120832 || ids.size()>=tokens) throw std::runtime_error("入力 ID が範囲外です");
+                ids.push_back(id);
+            }
+            if(!file.eof() || ids.empty() || ids.size()+count>tokens || tokens>1048576 || chunk>128)
+                throw std::runtime_error("入力列または生成長が不正です");
+        }
         Residency gpu(checkpoint,tokens);
         try {
             gpu.reserve();
+            if(mode=="generate") {gpu.upload();generate(gpu,ids,count,chunk);}
         } catch(...) {
             gpu.shutdown();
             throw;

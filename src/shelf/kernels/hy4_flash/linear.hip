@@ -7,7 +7,8 @@ using namespace shelf::kernel::exl3_detail;
 using namespace shelf::kernel::exl3_detail::mul24;
 
 __global__ void rotate_input(const uint16_t* input, const uint16_t* suh, int8_t* codes,
-                             float* scales, int width, int padded) {
+                             float* scales, int width, int padded, const Hy4ExpertProjection* group=nullptr,int stride=0) {
+    if(group) suh=group[blockIdx.y*stride].suh;
     const unsigned lane = threadIdx.x;
     const int base = blockIdx.x * 128 + lane * 4;
     float v[4];
@@ -30,7 +31,8 @@ __global__ void rotate_input(const uint16_t* input, const uint16_t* suh, int8_t*
 
 template<int Bits>
 __global__ void multiply(const int8_t* codes, const float* scales, const uint32_t* trellis,
-                         float* partial, int k, int n) {
+                         float* partial, int k, int n, const Hy4ExpertProjection* group=nullptr,int stride=0) {
+    if(group) trellis=group[blockIdx.y*stride].trellis;
     const unsigned col = threadIdx.x % 16;
     const unsigned worker = threadIdx.x / 16;
     const int row = blockIdx.y;
@@ -60,7 +62,8 @@ __global__ void multiply(const int8_t* codes, const float* scales, const uint32_
 }
 
 __global__ void rotate_output(const float* partial, const uint16_t* svh, uint16_t* output,
-                              int width, int padded) {
+                              int width, int padded, const Hy4ExpertProjection* group=nullptr,int stride=0) {
+    if(group) svh=group[blockIdx.y*stride].svh;
     const int base = blockIdx.x * 128 + threadIdx.x * 4;
     float v[4];
     for (int i = 0; i < 4; ++i) v[i] = partial[size_t(blockIdx.y) * padded + base + i];
@@ -94,5 +97,19 @@ extern "C" hipError_t shelf_hy4_linear(
     if (status != hipSuccess) return status;
     rotate_output<<<dim3(padded_output / 128, rows), 32, 0, stream>>>(
         partial, svh, output, output_width, padded_output);
+    return hipGetLastError();
+}
+
+hipError_t shelf_hy4_expert_linear(const uint16_t* x,const Hy4ExpertProjection* matrices,int stride,
+    int8_t* codes,float* scales,float* partial,uint16_t* y,int rows) {
+    if(!x || !matrices || !codes || !scales || !partial || !y || rows<1 || rows>65535 || stride<1)
+        return hipErrorInvalidValue;
+    rotate_input<<<dim3(12,rows),32>>>(x,nullptr,codes,scales,1536,1536,matrices,stride);
+    auto status=hipGetLastError();
+    if(status!=hipSuccess) return status;
+    multiply<4><<<dim3(96,rows),128>>>(codes,scales,nullptr,partial,1536,1536,matrices,stride);
+    status=hipGetLastError();
+    if(status!=hipSuccess) return status;
+    rotate_output<<<dim3(12,rows),32>>>(partial,nullptr,y,1536,1536,matrices,stride);
     return hipGetLastError();
 }

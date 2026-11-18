@@ -27,3 +27,9 @@ CPU 基準に 4 stream の iHC、Engram の履歴 hash・正規化・残差、sp
 shelf-compute hy4 inspect と reserve を追加。inspect は CPU だけで組立済み index・行列の形状と乗数・全 expert・FP8 Engram を読み、配置表に従った正確な重みサイズを出す。reserve は 3 台の ISA を照合し、重み、作業域、KV、indexer を含む領域を同時に確保して解放する。SHELF_HY4_ONLY=ON で専用 shelf-compute のビルドとヘルプ表示が成功した。本体未完成のため実物の inspect・reserve は保留。DFly が含まれるかどうかを出力で明示する。
 
 原本 4 表の CPU 変換が完了。各表の先頭・末尾、チャンク境界を含む 128 行を読み戻し、すべての復元値が元の行別 FP8 演算に一致した。変換した 4 表は合計 64,680,629,984 byte（ヘッダーを含む）。
+
+## N1　ネイティブの生成経路
+
+shelf-compute hy4 generate から本体 42 層と共有 head を呼べるようにした。Octave の符号化・復号、過去グループの indexer、iHC、ホスト FP8 Engram の必要行取得、rank 別の latent 転送・3 射影の grouped expert・加重和を接続した。DFly は予約した本体 KV と採択済み位置の index を読み、6 行の一時ブロックを処理し、最長 5 候補を本体で検証する。実行形式がリンクできた段階であり、3 GPU の生成・性能は未検証。
+
+DFly の slot 0 融合、各後続 slot の hidden correction、過去 index とブロック内 causal attention の契約は、vLLM の Hy4-flash 対応 PR のコミット af127016aa1e14f1e597b546e14f5fdfbd05db11 と原本の tensor を照合した。[実装](https://github.com/vllm-project/vllm/tree/af127016aa1e14f1e597b546e14f5fdfbd05db11/vllm/models/hy_v4/nvidia)
