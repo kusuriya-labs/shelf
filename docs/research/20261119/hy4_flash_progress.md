@@ -367,3 +367,11 @@ PYTHONPATH=vendor/BetterBench BETTERBENCH_NO_UPDATE_CHECK=1 python3 -m betterben
 温度付きの再実行では Engram の host 参照は 0.87 ms / 検証、major page fault は 0 件だった。直前に同一入力と同一 seed の生成列を実行済みなので、遅い回の major fault を直接観測した結果ではない。4 枚の Engram 表は合計約 64 GiB の mmap で、異なる入力・生成列への冷えたアクセスが候補となる。CPU 単体で同表の 4,800 行をランダムに読み出した試行は、逐次 1.80 秒・major fault 4,712 件、8 並列 0.33 秒・4,700 件。アクセス位置は異なり、実サーバーの改善量を示すものではない。生ログと CPU 試験は `hy4-flash-pilot/shelf-qualification/server-path-investigation/` に保存した。
 
 並列読み出しの候補は、同じ 2,048 token 入力の 256 token greedy を既存の `ep3-9ao7j7r7/long-dfly.log` と照合したところ、12 token 目から不一致だった。入力・変換報告・配置表の SHA-256 は一致したが、過去のバイナリと現行ビルドは異なるため、並列化が原因かどうかはこの比較だけでは確定できない。候補は取り外した。現行ビルドの逐次版との比較と、未計測入力での実機性能評価が必要である。CPU 配列試験だけでは生成一致を保証しない。
+
+## SP2　Engram 起動時読み込みの実装と検証準備
+
+Engram の 4 表は safetensors の `mmap(PROT_READ, MAP_PRIVATE)` を参照し、従来は `MAP_POPULATE` と `mlock` のいずれも使わない。検査時の memlock の soft / hard 上限はともに 14,741,741,568 byte で、4 表の 64,680,628,768 byte を固定するには足りない。ホスト RAM は約 109 GiB。server は GPU 重み転送の後、各表に `MADV_POPULATE_READ` を適用し、読み込み完了後に ready になる。`SHELF_HY4_ENGRAM_POPULATE=0` で従来の遅延読み込みに戻せる。ページは固定しないため、読み込み後もメモリ圧迫で退避される。読み込みに失敗した場合は server 起動を失敗させる。Hy4 の起動時 ping 待ちは 900 秒に延長した。
+
+`SHELF_HY4_PROFILE_EP=1` では、各 request の前後に `mincore` で常駐ページを数え、`/proc/self/stat` の minor / major fault 増分を記録する。計測の同期と常駐確認は HTTP の時間を変えるので、性能本測定とは分ける。小さな safetensors の読み込み後の常駐ページ数・内容を CPU で検査し、CPU CTest と server の compute client / CLI テストは通った。固定英文の 2,017 token と qualify の 2,048 token の約 30 token 差は、本調査では近似として扱う。
+
+本体の Hugging Face upload が進行しているため、ページキャッシュの評価と BetterBench の再測定は `upload.log` の `verified` を確認するまで実施しない。現段階では populate の実機効果、初回・後続 request の fault 増分、改善後の BetterBench 値は未測定である。

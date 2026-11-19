@@ -24,8 +24,11 @@ struct Checkpoint {
     Checkpoint(const Path &model, const Path &engram, const Path &draft, const Owners &owners);
     const Weight &at(const std::string &key) const;
     void relocate(const Owners &layout);
+    void populate_engram() const;
+    void report_engram_residency(const char *phase) const;
     void load(const Path &directory, bool draft);
     std::vector<io::SafetensorsReader> files;
+    std::array<size_t, 4> engram_files{};
     std::map<std::string, Weight> weights;
     std::vector<Weight *> upload_order;
     std::array<size_t, 3> bytes{};

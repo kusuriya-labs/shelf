@@ -62,6 +62,8 @@ class SafetensorsReader {
       Result<StAxisSpan> axis_span(const std::string& name, std::uint64_t unit_begin,
                                    std::uint64_t unit_count) const;
       std::uint64_t file_size() const;
+      Status populate_read() const;
+      Result<std::size_t> resident_pages() const;
 
       // Parsed "__metadata__" header entry (empty if absent).
       const std::map<std::string, std::string>& metadata() const;

@@ -61,6 +61,8 @@ Structured output:  json_object, json_schema, strict tools (requires xgrammar)
 Ready.
 ```
 
+Hy4-flash の server は、GPU への重み転送後に Engram 表をホストのページキャッシュへ読み込んでから ready になる。表の容量に応じた空き RAM が必要で、起動時間が長くなる。ページは `mlock` されないため、メモリ圧迫時は退避される。読み込みを省略する場合は `SHELF_HY4_ENGRAM_POPULATE=0` を指定する。
+
 ## options
 
 <!-- cli:server -->

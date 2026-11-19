@@ -1,4 +1,6 @@
 #include <shelf/io/safetensors_reader.h>
+#include <algorithm>
+#include <cerrno>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
@@ -324,6 +326,23 @@ std::uint64_t SafetensorsReader::data_base_offset() const {
 
 std::uint64_t SafetensorsReader::file_size() const {
     return pimpl_->file_map.size;
+}
+
+Status SafetensorsReader::populate_read() const {
+    if (madvise(pimpl_->file_map.data, pimpl_->file_map.size, MADV_POPULATE_READ) != 0)
+        return Status::invalid_state(std::strerror(errno), __FILE__, __LINE__);
+    return Status::make_ok();
+}
+
+Result<std::size_t> SafetensorsReader::resident_pages() const {
+    long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0)
+        return Status::invalid_state("page size の取得に失敗しました", __FILE__, __LINE__);
+    auto size = pimpl_->file_map.size;
+    std::vector<unsigned char> present((size + page_size - 1) / page_size);
+    if (mincore(pimpl_->file_map.data, size, present.data()) != 0)
+        return Status::invalid_state(std::strerror(errno), __FILE__, __LINE__);
+    return std::count_if(present.begin(), present.end(), [](unsigned char v) { return v & 1; });
 }
 
 Result<StAxisSpan> SafetensorsReader::tensor_span(const std::string& name) const {

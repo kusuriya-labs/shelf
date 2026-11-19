@@ -2,6 +2,9 @@
 #include <shelf/quantization/exl3/exl3_int8.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <unistd.h>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -46,6 +49,43 @@ const Weight &Checkpoint::at(const std::string &key) const {
     if (it == weights.end())
         throw std::runtime_error("重みがありません: " + key);
     return it->second;
+}
+void Checkpoint::populate_engram() const {
+    auto begin = std::chrono::steady_clock::now();
+    for (auto index : engram_files) {
+        auto status = files.at(index).populate_read();
+        if (!status.ok())
+            throw std::runtime_error("Engram の populate に失敗しました: " + status.message());
+    }
+    fprintf(stderr, "engram_populate_s=%.3f\n",
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count());
+    long page = sysconf(_SC_PAGESIZE);
+    if (page <= 0)
+        throw std::runtime_error("page size の取得に失敗しました");
+    for (auto index : engram_files) {
+        const auto &file = files.at(index);
+        auto count = file.resident_pages();
+        if (!count.ok())
+            throw std::runtime_error("Engram の常駐確認に失敗しました: " + count.status().message());
+        if (count.value() != (file.file_size() + page - 1) / page)
+            throw std::runtime_error("Engram の全ページを常駐させられません");
+    }
+}
+void Checkpoint::report_engram_residency(const char *phase) const {
+    size_t resident = 0, total = 0;
+    long page = sysconf(_SC_PAGESIZE);
+    if (page <= 0)
+        throw std::runtime_error("page size の取得に失敗しました");
+    for (auto index : engram_files) {
+        const auto &file = files.at(index);
+        auto count = file.resident_pages();
+        if (!count.ok())
+            throw std::runtime_error("Engram の常駐確認に失敗しました: " + count.status().message());
+        resident += count.value();
+        total += (file.file_size() + page - 1) / page;
+    }
+    fprintf(stderr, "engram_resident phase=%s pages=%zu total=%zu page_size=%ld\n",
+            phase, resident, total, page);
 }
 Checkpoint::Checkpoint(const Path &model, const Path &engram, const Path &draft, const Owners &layout)
     : owners(layout), has_draft(!draft.empty()) {
@@ -93,6 +133,7 @@ Checkpoint::Checkpoint(const Path &model, const Path &engram, const Path &draft,
             auto data = take(reader.tensor_data(name, length));
             weights.emplace(name, Weight{spec, data, length, -1, 0});
         }
+        engram_files[g] = files.size();
         files.push_back(std::move(reader));
     }
     if (has_draft) {
