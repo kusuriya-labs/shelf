@@ -107,6 +107,7 @@ struct Exl3GemmArgs {
     // and the kernel gathers through this table; when null, the input plane is already in
     // group-row order.
     const int32_t* row_token = nullptr;
+    const uint32_t* group_row_base = nullptr;
     uint64_t trellis_batch_stride = 0;
     uint64_t suh_batch_stride = 0;
     uint64_t svh_batch_stride = 0;
@@ -151,6 +152,7 @@ struct Exl3GroupedArgs {
     // fused into one block so the expert's weight tiles are dequantized once per fused chunk.
     const uint32_t* expert_group_begin = nullptr;
     const int32_t* row_token = nullptr;
+    const uint32_t* group_row_base = nullptr;
     uint32_t group_capacity = 0;
 };
 

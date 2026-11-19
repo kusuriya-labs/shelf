@@ -490,11 +490,12 @@ marker の値が `0xDCD12D` の EXL3 を、`EXL3_MUL24_INT8_V1` / `EXL3_MUL24_IN
     1 回だけ行えば INT8 が優位になる余地はあるが、その場合は workspace（行 × k の int8 と scale）が必要で未実装。
 - 制約: 整数 bit rate のみ（half は拒否。expert も同じで、loader と program 構築の両方で拒否する）、K と N が 128 の倍数。
   expert の trellis は n-major ではない。correctness fallback は持たない。
-  **未検証**: 実モデル（Qwen3.8-Flash-Next の mul24 版 80 GB）の実行、複数 GPU（expert parallel と collective）、
-  dispatch 経由（`SHELF_EXL3_INT8_MOE` の切り替え）での実行、モデル全体の精度と速度。検証済みなのは
-  `test_exl3_mul24_grouped`（合成した expert plane を、FP16 と INT8 活性それぞれの CPU 参照（活性の丸めまで鏡像）と照合、
-  INT8 と FP16 の差は相対 RMS で 0.63〜0.69%、単一 GPU）、`bench_exl3_mul24_grouped`（kernel 単体の速度）、
-  `test_program_moe_plan`（program 構築）である。
+  **検証状況**: `test_exl3_mul24_grouped`（合成した expert plane を、FP16 と INT8 活性それぞれの CPU 参照
+  （活性の丸めまで鏡像）と照合、INT8 と FP16 の差は相対 RMS で 0.63〜0.69%、単一 GPU）、
+  `bench_exl3_mul24_grouped`（kernel 単体の速度）、`test_program_moe_plan`（program 構築）。
+  dispatch 経由は TP=2 の実モデルで実行し、FP16 活性は生成が安定した。INT8 活性は
+  4096 token prefill で FP16 より遅く、512 token prompt の生成が FP16 と一致しないため既定にしない。
+  複数 GPU の expert parallel と collective は未検証。
 
 ## KV quantization
 

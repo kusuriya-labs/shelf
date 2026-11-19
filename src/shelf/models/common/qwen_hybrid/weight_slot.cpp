@@ -35,19 +35,24 @@ RT::WeightSlot make_weight_slot(const W::MatrixWeight& w) {
             s.codes = w.host_codes;
             s.scales = w.host_scales;
             s.row_ref = w.host_row_ref;
+            if (w.encoding == W::MatrixEncoding::Exl3) {
+                s.exl3_suh = w.host_scales;
+                s.exl3_svh = w.host_row_ref;
+                s.exl3_marker = w.host_exl3_marker;
+            }
         } else {
             s.codes = w.codes.ndim() != 0 ? w.codes.data<void>() : nullptr;
             s.scales = w.scales.ndim() != 0 ? w.scales.data<void>() : nullptr;
             s.row_ref = w.row_ref.ndim() != 0 ? w.row_ref.data<void>() : nullptr;
+            s.exl3_suh = w.exl3_suh.ndim() != 0 ? w.exl3_suh.data<void>() : nullptr;
+            s.exl3_svh = w.exl3_svh.ndim() != 0 ? w.exl3_svh.data<void>() : nullptr;
+            s.exl3_marker = w.exl3_marker.ndim() != 0 ? w.exl3_marker.data<void>() : nullptr;
         }
         s.row_ref_exact = w.row_ref_exact;
         s.storage_scale_stride_bytes = w.storage_scale_stride_bytes;
         s.compute_codes = w.compute_codes.ndim() != 0 ? w.compute_codes.data<void>() : nullptr;
         s.compute_scales_bf16 =
             w.compute_scales_bf16.ndim() != 0 ? w.compute_scales_bf16.data<void>() : nullptr;
-        s.exl3_suh = w.exl3_suh.ndim() != 0 ? w.exl3_suh.data<void>() : nullptr;
-        s.exl3_svh = w.exl3_svh.ndim() != 0 ? w.exl3_svh.data<void>() : nullptr;
-        s.exl3_marker = w.exl3_marker.ndim() != 0 ? w.exl3_marker.data<void>() : nullptr;
         s.exl3_ka = w.exl3_ka;
         s.exl3_half = w.exl3_half ? 1u : 0u;
         s.codes_row_stride_bytes = w.codes_row_stride_bytes;

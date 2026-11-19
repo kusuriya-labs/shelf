@@ -83,15 +83,30 @@ bool compare_plane_prefix(const std::string& model_dir, const std::string& tenso
     return std::memcmp(host.data(), source.value(), bytes) == 0;
 }
 
+bool compare_host_plane_prefix(const std::string& model_dir, const std::string& tensor,
+                               const std::uint8_t* host_base, std::size_t bytes) {
+    const std::string shard = shard_for_tensor(model_dir, tensor);
+    if (shard.empty()) {
+        std::fprintf(stderr, "missing index entry: %s\n", tensor.c_str());
+        return false;
+    }
+    auto reader = shelf::io::SafetensorsReader::open(model_dir + "/" + shard);
+    if (!reader.ok()) return false;
+    std::size_t source_bytes = 0;
+    auto source = reader.value().tensor_data(tensor, source_bytes);
+    if (!source.ok() || source_bytes < bytes) return false;
+    return std::memcmp(host_base, source.value(), bytes) == 0;
+}
+
 void verify_expert_sample(const std::string& model_dir, const shelf::qwen4exp::Qwen4ExpRankWeights& w,
                           std::uint32_t rank, hipStream_t stream) {
     const auto& layer0 = w.layers[0];
     const auto& gate = layer0.mlp.gate_experts;
     const auto& gate_host = layer0.mlp.gate_experts_host;
     const auto& range = layer0.mlp.experts;
+    check(gate.experts + gate_host.experts == range.local_experts,
+          "MOE expert split covers the local expert range");
     if (gate.encoding != shelf::weights::MatrixEncoding::Exl3) {
-        check(gate.experts + gate_host.experts == range.local_experts,
-              "MOE expert split covers the local expert range");
         if (gate_host.experts != 0u) {
             check(gate_host.host_resident && gate_host.host_codes != nullptr &&
                       gate_host.host_scales != nullptr &&
@@ -101,14 +116,24 @@ void verify_expert_sample(const std::string& model_dir, const shelf::qwen4exp::Q
         }
         return;
     }
+    if (gate_host.experts != 0u) {
+        check(gate_host.host_resident && gate_host.host_codes != nullptr &&
+                  gate_host.host_scales != nullptr && gate_host.host_row_ref != nullptr &&
+                  w.expert_slot_map.ndim() != 0u,
+              "MOE EXL3 host expert planes are resident");
+    }
     const std::uint64_t sample_bytes =
         std::min<std::uint64_t>(4096u, gate.codes_batch_stride_bytes);
     const std::uint32_t first_expert = range.expert_begin;
+    const std::uint32_t last_vram_expert = range.expert_begin + gate.experts - 1u;
     const std::uint32_t last_expert = range.expert_begin + range.local_experts - 1;
     const std::string first_name =
         "model.language_model.layers.0.mlp.experts." + std::to_string(first_expert) +
         ".gate_proj.trellis";
-    const std::string last_name =
+    const std::string last_vram_name =
+        "model.language_model.layers.0.mlp.experts." + std::to_string(last_vram_expert) +
+        ".gate_proj.trellis";
+    const std::string last_host_name =
         "model.language_model.layers.0.mlp.experts." + std::to_string(last_expert) +
         ".gate_proj.trellis";
     char label[128];
@@ -116,13 +141,24 @@ void verify_expert_sample(const std::string& model_dir, const shelf::qwen4exp::Q
     check(compare_plane_prefix(model_dir, first_name, gate.codes.data<std::uint8_t>(),
                                sample_bytes, stream),
           label);
-    std::snprintf(label, sizeof(label), "rank%u last expert trellis matches source", rank);
-    check(compare_plane_prefix(model_dir, last_name,
+    std::snprintf(label, sizeof(label), "rank%u last VRAM expert trellis matches source", rank);
+    check(compare_plane_prefix(model_dir, last_vram_name,
                                gate.codes.data<std::uint8_t>() +
-                                   static_cast<std::uint64_t>(range.local_experts - 1u) *
+                                   static_cast<std::uint64_t>(gate.experts - 1u) *
                                        gate.codes_batch_stride_bytes,
                                sample_bytes, stream),
           label);
+    if (gate_host.experts != 0u) {
+        std::snprintf(label, sizeof(label), "rank%u last host expert trellis matches source",
+                      rank);
+        check(compare_host_plane_prefix(
+                  model_dir, last_host_name,
+                  static_cast<const std::uint8_t*>(gate_host.host_codes) +
+                      static_cast<std::uint64_t>(gate_host.experts - 1u) *
+                          gate_host.codes_batch_stride_bytes,
+                  sample_bytes),
+              label);
+    }
 }
 
 void verify_int6_source_rows(const std::string& model_dir,
@@ -368,6 +404,17 @@ int main(int argc, char** argv) {
             weights.layers[0].mlp.gate_experts);
         check(shelf::execution::validate_host_weight_slot(expert_slot, 0u).ok(),
               "EXL3 expert plane forms a rank-3 weight slot");
+        if (weights.layers[0].mlp.gate_experts_host.experts != 0u) {
+            const auto host_expert_slot = shelf::qwen_hybrid::make_weight_slot(
+                weights.layers[0].mlp.gate_experts_host);
+            const auto host_validation =
+                shelf::execution::validate_host_weight_slot(host_expert_slot, 0u);
+            if (!host_validation.ok())
+                std::fprintf(stderr, "host slot validation: %s\n",
+                             host_validation.message().c_str());
+            check(host_validation.ok(),
+                  "EXL3 host expert plane forms a rank-3 weight slot");
+        }
         if (const hipError_t error = hipStreamSynchronize(streams[index]);
             error != hipSuccess) {
             std::fprintf(stderr, "stream sync: %s\n", hipGetErrorString(error));

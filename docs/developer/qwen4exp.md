@@ -43,8 +43,11 @@ PLE の n-gram history を復元 prefix で再 seed する。MTP は無効であ
   残りを VRAM の slot に置く。host plane は `hipHostMallocMapped` で、GPU の grouped
   GEMM が PCIe 越しに読む。expert ごとの配置は device の slot map
   `int32 [layers][local_experts]` が持つ（`>= 0` は VRAM slot、`-1 - slot` は host slot）。
-  EXL3 expert の host offload は未対応で、`--moe-host-experts` が 0 より大きい場合は
-  `Status::unsupported` で停止する。
+  EXL3 expert も同じ offload を使う。trellis / suh / svh を host の
+  `host_codes / host_scales / host_row_ref` に置き、marker は全 expert で共通のため
+  VRAM の 1 枚を共有する。grouped GEMM は hit/miss を別 launch にし、miss 側の
+  group index は `miss_base` を `group_row_base` として元の group へ写像する。
+  group fuse は hit/miss それぞれの `expert_group_begin` を使い、host offload 中も有効である。
 - attention / GDN は `preshuffle_fp8_native` で gfx1201 の FP8 WMMA fragment order に
   する。活性は per-token dynamic FP8（`scale = amax / 448`）で、GEMM の epilogue で
   `weight_scale[o] * activation_scale[row]` を 1 回だけ適用する。

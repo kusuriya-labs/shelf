@@ -44,6 +44,8 @@ struct MoePlanScratch {
     uint32_t miss_rows_offset = 0;
     uint32_t miss_base_offset = 0;
     uint32_t miss_count_offset = 0;
+    uint32_t hit_expert_group_begin_offset = 0;
+    uint32_t miss_expert_group_begin_offset = 0;
 
     uint32_t capacity_units = 0;
 
@@ -100,6 +102,10 @@ struct MoePlanScratch {
         at += s.group_capacity;
         s.miss_count_offset = at;
         at += 1u;
+        s.hit_expert_group_begin_offset = at;
+        at += experts + 1u;
+        s.miss_expert_group_begin_offset = at;
+        at += experts + 1u;
         s.capacity_units = at;
         return s;
     }

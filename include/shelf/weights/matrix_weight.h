@@ -34,6 +34,7 @@ struct MatrixWeight {
     const void* host_codes = nullptr;
     const void* host_scales = nullptr;
     const void* host_row_ref = nullptr;
+    const void* host_exl3_marker = nullptr;
     gpu::Tensor data;
     gpu::Tensor codes;
     gpu::Tensor scales;

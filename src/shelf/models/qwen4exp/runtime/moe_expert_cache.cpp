@@ -182,9 +182,11 @@ std::uint64_t MoeExpertCache::swap_bytes() const {
                                    &mlp.down_experts_host};
     std::uint64_t bytes = 0u;
     for (std::uint32_t index = 0; index < 3u; ++index) {
+        const bool exl3 = planes[index]->encoding == weights::MatrixEncoding::Exl3;
         bytes += planes[index]->codes_batch_stride_bytes;
-        bytes += planes[index]->scales_batch_stride_bytes;
-        bytes += hosts[index]->rows;
+        bytes += exl3 ? planes[index]->exl3_suh_batch_stride_bytes
+                      : planes[index]->scales_batch_stride_bytes;
+        bytes += exl3 ? planes[index]->exl3_svh_batch_stride_bytes : hosts[index]->rows;
     }
     return 2u * bytes;
 }
@@ -306,8 +308,17 @@ Status MoeExpertCache::swap(std::uint32_t layer, std::uint32_t host_slot,
     for (std::uint32_t index = 0; index < 3u; ++index) {
         const MatrixWeight& vram = *vram_planes[index];
         const MatrixWeight& host = *host_planes[index];
-        if (vram.codes.ndim() == 0u || vram.scales.ndim() == 0u ||
-            vram.row_ref.ndim() == 0u || host.host_codes == nullptr ||
+        const bool exl3 = vram.encoding == weights::MatrixEncoding::Exl3;
+        const gpu::Tensor& scales_plane = exl3 ? vram.exl3_suh : vram.scales;
+        const gpu::Tensor& ref_plane = exl3 ? vram.exl3_svh : vram.row_ref;
+        const std::uint64_t vram_scales_stride = exl3 ? vram.exl3_suh_batch_stride_bytes
+                                                      : vram.scales_batch_stride_bytes;
+        const std::uint64_t host_scales_stride = exl3 ? host.exl3_suh_batch_stride_bytes
+                                                      : host.scales_batch_stride_bytes;
+        const std::uint64_t ref_stride =
+            exl3 ? vram.exl3_svh_batch_stride_bytes : static_cast<std::uint64_t>(vram.rows);
+        if (vram.codes.ndim() == 0u || scales_plane.ndim() == 0u ||
+            ref_plane.ndim() == 0u || host.host_codes == nullptr ||
             host.host_scales == nullptr || host.host_row_ref == nullptr) {
             return Status::invalid_state("moe cache swap plane is incomplete", __FILE__,
                                          __LINE__);
@@ -319,21 +330,21 @@ Status MoeExpertCache::swap(std::uint32_t layer, std::uint32_t host_slot,
             const_cast<std::uint8_t*>(static_cast<const std::uint8_t*>(host.host_codes)) +
             static_cast<std::size_t>(host_slot) * host.codes_batch_stride_bytes;
         std::uint8_t* vram_scales =
-            vram.scales.data<std::uint8_t>() + static_cast<std::size_t>(vram_slot) *
-                                                   vram.scales_batch_stride_bytes;
+            scales_plane.data<std::uint8_t>() +
+            static_cast<std::size_t>(vram_slot) * vram_scales_stride;
         std::uint8_t* host_scales =
             const_cast<std::uint8_t*>(static_cast<const std::uint8_t*>(host.host_scales)) +
-            static_cast<std::size_t>(host_slot) * host.scales_batch_stride_bytes;
+            static_cast<std::size_t>(host_slot) * host_scales_stride;
         std::uint8_t* vram_ref =
-            vram.row_ref.data<std::uint8_t>() +
-            static_cast<std::size_t>(vram_slot) * vram.rows;
+            ref_plane.data<std::uint8_t>() +
+            static_cast<std::size_t>(vram_slot) * ref_stride;
         std::uint8_t* host_ref =
             const_cast<std::uint8_t*>(static_cast<const std::uint8_t*>(host.host_row_ref)) +
-            static_cast<std::size_t>(host_slot) * host.rows;
+            static_cast<std::size_t>(host_slot) * ref_stride;
 
         const std::size_t codes_bytes = vram.codes_batch_stride_bytes;
-        const std::size_t scales_bytes = vram.scales_batch_stride_bytes;
-        const std::size_t ref_bytes = vram.rows;
+        const std::size_t scales_bytes = static_cast<std::size_t>(vram_scales_stride);
+        const std::size_t ref_bytes = static_cast<std::size_t>(ref_stride);
         std::vector<std::uint8_t> demoted_codes(codes_bytes);
         std::vector<std::uint8_t> demoted_scales(scales_bytes);
         std::vector<std::uint8_t> demoted_ref(ref_bytes);

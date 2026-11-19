@@ -38,6 +38,8 @@ struct MoePlanArrays {
     uint32_t* miss_rows = nullptr;
     uint32_t* miss_base = nullptr;
     uint32_t* miss_count = nullptr;
+    uint32_t* hit_expert_group_begin = nullptr;
+    uint32_t* miss_expert_group_begin = nullptr;
 };
 
 // The scratch arrays plus the capacity this call actually carries. The capacity comes from

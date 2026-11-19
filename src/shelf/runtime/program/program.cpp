@@ -919,6 +919,7 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
                 if (!c.open_moe_scratch()) return fail("moe plan scratch has no capacity");
                 DispatchBinding b = base_binding(KernelId::LINEAR_EXL3_W16A16_GROUPED);
                 b.weight_index = n.weight_index;
+                b.host_weight_index = n.host_weight_index;
                 b.compute_spec = w.compute_spec;
                 b.flags = c.graph->value_dtype(node.outputs[0]) == ValueDType::F32 ? 1u : 0u;
                 b.input_slots[0] = node.inputs[0].id;

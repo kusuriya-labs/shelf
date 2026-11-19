@@ -141,6 +141,8 @@ hipError_t launch_moe_slot_scan_split(
     uint32_t* miss_rows,
     uint32_t* miss_base,
     uint32_t* miss_count,
+    uint32_t* hit_expert_group_begin,
+    uint32_t* miss_expert_group_begin,
     uint32_t rows,
     uint32_t experts,
     uint32_t top_k,

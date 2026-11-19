@@ -665,11 +665,6 @@ Result<MatrixWeight> load_expert_matrix(const qqb::QuantizedModelReader& reader,
                                         expert_begin, n, k, host_experts, host_arena,
                                         arena, stream, host_plane);
     }
-    if (host_experts != 0u) {
-        return Status::unsupported(
-            "Qwen4Exp host expert offload supports MXFP4 experts only", __FILE__,
-            __LINE__);
-    }
     if (view.encoding != qqm::QuantizedEncoding::Exl3) {
         return Status::unsupported(
             ("Qwen4Exp routed expert is not EXL3 or MXFP4: " + first_name).c_str(),
@@ -700,13 +695,18 @@ Result<MatrixWeight> load_expert_matrix(const qqb::QuantizedModelReader& reader,
         static_cast<std::uint64_t>(k / 16u) * (n / 16u) * words * 2u;
     const std::uint64_t suh_bytes = static_cast<std::uint64_t>(k) * 2u;
     const std::uint64_t svh_bytes = static_cast<std::uint64_t>(n) * 2u;
+    if (host_experts >= local_experts) {
+        return Status::invalid_argument(
+            "Qwen4Exp EXL3 expert split leaves no VRAM expert", __FILE__, __LINE__);
+    }
+    const std::uint32_t vram_experts = local_experts - host_experts;
 
     MatrixWeight w;
     w.encoding = shelf::weights::MatrixEncoding::Exl3;
     w.rows = n;
     w.cols = k;
     w.k_padded = k;
-    w.experts = local_experts;
+    w.experts = vram_experts;
     w.exl3_ka = ka;
     w.exl3_half = half;
     w.preshuffled = false;
@@ -717,28 +717,66 @@ Result<MatrixWeight> load_expert_matrix(const qqb::QuantizedModelReader& reader,
     w.exl3_svh_batch_stride_bytes = svh_bytes;
     w.exl3_marker_batch_stride_bytes = 4u;
 
-    w.codes = alloc_u8(trellis_bytes * local_experts,
-                       {local_experts, static_cast<std::size_t>(trellis_bytes)},
+    host_plane.encoding = shelf::weights::MatrixEncoding::Exl3;
+    host_plane.experts = host_experts;
+    host_plane.exl3_ka = ka;
+    host_plane.exl3_half = half;
+    host_plane.codes_row_stride_bytes = w.codes_row_stride_bytes;
+    host_plane.codes_batch_stride_bytes = trellis_bytes;
+    host_plane.exl3_suh_batch_stride_bytes = suh_bytes;
+    host_plane.exl3_svh_batch_stride_bytes = svh_bytes;
+    host_plane.exl3_marker_batch_stride_bytes = 4u;
+
+    w.codes = alloc_u8(trellis_bytes * vram_experts,
+                       {vram_experts, static_cast<std::size_t>(trellis_bytes)},
                        {static_cast<std::size_t>(trellis_bytes), 1u}, arena);
     if (w.codes.ndim() == 0) {
         return Status::insufficient_memory(
             "Qwen4Exp expert trellis plane allocation failed", __FILE__, __LINE__);
     }
-    w.exl3_suh = alloc_u16(suh_bytes * local_experts, {local_experts, k}, {k, 1u}, arena);
+    w.exl3_suh = alloc_u16(suh_bytes * vram_experts, {vram_experts, k}, {k, 1u}, arena);
     if (w.exl3_suh.ndim() == 0) {
         return Status::insufficient_memory(
             "Qwen4Exp expert suh plane allocation failed", __FILE__, __LINE__);
     }
-    w.exl3_svh = alloc_u16(svh_bytes * local_experts, {local_experts, n}, {n, 1u}, arena);
+    w.exl3_svh = alloc_u16(svh_bytes * vram_experts, {vram_experts, n}, {n, 1u}, arena);
     if (w.exl3_svh.ndim() == 0) {
         return Status::insufficient_memory(
             "Qwen4Exp expert svh plane allocation failed", __FILE__, __LINE__);
     }
-    w.exl3_marker = alloc_u8(4u * local_experts, {local_experts, 4u}, {4u, 1u}, arena);
+    w.exl3_marker = alloc_u8(4u * vram_experts, {vram_experts, 4u}, {4u, 1u}, arena);
     if (w.exl3_marker.ndim() == 0) {
         return Status::insufficient_memory(
             "Qwen4Exp expert marker plane allocation failed", __FILE__, __LINE__);
     }
+    host_plane.host_exl3_marker = w.exl3_marker.data<void>();
+
+    std::uint8_t* host_trellis = nullptr;
+    std::uint8_t* host_suh = nullptr;
+    std::uint8_t* host_svh = nullptr;
+    bool host_allocated = false;
+    auto allocate_host_planes = [&]() -> Status {
+        if (host_experts == 0u) return Status::make_ok();
+        void* trellis = nullptr;
+        void* suh_ptr = nullptr;
+        void* svh_ptr = nullptr;
+        Status st = host_arena.allocate(
+            static_cast<std::size_t>(trellis_bytes * host_experts), &trellis);
+        if (!st.ok()) return st;
+        st = host_arena.allocate(static_cast<std::size_t>(suh_bytes * host_experts), &suh_ptr);
+        if (!st.ok()) return st;
+        st = host_arena.allocate(static_cast<std::size_t>(svh_bytes * host_experts), &svh_ptr);
+        if (!st.ok()) return st;
+        host_trellis = static_cast<std::uint8_t*>(trellis);
+        host_suh = static_cast<std::uint8_t*>(suh_ptr);
+        host_svh = static_cast<std::uint8_t*>(svh_ptr);
+        host_plane.host_resident = true;
+        host_plane.host_codes = host_trellis;
+        host_plane.host_scales = host_suh;
+        host_plane.host_row_ref = host_svh;
+        host_allocated = true;
+        return Status::make_ok();
+    };
 
     // The marker is the codebook multiplier and names the format (mul1 W16A16 or mul24 EXL3-INT8). One plane
     // is decoded by one kernel, so every expert of it must carry the same multiplier.
@@ -782,24 +820,43 @@ Result<MatrixWeight> load_expert_matrix(const qqb::QuantizedModelReader& reader,
                 ("Qwen4Exp expert payload size differs from the geometry: " + name).c_str(),
                 __FILE__, __LINE__);
         }
-        Status st = copy_async(w.codes.data<std::uint8_t>() + local * trellis_bytes,
-                               value.codes.data, static_cast<std::size_t>(trellis_bytes), stream,
-                               "Qwen4Exp expert trellis upload");
-        if (!st.ok()) return st;
-        st = copy_async(w.exl3_suh.data<std::uint16_t>() + static_cast<std::size_t>(local) * k,
-                        value.suh.data, static_cast<std::size_t>(suh_bytes), stream,
-                        "Qwen4Exp expert suh upload");
-        if (!st.ok()) return st;
-        st = copy_async(w.exl3_svh.data<std::uint16_t>() + static_cast<std::size_t>(local) * n,
-                        value.svh.data, static_cast<std::size_t>(svh_bytes), stream,
-                        "Qwen4Exp expert svh upload");
-        if (!st.ok()) return st;
-        st = copy_async(w.exl3_marker.data<std::uint8_t>() +
-                            static_cast<std::size_t>(local) * 4u,
-                        value.marker.data, 4u, stream, "Qwen4Exp expert marker upload");
+        if (local < vram_experts) {
+            Status st = copy_async(w.codes.data<std::uint8_t>() + local * trellis_bytes,
+                                   value.codes.data, static_cast<std::size_t>(trellis_bytes),
+                                   stream, "Qwen4Exp expert trellis upload");
+            if (!st.ok()) return st;
+            st = copy_async(w.exl3_suh.data<std::uint16_t>() + static_cast<std::size_t>(local) * k,
+                            value.suh.data, static_cast<std::size_t>(suh_bytes), stream,
+                            "Qwen4Exp expert suh upload");
+            if (!st.ok()) return st;
+            st = copy_async(w.exl3_svh.data<std::uint16_t>() + static_cast<std::size_t>(local) * n,
+                            value.svh.data, static_cast<std::size_t>(svh_bytes), stream,
+                            "Qwen4Exp expert svh upload");
+            if (!st.ok()) return st;
+            st = copy_async(w.exl3_marker.data<std::uint8_t>() +
+                                static_cast<std::size_t>(local) * 4u,
+                            value.marker.data, 4u, stream, "Qwen4Exp expert marker upload");
+            if (!st.ok()) return st;
+        } else {
+            if (!host_allocated) {
+                Status st = allocate_host_planes();
+                if (!st.ok()) return st;
+            }
+            const std::uint32_t slot = local - vram_experts;
+            std::memcpy(host_trellis + static_cast<std::size_t>(slot) * trellis_bytes,
+                        value.codes.data, static_cast<std::size_t>(trellis_bytes));
+            std::memcpy(host_suh + static_cast<std::size_t>(slot) * suh_bytes, value.suh.data,
+                        static_cast<std::size_t>(suh_bytes));
+            std::memcpy(host_svh + static_cast<std::size_t>(slot) * svh_bytes, value.svh.data,
+                        static_cast<std::size_t>(svh_bytes));
+        }
+    }
+    if (host_experts != 0u && !host_allocated) {
+        Status st = allocate_host_planes();
         if (!st.ok()) return st;
     }
     shelf::weights::apply_default_compute_spec(w);
+    shelf::weights::apply_default_compute_spec(host_plane);
     if (multiplier == shelf::quantization::exl3::kExl3Mul24Multiplier) {
         if (half) {
             return Status::unsupported(
@@ -809,6 +866,8 @@ Result<MatrixWeight> load_expert_matrix(const qqb::QuantizedModelReader& reader,
         }
         w.quant_spec = shelf::quantization::QuantSpecId::EXL3_MUL24_INT8_V1;
         w.compute_spec = shelf::quantization::ComputeSpecId::EXL3_MUL24_INT8_W8A8_F32_BF16;
+        host_plane.quant_spec = w.quant_spec;
+        host_plane.compute_spec = w.compute_spec;
     }
     return w;
 }
@@ -1368,13 +1427,13 @@ Status expect_experts(const MatrixWeight& w, const MatrixWeight& host,
             (std::string("Qwen4Exp expert plane stride mismatch: ") + what).c_str(),
             __FILE__, __LINE__);
     }
-    if (w.codes.ndim() != 2u || w.codes.dim(0) != local_experts ||
+    if (w.codes.ndim() != 2u || w.codes.dim(0) != w.experts ||
         w.codes.dim(1) != expected_trellis ||
-        w.exl3_suh.ndim() != 2u || w.exl3_suh.dim(0) != local_experts ||
+        w.exl3_suh.ndim() != 2u || w.exl3_suh.dim(0) != w.experts ||
         w.exl3_suh.dim(1) != cols ||
-        w.exl3_svh.ndim() != 2u || w.exl3_svh.dim(0) != local_experts ||
+        w.exl3_svh.ndim() != 2u || w.exl3_svh.dim(0) != w.experts ||
         w.exl3_svh.dim(1) != rows ||
-        w.exl3_marker.ndim() != 2u || w.exl3_marker.dim(0) != local_experts ||
+        w.exl3_marker.ndim() != 2u || w.exl3_marker.dim(0) != w.experts ||
         w.exl3_marker.dim(1) != 4u) {
         return Status::invalid_argument(
             (std::string("Qwen4Exp expert plane tensor shape mismatch: ") + what).c_str(),

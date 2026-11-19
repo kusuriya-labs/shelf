@@ -92,6 +92,8 @@ Result<MoePlanView> resolve_moe_plan(const Program& program, const DispatchBindi
     view.arrays.miss_rows = base + capacity.miss_rows_offset;
     view.arrays.miss_base = base + capacity.miss_base_offset;
     view.arrays.miss_count = base + capacity.miss_count_offset;
+    view.arrays.hit_expert_group_begin = base + capacity.hit_expert_group_begin_offset;
+    view.arrays.miss_expert_group_begin = base + capacity.miss_expert_group_begin_offset;
     return view;
 }
 
@@ -157,6 +159,7 @@ Result<OptimizedLaunchResult> try_launch_moe_plan_scan(const Program& program,
         a.tile_counts, a.expert_row_begin, a.tile_base, a.expert_group_begin, a.group_expert,
         a.group_rows, a.group_count, a.row_token, expert_slot, a.hit_slot, a.hit_rows,
         a.hit_base, a.hit_count, a.miss_slot, a.miss_rows, a.miss_base, a.miss_count,
+        a.hit_expert_group_begin, a.miss_expert_group_begin,
         plan.value().tokens, plan.value().experts, plan.value().top_k, stream);
     if (herr != hipSuccess)
         return Status::hip_error("moe plan scan launch", hipGetErrorString(herr), __FILE__,
@@ -381,11 +384,57 @@ Result<OptimizedLaunchResult> try_launch_moe_grouped_exl3(const Program& program
     args.row_token = token_rows ? plan.value().arrays.row_token : nullptr;
     args.group_capacity = plan.value().group_capacity;
 
-    const hipError_t herr =
-        ::shelf::kernel::launch_gemm_exl3_w16a16_grouped(args, stream);
+    auto launch_plane = [&](const WeightSlot& plane, const uint32_t* group_expert,
+                            const uint32_t* group_rows, const uint32_t* group_count,
+                            const uint32_t* group_row_base,
+                            const uint32_t* expert_group_begin) -> hipError_t {
+        ::shelf::kernel::Exl3GroupedArgs a = args;
+        a.trellis = plane.codes;
+        a.suh = plane.exl3_suh;
+        a.svh = plane.exl3_svh;
+        a.group_expert = group_expert;
+        a.group_rows = group_rows;
+        a.group_count = group_count;
+        a.group_row_base = group_row_base;
+        a.expert_group_begin = expert_group_begin;
+        return ::shelf::kernel::launch_gemm_exl3_w16a16_grouped(a, stream);
+    };
+
+    const uint32_t* hit_expert_group_begin =
+        b.host_weight_index == ::shelf::runtime::kNoWeight
+            ? plan.value().arrays.expert_group_begin
+            : plan.value().arrays.hit_expert_group_begin;
+    hipError_t herr = launch_plane(e, plan.value().arrays.hit_slot,
+                                   plan.value().arrays.hit_rows,
+                                   plan.value().arrays.hit_count,
+                                   plan.value().arrays.hit_base,
+                                   hit_expert_group_begin);
     if (herr != hipSuccess)
         return Status::hip_error("moe grouped exl3 launch", hipGetErrorString(herr),
                                  __FILE__, __LINE__);
+
+    if (b.host_weight_index != ::shelf::runtime::kNoWeight) {
+        if (b.host_weight_index >= ctx.weight_count)
+            return bad("moe grouped exl3: host weight_index invalid");
+        const WeightSlot host = ctx.weights[b.host_weight_index];
+        if (host.encoding != 4u || host.codes == nullptr || host.exl3_suh == nullptr ||
+            host.exl3_svh == nullptr || host.experts < 2u || host.rows != e.rows ||
+            host.k_padded != e.k_padded || host.exl3_ka != e.exl3_ka ||
+            host.exl3_half != e.exl3_half || host.compute_spec != e.compute_spec ||
+            host.codes_row_stride_bytes != e.codes_row_stride_bytes ||
+            host.codes_batch_stride_bytes != e.codes_batch_stride_bytes ||
+            host.exl3_suh_batch_stride_bytes != e.exl3_suh_batch_stride_bytes ||
+            host.exl3_svh_batch_stride_bytes != e.exl3_svh_batch_stride_bytes)
+            return bad("moe grouped exl3: host expert plane mismatch");
+        herr = launch_plane(host, plan.value().arrays.miss_slot,
+                            plan.value().arrays.miss_rows,
+                            plan.value().arrays.miss_count,
+                            plan.value().arrays.miss_base,
+                            plan.value().arrays.miss_expert_group_begin);
+        if (herr != hipSuccess)
+            return Status::hip_error("moe grouped exl3 host launch", hipGetErrorString(herr),
+                                     __FILE__, __LINE__);
+    }
     record_physical_launch(1u);
     record_optimized_op();
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};

@@ -22,9 +22,15 @@ __device__ __forceinline__ bool resolve_group_plan(Exl3GemmArgs& args, uint32_t 
     uint32_t rows_here = args.group_rows[group_index];
     if (args.expert_group_begin != nullptr) {
         const uint32_t begin = args.expert_group_begin[expert];
-        const uint32_t end = args.expert_group_begin[expert + 1u];
         if (((group_index - begin) % kGroups) != 0u) return false;
-        const uint32_t chunk_end = (group_index + kGroups) < end ? (group_index + kGroups) : end;
+        const uint32_t count = args.group_count[0];
+        uint32_t chunk_end = (group_index + kGroups) < count ? (group_index + kGroups) : count;
+        for (uint32_t gi = group_index + 1u; gi < chunk_end; ++gi) {
+            if (args.group_expert[gi] != expert) {
+                chunk_end = gi;
+                break;
+            }
+        }
         rows_here = 0u;
         for (uint32_t gi = group_index; gi < chunk_end; ++gi) rows_here += args.group_rows[gi];
     }
@@ -35,12 +41,19 @@ __device__ __forceinline__ bool resolve_group_plan(Exl3GemmArgs& args, uint32_t 
                static_cast<std::uint64_t>(expert) * args.suh_batch_stride;
     args.svh = static_cast<const std::uint8_t*>(args.svh) +
                static_cast<std::uint64_t>(expert) * args.svh_batch_stride;
+    const uint32_t base =
+        args.group_row_base != nullptr ? args.group_row_base[group_index] : group_index;
     const std::uint64_t output_offset =
-        static_cast<std::uint64_t>(group_index) * kExl3W16A16RowTile * args.output_row_stride;
+        static_cast<std::uint64_t>(base) * kExl3W16A16RowTile * args.output_row_stride;
     if (args.row_token == nullptr) {
         const std::uint64_t input_offset =
-            static_cast<std::uint64_t>(group_index) * kExl3W16A16RowTile * args.input_row_stride;
+            static_cast<std::uint64_t>(base) * kExl3W16A16RowTile * args.input_row_stride;
         args.input = static_cast<const shelf::bf16_t*>(args.input) + input_offset;
+    } else if (base != group_index) {
+        const std::int64_t shift =
+            (static_cast<std::int64_t>(base) - static_cast<std::int64_t>(group_index)) *
+            static_cast<std::int64_t>(kExl3W16A16RowTile);
+        args.row_token += shift;
     }
     args.output = args.output_dtype == 0u
                       ? static_cast<void*>(static_cast<shelf::bf16_t*>(args.output) + output_offset)

@@ -516,6 +516,7 @@ hipError_t launch_gemm_exl3_w16a16_grouped(const Exl3GroupedArgs& args,
     dense.group_count = args.group_count;
     dense.expert_group_begin = args.expert_group_begin;
     dense.row_token = args.row_token;
+    dense.group_row_base = args.group_row_base;
     dense.trellis_batch_stride = args.trellis_batch_stride;
     dense.suh_batch_stride = args.suh_batch_stride;
     dense.svh_batch_stride = args.svh_batch_stride;
