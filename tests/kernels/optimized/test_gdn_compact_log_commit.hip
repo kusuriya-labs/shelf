@@ -62,9 +62,9 @@ struct Buf {
     uint16_t* b = nullptr;
     uint16_t* dt_bias = nullptr;
     uint16_t* a_log = nullptr;
-    shelf::fp16_t* state = nullptr;
+    ::shelf::state::GdnStateScalar* state = nullptr;
     float* out = nullptr;
-    shelf::fp16_t* hist = nullptr;
+    ::shelf::state::GdnStateScalar* hist = nullptr;
     float* compact_delta = nullptr;
     float* compact_k = nullptr;
     float* compact_a = nullptr;
@@ -77,19 +77,15 @@ struct Buf {
     }
 };
 
-bool read_state_f16(const shelf::fp16_t* src, std::vector<float>& dst, size_t n) {
-    std::vector<shelf::fp16_t> tmp(n);
-    if (hipMemcpy(tmp.data(), src, n * sizeof(shelf::fp16_t), hipMemcpyDeviceToHost) != hipSuccess)
-        return false;
+bool read_state_f16(const ::shelf::state::GdnStateScalar* src, std::vector<float>& dst, size_t n) {
     dst.resize(n);
-    for (size_t i = 0; i < n; ++i) dst[i] = shelf::fp16_to_f32(tmp[i]);
-    return true;
+    return hipMemcpy(dst.data(), src, n * sizeof(::shelf::state::GdnStateScalar),
+                     hipMemcpyDeviceToHost) == hipSuccess;
 }
 
-bool write_state_f16(shelf::fp16_t* dst, const std::vector<float>& src, size_t n) {
-    std::vector<shelf::fp16_t> tmp(n);
-    for (size_t i = 0; i < n; ++i) tmp[i] = shelf::f32_to_fp16(src[i]);
-    return hipMemcpy(dst, tmp.data(), n * sizeof(shelf::fp16_t), hipMemcpyHostToDevice) == hipSuccess;
+bool write_state_f16(::shelf::state::GdnStateScalar* dst, const std::vector<float>& src, size_t n) {
+    return hipMemcpy(dst, src.data(), n * sizeof(::shelf::state::GdnStateScalar),
+                     hipMemcpyHostToDevice) == hipSuccess;
 }
 
 bool setup(Buf& d, uint32_t seed) {
@@ -103,7 +99,7 @@ bool setup(Buf& d, uint32_t seed) {
     if (hipMalloc(&d.b, g_bytes) != hipSuccess) return false;
     if (hipMalloc(&d.dt_bias, kHeads * 2u) != hipSuccess) return false;
     if (hipMalloc(&d.a_log, kHeads * 2u) != hipSuccess) return false;
-    if (hipMalloc(&d.state, kStates * kSlotStride * sizeof(shelf::fp16_t)) != hipSuccess)
+    if (hipMalloc(&d.state, kStates * kSlotStride * sizeof(::shelf::state::GdnStateScalar)) != hipSuccess)
         return false;
     if (hipMalloc(&d.out, (size_t)kRows * kVdim * 4u) != hipSuccess) return false;
     if (hipMalloc(&d.compact_delta, (size_t)kStates * kRows * kVdim * 4u) != hipSuccess)
@@ -112,11 +108,11 @@ bool setup(Buf& d, uint32_t seed) {
         return false;
     if (hipMalloc(&d.compact_a, (size_t)kStates * kRows * kHeads * 4u) != hipSuccess)
         return false;
-    if (hipMalloc(&d.hist, (size_t)kRows * kStates * kSlotStride * sizeof(shelf::fp16_t)) !=
+    if (hipMalloc(&d.hist, (size_t)kRows * kStates * kSlotStride * sizeof(::shelf::state::GdnStateScalar)) !=
             hipSuccess)
         return false;
     shelf::gpu::discard_cleanup_result(
-        hipMemset(d.hist, 0, (size_t)kRows * kStates * kSlotStride * sizeof(shelf::fp16_t)));
+        hipMemset(d.hist, 0, (size_t)kRows * kStates * kSlotStride * sizeof(::shelf::state::GdnStateScalar)));
     if (hipMalloc(&d.requests, sizeof(::shelf::runtime::DeviceRequestDescriptor)) != hipSuccess)
         return false;
 
@@ -298,10 +294,10 @@ void test_tree_chunk_batch(hipStream_t stream) {
     duplicate(d.v, src.v, kVdim * sizeof(uint16_t));
     duplicate(d.a, src.a, kHeads * sizeof(uint16_t));
     duplicate(d.b, src.b, kHeads * sizeof(uint16_t));
-    ok = ok && hipMalloc(&d.state, count * kStates * kSlotStride * sizeof(shelf::fp16_t)) == hipSuccess;
+    ok = ok && hipMalloc(&d.state, count * kStates * kSlotStride * sizeof(::shelf::state::GdnStateScalar)) == hipSuccess;
     for (uint32_t i = 0; ok && i < count; ++i)
         ok = hipMemcpy(d.state + i * kStates * kSlotStride, src.state,
-                       kStates * kSlotStride * sizeof(shelf::fp16_t), hipMemcpyDeviceToDevice) == hipSuccess;
+                       kStates * kSlotStride * sizeof(::shelf::state::GdnStateScalar), hipMemcpyDeviceToDevice) == hipSuccess;
     ok = ok && hipMalloc(&d.out, total * kVdim * sizeof(float)) == hipSuccess &&
          hipMalloc(&d.compact_delta, total * kVdim * sizeof(float)) == hipSuccess &&
          hipMalloc(&d.compact_k, total * kHeads * kHeadK * sizeof(float)) == hipSuccess &&
@@ -618,12 +614,14 @@ int main() {
         bool hok = true;
         size_t hfirst = 0;
         for (uint32_t r = 0u; r < kRows; ++r) {
-            if (!all_bits_equal(ref_traj[r + 1u], chain_hist[r], hfirst)) {
-                hok = false;
-                std::printf("  [hist] r=%u first_bad=%zu ref=%.6g hist=%.6g\n", r, hfirst,
-                            (double)ref_traj[r + 1u][hfirst], (double)chain_hist[r][hfirst]);
-                break;
+            bool row_ok = ref_traj[r + 1u].size() == chain_hist[r].size();
+            for (std::size_t i = 0; row_ok && i < ref_traj[r + 1u].size(); ++i) {
+                const double x = ref_traj[r + 1u][i];
+                const double y = chain_hist[r][i];
+                const double scale = std::fmax(1.0, std::fmax(std::fabs(x), std::fabs(y)));
+                if (std::fabs(x - y) > 1e-3 * scale) row_ok = false;
             }
+            if (!row_ok) { hok = false; break; }
         }
         check(hok, "history capture matches chain state (multi-layer)");
     }

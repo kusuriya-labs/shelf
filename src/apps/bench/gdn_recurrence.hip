@@ -185,7 +185,7 @@ bool build(Env& e, uint32_t seed) {
                      &e.out, &e.vals_dev, &e.state_dev, &e.param_dev, &e.ctx_dev};
     size_t szs[] = {(size_t)rows * e.qk * 4, (size_t)rows * e.qk * 4, (size_t)rows * e.vdim * 2,
                     (size_t)rows * nvh * 2, (size_t)rows * nvh * 2, (size_t)nvh * 2, (size_t)nvh * 2,
-                    state_total * sizeof(shelf::fp16_t), (size_t)nr * sizeof(::shelf::runtime::DeviceRequestDescriptor),
+                    state_total * sizeof(::shelf::state::GdnStateScalar), (size_t)nr * sizeof(::shelf::runtime::DeviceRequestDescriptor),
                     (size_t)rows * e.vdim * 4, 6 * sizeof(V), sizeof(S),
                     2 * sizeof(::shelf::runtime::StaticParameterSlot), sizeof(::shelf::runtime::DeviceBatchContext)};
     for (size_t i = 0; i < 14; ++i)
@@ -310,7 +310,7 @@ bool build(Env& e, uint32_t seed) {
     e.binding.parameter_index1 = 1;
 
     e.state_view = {};
-    e.state_view.gdn.recurrent_base = (shelf::fp16_t*)e.state;
+    e.state_view.gdn.recurrent_base = (::shelf::state::GdnStateScalar*)e.state;
     e.state_view.gdn.num_gdn_states = 1;
     e.state_view.gdn.max_sequences = max_seq;
     e.state_view.gdn.recurrent_slot_stride = slot_stride;
@@ -327,7 +327,7 @@ bool build(Env& e, uint32_t seed) {
     e.ka.b = (const bf16t*)e.b;
     e.ka.dt_bias = (const bf16t*)e.dt_bias;
     e.ka.a_log = (const bf16t*)e.a_log;
-    e.ka.recurrent_state = (shelf::fp16_t*)e.state;
+    e.ka.recurrent_state = (::shelf::state::GdnStateScalar*)e.state;
     e.ka.output = (float*)e.out;
     e.ka.requests = (const ::shelf::runtime::DeviceRequestDescriptor*)e.requests;
     e.ka.num_requests = nr;
@@ -440,12 +440,12 @@ int run_gdn_recurrence(int argc, char** argv) {
                 const uint64_t slot_stride =
                     (uint64_t)e.p.num_v_heads * e.p.head_k * e.p.head_v;
                 const uint32_t capture = rows - 1u;
-                if (hipMalloc(&e.hist, (size_t)capture * slot_stride * sizeof(shelf::fp16_t)) !=
+                if (hipMalloc(&e.hist, (size_t)capture * slot_stride * sizeof(::shelf::state::GdnStateScalar)) !=
                     hipSuccess) {
                     rc = 1;
                     continue;
                 }
-                e.ka.recurrent_history = (shelf::fp16_t*)e.hist;
+                e.ka.recurrent_history = (::shelf::state::GdnStateScalar*)e.hist;
                 e.ka.recurrent_history_row_stride = slot_stride;
                 e.ka.capture_rows = capture;
             }

@@ -102,7 +102,7 @@ std::size_t spec_gdn_conv_bytes(const GdnStatePool& pool) noexcept {
 }
 
 std::size_t spec_gdn_recurrent_bytes(const GdnStatePool& pool) noexcept {
-    return static_cast<std::size_t>(pool.device_view().recurrent_slot_stride) * sizeof(fp16_t);
+    return static_cast<std::size_t>(pool.device_view().recurrent_slot_stride) * sizeof(::shelf::state::GdnStateScalar);
 }
 
 Status spec_gdn_snapshot(
@@ -126,7 +126,7 @@ Status spec_gdn_snapshot(
     }
     const GdnStatePoolDeviceView view = pool.device_view();
     bf16_t* conv_src = view.conv_base + static_cast<std::size_t>(slot) * view.conv_slot_stride;
-    const fp16_t* rec_src = view.recurrent_base + static_cast<std::size_t>(slot) * view.recurrent_slot_stride;
+    const ::shelf::state::GdnStateScalar* rec_src = view.recurrent_base + static_cast<std::size_t>(slot) * view.recurrent_slot_stride;
     hipError_t err = hipMemcpyAsync(conv_dst, conv_src, conv_bytes, hipMemcpyDeviceToDevice, stream);
     if (err != hipSuccess) {
         return Status::hip_error("spec_gdn_snapshot conv copy", hipGetErrorString(err), __FILE__, __LINE__);
@@ -159,7 +159,7 @@ Status spec_gdn_restore(
     }
     const GdnStatePoolDeviceView view = pool.device_view();
     bf16_t* conv_dst = view.conv_base + static_cast<std::size_t>(slot) * view.conv_slot_stride;
-    fp16_t* rec_dst =
+    ::shelf::state::GdnStateScalar* rec_dst =
         view.recurrent_base + static_cast<std::size_t>(slot) * view.recurrent_slot_stride;
     hipError_t err = hipMemcpyAsync(conv_dst, conv_src, conv_bytes, hipMemcpyDeviceToDevice, stream);
     if (err != hipSuccess) {

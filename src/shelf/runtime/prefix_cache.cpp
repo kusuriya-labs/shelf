@@ -32,7 +32,7 @@ std::size_t gdn_conv_slot_bytes(const GdnStatePool& pool) {
 std::size_t gdn_recurrent_slot_bytes(const GdnStatePool& pool) {
     const GdnStatePoolLayout& layout = pool.layout();
     return static_cast<std::size_t>(layout.num_gdn_states) * layout.num_v_heads *
-           layout.head_k * layout.head_v * sizeof(fp16_t);
+           layout.head_k * layout.head_v * sizeof(::shelf::state::GdnStateScalar);
 }
 
 std::size_t qsa_pooled_slot_bytes(const ::shelf::state::QsaKeyStatePool& pool) {
@@ -214,7 +214,7 @@ Status gdn_slot_to_host(const GdnStatePool& pool, SequenceSlotId slot,
     }
     const std::byte* rec =
         reinterpret_cast<const std::byte*>(view.recurrent_base) +
-        static_cast<std::size_t>(slot) * view.recurrent_slot_stride * sizeof(fp16_t);
+        static_cast<std::size_t>(slot) * view.recurrent_slot_stride * sizeof(::shelf::state::GdnStateScalar);
     err = hipMemcpyAsync(base + region.rec, rec, region.rec_bytes,
                          hipMemcpyDeviceToHost, stream);
     if (err != hipSuccess) {
@@ -238,7 +238,7 @@ Status gdn_slot_from_host(const GdnStatePool& pool, SequenceSlotId slot,
                                  hipGetErrorString(err), __FILE__, __LINE__);
     }
     std::byte* rec = reinterpret_cast<std::byte*>(view.recurrent_base) +
-        static_cast<std::size_t>(slot) * view.recurrent_slot_stride * sizeof(fp16_t);
+        static_cast<std::size_t>(slot) * view.recurrent_slot_stride * sizeof(::shelf::state::GdnStateScalar);
     err = hipMemcpyAsync(rec, base + region.rec, region.rec_bytes,
                          hipMemcpyHostToDevice, stream);
     if (err != hipSuccess) {
@@ -750,7 +750,7 @@ PrefixCacheBytes prefix_cache_bytes(
         static_cast<std::size_t>(layout.num_gdn_states) * layout.conv_history *
             layout.conv_history_stride * sizeof(bf16_t) +
         static_cast<std::size_t>(layout.num_gdn_states) * layout.num_v_heads *
-            layout.head_k * layout.head_v * sizeof(fp16_t);
+            layout.head_k * layout.head_v * sizeof(::shelf::state::GdnStateScalar);
     bytes.state =
         bytes.state_slot * static_cast<std::size_t>(config.capture_slots);
     if (config.capture_slots != 0u && qsa != nullptr) {

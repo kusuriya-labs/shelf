@@ -14,7 +14,7 @@ namespace state {
 
 struct GdnStatePoolDeviceView {
     bf16_t* conv_base = nullptr;
-    fp16_t* recurrent_base = nullptr;
+    GdnStateScalar* recurrent_base = nullptr;
 
     uint32_t num_gdn_states = 0;
     uint32_t max_sequences = 0;
@@ -112,7 +112,7 @@ class GdnStatePool {
     GdnStatePoolDeviceView device_view() const noexcept {
         return GdnStatePoolDeviceView{
             .conv_base = conv_memory_.data<bf16_t>(),
-            .recurrent_base = recurrent_memory_.data<fp16_t>(),
+            .recurrent_base = recurrent_memory_.data<GdnStateScalar>(),
             .num_gdn_states = layout_.num_gdn_states,
             .max_sequences = max_slots_,
             .conv_slot_stride =

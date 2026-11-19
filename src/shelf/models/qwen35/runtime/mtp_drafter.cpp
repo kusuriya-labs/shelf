@@ -1244,7 +1244,7 @@ std::size_t mtp_batch_rank_state_reserve_bytes(
         (static_cast<std::size_t>(gdn.conv_history_stride) * gdn.conv_history *
              sizeof(bf16_t) +
          static_cast<std::size_t>(gdn.num_v_heads) * gdn.head_k * gdn.head_v *
-             sizeof(fp16_t));
+             sizeof(::shelf::state::GdnStateScalar));
     return history + compact + static_cast<std::size_t>(drafter_count) * snapshot;
 }
 

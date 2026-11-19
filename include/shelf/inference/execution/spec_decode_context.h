@@ -1,6 +1,7 @@
 #pragma once
 
 #include <shelf/core/memory/types.h>
+#include <shelf/inference/state/gdn_state.h>
 #include <cstdint>
 
 namespace shelf {
@@ -8,7 +9,7 @@ namespace execution {
 
 struct GdnSpecHistoryDeviceView {
     bf16_t* conv_history = nullptr;
-    fp16_t* recurrent_history = nullptr;
+    ::shelf::state::GdnStateScalar* recurrent_history = nullptr;
     // Optional tree-only mask: save recurrent state only at marked rows.
     const uint32_t* recurrent_capture_mask = nullptr;
 

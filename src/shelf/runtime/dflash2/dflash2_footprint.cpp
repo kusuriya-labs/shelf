@@ -70,7 +70,7 @@ std::size_t dflash2_spec_workspace_bytes(const DFlash2SpecDecoderConfig& config,
                       sizeof(bf16_t));
     if (config.tree) {
         total += align_up(static_cast<std::size_t>(history_rows) * view.recurrent_slot_stride *
-                          sizeof(fp16_t));
+                          sizeof(::shelf::state::GdnStateScalar));
         total += align_up((2u * history_rows + 16u * history_rows) * sizeof(uint32_t));
         total += align_up((4u * history_rows + 1u + history_rows * (history_rows + 1u) / 2u) *
                           sizeof(uint32_t));

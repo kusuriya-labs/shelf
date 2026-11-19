@@ -57,12 +57,12 @@ struct Buf {
     uint16_t* b = nullptr;
     uint16_t* dt_bias = nullptr;
     uint16_t* a_log = nullptr;
-    shelf::fp16_t* state_ref = nullptr;
-    shelf::fp16_t* state_cand = nullptr;
+    ::shelf::state::GdnStateScalar* state_ref = nullptr;
+    ::shelf::state::GdnStateScalar* state_cand = nullptr;
     float* out_ref = nullptr;
     float* out_cand = nullptr;
-    shelf::fp16_t* hist_ref = nullptr;
-    shelf::fp16_t* hist_cand = nullptr;
+    ::shelf::state::GdnStateScalar* hist_ref = nullptr;
+    ::shelf::state::GdnStateScalar* hist_cand = nullptr;
     void* requests = nullptr;
     uint32_t rows = 0;
     uint32_t qk = 0;
@@ -91,7 +91,7 @@ bool setup(Buf& d, const Shapes& sh, uint32_t rows, uint32_t capture_rows, uint3
     const size_t gate_bytes = (size_t)rows * sh.num_v_heads * 2u;
     const size_t st_bytes = (size_t)rows * d.slot_stride * 4u;
     const size_t hist_bytes =
-        (size_t)capture_rows * d.slot_stride * sizeof(shelf::fp16_t);
+        (size_t)capture_rows * d.slot_stride * sizeof(::shelf::state::GdnStateScalar);
 
     if (hipMalloc(&d.q, qk_bytes) != hipSuccess) return false;
     if (hipMalloc(&d.k, qk_bytes) != hipSuccess) return false;
@@ -100,9 +100,9 @@ bool setup(Buf& d, const Shapes& sh, uint32_t rows, uint32_t capture_rows, uint3
     if (hipMalloc(&d.b, gate_bytes) != hipSuccess) return false;
     if (hipMalloc(&d.dt_bias, (size_t)sh.num_v_heads * 2u) != hipSuccess) return false;
     if (hipMalloc(&d.a_log, (size_t)sh.num_v_heads * 2u) != hipSuccess) return false;
-    if (hipMalloc(&d.state_ref, (size_t)d.slot_stride * sizeof(shelf::fp16_t)) != hipSuccess)
+    if (hipMalloc(&d.state_ref, (size_t)d.slot_stride * sizeof(::shelf::state::GdnStateScalar)) != hipSuccess)
         return false;
-    if (hipMalloc(&d.state_cand, (size_t)d.slot_stride * sizeof(shelf::fp16_t)) != hipSuccess)
+    if (hipMalloc(&d.state_cand, (size_t)d.slot_stride * sizeof(::shelf::state::GdnStateScalar)) != hipSuccess)
         return false;
     if (hipMalloc(&d.out_ref, (size_t)rows * d.vdim * 4u) != hipSuccess) return false;
     if (hipMalloc(&d.out_cand, (size_t)rows * d.vdim * 4u) != hipSuccess) return false;
@@ -140,16 +140,14 @@ bool setup(Buf& d, const Shapes& sh, uint32_t rows, uint32_t capture_rows, uint3
     std::vector<float> hs((size_t)d.slot_stride);
     uint32_t ss = seed * 31u + 5u;
     for (size_t i = 0; i < hs.size(); ++i) hs[i] = rndf(ss, 0.25f);
-    std::vector<shelf::fp16_t> hs16(hs.size());
-    for (size_t i = 0; i < hs.size(); ++i) hs16[i] = shelf::f32_to_fp16(hs[i]);
-    if (hipMemcpy(d.state_ref, hs16.data(), hs16.size() * sizeof(shelf::fp16_t),
+    if (hipMemcpy(d.state_ref, hs.data(), hs.size() * sizeof(::shelf::state::GdnStateScalar),
                   hipMemcpyHostToDevice) != hipSuccess ||
-        hipMemcpy(d.state_cand, hs16.data(), hs16.size() * sizeof(shelf::fp16_t),
+        hipMemcpy(d.state_cand, hs.data(), hs.size() * sizeof(::shelf::state::GdnStateScalar),
                   hipMemcpyHostToDevice) != hipSuccess)
         return false;
 
-    std::vector<shelf::fp16_t> hh(hist_bytes / sizeof(shelf::fp16_t),
-                               shelf::f32_to_fp16(-12345.0f));
+    std::vector<::shelf::state::GdnStateScalar> hh(hist_bytes / sizeof(::shelf::state::GdnStateScalar),
+                               -12345.0f);
     if (hipMemcpy(d.hist_ref, hh.data(), hist_bytes, hipMemcpyHostToDevice) != hipSuccess ||
         hipMemcpy(d.hist_cand, hh.data(), hist_bytes, hipMemcpyHostToDevice) != hipSuccess)
         return false;
@@ -213,7 +211,7 @@ bool run_case(const Shapes& sh, uint32_t rows, uint32_t capture_rows, hipStream_
         if (ok && hipStreamSynchronize(stream) != hipSuccess) ok = false;
         if (ok && r < capture_rows)
             ok = hipMemcpy(d.hist_ref + (size_t)r * d.slot_stride, d.state_ref,
-                           (size_t)d.slot_stride * sizeof(shelf::fp16_t),
+                           (size_t)d.slot_stride * sizeof(::shelf::state::GdnStateScalar),
                            hipMemcpyDeviceToDevice) == hipSuccess;
     }
 
@@ -234,13 +232,13 @@ bool run_case(const Shapes& sh, uint32_t rows, uint32_t capture_rows, hipStream_
     if (ok) {
         std::vector<shelf::fp16_t> s_ref(d.slot_stride), s_cand(d.slot_stride);
         shelf::gpu::discard_cleanup_result(
-            hipMemcpy(s_ref.data(), d.state_ref, s_ref.size() * sizeof(shelf::fp16_t),
+            hipMemcpy(s_ref.data(), d.state_ref, s_ref.size() * sizeof(::shelf::state::GdnStateScalar),
                       hipMemcpyDeviceToHost));
         shelf::gpu::discard_cleanup_result(
-            hipMemcpy(s_cand.data(), d.state_cand, s_cand.size() * sizeof(shelf::fp16_t),
+            hipMemcpy(s_cand.data(), d.state_cand, s_cand.size() * sizeof(::shelf::state::GdnStateScalar),
                       hipMemcpyDeviceToHost));
         state_ok = std::memcmp(s_ref.data(), s_cand.data(),
-                               s_ref.size() * sizeof(shelf::fp16_t)) == 0;
+                               s_ref.size() * sizeof(::shelf::state::GdnStateScalar)) == 0;
 
         std::vector<float> o_ref((size_t)rows * d.vdim), o_cand((size_t)rows * d.vdim);
         shelf::gpu::discard_cleanup_result(
@@ -252,15 +250,15 @@ bool run_case(const Shapes& sh, uint32_t rows, uint32_t capture_rows, hipStream_
         const size_t hn = (size_t)capture_rows * d.slot_stride;
         std::vector<shelf::fp16_t> h_ref(hn), h_cand(hn);
         shelf::gpu::discard_cleanup_result(
-            hipMemcpy(h_ref.data(), d.hist_ref, hn * sizeof(shelf::fp16_t),
+            hipMemcpy(h_ref.data(), d.hist_ref, hn * sizeof(::shelf::state::GdnStateScalar),
                       hipMemcpyDeviceToHost));
         shelf::gpu::discard_cleanup_result(
-            hipMemcpy(h_cand.data(), d.hist_cand, hn * sizeof(shelf::fp16_t),
+            hipMemcpy(h_cand.data(), d.hist_cand, hn * sizeof(::shelf::state::GdnStateScalar),
                       hipMemcpyDeviceToHost));
-        hist_ok = std::memcmp(h_ref.data(), h_cand.data(), hn * sizeof(shelf::fp16_t)) == 0;
+        hist_ok = std::memcmp(h_ref.data(), h_cand.data(), hn * sizeof(::shelf::state::GdnStateScalar)) == 0;
         if (!hist_ok) {
             size_t hi = 0;
-            while (hi < hn && std::memcmp(&h_ref[hi], &h_cand[hi], sizeof(shelf::fp16_t)) == 0)
+            while (hi < hn && std::memcmp(&h_ref[hi], &h_cand[hi], sizeof(::shelf::state::GdnStateScalar)) == 0)
                 ++hi;
             std::printf("  [hist] rows=%u cap=%u first_bad=%zu (row=%zu off=%zu) ref=%.6g cand=%.6g\n",
                         rows, capture_rows, hi, hi / d.slot_stride, hi % d.slot_stride,

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <shelf/core/memory/types.h>
+#include <shelf/inference/state/gdn_state.h>
 #include <shelf/runtime/batch/device_batch_context.h>
 #include <hip/hip_runtime.h>
 
@@ -18,7 +19,7 @@ struct GdnRecurrenceArgs {
     const bf16_t* dt_bias = nullptr;
     const bf16_t* a_log = nullptr;
 
-    fp16_t* recurrent_state = nullptr;
+    ::shelf::state::GdnStateScalar* recurrent_state = nullptr;
     float* output = nullptr;
 
     const ::shelf::runtime::DeviceRequestDescriptor* requests = nullptr;
@@ -47,7 +48,7 @@ struct GdnRecurrenceArgs {
     uint64_t recurrent_slot_stride = 0;
     uint64_t recurrent_layer_stride = 0;
 
-    fp16_t* recurrent_history = nullptr;
+    ::shelf::state::GdnStateScalar* recurrent_history = nullptr;
     uint64_t recurrent_history_row_stride = 0;
     uint32_t capture_rows = 0;
     const uint32_t* recurrent_capture_mask = nullptr;

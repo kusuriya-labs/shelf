@@ -46,7 +46,7 @@ Result<GdnStatePool> GdnStatePool::create(
         * layout.num_v_heads
         * layout.head_k
         * layout.head_v
-        * sizeof(fp16_t);
+        * sizeof(GdnStateScalar);
 
     auto rec_alloc = arena.allocate_aligned(rec_bytes, 256);
     if (!rec_alloc.ok()) {
@@ -91,7 +91,7 @@ Result<GdnStatePool> GdnStatePool::create(
         1,
     };
 
-    auto rec_tensor = gpu::Tensor::create<fp16_t>(
+    auto rec_tensor = gpu::Tensor::create<GdnStateScalar>(
         rec_alloc.value(),
         rec_shape,
         5,
@@ -146,7 +146,7 @@ Status GdnStatePool::initialize(
         return Status::hip_error("hipMemsetAsync", "initialize conv", __FILE__, __LINE__);
     }
 
-    fp16_t* rec_base = recurrent_memory_.data<fp16_t>();
+    GdnStateScalar* rec_base = recurrent_memory_.data<GdnStateScalar>();
     std::size_t slot_offset_rec =
         slot * layout_.num_gdn_states * layout_.num_v_heads * layout_.head_k * layout_.head_v;
 
@@ -155,7 +155,7 @@ Status GdnStatePool::initialize(
         * layout_.num_v_heads
         * layout_.head_k
         * layout_.head_v
-        * sizeof(fp16_t);
+        * sizeof(GdnStateScalar);
 
     err = hipMemsetAsync(
         rec_base + slot_offset_rec,
@@ -207,7 +207,7 @@ Status GdnStatePool::reset(
         return Status::hip_error("hipMemsetAsync", "reset conv", __FILE__, __LINE__);
     }
 
-    fp16_t* rec_base = recurrent_memory_.data<fp16_t>();
+    GdnStateScalar* rec_base = recurrent_memory_.data<GdnStateScalar>();
     std::size_t slot_offset_rec =
         slot * layout_.num_gdn_states * layout_.num_v_heads * layout_.head_k * layout_.head_v;
 
@@ -216,7 +216,7 @@ Status GdnStatePool::reset(
         * layout_.num_v_heads
         * layout_.head_k
         * layout_.head_v
-        * sizeof(fp16_t);
+        * sizeof(GdnStateScalar);
 
     err = hipMemsetAsync(
         rec_base + slot_offset_rec,
@@ -284,11 +284,11 @@ GDNState GdnStatePool::gdn_state(
 
     gpu::DeviceAllocationView rec_view = gpu::GpuArena::make_view(
         reinterpret_cast<std::byte*>(
-            recurrent_memory_.data<fp16_t>() + slot_rec_offset + state_rec_offset),
-        layout_.num_v_heads * layout_.head_k * layout_.head_v * sizeof(fp16_t),
+            recurrent_memory_.data<GdnStateScalar>() + slot_rec_offset + state_rec_offset),
+        layout_.num_v_heads * layout_.head_k * layout_.head_v * sizeof(GdnStateScalar),
         device_);
 
-    auto rec_result = gpu::Tensor::create<fp16_t>(rec_view, rec_shape, 3, rec_strides);
+    auto rec_result = gpu::Tensor::create<GdnStateScalar>(rec_view, rec_shape, 3, rec_strides);
 
     assert(conv_result.ok() && rec_result.ok());
     (void)conv_result;
@@ -346,12 +346,12 @@ Status GdnStatePool::copy_slot_from(
             "copy_slot_from conv", hipGetErrorString(err), __FILE__, __LINE__);
     }
 
-    fp16_t* dst_rec = recurrent_memory_.data<fp16_t>()
+    GdnStateScalar* dst_rec = recurrent_memory_.data<GdnStateScalar>()
         + static_cast<std::size_t>(dst_slot) * rec_slot_elems;
-    const fp16_t* src_rec = src.recurrent_memory_.data<fp16_t>()
+    const GdnStateScalar* src_rec = src.recurrent_memory_.data<GdnStateScalar>()
         + static_cast<std::size_t>(src_slot) * rec_slot_elems;
     err = hipMemcpyAsync(
-        dst_rec, src_rec, rec_slot_elems * sizeof(fp16_t),
+        dst_rec, src_rec, rec_slot_elems * sizeof(GdnStateScalar),
         hipMemcpyDeviceToDevice, stream);
     if (err != hipSuccess) {
         return Status::hip_error(

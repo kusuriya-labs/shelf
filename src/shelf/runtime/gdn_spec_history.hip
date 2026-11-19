@@ -24,7 +24,7 @@ Result<GdnSpecHistory> create_gdn_spec_history(
     history.rows = rows;
     history.conv_state_bytes = static_cast<std::size_t>(view.conv_slot_stride) * sizeof(bf16_t);
     history.recurrent_state_bytes =
-        with_recurrent ? static_cast<std::size_t>(view.recurrent_slot_stride) * sizeof(fp16_t)
+        with_recurrent ? static_cast<std::size_t>(view.recurrent_slot_stride) * sizeof(::shelf::state::GdnStateScalar)
                        : 0u;
 
     {
@@ -36,17 +36,25 @@ Result<GdnSpecHistory> create_gdn_spec_history(
             backing, {rows, view.conv_slot_stride}, {view.conv_slot_stride, 1u});
         if (!tensor.ok()) return tensor.status();
         history.conv = tensor.release();
+        if (hipMemset(history.conv.data<bf16_t>(), 0,
+                      count * sizeof(bf16_t)) != hipSuccess)
+            return Status::hip_error("gdn conv history zero", "hipMemset",
+                                     __FILE__, __LINE__);
     }
     if (with_recurrent) {
         const std::size_t count = static_cast<std::size_t>(rows) * view.recurrent_slot_stride;
-        auto rec_view = arena.allocate_aligned(count * sizeof(fp16_t), 256u);
+        auto rec_view = arena.allocate_aligned(count * sizeof(::shelf::state::GdnStateScalar), 256u);
         if (!rec_view.ok()) return rec_view.status();
         auto backing = rec_view.release();
-        auto tensor = gpu::Tensor::create<fp16_t>(
+        auto tensor = gpu::Tensor::create<::shelf::state::GdnStateScalar>(
             backing, {rows, view.recurrent_slot_stride},
             {view.recurrent_slot_stride, 1u});
         if (!tensor.ok()) return tensor.status();
         history.recurrent = tensor.release();
+        if (hipMemset(history.recurrent.data<::shelf::state::GdnStateScalar>(), 0,
+                      count * sizeof(::shelf::state::GdnStateScalar)) != hipSuccess)
+            return Status::hip_error("gdn recurrent history zero", "hipMemset",
+                                     __FILE__, __LINE__);
     }
 
     history.initialized = true;
@@ -64,7 +72,7 @@ GdnSpecHistoryDeviceView gdn_spec_history_view(
     // Conv-only histories have no recurrent tensor. Avoid taking data() on an
     // empty tensor and make the absence explicit to the recurrence selector.
     if (history.recurrent_state_bytes != 0u) {
-        view.recurrent_history = history.recurrent.data<fp16_t>();
+        view.recurrent_history = history.recurrent.data<::shelf::state::GdnStateScalar>();
     }
     view.capture_rows = capture_rows;
     view.conv_row_stride = static_cast<uint64_t>(history.conv.dim(1));
@@ -105,7 +113,7 @@ Status restore_gdn_spec_history(
     }
     const GdnStatePoolDeviceView view = pool.device_view();
     bf16_t* conv_dst = view.conv_base + static_cast<std::size_t>(slot) * view.conv_slot_stride;
-    fp16_t* rec_dst =
+    ::shelf::state::GdnStateScalar* rec_dst =
         view.recurrent_base + static_cast<std::size_t>(slot) * view.recurrent_slot_stride;
     const bf16_t* conv_src =
         history.conv.data<bf16_t>() +
@@ -118,8 +126,8 @@ Status restore_gdn_spec_history(
                                  __FILE__, __LINE__);
     }
     if (history.recurrent_state_bytes == 0u) return Status::make_ok();
-    const fp16_t* rec_src =
-        history.recurrent.data<fp16_t>() +
+    const ::shelf::state::GdnStateScalar* rec_src =
+        history.recurrent.data<::shelf::state::GdnStateScalar>() +
         static_cast<std::size_t>(history_row) * history.recurrent.dim(1);
     err = hipMemcpyAsync(rec_dst, rec_src, history.recurrent_state_bytes,
                          hipMemcpyDeviceToDevice, stream);

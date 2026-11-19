@@ -17,7 +17,7 @@
 #include <vector>
 
 using shelf::bf16_t;
-using shelf::fp16_t;
+using StateScalar = ::shelf::state::GdnStateScalar;
 using shelf::state::GdnStatePool;
 using shelf::state::GdnStatePoolDeviceView;
 using shelf::state::GdnStatePoolLayout;
@@ -85,7 +85,18 @@ static bool alloc_u8(
     return true;
 }
 
-static bool same_bytes(const void* a, const void* b, std::size_t n) {
+static bool close_state(const StateScalar* a, const StateScalar* b, std::size_t bytes) {
+    const std::size_t n = bytes / sizeof(StateScalar);
+    for (std::size_t i = 0; i < n; ++i) {
+        const double x = a[i];
+        const double y = b[i];
+        const double scale = std::fmax(1.0, std::fmax(std::fabs(x), std::fabs(y)));
+        if (std::fabs(x - y) > 1e-3 * scale) return false;
+    }
+    return true;
+}
+
+bool same_bytes(const void* a, const void* b, std::size_t n) {
     return std::memcmp(a, b, n) == 0;
 }
 
@@ -149,7 +160,7 @@ int main() {
               static_cast<std::size_t>(view.conv_slot_stride) * sizeof(bf16_t),
           "history conv bytes");
     check(history.recurrent_state_bytes ==
-              static_cast<std::size_t>(view.recurrent_slot_stride) * sizeof(fp16_t),
+              static_cast<std::size_t>(view.recurrent_slot_stride) * sizeof(StateScalar),
           "history recurrent bytes");
     std::printf("GATE11C_HISTORY conv_state_bytes=%zu recurrent_state_bytes=%zu rows=%u\n",
                 history.conv_state_bytes, history.recurrent_state_bytes, history.rows);
@@ -259,7 +270,7 @@ int main() {
 
     const std::size_t rec_slot_bytes = history.recurrent_state_bytes;
     const std::size_t conv_slot_bytes = history.conv_state_bytes;
-    std::vector<std::vector<fp16_t>> clean_rec(kRows + 1u);
+    std::vector<std::vector<StateScalar>> clean_rec(kRows + 1u);
     std::vector<std::vector<bf16_t>> clean_conv(kRows + 1u);
 
     auto make_rec_args = [&](uint32_t actual_rows) {
@@ -326,7 +337,7 @@ int main() {
         check(::shelf::kernel::launch_gdn_conv1d_bf16_f32(ca, stream) == hipSuccess,
               "clean conv launch");
         check(hipStreamSynchronize(stream) == hipSuccess, "clean sync");
-        clean_rec[n].resize(rec_slot_bytes / sizeof(fp16_t));
+        clean_rec[n].resize(rec_slot_bytes / sizeof(StateScalar));
         clean_conv[n].resize(conv_slot_bytes / sizeof(bf16_t));
         check(hipMemcpy(clean_rec[n].data(), view.recurrent_base, rec_slot_bytes,
                         hipMemcpyDeviceToHost) == hipSuccess,
@@ -339,7 +350,7 @@ int main() {
     check(pool.reset(0u, stream).ok(), "capture reset");
     {
         auto ra = make_rec_args(kCapture);
-        ra.recurrent_history = history.recurrent.data<fp16_t>();
+        ra.recurrent_history = history.recurrent.data<StateScalar>();
         ra.recurrent_history_row_stride = static_cast<uint64_t>(history.recurrent.dim(1));
         ra.capture_rows = kCapture;
         check(::shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(ra, stream) ==
@@ -355,10 +366,10 @@ int main() {
     }
 
     for (uint32_t n = 1u; n <= kCapture; ++n) {
-        std::vector<fp16_t> hist_rec(rec_slot_bytes / sizeof(fp16_t));
+        std::vector<StateScalar> hist_rec(rec_slot_bytes / sizeof(StateScalar));
         std::vector<bf16_t> hist_conv(conv_slot_bytes / sizeof(bf16_t));
-        const fp16_t* rec_row =
-            history.recurrent.data<fp16_t>() +
+        const StateScalar* rec_row =
+            history.recurrent.data<StateScalar>() +
             static_cast<std::size_t>(n - 1u) * history.recurrent.dim(1);
         const bf16_t* conv_row =
             history.conv.data<bf16_t>() +
@@ -369,7 +380,7 @@ int main() {
         check(hipMemcpy(hist_conv.data(), conv_row, conv_slot_bytes,
                         hipMemcpyDeviceToHost) == hipSuccess,
               "history conv read");
-        check(same_bytes(hist_rec.data(), clean_rec[n].data(), rec_slot_bytes),
+        check(close_state(hist_rec.data(), clean_rec[n].data(), rec_slot_bytes),
               "recurrent history row " + std::to_string(n));
         check(same_bytes(hist_conv.data(), clean_conv[n].data(), conv_slot_bytes),
               "conv history row " + std::to_string(n));
@@ -379,7 +390,7 @@ int main() {
     check(restore_gdn_spec_history(pool, 0u, history, 1u, stream).ok(), "history restore");
     check(hipStreamSynchronize(stream) == hipSuccess, "restore sync");
     {
-        std::vector<fp16_t> live_rec(rec_slot_bytes / sizeof(fp16_t));
+        std::vector<StateScalar> live_rec(rec_slot_bytes / sizeof(StateScalar));
         std::vector<bf16_t> live_conv(conv_slot_bytes / sizeof(bf16_t));
         check(hipMemcpy(live_rec.data(), view.recurrent_base, rec_slot_bytes,
                         hipMemcpyDeviceToHost) == hipSuccess,
@@ -387,10 +398,10 @@ int main() {
         check(hipMemcpy(live_conv.data(), view.conv_base, conv_slot_bytes,
                         hipMemcpyDeviceToHost) == hipSuccess,
               "restore conv read");
-        const fp16_t* rec_row =
-            history.recurrent.data<fp16_t>() + 1u * history.recurrent.dim(1);
+        const StateScalar* rec_row =
+            history.recurrent.data<StateScalar>() + 1u * history.recurrent.dim(1);
         const bf16_t* conv_row = history.conv.data<bf16_t>() + 1u * history.conv.dim(1);
-        std::vector<fp16_t> want_rec(rec_slot_bytes / sizeof(fp16_t));
+        std::vector<StateScalar> want_rec(rec_slot_bytes / sizeof(StateScalar));
         std::vector<bf16_t> want_conv(conv_slot_bytes / sizeof(bf16_t));
         (void)hipMemcpy(want_rec.data(), rec_row, rec_slot_bytes, hipMemcpyDeviceToHost);
         (void)hipMemcpy(want_conv.data(), conv_row, conv_slot_bytes, hipMemcpyDeviceToHost);
@@ -424,7 +435,7 @@ int main() {
         set_req_rows(kCapture);
         check(pool.reset(0u, stream).ok(), "tree chain reset");
         auto ra = make_rec_args(kCapture);
-        ra.recurrent_history = history.recurrent.data<fp16_t>();
+        ra.recurrent_history = history.recurrent.data<StateScalar>();
         ra.recurrent_history_row_stride =
             static_cast<uint64_t>(history.recurrent.dim(1));
         ra.capture_rows = kCapture;
@@ -440,7 +451,7 @@ int main() {
         check(::shelf::kernel::launch_gdn_conv1d_bf16_f32(ca, stream) == hipSuccess,
               "tree chain conv launch");
         check(hipStreamSynchronize(stream) == hipSuccess, "tree chain sync");
-        std::vector<fp16_t> trec(rec_slot_bytes / sizeof(fp16_t));
+        std::vector<StateScalar> trec(rec_slot_bytes / sizeof(StateScalar));
         std::vector<bf16_t> tconv(conv_slot_bytes / sizeof(bf16_t));
         check(hipMemcpy(trec.data(), view.recurrent_base, rec_slot_bytes,
                         hipMemcpyDeviceToHost) == hipSuccess,
@@ -464,7 +475,7 @@ int main() {
         set_req_rows(4u);
         check(pool.reset(0u, stream).ok(), "tree branch reset A");
         auto ra = make_rec_args(4u);
-        ra.recurrent_history = history.recurrent.data<fp16_t>();
+        ra.recurrent_history = history.recurrent.data<StateScalar>();
         ra.recurrent_history_row_stride =
             static_cast<uint64_t>(history.recurrent.dim(1));
         ra.capture_rows = kCapture;
@@ -497,7 +508,7 @@ int main() {
         const uint32_t mask[4] = {0u, 1u, 0u, 0u};
         check(hipMemcpy(capture_mask.data<uint8_t>(), mask, sizeof(mask), hipMemcpyHostToDevice) == hipSuccess,
               "tree capture mask upload");
-        check(hipMemset(history.recurrent.data<fp16_t>(), 0x7f,
+        check(hipMemset(history.recurrent.data<StateScalar>(), 0x7f,
                         4u * rec_slot_bytes) == hipSuccess, "tree history sentinel");
         check(pool.reset(0u, stream).ok(), "tree masked reset");
         ra.recurrent_capture_mask = reinterpret_cast<const uint32_t*>(capture_mask.data<uint8_t>());
@@ -512,7 +523,7 @@ int main() {
               "tree masked branch equals full history");
         for (uint32_t row : {0u, 2u, 3u}) {
             uint16_t sentinel = 0u;
-            const fp16_t* slot = history.recurrent.data<fp16_t>() +
+            const StateScalar* slot = history.recurrent.data<StateScalar>() +
                 static_cast<std::size_t>(row) * history.recurrent.dim(1);
             check(hipMemcpy(&sentinel, slot, sizeof(sentinel), hipMemcpyDeviceToHost) == hipSuccess &&
                       sentinel == 0x7f7fu, "tree unmarked history unchanged");

@@ -25,12 +25,12 @@ __device__ __forceinline__ bool gdn_request_selected(
     return true;
 }
 
-__device__ __forceinline__ float ld_f16(const fp16_t* p) {
-    return static_cast<float>(p->value);
+__device__ __forceinline__ float ld_state(const ::shelf::state::GdnStateScalar* p) {
+    return *p;
 }
 
-__device__ __forceinline__ void st_f16(fp16_t* p, float v) {
-    p->value = static_cast<_Float16>(v);
+__device__ __forceinline__ void st_state(::shelf::state::GdnStateScalar* p, float v) {
+    *p = v;
 }
 
 __device__ __forceinline__ float f16_round(float v) {
@@ -67,11 +67,11 @@ __global__ void gdn_recurrence_f32_impl(const GdnRecurrenceArgs a) {
     const uint32_t repeat = a.num_v_heads / a.key_heads;
     const uint32_t qk_head = v_head / repeat;
 
-    fp16_t* state_head = a.recurrent_state
+    ::shelf::state::GdnStateScalar* state_head = a.recurrent_state
         + static_cast<uint64_t>(slot) * a.recurrent_slot_stride
         + static_cast<uint64_t>(a.state_index) * a.recurrent_layer_stride
         + static_cast<uint64_t>(v_head) * head_k * head_v;
-    fp16_t* state_col = state_head + vcol;
+    ::shelf::state::GdnStateScalar* state_col = state_head + vcol;
 
     const float dt_bias = bf16f(a.dt_bias + v_head);
     const float neg_exp_a_log = -__expf(bf16f(a.a_log + v_head));
@@ -101,20 +101,20 @@ __global__ void gdn_recurrence_f32_impl(const GdnRecurrenceArgs a) {
 
         float kv_mem = 0.0f;
         for (uint32_t kk = 0u; kk < head_k; ++kk) {
-            const float s = ld_f16(state_col + static_cast<uint64_t>(kk) * head_v);
+            const float s = ld_state(state_col + static_cast<uint64_t>(kk) * head_v);
             kv_mem += s * d_t * k_row[kk];
         }
 
         const float delta = (v_val - kv_mem) * beta;
 
         for (uint32_t kk = 0u; kk < head_k; ++kk) {
-            fp16_t* sc = state_col + static_cast<uint64_t>(kk) * head_v;
-            st_f16(sc, ld_f16(sc) * d_t + k_row[kk] * delta);
+            ::shelf::state::GdnStateScalar* sc = state_col + static_cast<uint64_t>(kk) * head_v;
+            st_state(sc, ld_state(sc) * d_t + k_row[kk] * delta);
         }
 
         float acc = 0.0f;
         for (uint32_t kk = 0u; kk < head_k; ++kk) {
-            acc += ld_f16(state_col + static_cast<uint64_t>(kk) * head_v) * q_row[kk];
+            acc += ld_state(state_col + static_cast<uint64_t>(kk) * head_v) * q_row[kk];
         }
 
         a.output[static_cast<size_t>(row) * a.output_row_stride + static_cast<size_t>(v_head) * head_v + vcol] = acc;
@@ -269,7 +269,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
     const uint32_t hi = lane >> 4u;
     const uint32_t kh = lane >> 4u;
 
-    fp16_t* state_head = a.recurrent_state
+    ::shelf::state::GdnStateScalar* state_head = a.recurrent_state
         + static_cast<uint64_t>(slot) * a.recurrent_slot_stride
         + static_cast<uint64_t>(a.state_index) * a.recurrent_layer_stride
         + static_cast<uint64_t>(v_head) * hd * hv;
@@ -297,9 +297,9 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
         for (uint32_t vj = 0; vj < 2u; ++vj) {
             const uint32_t m0 = (kt0 + ki) * 16u + 8u * hi;
             const uint32_t n0 = (vt0 + vj) * 16u + lo;
-            const fp16_t* sp = state_head + static_cast<size_t>(m0) * hv + v0 + n0;
+            const ::shelf::state::GdnStateScalar* sp = state_head + static_cast<size_t>(m0) * hv + v0 + n0;
             #pragma unroll
-            for (uint32_t e = 0; e < 8u; ++e) Sacc[ki * 2u + vj][e] = ld_f16(sp + static_cast<size_t>(e) * hv);
+            for (uint32_t e = 0; e < 8u; ++e) Sacc[ki * 2u + vj][e] = ld_state(sp + static_cast<size_t>(e) * hv);
         }
     #pragma unroll
     for (uint32_t ki = 0; ki < 2u; ++ki)
@@ -325,7 +325,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
             if (a.row_parent != nullptr && ci > 0u) {
                 const int32_t parent = a.row_parent[c0];
                 if (parent != static_cast<int32_t>(c0) - 1) {
-                    const fp16_t* src = state_head;
+                    const ::shelf::state::GdnStateScalar* src = state_head;
                     if (parent >= 0 && a.recurrent_history != nullptr &&
                         static_cast<uint32_t>(parent) < a.capture_rows) {
                         src = a.recurrent_history +
@@ -339,11 +339,11 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
                         for (uint32_t vj = 0; vj < 2u; ++vj) {
                             const uint32_t m0 = (kt0 + ki) * 16u + 8u * hi;
                             const uint32_t n0 = (vt0 + vj) * 16u + lo;
-                            const fp16_t* sp = src + static_cast<size_t>(m0) * hv + v0 + n0;
+                            const ::shelf::state::GdnStateScalar* sp = src + static_cast<size_t>(m0) * hv + v0 + n0;
                             #pragma unroll
                             for (uint32_t e = 0; e < 8u; ++e)
                                 Sacc[ki * 2u + vj][e] =
-                                    ld_f16(sp + static_cast<size_t>(e) * hv);
+                                    ld_state(sp + static_cast<size_t>(e) * hv);
                         }
                     #pragma unroll
                     for (uint32_t ki = 0; ki < 2u; ++ki)
@@ -583,7 +583,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
                 (a.recurrent_capture_mask == nullptr || a.recurrent_capture_mask[c0] != 0u) &&
                 (a.capture_verify_only == 0u ||
                  req.execution_class == ::shelf::runtime::ExecutionClass::SPEC_VERIFY)) {
-                fp16_t* hist_head = a.recurrent_history
+                ::shelf::state::GdnStateScalar* hist_head = a.recurrent_history
                     + static_cast<uint64_t>(c0) * a.recurrent_history_row_stride
                     + static_cast<uint64_t>(a.state_index) * a.recurrent_layer_stride
                     + static_cast<uint64_t>(v_head) * hd * hv;
@@ -593,10 +593,10 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
                     for (uint32_t vj = 0; vj < 2u; ++vj) {
                         const uint32_t m0 = (kt0 + ki) * 16u + 8u * hi;
                         const uint32_t n0 = (vt0 + vj) * 16u + lo;
-                        fp16_t* hp = hist_head + static_cast<size_t>(m0) * hv + v0 + n0;
+                        ::shelf::state::GdnStateScalar* hp = hist_head + static_cast<size_t>(m0) * hv + v0 + n0;
                         #pragma unroll
                         for (uint32_t e = 0; e < 8u; ++e)
-                            st_f16(hp + static_cast<size_t>(e) * hv, Sacc[ki * 2u + vj][e]);
+                            st_state(hp + static_cast<size_t>(e) * hv, Sacc[ki * 2u + vj][e]);
                     }
             }
             if (a.compact_delta != nullptr) {
@@ -649,7 +649,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
         if (a.skip_state_store != 0u) return;
     }
     const uint32_t slot_store = a.requests[request_index].request_handle.slot;
-    fp16_t* const store_head = a.recurrent_state
+    ::shelf::state::GdnStateScalar* const store_head = a.recurrent_state
         + static_cast<uint64_t>(slot_store) * a.recurrent_slot_stride
         + static_cast<uint64_t>(a.state_index) * a.recurrent_layer_stride
         + static_cast<uint64_t>(v_head) * hd * hv;
@@ -659,9 +659,9 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
         for (uint32_t vj = 0; vj < 2u; ++vj) {
             const uint32_t m0 = (kt0 + ki) * 16u + 8u * hi;
             const uint32_t n0 = (vt0 + vj) * 16u + lo;
-            fp16_t* sp = store_head + static_cast<size_t>(m0) * hv + v0 + n0;
+            ::shelf::state::GdnStateScalar* sp = store_head + static_cast<size_t>(m0) * hv + v0 + n0;
             #pragma unroll
-            for (uint32_t e = 0; e < 8u; ++e) st_f16(sp + static_cast<size_t>(e) * hv, Sacc[ki * 2u + vj][e]);
+            for (uint32_t e = 0; e < 8u; ++e) st_state(sp + static_cast<size_t>(e) * hv, Sacc[ki * 2u + vj][e]);
         }
 }
 
@@ -743,7 +743,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_commit_body(GdnRecurrenceArg
     const uint32_t row_begin = req.row_begin;
 
     for (uint32_t li = 0u; li < a.num_gdn_states; ++li) {
-        fp16_t* state_head = a.recurrent_state
+        ::shelf::state::GdnStateScalar* state_head = a.recurrent_state
             + static_cast<uint64_t>(slot) * a.recurrent_slot_stride
             + static_cast<uint64_t>(li) * a.recurrent_layer_stride
             + static_cast<uint64_t>(v_head) * hd * hv;
@@ -758,10 +758,10 @@ __device__ __forceinline__ void gdn_recurrence_wmma_commit_body(GdnRecurrenceArg
             for (uint32_t vj = 0; vj < 2u; ++vj) {
                 const uint32_t m0 = (kt0 + ki) * 16u + 8u * hi;
                 const uint32_t n0 = (vt0 + vj) * 16u + lo;
-                const fp16_t* sp = state_head + static_cast<size_t>(m0) * hv + v0 + n0;
+                const ::shelf::state::GdnStateScalar* sp = state_head + static_cast<size_t>(m0) * hv + v0 + n0;
                 #pragma unroll
                 for (uint32_t e = 0; e < 8u; ++e)
-                    Sacc[ki * 2u + vj][e] = ld_f16(sp + static_cast<size_t>(e) * hv);
+                    Sacc[ki * 2u + vj][e] = ld_state(sp + static_cast<size_t>(e) * hv);
             }
 
         for (uint32_t i = 0u; i < a.compact_rows; ++i) {
@@ -813,10 +813,10 @@ __device__ __forceinline__ void gdn_recurrence_wmma_commit_body(GdnRecurrenceArg
             for (uint32_t vj = 0; vj < 2u; ++vj) {
                 const uint32_t m0 = (kt0 + ki) * 16u + 8u * hi;
                 const uint32_t n0 = (vt0 + vj) * 16u + lo;
-                fp16_t* sp = state_head + static_cast<size_t>(m0) * hv + v0 + n0;
+                ::shelf::state::GdnStateScalar* sp = state_head + static_cast<size_t>(m0) * hv + v0 + n0;
                 #pragma unroll
                 for (uint32_t e = 0; e < 8u; ++e)
-                    st_f16(sp + static_cast<size_t>(e) * hv, Sacc[ki * 2u + vj][e]);
+                    st_state(sp + static_cast<size_t>(e) * hv, Sacc[ki * 2u + vj][e]);
             }
     }
 }

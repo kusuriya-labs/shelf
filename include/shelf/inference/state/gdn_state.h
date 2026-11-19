@@ -5,6 +5,8 @@
 namespace shelf {
 namespace state {
 
+using GdnStateScalar = float;
+
 struct GDNState {
     gpu::Tensor conv_state;
     gpu::Tensor recurrent_state;

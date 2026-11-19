@@ -18,7 +18,7 @@
 namespace {
 
 using bf16t = shelf::bf16_t;
-using fp16t = shelf::fp16_t;
+using fp16t = ::shelf::state::GdnStateScalar;
 using V = ::shelf::runtime::DeviceValueBinding;
 using S = ::shelf::runtime::DeviceStateBinding;
 using P = ::shelf::runtime::DeviceProgramView;
@@ -168,10 +168,8 @@ bool run_case(const Case& c) {
     if (hipMemcpy(buf.b, h_b.data(), h_b.size() * 2, hipMemcpyHostToDevice) != hipSuccess) return false;
     if (hipMemcpy(buf.dt_bias, h_dt.data(), h_dt.size() * 2, hipMemcpyHostToDevice) != hipSuccess) return false;
     if (hipMemcpy(buf.a_log, h_al.data(), h_al.size() * 2, hipMemcpyHostToDevice) != hipSuccess) return false;
-    std::vector<fp16t> h_state16(h_state.size());
-    for (size_t i = 0; i < h_state.size(); ++i) h_state16[i] = shelf::f32_to_fp16(h_state[i]);
-    if (hipMemcpy(buf.state_correct, h_state16.data(), h_state16.size() * sizeof(fp16t), hipMemcpyHostToDevice) != hipSuccess) return false;
-    if (hipMemcpy(buf.state_opt, h_state16.data(), h_state16.size() * sizeof(fp16t), hipMemcpyHostToDevice) != hipSuccess) return false;
+    if (hipMemcpy(buf.state_correct, h_state.data(), h_state.size() * sizeof(fp16t), hipMemcpyHostToDevice) != hipSuccess) return false;
+    if (hipMemcpy(buf.state_opt, h_state.data(), h_state.size() * sizeof(fp16t), hipMemcpyHostToDevice) != hipSuccess) return false;
     if (hipMemset(buf.out_correct, 0, (size_t)rows * vdim * 4) != hipSuccess) return false;
     if (hipMemset(buf.out_opt, 0, (size_t)rows * vdim * 4) != hipSuccess) return false;
 
@@ -330,7 +328,7 @@ bool run_case(const Case& c) {
     bool single_rows = c.rows == nreq && !c.verify && !c.poison_v && c.head_k == 128u && c.head_v % 64u == 0u;
     for (const auto& req : c.reqs) single_rows = single_rows && req.row_count == 1u;
     if (single_rows && ::shelf::kernel::gdn_recurrence_lossy_enabled()) {
-        if (hipMemcpy(buf.state_opt, h_state16.data(), h_state16.size() * sizeof(fp16t), hipMemcpyHostToDevice) != hipSuccess ||
+        if (hipMemcpy(buf.state_opt, h_state.data(), h_state.size() * sizeof(fp16t), hipMemcpyHostToDevice) != hipSuccess ||
             ::shelf::kernel::launch_gdn_recurrence_f32_wmma_single_row_experimental(ka, nullptr) != hipSuccess) return false;
         std::vector<float> candidate_out(oo.size());
         std::vector<fp16t> candidate_state(so16.size());
@@ -344,7 +342,7 @@ bool run_case(const Case& c) {
         }
         for (size_t i = 0; i < so16.size(); ++i) {
             if (std::memcmp(&so16[i], &candidate_state[i], sizeof(fp16t))) ++state_changed;
-            max_state_diff = std::fmax(max_state_diff, std::fabs(double(shelf::fp16_to_f32(so16[i])) - shelf::fp16_to_f32(candidate_state[i])));
+            max_state_diff = std::fmax(max_state_diff, std::fabs(double(double(so16[i])) - candidate_state[i]));
         }
         experimental_pass = output_changed == 0u && state_changed == 0u;
         std::printf("  [%s] experimental vs WMMA: changed=%zu/%zu max_abs=%.3e/%.3e %s\n", c.name,
@@ -353,9 +351,9 @@ bool run_case(const Case& c) {
     }
     std::vector<float> sc(state_total), so(state_total);
     for (size_t i = 0; i < state_total; ++i) {
-        sc[i] = shelf::fp16_to_f32(sc16[i]);
-        so[i] = shelf::fp16_to_f32(so16[i]);
-        if (c.skip_store) sc[i] = shelf::fp16_to_f32(h_state16[i]);
+        sc[i] = double(sc16[i]);
+        so[i] = double(so16[i]);
+        if (c.skip_store) sc[i] = h_state[i];
     }
 
     const auto out_hit = [&](size_t i) {

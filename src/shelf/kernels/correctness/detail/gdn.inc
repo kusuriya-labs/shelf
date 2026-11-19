@@ -128,7 +128,7 @@ __device__ __forceinline__ ProgramStatus exec_gdn_recurrence(
         const uint32_t slot = req.request_handle.slot;
         if (slot >= gdn.max_sequences) return ProgramStatus::INVALID_BINDING;
         const uint32_t qk_head = h / repeat;
-        fp16_t* sbase = gdn.recurrent_base +
+        ::shelf::state::GdnStateScalar* sbase = gdn.recurrent_base +
                        static_cast<size_t>(slot) * gdn.recurrent_slot_stride +
                        static_cast<size_t>(sb->state_index) * gdn.recurrent_layer_stride +
                        static_cast<size_t>(h) * gdn.head_k * gdn.head_v + vcol;
@@ -154,17 +154,17 @@ __device__ __forceinline__ ProgramStatus exec_gdn_recurrence(
                                     static_cast<size_t>(h) * gdn.head_v + vcol];
             float kv_mem = 0.f;
             for (uint32_t kk = 0; kk < gdn.head_k; ++kk) {
-                kv_mem += gdn_ld_f16(sbase + kk * gdn.head_v) * d_t *
+                kv_mem += (sbase + kk * gdn.head_v)[0] * d_t *
                           load_elem(k_in, krow + kk);
             }
             const float delta = (__bfloat162float(v_val) - kv_mem) * beta;
             for (uint32_t kk = 0; kk < gdn.head_k; ++kk) {
-                fp16_t* sc = sbase + kk * gdn.head_v;
-                gdn_st_f16(sc, gdn_ld_f16(sc) * d_t + load_elem(k_in, krow + kk) * delta);
+                ::shelf::state::GdnStateScalar* sc = sbase + kk * gdn.head_v;
+                *sc = *sc * d_t + load_elem(k_in, krow + kk) * delta;
             }
             float acc = 0.f;
             for (uint32_t kk = 0; kk < gdn.head_k; ++kk) {
-                acc += gdn_ld_f16(sbase + kk * gdn.head_v) * load_elem(q_in, qrow + kk);
+                acc += (sbase + kk * gdn.head_v)[0] * load_elem(q_in, qrow + kk);
             }
             static_cast<float*>(out.ptr)
                 [static_cast<size_t>(row) * out.row_stride +
