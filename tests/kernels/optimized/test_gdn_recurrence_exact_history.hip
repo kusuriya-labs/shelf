@@ -230,7 +230,7 @@ bool run_case(const Shapes& sh, uint32_t rows, uint32_t capture_rows, hipStream_
     bool out_ok = ok;
     bool hist_ok = ok;
     if (ok) {
-        std::vector<shelf::fp16_t> s_ref(d.slot_stride), s_cand(d.slot_stride);
+        std::vector<::shelf::state::GdnStateScalar> s_ref(d.slot_stride), s_cand(d.slot_stride);
         shelf::gpu::discard_cleanup_result(
             hipMemcpy(s_ref.data(), d.state_ref, s_ref.size() * sizeof(::shelf::state::GdnStateScalar),
                       hipMemcpyDeviceToHost));
@@ -248,7 +248,7 @@ bool run_case(const Shapes& sh, uint32_t rows, uint32_t capture_rows, hipStream_
         out_ok = std::memcmp(o_ref.data(), o_cand.data(), o_ref.size() * 4u) == 0;
 
         const size_t hn = (size_t)capture_rows * d.slot_stride;
-        std::vector<shelf::fp16_t> h_ref(hn), h_cand(hn);
+        std::vector<::shelf::state::GdnStateScalar> h_ref(hn), h_cand(hn);
         shelf::gpu::discard_cleanup_result(
             hipMemcpy(h_ref.data(), d.hist_ref, hn * sizeof(::shelf::state::GdnStateScalar),
                       hipMemcpyDeviceToHost));
@@ -262,8 +262,7 @@ bool run_case(const Shapes& sh, uint32_t rows, uint32_t capture_rows, hipStream_
                 ++hi;
             std::printf("  [hist] rows=%u cap=%u first_bad=%zu (row=%zu off=%zu) ref=%.6g cand=%.6g\n",
                         rows, capture_rows, hi, hi / d.slot_stride, hi % d.slot_stride,
-                        (double)shelf::fp16_to_f32(h_ref[hi]),
-                        (double)shelf::fp16_to_f32(h_cand[hi]));
+                        (double)h_ref[hi], (double)h_cand[hi]);
         }
     }
 

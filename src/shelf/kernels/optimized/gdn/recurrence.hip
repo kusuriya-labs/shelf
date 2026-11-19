@@ -33,10 +33,6 @@ __device__ __forceinline__ void st_state(::shelf::state::GdnStateScalar* p, floa
     *p = v;
 }
 
-__device__ __forceinline__ float f16_round(float v) {
-    return static_cast<float>(static_cast<_Float16>(v));
-}
-
 __device__ __forceinline__ float gdn_softplus_exact(float x) {
     return __logf(1.0f + __expf(x));
 }
@@ -626,10 +622,6 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
                     kdst[col] = ksrc[col] * de0;
                 }
             }
-            #pragma unroll
-            for (uint32_t t = 0; t < 4u; ++t)
-                #pragma unroll
-                for (uint32_t e = 0; e < 8u; ++e) Sacc[t][e] = f16_round(Sacc[t][e]);
         }
         detail::lds_barrier();
         #pragma unroll
@@ -801,10 +793,6 @@ __device__ __forceinline__ void gdn_recurrence_wmma_commit_body(GdnRecurrenceArg
                             g::gdn_wmma2<kLossy>(Sacc[ki * 2u + vj], akT, bv[vj]);
                 }
             }
-            #pragma unroll
-            for (uint32_t t = 0; t < 4u; ++t)
-                #pragma unroll
-                for (uint32_t e = 0; e < 8u; ++e) Sacc[t][e] = f16_round(Sacc[t][e]);
         }
 
         #pragma unroll
