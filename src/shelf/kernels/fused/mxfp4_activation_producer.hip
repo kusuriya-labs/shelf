@@ -35,6 +35,21 @@ struct RowrefScratch {
     int32_t* wmax;
 };
 
+__device__ __forceinline__ bool aligned16(const void* p) {
+    return (reinterpret_cast<uintptr_t>(p) & 15u) == 0u;
+}
+
+__device__ __forceinline__ uint4 add_bf16x8(uint4 av, uint4 bv) {
+    const __hip_bfloat16* al = reinterpret_cast<const __hip_bfloat16*>(&av);
+    const __hip_bfloat16* bl = reinterpret_cast<const __hip_bfloat16*>(&bv);
+    uint4 rv;
+    __hip_bfloat16* rl = reinterpret_cast<__hip_bfloat16*>(&rv);
+    #pragma unroll
+    for (uint32_t j = 0u; j < 8u; ++j)
+        rl[j] = __float2bfloat16(__bfloat162float(al[j]) + __bfloat162float(bl[j]));
+    return rv;
+}
+
 __host__ __device__ __forceinline__ uint32_t align_up4(uint32_t words, uint32_t align) {
     return (words + align - 1u) & ~(align - 1u);
 }
@@ -202,12 +217,22 @@ __global__ __launch_bounds__(kBlock) void mxfp4_norm_quantize_kernel(
     const uint32_t row = blockIdx.x;
     const bf16* input = reinterpret_cast<const bf16*>(a.input) +
         static_cast<size_t>(row) * a.input_stride;
-    for (uint32_t base = threadIdx.x * 4u; base < a.k; base += kBlock * 4u) {
-        #pragma unroll
-        for (uint32_t j = 0u; j < 4u; ++j) {
-            if (base + j < a.k) x[base + j] = input[base + j];
+    const bool vec = ((a.k & 7u) == 0u) &&
+                     ((a.input_stride & 7u) == 0u) && aligned16(input) && aligned16(x);
+    if (vec) {
+        for (uint32_t base = threadIdx.x * 8u; base < a.k; base += kBlock * 8u) {
+            const uint4 v = *reinterpret_cast<const uint4*>(input + base);
+            *reinterpret_cast<uint4*>(x + base) = v;
+        }
+    } else {
+        for (uint32_t base = threadIdx.x * 4u; base < a.k; base += kBlock * 4u) {
+            #pragma unroll
+            for (uint32_t j = 0u; j < 4u; ++j) {
+                if (base + j < a.k) x[base + j] = input[base + j];
+            }
         }
     }
+    __syncthreads();
     const float inv = rms_inverse(x, a.k, a.eps, sums);
     normalize_row(x, reinterpret_cast<const bf16*>(a.weight), a.k, inv);
     __syncthreads();
@@ -234,17 +259,32 @@ __global__ __launch_bounds__(kBlock) void mxfp4_residual_norm_quantize_kernel(
         static_cast<size_t>(row) * a.b_stride;
     bf16* residual = reinterpret_cast<bf16*>(a.residual) +
         static_cast<size_t>(row) * a.residual_stride;
-    for (uint32_t base = threadIdx.x * 4u; base < a.k; base += kBlock * 4u) {
-        #pragma unroll
-        for (uint32_t j = 0u; j < 4u; ++j) {
-            const uint32_t i = base + j;
-            if (i >= a.k) break;
-            const bf16 v = __float2bfloat16(__bfloat162float(left[i]) +
-                                            __bfloat162float(right[i]));
-            x[i] = v;
-            residual[i] = v;
+    const bool vec = ((a.k & 7u) == 0u) &&
+                     ((a.a_stride & 7u) == 0u) && ((a.b_stride & 7u) == 0u) &&
+                     ((a.residual_stride & 7u) == 0u) && aligned16(left) &&
+                     aligned16(right) && aligned16(residual) && aligned16(x);
+    if (vec) {
+        for (uint32_t base = threadIdx.x * 8u; base < a.k; base += kBlock * 8u) {
+            const uint4 av = *reinterpret_cast<const uint4*>(left + base);
+            const uint4 bv = *reinterpret_cast<const uint4*>(right + base);
+            const uint4 rv = add_bf16x8(av, bv);
+            *reinterpret_cast<uint4*>(x + base) = rv;
+            *reinterpret_cast<uint4*>(residual + base) = rv;
+        }
+    } else {
+        for (uint32_t base = threadIdx.x * 4u; base < a.k; base += kBlock * 4u) {
+            #pragma unroll
+            for (uint32_t j = 0u; j < 4u; ++j) {
+                const uint32_t i = base + j;
+                if (i >= a.k) break;
+                const bf16 v = __float2bfloat16(__bfloat162float(left[i]) +
+                                                __bfloat162float(right[i]));
+                x[i] = v;
+                residual[i] = v;
+            }
         }
     }
+    __syncthreads();
     const float inv = rms_inverse(x, a.k, a.eps, sums);
     normalize_row(x, reinterpret_cast<const bf16*>(a.weight), a.k, inv);
     __syncthreads();

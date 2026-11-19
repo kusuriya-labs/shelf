@@ -110,3 +110,25 @@ affine scan は遷移行列の合成で仕事量が約 3 倍になるため、�
 勝てない見込み。
 
 決定: ②は不採用。recurrence は prefill の約 4% なので、③ 融合 producer の帯域に進む。
+
+## 9. ③ 融合 MXFP4 producer の帯域改善
+
+norm / residual_norm producer の入力コピー（global → LDS）と residual 書き込みを
+16B（bf16 × 8）ベクトルにした。residual の加算は要素ごとに同じ bf16 丸めを行う。
+
+- 正しさ: `test_mxfp4_activation_producer` 16/16 PASS、`shelf-bench quality` で
+  vector / scalar の KL 0・top-1 100%（bit 一致）。
+- 速度（pp 8192、chunk 4096、交互 3 回）:
+
+| 回 | scalar | vector |
+| ---: | ---: | ---: |
+| 1 | 3,766.1 ms | 3,757.3 ms |
+| 2 | 3,772.3 ms | 3,763.5 ms |
+| 3 | 3,781.9 ms | 3,768.4 ms |
+
+**約 0.3% 短縮**（3 回とも vector が速い）。producer は prefill の数 % なので
+上限は小さいが、bit 一致で回帰がないため採用する。
+
+補足: rowref scales の `g=1..groups-1` の zero-fill は GEMM が
+`scales[row*stride+0]` しか読まないため削れるが、書き込み量は codes の約 1/32 で、
+E2E への寄与は 0.1% 未満と見積もり、実装しない。
