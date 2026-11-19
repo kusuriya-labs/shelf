@@ -91,3 +91,22 @@ multi-chunk と single-chunk が bit 一致した。品質ゲートを通過す�
 並列性を上げる。現在は head 方向（48）だけが並列で、row は serial。
 conv / recurrence の event 内訳を取り、chunk 4,096 での上限を確認してから
 scan の並列化方式を決める。
+
+## 8. ② GDN chunk-parallel の負結果
+
+2-pass 方式（state pass で chunk 境界の state を保存し、output pass を chunk 並列で実行）を
+実装して測った。chunk_rows=256、1 request、rows>=1024 で有効化。
+
+- 品質: parallel on/off で **KL 0 / top-1 100%**（f32 state の bit 一致）。
+- 速度（pp 8192、chunk 4096、交互 3 回）:
+  parallel off 3,758.8 / 3,766.3 / 3,777.6 ms、
+  parallel on 3,990.1 / 3,999.2 / 4,003.3 ms。
+  **約 6% 遅い。**
+
+理由: recurrence は 96 block（48 head × 2 vgroup）で 1.5 wave になり、すでに
+throughput 律速である。2-pass は state pass の仕事（約 2/3）を直列に残したまま
+output pass の仕事（1/P）を追加するため、並列度の増加が仕事量の増加に負ける。
+affine scan は遷移行列の合成で仕事量が約 3 倍になるため、この throughput 律速では
+勝てない見込み。
+
+決定: ②は不採用。recurrence は prefill の約 4% なので、③ 融合 producer の帯域に進む。
