@@ -38,59 +38,6 @@ __global__ void rotate_input(const uint16_t *input, const uint16_t *suh, int8_t 
         codes[size_t(blockIdx.y) * padded + base + i] = scale ? int8_t(rintf(v[i] / scale)) : 0;
 }
 
-template <int Bits> __device__ __forceinline__ uint32_t unpack_four(const uint32_t *tile, unsigned t) {
-    constexpr int words = Bits * 8;
-    unsigned bit = ((t + 1) * Bits + 256 * Bits - 16) % (256 * Bits);
-    unsigned hi = tile[bit / 32], lo = tile[(bit / 32 + 1) % words];
-    unsigned packed = 0;
-#pragma unroll
-    for (unsigned j = 0; j < 4; ++j) {
-        unsigned end = (bit % 32) + j * Bits + 16;
-        unsigned state = end <= 32 ? (hi >> (32 - end)) : __builtin_amdgcn_alignbit(hi, lo, 64 - end);
-        unsigned value = __umul24(state & 65535, 0xdcd12du);
-        unsigned sum = __builtin_amdgcn_udot4(value, 0x01010101u, 3u, false);
-        packed |= ((sum >> 2) & 255u) << (8 * j);
-    }
-    return packed ^ 0x80808080u;
-}
-__device__ __forceinline__ int dot4(uint32_t a, uint32_t b, int acc) {
-    return __builtin_amdgcn_sudot4(true, a, true, b, acc, false);
-}
-
-template <bool Mixed>
-__global__ void multiply(const int8_t *codes, const float *scales, const uint32_t *trellis, float *partial,
-                         int k, int n, const Hy4ExpertProjection *group = nullptr, int stride = 0,
-                         const Hy4Route *routes = nullptr) {
-    const auto &matrix = group[(routes ? routes[blockIdx.y].expert : blockIdx.y) * stride];
-    trellis = matrix.trellis;
-    const unsigned bits = Mixed ? matrix.bits : 4;
-    const unsigned col = threadIdx.x % 16;
-    const unsigned worker = threadIdx.x / 16;
-    const int row = blockIdx.y;
-    __shared__ float sums[8][16];
-    float acc = 0;
-    const unsigned words = bits * 8;
-    for (unsigned kt = worker; kt < unsigned(k / 16); kt += 8) {
-        const uint32_t *tile = trellis + (size_t(kt) * (n / 16) + blockIdx.x) * words;
-        int dot = 0;
-#pragma unroll
-        for (unsigned g = 0; g < 4; ++g) {
-            uint32_t a;
-            __builtin_memcpy(&a, codes + size_t(row) * k + kt * 16 + g * 4, 4);
-            unsigned t = g / 2 * 128 + col * 8 + g % 2 * 4;
-            dot = dot4(a, (bits == 3 ? unpack_four<3>(tile, t) : unpack_four<4>(tile, t)), dot);
-        }
-        acc += dot * scales[size_t(row) * (k / 128) + kt / 8];
-    }
-    sums[worker][col] = acc;
-    __syncthreads();
-    if (worker == 0) {
-        for (unsigned i = 1; i < 8; ++i)
-            acc += sums[i][col];
-        partial[size_t(row) * n + blockIdx.x * 16 + col] = acc * shelf::quantization::exl3::kExl3Int8GridStep;
-    }
-}
-
 __global__ void rotate_output(const float *partial, const uint16_t *svh, uint16_t *output, int width,
                               int padded, const Hy4ExpertProjection *group = nullptr, int stride = 0,
                               float *logits = nullptr, const Hy4Route *routes = nullptr, int splits = 1) {
@@ -143,31 +90,18 @@ extern "C" hipError_t shelf_hy4_linear(const uint16_t *input, const uint16_t *su
 extern "C" hipError_t shelf_hy4_expert_linear(const uint16_t *x, const Hy4ExpertProjection *matrices,
                                               int stride, int8_t *codes, float *scales, float *partial,
                                               uint16_t *y, int rows, const Hy4Route *routes,
-                                              const Hy4ExpertBatch *batches, int num_batches, int wmma,
-                                              int mixed) {
+                                              const Hy4ExpertBatch *batches, int num_batches, int mixed) {
     if (!x || !matrices || !codes || !scales || !partial || !y || rows < 1 || rows > 65535 || stride < 1)
         return hipErrorInvalidValue;
-    if ((batches && (!routes || num_batches < 1 || num_batches > rows || stride != 3)) ||
-        (!batches && num_batches))
+    if (!routes || !batches || num_batches < 1 || num_batches > rows || stride != 3)
         return hipErrorInvalidValue;
     rotate_input<<<dim3(12, rows), 32>>>(x, nullptr, codes, scales, 1536, 1536, matrices, stride, routes);
     auto status = hipGetLastError();
     if (status != hipSuccess)
         return status;
-    if (batches && wmma) {
-        status = shelf_hy4_wmma_experts(codes, scales, matrices, routes, batches, num_batches, partial, mixed);
-        if (status != hipSuccess)
-            return status;
-    } else if (batches) {
-        return hipErrorInvalidValue;
-    } else {
-        if (mixed)
-            multiply<true><<<dim3(96, rows), 128>>>(codes, scales, nullptr, partial, 1536, 1536, matrices,
-                                                    stride, routes);
-        else
-            multiply<false><<<dim3(96, rows), 128>>>(codes, scales, nullptr, partial, 1536, 1536, matrices,
-                                                     stride, routes);
-    }
+    status = shelf_hy4_wmma_experts(codes, scales, matrices, routes, batches, num_batches, partial, mixed);
+    if (status != hipSuccess)
+        return status;
     status = hipGetLastError();
     if (status != hipSuccess)
         return status;

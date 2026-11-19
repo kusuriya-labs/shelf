@@ -65,7 +65,7 @@ __global__ void weighted(Mat x, const Hy4Route *route, const int *offsets, const
     out.p[r * 1536 + c] = f32_to_bf16_rne_device(sum);
 }
 Mat grouped(Ops &op, Mat x, const Hy4Route *routes, int layer, int kind, const Hy4ExpertBatch *batches,
-            int count, bool wmma) {
+            int count) {
     Mat y = op.mat(x.rows, 1536);
     size_t mark = op.arena.cursor;
     auto codes = static_cast<int8_t *>(op.arena.next(size_t(x.rows) * 1536));
@@ -73,7 +73,7 @@ Mat grouped(Ops &op, Mat x, const Hy4Route *routes, int layer, int kind, const H
     auto partial = static_cast<float *>(op.arena.next(size_t(x.rows) * 1536 * 4));
     auto desc = op.gpu.matrices[op.rank] + (layer - 1) * 1536 + kind;
     checked(shelf_hy4_expert_linear(x.p, desc, 3, codes, scales, partial, y.p, x.rows, routes, batches, count,
-                                    wmma, op.gpu.model.mixed));
+                                    op.gpu.model.mixed));
     op.arena.cursor = mark;
     return y;
 }
@@ -123,8 +123,7 @@ Mat moe(Ops &op, int layer, Mat x) {
         op.gpu.routed_rows[r] += count;
         std::vector<Hy4ExpertBatch> groups;
         std::vector<int> undo;
-        bool use_wmma = true;
-        if (x.rows >= 8) {
+        {
             auto &route = routes[r];
             std::vector<int> order(count);
             undo.resize(count);
@@ -167,9 +166,9 @@ Mat moe(Ops &op, int layer, Mat x) {
             checked(hipEventRecord(op.gpu.expert_begin[r]));
         gather_route<<<dim3(6, count), 256>>>(input, gpu_routes, a);
         checked(hipGetLastError());
-        Mat g = grouped(rank, a, gpu_routes, layer, 0, batches, num_batches, use_wmma),
-            u = grouped(rank, a, gpu_routes, layer, 1, batches, num_batches, use_wmma);
-        Mat v = grouped(rank, rank.swiglu(g, u, true), gpu_routes, layer, 2, batches, num_batches, use_wmma);
+        Mat g = grouped(rank, a, gpu_routes, layer, 0, batches, num_batches),
+            u = grouped(rank, a, gpu_routes, layer, 1, batches, num_batches);
+        Mat v = grouped(rank, rank.swiglu(g, u, true), gpu_routes, layer, 2, batches, num_batches);
         result[r] = rank.mat(x.rows, 1536);
         weighted<<<dim3(6, x.rows), 256>>>(v, gpu_routes, offsets_gpu, inverse, result[r]);
         checked(hipGetLastError());
