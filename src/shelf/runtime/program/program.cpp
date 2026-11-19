@@ -1049,24 +1049,90 @@ Status finalize_layout(Ctx& c) {
         ValueBinding* value = nullptr;
         int32_t aw_index = -1;
         bool moe_scratch = false;
+        const char* cat = "other";
+        KernelId kernel = KernelId::COUNT;
+    };
+    const char* ws_dbg_env = std::getenv("SHELF_WS_DEBUG");
+    const bool ws_debug = ws_dbg_env != nullptr && ws_dbg_env[0] != '\0';
+    std::unordered_map<uint32_t, KernelId> value_producer;
+    if (ws_debug) {
+        for (const auto& d : c.plan->dispatches)
+            for (uint32_t k = 0; k < d.output_count; ++k)
+                value_producer.emplace(d.output_slots[k], d.kernel_id);
+    }
+    const auto category_of = [](ValueRowDomain domain, KernelId k) -> const char* {
+        if (domain == ValueRowDomain::GROUPED_ROWS) return "moe_grouped";
+        switch (k) {
+            case KernelId::MOE_COMBINE: return "moe_combine";
+            case KernelId::HYPER_MIX:
+            case KernelId::HYPER_APPLY:
+            case KernelId::HYPER_INJECT:
+            case KernelId::REPEAT_STREAMS:
+            case KernelId::MEAN_STREAMS: return "hyper";
+            case KernelId::PAGED_ATTENTION:
+            case KernelId::KV_APPEND:
+            case KernelId::ROPE:
+            case KernelId::QSA_KEY_CACHE:
+            case KernelId::QSA_SELECT:
+            case KernelId::QSA_ROPE:
+            case KernelId::SPLIT: return "attention";
+            case KernelId::GDN_RECURRENCE:
+            case KernelId::STATEFUL_CAUSAL_CONV1D:
+            case KernelId::L2_NORMALIZE:
+            case KernelId::SCALE: return "gdn";
+            case KernelId::PLE_GATE:
+            case KernelId::PLE_BROADCAST_MUL:
+            case KernelId::PLE_CONV:
+            case KernelId::PLE_STREAM_DOT: return "ple";
+            case KernelId::OUTPUT_GATHER:
+            case KernelId::LINEAR_INT8_W32:
+            case KernelId::SAMPLING:
+            case KernelId::EMBEDDING_LOOKUP: return "head";
+            case KernelId::LINEAR_MXFP4_W4A8:
+            case KernelId::LINEAR_BF16:
+            case KernelId::LINEAR_FP8_FINEGRAINED:
+            case KernelId::LINEAR_FP8_PTPC:
+            case KernelId::LINEAR_EXL3_W16A16:
+            case KernelId::LINEAR_EXL3_INT8: return "dense_linear";
+            default: return "elementwise";
+        }
     };
     std::vector<AllocItem> items;
     for (auto& vb : c.plan->values) {
         if (vb.storage != ValueStorage::WORKSPACE) continue;
         const auto& lt = c.lifetimes[vb.logical_value.id];
-        items.push_back(AllocItem{vb.bytes, lt.first_command, lt.last_command, &vb, -1});
+        KernelId producer = KernelId::COUNT;
+        if (ws_debug) {
+            const auto it = value_producer.find(vb.logical_value.id);
+            if (it != value_producer.end()) producer = it->second;
+        }
+        items.push_back(AllocItem{vb.bytes, lt.first_command, lt.last_command, &vb, -1, false,
+                                  ws_debug ? category_of(vb.row_domain, producer) : "other",
+                                  producer});
     }
     for (uint32_t i = 0; i < c.activation_workspaces.size(); ++i) {
         auto& aw = c.activation_workspaces[i];
+        bool grouped = false;
+        KernelId kernel = KernelId::COUNT;
+        if (ws_debug) {
+            for (uint32_t ref : aw.binding_refs) {
+                if (ref >= c.plan->dispatches.size()) continue;
+                kernel = c.plan->dispatches[ref].kernel_id;
+                if (c.plan->dispatches[ref].scratch_slot != kNoWorkspace) grouped = true;
+            }
+        }
         items.push_back(AllocItem{aw.total_bytes, aw.first_command, aw.last_command,
-                                  nullptr, static_cast<int32_t>(i)});
+                                  nullptr, static_cast<int32_t>(i), false,
+                                  ws_debug ? (grouped ? "moe_act" : "dense_act") : "other",
+                                  kernel});
     }
     if (c.moe_scratch.present) {
         // The router adds into the counters and a run zeroes the scratch once, at its start.
         // A block that dies before the first router would leave its own bytes in the counters,
         // so the scratch keeps its offset for the whole program instead of its dispatch span.
         items.push_back(AllocItem{c.moe_scratch.bytes, 0u,
-                                  std::numeric_limits<uint32_t>::max(), nullptr, -1, true});
+                                  std::numeric_limits<uint32_t>::max(), nullptr, -1, true,
+                                  ws_debug ? "moe_plan" : "other", KernelId::COUNT});
     }
     std::sort(items.begin(), items.end(), [](const AllocItem& a, const AllocItem& b) {
         if (a.first_command != b.first_command) return a.first_command < b.first_command;
@@ -1082,16 +1148,33 @@ Status finalize_layout(Ctx& c) {
         uint64_t offset = 0;
         uint64_t bytes = 0;
         uint32_t last_command = 0;
+        const char* cat = "other";
     };
+    struct Grow {
+        uint64_t bytes;
+        const char* cat;
+        uint32_t cmd;
+        std::size_t free_n;
+        uint64_t free_bytes;
+        uint64_t max_free;
+    };
+    std::vector<Grow> grows;
     std::vector<FreeBlock> free_list;
     std::vector<LiveBlock> live;
+    std::map<std::string, uint64_t> live_cat;
+    std::map<std::string, uint64_t> peak_cat;
+    uint64_t live_total = 0;
+    uint64_t peak_live = 0;
     uint64_t cursor = 0;
     c.plan->workspace.ranges.clear();
+    std::vector<const char*> range_cat;
 
     for (const auto& item : items) {
         for (auto it = live.begin(); it != live.end();) {
             if (it->last_command < item.first_command) {
                 free_list.push_back(FreeBlock{it->offset, it->bytes, it->last_command});
+                live_cat[it->cat] -= it->bytes;
+                live_total -= it->bytes;
                 it = live.erase(it);
             } else {
                 ++it;
@@ -1116,9 +1199,20 @@ Status finalize_layout(Ctx& c) {
                 free_list.push_back(FreeBlock{offset + item.bytes, rem, free_after});
             }
         } else {
+            const uint64_t before = cursor;
             offset = (cursor + kWorkspaceAlignment - 1) / kWorkspaceAlignment *
                      kWorkspaceAlignment;
             cursor = offset + item.bytes;
+            if (std::getenv("SHELF_WS_DEBUG") != nullptr) {
+                uint64_t free_bytes = 0;
+                uint64_t max_free = 0;
+                for (const auto& f : free_list) {
+                    free_bytes += f.bytes;
+                    max_free = std::max(max_free, f.bytes);
+                }
+                grows.push_back(Grow{item.bytes, item.cat, item.first_command,
+                                     free_list.size(), free_bytes, max_free});
+            }
         }
         const uint32_t slot = static_cast<uint32_t>(c.plan->workspace.ranges.size());
         WorkspaceRange r{};
@@ -1127,6 +1221,7 @@ Status finalize_layout(Ctx& c) {
         r.first_command = item.first_command;
         r.last_command = item.last_command;
         c.plan->workspace.ranges.push_back(r);
+        range_cat.push_back(item.cat);
         if (item.value != nullptr) {
             item.value->offset = offset;
             item.value->slot = slot;
@@ -1140,20 +1235,79 @@ Status finalize_layout(Ctx& c) {
             for (uint32_t ref : aw.binding_refs)
                 c.plan->dispatches[ref].workspace_slot = slot;
         }
-        live.push_back(LiveBlock{offset, item.bytes, item.last_command});
+        live.push_back(LiveBlock{offset, item.bytes, item.last_command, item.cat});
+        live_cat[item.cat] += item.bytes;
+        live_total += item.bytes;
+        if (live_total > peak_live) {
+            peak_live = live_total;
+            peak_cat = live_cat;
+        }
     }
     c.plan->workspace.total_bytes = cursor;
-    if (const char* wsdbg = std::getenv("SHELF_WS_DEBUG")) {
-        if (wsdbg[0] != '\0') {
-            uint64_t act_ws_bytes = 0;
-            for (auto& aw : c.activation_workspaces) act_ws_bytes += aw.total_bytes;
-            uint64_t value_ws_bytes = cursor - act_ws_bytes;
-            uint64_t top = 0;
-            for (auto& r : c.plan->workspace.ranges) top = std::max(top, r.bytes);
+    if (ws_debug) {
+        {
+            std::map<std::string, std::pair<uint64_t, uint32_t>> by_cat;
+            uint64_t range_sum = 0;
+            for (std::size_t i = 0; i < c.plan->workspace.ranges.size(); ++i) {
+                const auto& r = c.plan->workspace.ranges[i];
+                auto& e = by_cat[range_cat[i]];
+                e.first += r.bytes;
+                e.second += 1u;
+                range_sum += r.bytes;
+            }
             std::fprintf(stderr,
-                         "WSDBG total=%.2fGB value_ws=%.2fGB act_ws=%.2fGB ranges=%zu max_range=%.3fGB\n",
-                         cursor / 1e9, value_ws_bytes / 1e9, act_ws_bytes / 1e9,
-                         c.plan->workspace.ranges.size(), (double)top / 1e9);
+                         "WSDBG bucket=%u class=%u total=%.3fGB range_sum=%.3fGB ranges=%zu\n",
+                         static_cast<unsigned>(c.plan->row_bucket),
+                         static_cast<unsigned>(c.plan->execution_class),
+                         cursor / 1e9, range_sum / 1e9,
+                         c.plan->workspace.ranges.size());
+            std::fprintf(stderr, "  WSDBG peak_live=%.3fGB final_live=%.3fGB grows=%zu\n",
+                         peak_live / 1e9, live_total / 1e9, grows.size());
+            {
+                std::vector<Grow> top = grows;
+                std::sort(top.begin(), top.end(),
+                          [](const Grow& a, const Grow& b) { return a.bytes > b.bytes; });
+                for (std::size_t i = 0; i < top.size() && i < 12u; ++i)
+                    std::fprintf(stderr,
+                                 "  WSDBG grow %8.2fMB cat=%-12s cmd=%u free=%zu blocks/%.1fMB max=%.1fMB\n",
+                                 top[i].bytes / 1e6, top[i].cat, top[i].cmd, top[i].free_n,
+                                 top[i].free_bytes / 1e6, top[i].max_free / 1e6);
+            }
+            std::vector<std::pair<std::string, uint64_t>> pcat(peak_cat.begin(),
+                                                               peak_cat.end());
+            std::sort(pcat.begin(), pcat.end(), [](const auto& a, const auto& b) {
+                return a.second > b.second;
+            });
+            for (std::size_t i = 0; i < pcat.size(); ++i)
+                std::fprintf(stderr, "  WSDBG live %-14s %9.2fMB\n", pcat[i].first.c_str(),
+                             pcat[i].second / 1e6);
+            std::vector<std::pair<std::string, std::pair<uint64_t, uint32_t>>> cats(
+                by_cat.begin(), by_cat.end());
+            std::sort(cats.begin(), cats.end(),
+                      [](const auto& a, const auto& b) {
+                          return a.second.first > b.second.first;
+                      });
+            for (std::size_t i = 0; i < cats.size() && i < 16u; ++i)
+                std::fprintf(stderr, "  WSDBG demand %-14s %9.2fMB ranges=%u\n",
+                             cats[i].first.c_str(), cats[i].second.first / 1e6,
+                             cats[i].second.second);
+            std::vector<std::pair<uint64_t, std::size_t>> tops;
+            tops.reserve(c.plan->workspace.ranges.size());
+            for (std::size_t i = 0; i < c.plan->workspace.ranges.size(); ++i)
+                tops.emplace_back(c.plan->workspace.ranges[i].bytes, i);
+            std::sort(tops.begin(), tops.end(),
+                      [](const auto& a, const auto& b) { return a.first > b.first; });
+            for (std::size_t i = 0; i < tops.size() && i < 15u; ++i) {
+                const std::size_t ri = tops[i].second;
+                const auto& r = c.plan->workspace.ranges[ri];
+                KernelId k = KernelId::COUNT;
+                if (r.first_command < c.plan->dispatches.size())
+                    k = c.plan->dispatches[r.first_command].kernel_id;
+                std::fprintf(stderr,
+                             "  WSDBG top %8.2fMB cat=%-12s first=%u last=%u kernel=%s\n",
+                             r.bytes / 1e6, range_cat[ri], r.first_command, r.last_command,
+                             kernel_to_name(k));
+            }
         }
     }
     if (!options.validate_workspace) return Status::make_ok();
