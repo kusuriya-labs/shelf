@@ -53,3 +53,23 @@ OpenCode の短いタスクで Hy4 が `shell` を使い `head -n 1 README.md` �
 別の作業が GPU を保持している間に `start` を待機させ、`stop` で待機中の管理プロセスが終了することも確認した。これにより、待機の後で意図せずサーバーが起動することを防ぐ。
 
 追加計測では `SHELF_HY4_PROFILE_EP=1` を指定してサーバーを起動した。ヘルスチェック完了まで 40.42 秒。続けて同じ OpenCode セッションを再開した 3568 token の prefill は 6.725128 秒で、`profile_engram` の prefill 行取得区間は 148.048 ms だった。この値は先読み後の `rows` 呼び出しと待機の合計であり、非同期 RDMA READ の全経過時間ではない。先読みが GPU 処理と重なり、profiling による負荷も含むため、非 profiling 実行と厳密に比較しない。計測時の compute プロセスは `VmLck=0 KiB`、`VmPin=7840 KiB`。計測後にサーバーを停止した。
+
+## 状態退避を統合した運用
+
+`hy4-agent-integrated` では上記のビルド手順で状態退避を含む。`hy4-llm start` は既存の GPU ロック取得後、`10.255.254.1:19391` に状態サーバーがなければ、ローカルでバイナリを構築し `user@192.168.0.148` に転送して起動する。SSH の鍵認証と `c++`、libibverbs、OpenSSL が必要。1 世代 512 MiB の領域を 2 個使う。既存の 19391 番を使用した場合は停止しない。19390 番の Engram サーバーは操作しない。状態サーバーの内容はメモリ上のみであり、停止すると失われる。
+
+compute には `SHELF_HY4_SNAPSHOT=1` を設定する。通常停止および `with-gpu` の停止時には `POST /admin/snapshot` で最後に完成した保存候補を再送する。退避に失敗しても警告を残し停止を続ける。GPU コマンドの間は状態サーバーを維持し、GPU ロックも保持する。再開後の履歴の token 列が保存済み prefix と一致し、fingerprint 等の照合にも成功した場合のみ、その部分の prefill を省く。状態サーバーが利用できない場合や照合に失敗した場合は通常 prefill に戻る。保存境界や制約の詳細は [状態退避の記録](hy4_state_snapshot.md) を参照。
+
+各起動の記録は `.hy4-agent/diagnostics/日時/` に置く。`server.log` はサーバーと compute の標準エラー、`compute-stdout.jsonl` は compute の標準出力、`server-exit.txt` と `compute-exit.txt` は終了コードとシグナル、`maps-*.txt` は実行中に取得したメモリ配置である。`environment.json` は明示的に選んだ環境変数のみを記録し、`libraries.txt`、`hip-version.txt`、`gpu-before.txt` は起動時の環境を示す。異常終了時はカーネルログ、GPU 状態、coredumpctl の結果を保存し、取得可能な core があれば `compute-core/gdb.txt` または `server-core/gdb.txt` に `bt full` と `info sharedlibrary` を記録する。`core-settings.txt` は core 上限、`core_pattern`、Apport 設定を記録する。core を取得できない場合は `core-unavailable.txt` と取得コマンドの出力を確認する。ログには会話内容やメモリアドレスが含まれ得るため、ディレクトリは所有者のみアクセス可能にしている。
+
+このホストでは `core_pattern` は Apport のパイプで、`coredumpctl` は存在しない。Apport の設定は有効だが、実際に core を取得できるかは異常終了時の Apport の処理と権限に依存する。既存の SIGSEGV の原因調査は行っていない。
+
+### 統合後の実測
+
+2026-11-19、3 GPU、4 bpw、DFly、OpenCode の同一セッションで実施した。記憶する内容を含む履歴の要求は 5,112 token で、`with-gpu -- rocm-smi --showproductname` の前に 22,218,528 byte の管理 API による退避が成功した。再起動後の次ターンは入力 5,189 token のうち 4,096 token を復元し、履歴中の合言葉に正しく回答した。このターンの prefill は 2.883 秒、復元処理は 0.350 秒だった。
+
+同じ OpenCode の次ターンの HTTP リクエストを保存して再送し、最初の compute token を受信するまでの時間を測った。保存済み prefix が 5,120 token の復元ありは 0.841 秒、`SHELF_HY4_SNAPSHOT` を設定しない別サーバーでの通常 prefill は 9.896 秒だった。各 1 回であり、サーバー起動時間は含まない。両条件の生成テキストは一致した。OpenCode 側の SSE はツール対応時に生成完了まで保持されるため、この値は画面表示までの時間ではない。計測には `SHELF_DFLASH2_TOKEN_TIMESTAMPS` の compute token 受信時刻を使用した。
+
+同じ 5,189 token のリクエストで、保存 payload の fingerprint を変更して checksum を再計算した場合は fingerprint 不一致として拒否され、通常 prefill は 10.157 秒だった。状態サーバーを停止した場合も接続失敗から通常 prefill に戻り 9.930 秒だった。どちらも snapshot なしの対照と生成テキストが一致した。専用の 32 MiB 状態サーバーを使った RDMA 単体テストでは、往復、容量超過の拒否と旧世代の保持、世代切り替えが成功した。
+
+統合版の実機では、状態サーバー停止中の退避が HTTP 503 となっても GPU コマンドを続行し、コマンド失敗の終了コード 37、クライアントへの SIGTERM の終了コード 143、およびそれぞれの後のサーバー復帰を確認した。制御・ツール変換・snapshot HTTP の Python テストと CTest の CPU テストも成功した。実際の SIGSEGV や core は発生していないため、core 取得と gdb の連携は模擬コマンドによる確認に限る。

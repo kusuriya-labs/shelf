@@ -152,6 +152,7 @@ class AsyncComputeClient:
         subprocess_kwargs = {}
         if _libc is not None:
             subprocess_kwargs["preexec_fn"] = _set_parent_death_signal
+        self._started_at = time.time()
         self._proc = await asyncio.create_subprocess_exec(
             *self._argv,
             stdin=asyncio.subprocess.PIPE,
@@ -180,10 +181,50 @@ class AsyncComputeClient:
                 line = await self._proc.stdout.readline()
 
                 if not line:
+                    code = await self._proc.wait()
+                    diagnostic_dir = os.environ.get("SHELF_HY4_DIAGNOSTICS")
+                    if diagnostic_dir:
+                        with open(os.path.join(diagnostic_dir, "compute-exit.txt"), "w", encoding="utf-8") as handle:
+                            handle.write(f"終了コード: {code}\nシグナル: {-code if code < 0 else 0}\n")
+                        if code not in (0, -15):
+                            for name, command in (
+                                ("compute-dmesg.txt", ["dmesg", "--ctime"]),
+                                ("compute-journal.txt", ["journalctl", "-k", "--no-pager", "-n", "500"]),
+                                ("compute-gpu.txt", ["rocm-smi"]),
+                                ("compute-coredump.txt", ["coredumpctl", "--no-pager", "info", str(self._proc.pid)]),
+                                ("compute-gdb.txt", ["coredumpctl", "--no-pager", "debug", str(self._proc.pid), "--debugger=gdb", "--debugger-arguments=-batch -ex 'bt full' -ex 'info sharedlibrary'"]),
+                            ):
+                                proc = None
+                                try:
+                                    proc = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+                                    output, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+                                    with open(os.path.join(diagnostic_dir, name), "wb") as handle:
+                                        handle.write(output)
+                                except (OSError, asyncio.TimeoutError) as exc:
+                                    if proc is not None and proc.returncode is None:
+                                        proc.kill()
+                                        await proc.wait()
+                                    with open(os.path.join(diagnostic_dir, name), "w", encoding="utf-8") as handle:
+                                        handle.write(str(exc))
+                            helper = os.environ.get("SHELF_HY4_CORE_HELPER")
+                            if helper:
+                                proc = None
+                                try:
+                                    proc = await asyncio.create_subprocess_exec(sys.executable, helper, str(self._proc.pid), self._argv[0], os.path.join(diagnostic_dir, "compute-core"), str(self._started_at))
+                                    await asyncio.wait_for(proc.wait(), timeout=250)
+                                except (OSError, asyncio.TimeoutError) as exc:
+                                    if proc is not None and proc.returncode is None:
+                                        proc.kill()
+                                        await proc.wait()
+                                    self._log.write(f"[compute] core の取得に失敗: {exc}\n")
                     await self._broadcast_error(ComputeError(
-                        f"compute process exited with code {self._proc.returncode}"))
+                        f"compute process exited with code {code}"))
                     return
 
+                diagnostic_dir = os.environ.get("SHELF_HY4_DIAGNOSTICS")
+                if diagnostic_dir:
+                    with open(os.path.join(diagnostic_dir, "compute-stdout.jsonl"), "ab") as handle:
+                        handle.write(line)
                 try:
                     event = json.loads(line)
                 except json.JSONDecodeError as exc:

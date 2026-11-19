@@ -5,6 +5,10 @@ import json
 import os
 from pathlib import Path
 import select
+import resource
+import threading
+import datetime
+import hashlib
 import signal
 import socket
 import subprocess
@@ -21,6 +25,9 @@ DEVICES = 'GPU-a8e9ddefa2d60f55,GPU-08b2ddcbd6e6b36c,GPU-76a08c022586fed6'
 PORT = 18123
 MODEL = 'Hy4-flash-4bpw'
 BASE = Path.home() / 'datapool/rocm-exl3-rdna2'
+REMOTE = 'user@192.168.0.148'
+REMOTE_SERVER = '/tmp/shelf-hy4-snapshot-agent-' + hashlib.sha256(str(ROOT).encode()).hexdigest()[:12]
+REMOTE_PID = REMOTE_SERVER + '.pid'
 
 
 def emit(message):
@@ -31,10 +38,10 @@ def vram():
     return {p.parent.parent.name: int(p.read_text()) for p in sorted(Path('/sys/class/drm').glob('card[0-9]*/device/mem_info_vram_used'))}
 
 
-def request_json(path, data=None):
+def request_json(path, data=None, timeout=30):
     body = None if data is None else json.dumps(data).encode()
     req = urllib.request.Request(f'http://127.0.0.1:{PORT}{path}', data=body, headers={'Content-Type': 'application/json'})
-    with urllib.request.urlopen(req, timeout=30) as response:
+    with urllib.request.urlopen(req, timeout=timeout) as response:
         return json.load(response)
 
 
@@ -82,6 +89,10 @@ def stop_orphan():
         command = Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
         if str(ROOT / 'build-hy4-agent/shelf-server').encode() not in command or os.getpgid(pid) != pid:
             raise RuntimeError('PID の所有者を確認できないため停止できません')
+        try:
+            emit(f'状態退避: {request_json("/admin/snapshot", {}, timeout=150)}')
+        except (OSError, ValueError, urllib.error.URLError) as exc:
+            emit(f'警告: 状態退避に失敗しました: {exc}')
         os.killpg(pid, signal.SIGTERM)
         deadline = time.monotonic() + 45
         while time.monotonic() < deadline and Path(f'/proc/{pid}/cmdline').exists():
@@ -129,6 +140,10 @@ class Manager:
         self.locks = []
         self.baseline = {}
         self.log = None
+        self.snapshot_owned = False
+        self.diagnostics = None
+        self.monitor_stop = None
+        self.server_started = 0
 
     def acquire(self):
         for name in LOCKS:
@@ -139,6 +154,72 @@ class Manager:
         if len(self.baseline) < 3:
             raise RuntimeError('3 台分の VRAM 使用量を取得できません')
 
+    def start_snapshot(self):
+        try:
+            with socket.create_connection(('10.255.254.1', 19391), timeout=2):
+                marker = STATE / 'snapshot-owned'
+                if marker.exists() and marker.read_text().strip() == REMOTE_SERVER:
+                    command = f'test -f {REMOTE_PID} && test "$(readlink /proc/$(cat {REMOTE_PID})/exe)" = {REMOTE_SERVER}'
+                    result = subprocess.run(['ssh', '-o', 'BatchMode=yes', REMOTE, command], timeout=30)
+                    if result.returncode == 0:
+                        self.snapshot_owned = True
+                    else:
+                        marker.unlink(missing_ok=True)
+                emit('既存の状態サーバーを使用します')
+                return
+        except OSError:
+            pass
+        binary = STATE / 'snapshot-server'
+        subprocess.run(['c++', '-std=c++20', '-O2', '-I' + str(ROOT / 'include'),
+                        str(ROOT / 'tools/hy4_flash/snapshot/server.cpp'), '-libverbs', '-lcrypto', '-o', str(binary)], check=True)
+        subprocess.run(['scp', '-q', '-o', 'BatchMode=yes', str(binary), REMOTE + ':' + REMOTE_SERVER], check=True, timeout=30)
+        command = f'nohup {REMOTE_SERVER} 536870912 > {REMOTE_SERVER}.log 2>&1 < /dev/null & echo $! > {REMOTE_PID}'
+        subprocess.run(['ssh', '-o', 'BatchMode=yes', REMOTE, command], check=True, timeout=30)
+        self.snapshot_owned = True
+        (STATE / 'snapshot-owned').write_text(REMOTE_SERVER + '\n')
+        for _ in range(100):
+            try:
+                with socket.create_connection(('10.255.254.1', 19391), timeout=1):
+                    return
+            except OSError:
+                time.sleep(.2)
+        raise RuntimeError('状態サーバーが起動しません')
+
+    def stop_snapshot(self):
+        if not self.snapshot_owned:
+            return
+        command = (f'if test -f {REMOTE_PID}; then p=$(cat {REMOTE_PID}); '
+                   f'if test "$(readlink /proc/$p/exe)" = {REMOTE_SERVER}; then '
+                   f'kill "$p" || exit 1; n=0; while test "$(readlink /proc/$p/exe)" = {REMOTE_SERVER}; do '
+                   f'if test "$n" -ge 100; then exit 1; fi; n=$((n+1)); sleep 0.1; done; fi; '
+                   f'rm -f {REMOTE_PID}; fi')
+        try:
+            subprocess.run(['ssh', '-o', 'BatchMode=yes', REMOTE, command], check=True, timeout=30)
+            self.snapshot_owned = False
+            (STATE / 'snapshot-owned').unlink(missing_ok=True)
+        except (OSError, subprocess.SubprocessError) as exc:
+            emit(f'警告: 状態サーバーを停止できません: {exc}')
+
+    def monitor(self, pid, directory, stop):
+        while not stop.wait(.25):
+            try:
+                children = Path(f'/proc/{pid}/task/{pid}/children').read_text().split()
+            except OSError:
+                children = []
+            for child in [str(pid)] + children:
+                try:
+                    maps = Path(f'/proc/{child}/maps').read_text()
+                    (directory / f'maps-{child}.txt').write_text(maps)
+                except OSError:
+                    pass
+
+    def collect(self, command, path, timeout=15):
+        try:
+            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
+            path.write_bytes(result.stdout)
+        except (OSError, subprocess.SubprocessError) as exc:
+            path.write_text(str(exc))
+
     def start(self):
         if self.server and self.server.poll() is None:
             return
@@ -148,7 +229,7 @@ class Manager:
         except ConnectionRefusedError:
             pass
         env = os.environ.copy()
-        env.update(SHELF_HY4_ENGRAM_SOURCE='rdma', ROCR_VISIBLE_DEVICES=DEVICES)
+        env.update(SHELF_HY4_ENGRAM_SOURCE='rdma', ROCR_VISIBLE_DEVICES=DEVICES, SHELF_HY4_SNAPSHOT='1')
         env.pop('SHELF_HY4_ENGRAM_MLOCK', None)
         env.pop('SHELF_HY4_ENGRAM_POPULATE', None)
         cmd = [str(Path('/tmp/shelfvenv/bin/python')), str(ROOT / 'build-hy4-agent/shelf-server'),
@@ -157,11 +238,35 @@ class Manager:
                '--placement', str(BASE / 'hy4-flash-pilot/shelf-placement/owners-4bpw.json'),
                '--dfly-dir', str(BASE / 'hy4-flash-pilot/shelf-dfly/Hy4-flash-dfly-4bpw'),
                '--model', MODEL, '--port', str(PORT), '--max-seq-len', '8192', '--max-concurrent-requests', '1']
-        self.log = open(STATE / 'server.log', 'ab', buffering=0)
+        directory = STATE / 'diagnostics' / (datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f'))
+        directory.mkdir(parents=True, mode=0o700)
+        self.diagnostics = directory
+        env['SHELF_HY4_DIAGNOSTICS'] = str(directory)
+        env['SHELF_HY4_CORE_HELPER'] = str(ROOT / 'tools/hy4_agent/hy4-core.py')
+        safe = {key: env[key] for key in ('SHELF_HY4_ENGRAM_SOURCE', 'SHELF_HY4_SNAPSHOT', 'ROCR_VISIBLE_DEVICES', 'PATH', 'LD_LIBRARY_PATH') if key in env}
+        (directory / 'environment.json').write_text(json.dumps(safe, ensure_ascii=False, indent=2))
+        try:
+            resource.setrlimit(resource.RLIMIT_CORE, (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
+            core_limit = str(resource.getrlimit(resource.RLIMIT_CORE))
+        except (OSError, ValueError) as exc:
+            core_limit = f'{resource.getrlimit(resource.RLIMIT_CORE)}; unlimited 設定失敗: {exc}'
+        pattern = Path('/proc/sys/kernel/core_pattern').read_text()
+        apport = Path('/etc/default/apport')
+        (directory / 'core-settings.txt').write_text('RLIMIT_CORE: ' + core_limit + '\ncore_pattern: ' + pattern +
+                                                     '\nApport 設定: ' + (apport.read_text() if apport.exists() else 'なし'))
+        self.collect(['coredumpctl', '--no-pager', 'list', '--no-legend'], directory / 'coredumpctl-before.txt')
+        self.collect(['rocm-smi'], directory / 'gpu-before.txt')
+        self.collect(['ldd', str(ROOT / 'build-hy4-agent/shelf-compute')], directory / 'libraries.txt')
+        self.collect(['/opt/rocm/core-7.14/bin/hipcc', '--version'], directory / 'hip-version.txt')
+        self.collect([sys.executable, '--version'], directory / 'python-version.txt')
+        self.log = open(directory / 'server.log', 'ab', buffering=0)
         started = time.monotonic()
+        self.server_started = time.time()
         self.server = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=self.log, stderr=subprocess.STDOUT,
                                        start_new_session=True, pass_fds=tuple(f.fileno() for f in self.locks))
         (STATE / 'server.pid').write_text(str(self.server.pid) + '\n')
+        self.monitor_stop = threading.Event()
+        threading.Thread(target=self.monitor, args=(self.server.pid, directory, self.monitor_stop), daemon=True).start()
         deadline = time.monotonic() + int(os.environ.get('HY4_START_TIMEOUT', '900'))
         try:
             while time.monotonic() < deadline:
@@ -188,6 +293,12 @@ class Manager:
     def stop(self):
         if self.server:
             pid = self.server.pid
+            if self.server.poll() is None:
+                try:
+                    result = request_json('/admin/snapshot', {}, timeout=150)
+                    emit(f'状態退避: {result}')
+                except (OSError, ValueError, urllib.error.URLError) as exc:
+                    emit(f'警告: 状態退避に失敗しました: {exc}')
             try:
                 os.killpg(pid, signal.SIGTERM)
             except ProcessLookupError:
@@ -201,6 +312,19 @@ class Manager:
                 os.killpg(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+            code = self.server.returncode
+            (self.diagnostics / 'server-exit.txt').write_text(f'終了コード: {code}\nシグナル: {-code if code < 0 else 0}\n')
+            if self.monitor_stop:
+                self.monitor_stop.set()
+            if code not in (0, -signal.SIGTERM):
+                self.collect(['dmesg', '--ctime'], self.diagnostics / 'dmesg.txt')
+                self.collect(['journalctl', '-k', '--no-pager', '-n', '500'], self.diagnostics / 'kernel-journal.txt')
+                self.collect(['rocm-smi'], self.diagnostics / 'gpu-after.txt')
+                self.collect(['coredumpctl', '--no-pager', 'list'], self.diagnostics / 'coredumpctl-after.txt')
+                self.collect(['coredumpctl', '--no-pager', 'debug', str(pid), '--debugger=gdb',
+                              "--debugger-arguments=-batch -ex 'bt full' -ex 'info sharedlibrary'"],
+                             self.diagnostics / 'server-gdb.txt')
+                self.collect([sys.executable, str(ROOT / 'tools/hy4_agent/hy4-core.py'), str(pid), sys.executable, str(self.diagnostics / 'server-core'), str(self.server_started)], self.diagnostics / 'core-helper.txt', timeout=250)
             self.server = None
             (STATE / 'server.pid').unlink(missing_ok=True)
             if self.log:
@@ -281,6 +405,7 @@ class Manager:
         listener.settimeout(1)
         (STATE / 'manager.pid').write_text(str(os.getpid()) + '\n')
         try:
+            self.start_snapshot()
             self.start()
             while True:
                 try:
@@ -316,7 +441,7 @@ class Manager:
                             fds = []
                             result = {'ok': True, 'code': code}
                         elif action == 'stop':
-                            self.stop(); write_message(conn, {'ok': True}); return
+                            self.stop(); self.stop_snapshot(); write_message(conn, {'ok': True}); return
                         else:
                             raise ValueError('不明な操作')
                         write_message(conn, result)
@@ -333,6 +458,7 @@ class Manager:
             finally:
                 listener.close(); SOCKET.unlink(missing_ok=True)
                 (STATE / 'manager.pid').unlink(missing_ok=True)
+                self.stop_snapshot()
 
 
 def start():
@@ -400,6 +526,11 @@ def main():
             if action == 'stop':
                 stop_pending()
                 stop_orphan()
+                marker = STATE / 'snapshot-owned'
+                if marker.exists() and marker.read_text().strip() == REMOTE_SERVER:
+                    manager = Manager()
+                    manager.snapshot_owned = True
+                    manager.stop_snapshot()
             emit('Hy4 は停止しています'); return 0 if action == 'stop' else 1
         emit(json.dumps(result, ensure_ascii=False))
         return 0 if result.get('ok') else 1

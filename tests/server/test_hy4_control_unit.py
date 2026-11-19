@@ -7,7 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location('hy4_control', ROOT / 'tools/hy4_agent/hy4-control.py')
@@ -16,6 +16,28 @@ spec.loader.exec_module(control)
 
 
 class Hy4ControlTest(unittest.TestCase):
+    def test_snapshot_before_stop_and_failure(self):
+        for failure in (False, True):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                manager = control.Manager()
+                manager.server = Mock(pid=123, returncode=0)
+                manager.server.poll.return_value = None
+                manager.diagnostics = Path(directory)
+                calls = []
+                def snapshot(*args, **kwargs):
+                    calls.append('snapshot')
+                    if failure:
+                        raise OSError('失敗')
+                    return {'status': 'ok'}
+                def kill(*args):
+                    calls.append('kill')
+                with patch.object(control, 'STATE', Path(directory)), patch.object(control, 'request_json', side_effect=snapshot), \
+                     patch.object(control.os, 'killpg', side_effect=kill), patch.object(control, 'vram', return_value={}):
+                    manager.stop()
+                self.assertEqual(calls[:2], ['snapshot', 'kill'])
+                manager_server_exit = (Path(directory) / 'server-exit.txt').read_text()
+                self.assertIn('終了コード: 0', manager_server_exit)
+
     def test_exit_code_and_restart(self):
         self.run_command("print('出力'); raise SystemExit(37)", 10, 37, '出力')
 
