@@ -1,6 +1,7 @@
 #pragma once
 
 #include <shelf/core/status.h>
+#include <shelf/io/token_ids.h>
 #include <shelf/runtime/decode_backend.h>
 #include <shelf/models/qwen35/runtime/mtp_drafter.h>
 #include <shelf/runtime/scheduling_types.h>
@@ -71,7 +72,7 @@ int parse_compute_options(int argc, char** argv, ComputeOptions& opt);
 
 int validate_compute_options(const ComputeOptions& opt);
 
-std::vector<int32_t> read_input_ids(const std::string& path);
+using ::shelf::io::read_input_ids;
 
 std::size_t safetensors_dir_bytes(const std::string& dir);
 

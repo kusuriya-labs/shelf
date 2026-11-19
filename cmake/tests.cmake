@@ -789,3 +789,10 @@ if(SHELF_BUILD_OPTIONAL_TESTS)
 endif()
 
 shelf_add_test(NAME test_token_mask_scheduler SOURCE unit/test_token_mask_scheduler.cpp LABELS "cpu;required" LIBRARIES shelf_qwen35_runtime shelf_qwen35)
+
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME test_hy4_flash_cpu
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/unit/test_hy4_flash.py)
+    set_tests_properties(test_hy4_flash_cpu PROPERTIES LABELS "cpu;optional")
+endif()
