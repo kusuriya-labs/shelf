@@ -1,27 +1,47 @@
-# Hy4 と OpenCode の接続調査
+# Hy4 を使う OpenCode エージェント
 
-この記録は実装の完了を意味しない。Hy4 によるツール実行は、現状のサーバーでは利用できない。
+fork 専用ブランチ `hy4-opencode-agent` の実験である。既存 worktree とグローバルの OpenCode 設定は変更しない。Hy4 4 bpw を R9700 と V620 2 台で実行し、Engram は `10.255.254.1:19390` の RDMA サーバーから読む。サーバー側の構築と接続先は [RDMA Engram の記録](hy4_rdma_engram.md) を参照する。リモート側の Engram は事前に登録済みであることが必要。
 
-## 調査条件
+## 準備と起動
 
-fork 専用ブランチ `hy4-rdma-engram` の b5caf77b を基点とする専用 worktree を使った。OpenCode は v2.3.2。RDMA サーバーが `10.255.254.1:19390` で待機していることを確認した。ローカルは `SHELF_HY4_RDMA=ON` でビルドし、`SHELF_HY4_ENGRAM_SOURCE=rdma`、R9700 と V620 2 台、4 bpw、DFly、`--max-seq-len 2304 --max-concurrent-requests 1` を使用した。既存の `/tmp/r9700.lock`、`/tmp/v620.lock`、`/tmp/v620-76a08.lock` は順にブロッキングで取得し、サーバー停止まで保持した。
+この worktree のルートで次を実行する。`/tmp/shelfvenv` はこの測定環境にある、Transformers などのサーバー依存を導入済みの Python 環境である。LLVM libc++ のパスもこのホストの既存環境を指定している。
 
-## ツール呼び出しの制約
+```sh
+cmake -S . -B build-hy4-agent \
+  -DSHELF_HY4_RDMA=ON -DCMAKE_BUILD_TYPE=Release \
+  -DSHELF_ROCM_ROOT=/opt/rocm/core-7.14 -DCMAKE_HIP_ARCHITECTURES=gfx1201 \
+  -DCMAKE_CXX_COMPILER=/opt/rocm/core-7.14/lib/llvm/bin/clang++ \
+  -DSHELF_LIBCXX_LLVM_ROOT="$HOME/coding-local/sLLM/.local-artifacts/phaseshift-draft-vocab/toolchain/root/usr/lib/llvm-23"
+cmake --build build-hy4-agent --target shelf-compute shelf-server-stage -j 4
+tools/hy4_agent/hy4-llm start
+tools/hy4_agent/hy4-llm status
+tools/hy4_agent/opencode-hy4 --standalone
+```
 
-`src/apps/server/serverlib/chat_service.py` の `ChatService.prepare` は Hy4 に `tools` または構造化出力が指定された場合、明示的に `Hy4 はテキスト生成に対応します` と拒否する。モデルの `chat_template.jinja` 自体は `<tool_calls:opensource>`、`<tool_call:opensource>`、`<arg_key:opensource>`、`<arg_value:opensource>` 形式を記述している。現行のツール解析・ストリーミング処理はこの形式への対応を確認していない。
+サーバーの Python 実装を変更した場合は `shelf-server-stage` を再実行する。終了時は `tools/hy4_agent/hy4-llm stop`。`restart` も利用できる。状態とログは `.hy4-agent/` に保存する。既定のモデル・Engram ディレクトリ・配置表・DFly は `tools/hy4_agent/hy4-control.py` に記載したこのホストのパスである。ポートは `127.0.0.1:18123`、model ID は `Hy4-flash-4bpw`。
 
-サーバー側で Hy4 のツール付きテンプレート生成と Hy4 固有の呼び出し形式の解析、引数の JSON 化、OpenAI 形式への変換、ストリーミング、複数呼び出し、ツール結果を含む次ターン、エラーを実装して検証する必要がある。単に拒否を外すことは対応完了を意味しない。今回サーバーは改造していない。
+`opencode-hy4` は XDG の config / data / cache / state をこの worktree 内へ向け、`opencode.json` をその専用 config にコピーする。`OPENCODE_DISABLE_PROJECT_CONFIG=1` により自動検出のプロジェクト指示を読み込まず、Hy4 の短い system 指示を専用設定に置く。設定は OpenCode v2.3.2 の [provider](https://opencode.ai/docs/providers/) と [permissions](https://opencode.ai/docs/permissions/) 形式。`subagent` を deny し、組み込み subagent も無効にする。これは shell の OS サンドボックスではないため、worktree 外への書き込みや push をしないという指示も守る必要がある。
 
-## OpenCode 設定
+## GPU の明け渡しと復帰
 
-[OpenCode の設定仕様](https://opencode.ai/docs/config/) はプロジェクト設定をグローバル設定より優先する。v2 の[権限仕様](https://opencode.ai/docs/permissions/)では旧 `permission.task` ではなく `permissions` 配列の `subagent` を使う。`XDG_CONFIG_HOME` などを専用ディレクトリに設定した `opencode debug config --standalone` により、プロジェクト内の provider、agent、`subagent` deny の設定が読み込まれることを確認した。これは実際の拒否動作の検証ではない。
+```sh
+tools/hy4_agent/with-gpu --timeout 3600 -- コマンド 引数...
+```
 
-実験用設定には 2,304 token の上限を設定した。これは既存の Hy4 実験で確保できた長さであり、OpenCode のツール定義や履歴を含めて実用的かは未検証である。専用サーバーの稼働中に他の GPU 利用者と競合しないよう、サーバーの生存期間も 3 個の共有ロックを保持する必要がある。検証コマンドへのロックの受け渡しを含む制御スクリプトは未実装である。
+`--timeout` は秒で、既定は 86400 秒。管理プロセスは `/tmp/r9700.lock`、`/tmp/v620.lock`、`/tmp/v620-76a08.lock` をこの順でブロッキング取得し、サーバーの稼働中も保持する。検証コマンドも同じ管理プロセスの下で実行するため、3 個のロックは停止・検証・再起動の間ずっと保持される。サーバーと検証コマンドにもロックのファイル記述子を継承させる。`with-gpu` はサーバーのプロセスグループを停止し、各 GPU の VRAM が取得直後の使用量から 128 MiB 以内へ戻ることを確認してからコマンドを実行する。コマンド終了後も VRAM を確認し、サーバーのモデル一覧と短い生成が通るまで待つ。コマンドの標準出力・標準エラーと終了コードを保持する。SIGINT / SIGTERM と timeout はコマンドのプロセスグループに転送し、終了後に再起動する。再起動の失敗は非ゼロで報告する。
 
-## 今回の実測と未実施項目
+Hy4 には GPU を使うコマンドを必ず `with-gpu` 経由で呼ばせる。Hy4 自身はサーバーを直接操作せず、長い出力はファイルへ保存する。管理プロセスが失われた場合は `hy4-llm stop` が記録された PID とこの worktree のサーバーパスを照合して停止を試みる。SIGKILL や OS 障害では自動復帰できないため、状態とログを確認する。
 
-2026-11-19、サーバープロセスの起動から `/v1/models` が応答するまで 132.08 秒。`context_length` は 2,304 だった。各 `card` の `mem_info_vram_used` は応答時に card0 25,053,376,512、card1 25,051,230,208、card2 34,191,564,800 byte、停止約 3 秒後にそれぞれ 19,304,448、17,162,240、59,916,288 byte。起動中に見た compute プロセスの `VmLck` は 0 KiB。サーバーを SIGTERM で終了し、3 GPU のロックを解放した。
+## コンテキストとツール形式
 
-短い生成要求は 0.76 秒で HTTP 200 を返したが、16 token の上限内では思考だけを出力し、本文は空だった。`tools` 付きの要求は HTTP 400 と `Hy4 はテキスト生成に対応します` を返した。OpenCode 実行はサーバーが終了するまでに結果を得られず中断した。したがってツール呼び出しの成立、subagent の実際の拒否、同一セッションの再開や prefill の時間は測定できていない。
+`--max-seq-len` と OpenCode の context 上限はともに 8192、出力上限は 1024。3 GPU の実機でこの長さの予約と短い生成を確認した。OpenCode の通常タスクで送信されたツール定義を含む入力は 2113 token、再起動直後の会話履歴は 2415 token だった。自動 compaction は有効、保持 1024 token、buffer 25% とした。長い作業での十分性や compaction の品質は未測定。
 
-`hy4-llm`、`with-gpu`、恒久的な OpenCode 設定は未実装。GPU 検証コマンドの失敗・SIGTERM・再起動失敗時の挙動も未検証。起動時間はモデル一覧への応答までであり、短い生成を含む完全なヘルスチェックの時間ではない。グローバル設定配下の通常ファイルの SHA-256 一覧を実験前後に比較し、一致した。
+Hy4 のテンプレートは `<tool_calls:opensource>` と `<tool_call:opensource>`、`<arg_key:opensource>`、`<arg_value:opensource>` を使う。サーバーは Hy4 のテンプレートへ `tools` と過去のツール結果を渡し、この形式を OpenAI の `tool_calls` に変換する。通常応答と SSE の両方に対応する。SSE の Hy4 ツール応答は生成全体を保持してから返すため、reasoning も逐次表示されない。`tool_choice` の auto / none / required / 指定関数に対応する。strict tools と構造化出力は未対応であり拒否する。
+
+## 実測
+
+2026-11-19、OpenCode v2.3.2、RDMA、4 bpw、DFly、逐次 1 request。3 個の共有ロックを保持して実施した。初回の 2304 token 条件ではサーバー起動から `/v1/models` 応答まで 132.08 秒だった。8192 token 条件では、OS キャッシュが温まった後の起動・短い生成を含むヘルスチェックが 40.40 秒、OpenCode の GPU 検証後の再起動が 40.38 秒だった。起動時間はキャッシュ状態に依存する。RDMA 側の Engram は常駐しており、ローカルへの全表読み込みは行わない。RDMA 接続・個別 READ の時間はこの測定では分離していない。compute プロセスの `VmLck` は 0 KiB と確認した。
+
+OpenCode の短いタスクで Hy4 が `shell` を使い `head -n 1 README.md` を実行し、結果を回答した。OpenCode 経由で `with-gpu` から `rocminfo` を実行し、`GPU_OK` を得た。サーバー再起動後、同じセッションの tool 結果を受けた 2415 token の再 prefill は 4.371931 秒。GPU ツール呼び出しは 45.25 秒、ターン全体は 58.18 秒だった。次ターンでも README の行と `GPU_OK` を再現した。`task` による subagent 起動を指示すると、Hy4 は `task` が存在せず起動できないと回答した。これはモデルが実際に禁止されたツール呼び出しを試みた試験ではない。
+
+検証中の card0 / card1 / card2 の VRAM は 19,304,448 / 17,162,240 / 59,916,288 byte。以前の起動時にはそれぞれ 25,053,376,512 / 25,051,230,208 / 34,191,564,800 byte を観測した。シェルから `rocminfo` を実行した正常系に加え、終了コード 37、SIGTERM の 143、サーバー実行ファイルを一時退避した再起動失敗時の非ゼロとエラー表示を確認した。`~/.config/opencode` 配下の通常ファイルの SHA-256 一覧は作業前後で比較する。

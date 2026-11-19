@@ -33,3 +33,5 @@ __pycache__/
 
 # Vendored external clone (keeps its own git history)
 /vendor/quark/
+
+/.hy4-agent/

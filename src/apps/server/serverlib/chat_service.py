@@ -27,6 +27,7 @@ from typing import Any, AsyncIterator, Optional
 from shelf_chat import codec, reasoning
 
 from .compute_client import ComputeCancelled, ComputeError, ComputeInvalidArgument
+from . import hy4_tools
 from .openai_protocol import (
     ChatRequest,
     ChatServiceError,
@@ -191,7 +192,9 @@ class ChatService:
     # ------------------------------------------------------------------ prepare
 
     def prepare(self, request: ChatRequest) -> PreparedChat:
-        messages = openai_messages_to_hf(request.messages)
+        tokenizer = getattr(self._processor, "tokenizer", self._processor)
+        is_hy4 = getattr(tokenizer, "_shelf_hy4", False)
+        messages = openai_messages_to_hf(request.messages, preserve_tool_ids=is_hy4)
 
         tools = request.tools if request.tool_choice != "none" else None
         strict_tools = bool(tools and any(t["function"].get("strict") for t in tools))
@@ -211,8 +214,8 @@ class ChatService:
 
         template_kwargs = request.template_kwargs
         if getattr(tokenizer, "_shelf_hy4", False):
-            if tools or request.response_schema is not None:
-                raise OpenAIProtocolError("Hy4 はテキスト生成に対応します")
+            if strict_tools or request.response_schema is not None:
+                raise OpenAIProtocolError("Hy4 は strict tools と構造化出力に未対応です", code="unsupported_parameter")
             if request.min_p or request.top_k > 64 or (request.temperature > 0 and request.top_p < 1 and not request.top_k):
                 raise OpenAIProtocolError("Hy4 の sampling は top_k 0〜64、top_p を使う場合は top_k が必要です")
             effort = "max" if request.effort_given and request.reasoning_effort == "xhigh" else "high"
@@ -238,10 +241,14 @@ class ChatService:
 
         tool_prefix = ""
         if request.tool_choice in ("required", "named") and not strict_tools:
-            tool_prefix = "<tool_call>\n<function="
-            if request.forced_tool_name is not None:
-                tool_prefix += request.forced_tool_name + ">\n"
-            prefix = ("</think>\n\n" if request.enable_thinking else "") + tool_prefix
+            if is_hy4:
+                tool_prefix = hy4_tools.CALLS_OPEN + hy4_tools.CALL_OPEN + (request.forced_tool_name or "")
+                prefix = ("</think:opensource>" if request.enable_thinking else "") + tool_prefix
+            else:
+                tool_prefix = "<tool_call>\n<function="
+                if request.forced_tool_name is not None:
+                    tool_prefix += request.forced_tool_name + ">\n"
+                prefix = ("</think>\n\n" if request.enable_thinking else "") + tool_prefix
             tokenizer = getattr(self._processor, "tokenizer", self._processor)
             prompt_ids += list(tokenizer.encode(prefix, add_special_tokens=False))
 
@@ -286,7 +293,7 @@ class ChatService:
 
     async def complete(self, request: ChatRequest) -> AssistantResult:
         prepared = self.prepare(request)
-        if request.stop or prepared.tool_prefix or prepared.grammar is not None:
+        if request.stop or prepared.tool_prefix or prepared.grammar is not None or (prepared.tools and getattr(getattr(self._processor, "tokenizer", self._processor), "_shelf_hy4", False)):
             content, reasoning_parts, calls = [], [], []
             done = None
             async for event in self.stream(request, prepared):
@@ -392,7 +399,9 @@ class ChatService:
                            request: ChatRequest) -> AsyncIterator[Any]:
         tracker = {"tokens": 0}
         strict = bool(prepared.tools and any(t["function"].get("strict") for t in prepared.tools))
-        inner = (self._stream_strict_tools(prepared, request, tracker) if strict
+        is_hy4 = getattr(getattr(self._processor, "tokenizer", self._processor), "_shelf_hy4", False)
+        inner = (self._stream_hy4_tools(prepared, request, tracker) if is_hy4 and prepared.tools
+                 else self._stream_strict_tools(prepared, request, tracker) if strict
                  else self._stream_forced_tools(prepared, request, tracker) if prepared.tool_prefix
                  else self._stream_tools(prepared, request, tracker) if prepared.tools
                  else self._stream_text(prepared, request, tracker))
@@ -475,6 +484,51 @@ class ChatService:
             raise ChatServiceError(str(exc), code="compute_error") from exc
         finally:
             await stream.aclose()
+
+    async def _stream_hy4_tools(self, prepared, request, tracker):
+        generated, done = [], None
+        stream = self._stream_open(prepared, request)
+        try:
+            async for event in stream:
+                if "token_id" in event:
+                    generated.append(int(event["token_id"]))
+                    tracker["tokens"] = len(generated)
+                elif "done" in event:
+                    done = event["done"]
+                    break
+        except ComputeInvalidArgument as exc:
+            raise OpenAIProtocolError(str(exc)) from exc
+        except ComputeError as exc:
+            raise ChatServiceError(str(exc), code="compute_error") from exc
+        finally:
+            await stream.aclose()
+        if done is None:
+            raise ChatServiceError("compute ended without a done event", code="compute_error")
+        final_ids = [int(x) for x in done.get("generated_ids", generated)]
+        tracker["tokens"] = len(final_ids)
+        log_tokens(final_ids)
+        split = codec.split_generation(self._processor, final_ids, thinking=prepared.enable_thinking)
+        if split.reasoning:
+            yield ReasoningDelta(split.reasoning)
+        answer = prepared.tool_prefix + split.answer
+        try:
+            content, calls = hy4_tools.parse_answer(answer, prepared.tools)
+        except ValueError as exc:
+            if done.get("finish_reason") == "length" and hy4_tools.CALLS_CLOSE not in answer:
+                content, calls = answer.split(hy4_tools.CALLS_OPEN, 1)[0], []
+            else:
+                raise ChatServiceError(f"tool call parse failure: {exc}", code="tool_parse_failure") from exc
+        if content:
+            yield ContentDelta(content)
+        self._validate_forced_calls(request, calls, str(done.get("finish_reason", "")))
+        for index, call in enumerate(calls):
+            delta = _tool_call_delta(call, index)
+            if delta is not None:
+                yield delta
+        finish = "tool_calls" if calls else map_finish_reason(str(done.get("finish_reason", "")), has_tool_calls=False)
+        yield StreamDone(finish,
+                         prompt_tokens=len(prepared.prompt_ids), completion_tokens=len(final_ids),
+                         cached_tokens=_cached_tokens(done))
 
     async def _stream_strict_tools(self, prepared: PreparedChat,
                                    request: ChatRequest, tracker: dict) -> AsyncIterator[Any]:

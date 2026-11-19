@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$(readlink -f "$0")")/../.." && pwd)
+export XDG_CONFIG_HOME="$root/.hy4-agent/config"
+export XDG_DATA_HOME="$root/.hy4-agent/data"
+export XDG_CACHE_HOME="$root/.hy4-agent/cache"
+export XDG_STATE_HOME="$root/.hy4-agent/state"
+export OPENCODE_DISABLE_CLAUDE_CODE=1
+export OPENCODE_DISABLE_PROJECT_CONFIG=1
+mkdir -p "$XDG_CONFIG_HOME/opencode"
+cp "$root/opencode.json" "$XDG_CONFIG_HOME/opencode/opencode.json"
+cd "$root"
+exec "$HOME/.local/bin/opencode" "$@"

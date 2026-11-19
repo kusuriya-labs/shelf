@@ -541,7 +541,7 @@ def _assistant_reasoning(message: dict) -> str | None:
     return primary if primary is not None else alias
 
 
-def openai_messages_to_hf(messages: list[dict]) -> list[dict]:
+def openai_messages_to_hf(messages: list[dict], *, preserve_tool_ids: bool = False) -> list[dict]:
     result = []
     system_parts = []
 
@@ -632,6 +632,8 @@ def openai_messages_to_hf(messages: list[dict]) -> list[dict]:
 
                     if call_id:
                         tool_names[call_id] = name
+                        if preserve_tool_ids:
+                            converted[-1]["id"] = call_id
 
                 hf["tool_calls"] = converted
 
@@ -652,6 +654,8 @@ def openai_messages_to_hf(messages: list[dict]) -> list[dict]:
 
             if name:
                 hf["name"] = str(name)
+            if preserve_tool_ids and call_id:
+                hf["tool_call_id"] = str(call_id)
 
             result.append(hf)
             continue

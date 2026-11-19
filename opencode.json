@@ -1,0 +1,41 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "hy4/Hy4-flash-4bpw",
+  "default_agent": "hy4",
+  "policies": [{"action": "tool.use", "resource": "subagent:*", "effect": "deny"}],
+  "providers": {
+    "hy4": {
+      "name": "Hy4 RDMA",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {"baseURL": "http://127.0.0.1:18123/v1", "headerTimeout": 900000, "chunkTimeout": 900000},
+      "models": {
+        "Hy4-flash-4bpw": {
+          "name": "Hy4-flash 4bpw",
+          "body": {"temperature": 0},
+          "capabilities": {"tools": true, "input": ["text"], "output": ["text"]},
+          "limit": {"context": 8192, "output": 1024}
+        }
+      }
+    }
+  },
+  "agents": {
+    "hy4": {
+      "description": "Hy4 専用の作業エージェント",
+      "mode": "primary",
+      "model": "hy4/Hy4-flash-4bpw",
+      "system": "日本語で応答する。編集とコミットは現在の専用 worktree 内のみで行い、push しない。GPU を使う検証は必ず tools/hy4_agent/with-gpu を使う。サーバーを直接停止・起動しない。長い出力はファイルに保存し要点だけ読む。subagent は使えない。",
+      "permissions": [
+        {"action": "*", "resource": "*", "effect": "deny"},
+        {"action": "shell", "resource": "*", "effect": "allow"},
+        {"action": "edit", "resource": "*", "effect": "allow"},
+        {"action": "read", "resource": "*", "effect": "allow"},
+        {"action": "glob", "resource": "*", "effect": "allow"},
+        {"action": "grep", "resource": "*", "effect": "allow"},
+        {"action": "subagent", "resource": "*", "effect": "deny"}
+      ]
+    },
+    "general": {"disabled": true},
+    "explore": {"disabled": true}
+  },
+  "compaction": {"auto": true, "keep": {"tokens": 1024}, "buffer": "25%"}
+}
