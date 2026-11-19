@@ -1,7 +1,7 @@
 #pragma once
 
 #include <shelf/core/memory/arena.h>
-#include <shelf/kernels/hy4_flash/linear.h>
+#include <shelf/models/hy4_flash/linear.h>
 #include <shelf/models/hy4_flash/checkpoint.h>
 
 namespace shelf::hy4 {

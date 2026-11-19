@@ -1,5 +1,5 @@
 #include <hip/hip_fp16.h>
-#include <shelf/kernels/hy4_flash/mla_prefill.h>
+#include <shelf/models/hy4_flash/mla_prefill.h>
 #include <shelf/models/hy4_flash/attention.h>
 #include <shelf/models/hy4_flash/absorbed.h>
 #include <shelf/kernels/fused/detail/octave_common.h>

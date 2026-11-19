@@ -1,4 +1,4 @@
-#include <shelf/kernels/hy4_flash/linear.h>
+#include <shelf/models/hy4_flash/linear.h>
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/decode.h>
 #include <shelf/quantization/exl3/exl3_int8.h>
 

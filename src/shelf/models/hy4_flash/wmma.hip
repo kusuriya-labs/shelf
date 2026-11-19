@@ -1,5 +1,5 @@
 #include <shelf/kernels/fused/exl3/group_body.h>
-#include <shelf/kernels/hy4_flash/linear.h>
+#include <shelf/models/hy4_flash/linear.h>
 
 namespace {
 template <int Bits, int Tiles>
