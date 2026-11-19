@@ -205,14 +205,23 @@ int compute(int argc, char **argv) {
                     bool lock = locked && std::string_view(locked) == "1";
                     if (lock && populate && std::string_view(populate) == "0")
                         throw std::invalid_argument("Engram の読み込みを無効にしたまま固定できません");
-                    if (!populate || std::string_view(populate) != "0")
+                    if (checkpoint.rdma && lock)
+                        throw std::invalid_argument("RDMA Engram とローカル固定は同時に使用できません");
+                    if (!checkpoint.rdma && (!populate || std::string_view(populate) != "0"))
                         checkpoint.populate_engram(lock);
                     if (auto profile = std::getenv("SHELF_HY4_PROFILE_EP");
                         profile && std::string_view(profile) == "1")
-                        checkpoint.report_engram_residency("ready");
+                        if (!checkpoint.rdma)
+                            checkpoint.report_engram_residency("ready");
                     serve(gpu, chunk);
                 } else if (mode == "generate") {
                     gpu.upload();
+                    if (auto locked = std::getenv("SHELF_HY4_ENGRAM_MLOCK");
+                        locked && std::string_view(locked) == "1") {
+                        if (checkpoint.rdma)
+                            throw std::invalid_argument("RDMA Engram とローカル固定は同時に使用できません");
+                        checkpoint.populate_engram(true);
+                    }
                     for (int pass = 0; pass < repeats; ++pass) {
                         auto result = generate(gpu, ids, count, chunk, temperature, seed, pass ? Path{} : logits_file);
                         printf("GENERATED_IDS=");

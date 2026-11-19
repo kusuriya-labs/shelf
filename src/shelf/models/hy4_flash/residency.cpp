@@ -23,6 +23,16 @@ void *Region::next(size_t length) {
     return base + start;
 }
 Residency::Residency(Checkpoint &model, size_t tokens) : model(model), tokens(tokens) {
+#ifdef SHELF_HY4_RDMA
+    if (model.rdma) {
+        engram_client = std::make_unique<rdma::Client>();
+        std::array<uint64_t, 4> rows{};
+        for (int g = 0; g < 4; ++g)
+            for (int size : model.moduli[g])
+                rows[g] += size;
+        engram_client->validate_rows(rows);
+    }
+#endif
     for (const auto &[name, dims] : model.shape)
         if (name.ends_with(".self_attn.kv_b_proj"))
             folded[name] = nullptr;
@@ -324,6 +334,18 @@ void Residency::shutdown() {
                     collect(hipDeviceDisablePeerAccess(physical[src]));
                 owns_peer[dst][src] = false;
             }
+#ifdef SHELF_HY4_RDMA
+    if (engram_pending.valid())
+        engram_pending.wait();
+    if (engram_client) {
+        try {
+            engram_client->shutdown();
+        } catch (const std::exception &e) {
+            errors += std::string(e.what()) + "\n";
+        }
+        engram_client.reset();
+    }
+#endif
     if (!errors.empty())
         throw std::runtime_error(errors);
 }

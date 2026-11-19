@@ -3,6 +3,10 @@
 #include <shelf/core/memory/arena.h>
 #include <shelf/kernels/hy4_flash/linear.h>
 #include <shelf/models/hy4_flash/checkpoint.h>
+#ifdef SHELF_HY4_RDMA
+#include <shelf/models/hy4_flash/rdma/client.h>
+#include <future>
+#endif
 
 namespace shelf::hy4 {
 inline constexpr int max_prefill_chunk = 1024;
@@ -15,6 +19,11 @@ struct Region {
 };
 
 struct Residency {
+#ifdef SHELF_HY4_RDMA
+    std::unique_ptr<rdma::Client> engram_client;
+    std::future<rdma::Tables> engram_pending;
+    rdma::Tables engram_rows;
+#endif
     Checkpoint &model;
     size_t tokens;
     std::array<int, 3> physical{0, 1, 2};

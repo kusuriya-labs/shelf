@@ -217,6 +217,7 @@ struct Target {
         int start = history.size();
         if (ids.empty() || start + ids.size() > op.gpu.tokens || (verify && ids.size() > 6))
             throw std::runtime_error("入力列が KV の範囲外です");
+        prefetch_engram(op, history, ids);
         Mat x = op.embed(ids, true);
         for (int layer = 0; layer < 42; ++layer) {
             Selection selection;

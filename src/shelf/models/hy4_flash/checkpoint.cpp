@@ -8,6 +8,8 @@
 #include <sys/resource.h>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
+#include <string_view>
 #include <fstream>
 #include <stdexcept>
 
@@ -91,6 +93,8 @@ void Checkpoint::populate_engram(bool lock) const {
     }
 }
 void Checkpoint::report_engram_residency(const char *phase) const {
+    if (rdma)
+        return;
     size_t resident = 0, total = 0;
     long page = sysconf(_SC_PAGESIZE);
     if (page <= 0)
@@ -108,6 +112,14 @@ void Checkpoint::report_engram_residency(const char *phase) const {
 }
 Checkpoint::Checkpoint(const Path &model, const Path &engram, const Path &draft, const Owners &layout)
     : owners(layout), has_draft(!draft.empty()) {
+    if (const auto source = std::getenv("SHELF_HY4_ENGRAM_SOURCE")) {
+        const std::string_view value(source);
+        require(value == "local" || value == "rdma", "Engram ソースが不正です");
+        rdma = value == "rdma";
+#ifndef SHELF_HY4_RDMA
+        require(!rdma, "このビルドでは Engram RDMA を使用できません");
+#endif
+    }
     const auto cfg = read_json(model / "config.json");
     require(cfg.value("model_type", std::string{}) == "hy_v4_flash" && cfg.value("exl3_text_only", false) &&
                 cfg.at("num_hidden_layers") == 42 && cfg.at("hc_mult") == 4 &&
@@ -139,6 +151,8 @@ Checkpoint::Checkpoint(const Path &model, const Path &engram, const Path &draft,
             rows += size;
             moduli[g][h] = size;
         }
+        if (rdma)
+            continue;
         auto key =
             "model.layers." + std::to_string(layer) + ".engram_layer.multi_head_embedding.embedding.weight";
         auto reader = take(io::SafetensorsReader::open((engram / (key + ".fp8.safetensors")).string()));

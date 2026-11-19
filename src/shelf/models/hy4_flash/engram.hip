@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
+#include <span>
 
 namespace shelf::hy4 {
 namespace {
@@ -68,16 +69,91 @@ __global__ void add_memory(Mat x, Mat k, Mat q, Mat value, const uint16_t *scale
     }
 }
 }
-Mat engram(Ops &op, int layer, Mat x, const std::vector<int> &prior, const std::vector<int> &ids) {
-    int g = (layer - 1) / 10;
-    auto p = "model.layers." + std::to_string(layer) + ".engram_layer.";
-    auto table = p + "multi_head_embedding.embedding.weight";
-    const auto &lookup = op.gpu.model.at(p + "lookup_table");
+std::vector<uint64_t> engram_indices(const Checkpoint &model, int g, const std::vector<int> &prior,
+                                     const std::vector<int> &ids) {
+    auto p = "model.layers." + std::to_string(1 + 10 * g) + ".engram_layer.";
+    const auto &lookup = model.at(p + "lookup_table");
     if (lookup.spec.dtype != io::SType::I32 || lookup.bytes != 120818 * 4)
         throw std::runtime_error("Engram の語彙写像が異なります");
     auto lut = static_cast<const int32_t *>(lookup.host);
+    std::vector<uint64_t> indices;
+    indices.reserve(ids.size() * 16);
+    for (size_t r = 0; r < ids.size(); ++r) {
+        int64_t mix[3]{};
+        for (int j = 0; j < 3; ++j) {
+            int index = int(r) - j, id = 120002;
+            if (index >= 0)
+                id = ids[index];
+            else if (int(prior.size()) + index >= 0)
+                id = prior[int(prior.size()) + index];
+            int normalized = lut[id >= 0 && id < 120818 ? id : 120002];
+            if (normalized < 0 || normalized > 92619)
+                throw std::runtime_error("Engram の正規化 ID が不正です");
+            mix[j] = normalized * multipliers[g][j];
+        }
+        size_t offset = 0;
+        for (int h = 0; h < 16; ++h) {
+            int size = model.moduli[g][h];
+            indices.push_back(offset + ((mix[0] ^ mix[1] ^ (h < 8 ? 0 : mix[2])) % size));
+            offset += size;
+        }
+    }
+    return indices;
+}
+struct EngramSource {
+    Ops &op;
+    void prefetch(const std::vector<int> &prior, const std::vector<int> &ids);
+    std::span<const uint8_t> rows(int g, const std::vector<int> &prior, const std::vector<int> &ids,
+                                  std::vector<uint8_t> &storage);
+};
+void EngramSource::prefetch(const std::vector<int> &prior, const std::vector<int> &ids) {
+#ifdef SHELF_HY4_RDMA
+    if (!op.gpu.model.rdma)
+        return;
+    rdma::Indices indices;
+    for (int g = 0; g < 4; ++g)
+        indices[g] = engram_indices(op.gpu.model, g, prior, ids);
+    auto client = op.gpu.engram_client.get();
+    op.gpu.engram_pending = std::async(std::launch::async, [client, indices = std::move(indices)] {
+        return client->read(indices);
+    });
+#else
+    (void)prior;
+    (void)ids;
+#endif
+}
+std::span<const uint8_t> EngramSource::rows(int g, const std::vector<int> &prior, const std::vector<int> &ids,
+                                           std::vector<uint8_t> &storage) {
+    size_t bytes = ids.size() * 16 * 98;
+#ifdef SHELF_HY4_RDMA
+    if (op.gpu.model.rdma) {
+        if (g == 0)
+            op.gpu.engram_rows = op.gpu.engram_pending.get();
+        auto result = op.gpu.engram_rows[g];
+        if (result.size() != bytes)
+            throw std::runtime_error("RDMA Engram の取得長が不正です");
+        return result;
+    }
+#endif
+    auto table = "model.layers." + std::to_string(1 + 10 * g) +
+                 ".engram_layer.multi_head_embedding.embedding.weight";
     auto bits = static_cast<const uint8_t *>(op.gpu.model.at(table).host);
     auto scales = static_cast<const uint8_t *>(op.gpu.model.at(table + ".scale").host);
+    auto indices = engram_indices(op.gpu.model, g, prior, ids);
+    storage.resize(bytes);
+    for (size_t i = 0; i < indices.size(); ++i) {
+        auto dest = storage.data() + i * 98;
+        std::memcpy(dest, bits + indices[i] * 96, 96);
+        std::memcpy(dest + 96, scales + indices[i] * 2, 2);
+    }
+    return storage;
+}
+void prefetch_engram(Ops &op, const std::vector<int> &prior, const std::vector<int> &ids) {
+    EngramSource{op}.prefetch(prior, ids);
+}
+Mat engram(Ops &op, int layer, Mat x, const std::vector<int> &prior, const std::vector<int> &ids) {
+    int g = (layer - 1) / 10;
+    auto p = "model.layers." + std::to_string(layer) + ".engram_layer.";
     auto bf = [&](const std::string &name) {
         auto v = op.param(p + name);
         if (v.type != io::SType::BF16)
@@ -90,30 +166,8 @@ Mat engram(Ops &op, int layer, Mat x, const std::vector<int> &prior, const std::
         getrusage(RUSAGE_THREAD, &before);
         lookup_begin = std::chrono::steady_clock::now();
     }
-    std::vector<uint8_t> packed(ids.size() * 16 * 98);
-    for (int r = 0; r < x.rows; ++r) {
-        int64_t mix[3]{};
-        for (int j = 0; j < 3; ++j) {
-            int index = r - j, id = 120002;
-            if (index >= 0)
-                id = ids[index];
-            else if (int(prior.size()) + index >= 0)
-                id = prior[int(prior.size()) + index];
-            int normalized = lut[id >= 0 && id < 120818 ? id : 120002];
-            if (normalized < 0 || normalized > 92619)
-                throw std::runtime_error("Engram の正規化 ID が不正です");
-            mix[j] = normalized * multipliers[g][j];
-        }
-        size_t offset = 0;
-        for (int h = 0; h < 16; ++h) {
-            int size = op.gpu.model.moduli[g][h];
-            size_t idx = offset + ((mix[0] ^ mix[1] ^ (h < 8 ? 0 : mix[2])) % size);
-            auto dest = packed.data() + (r * 16 + h) * 98;
-            std::memcpy(dest, bits + idx * 96, 96);
-            std::memcpy(dest + 96, scales + idx * 2, 2);
-            offset += size;
-        }
-    }
+    std::vector<uint8_t> storage;
+    auto packed = EngramSource{op}.rows(g, prior, ids, storage);
     if (op.gpu.expert_begin[0]) {
         auto end = std::chrono::steady_clock::now();
         rusage after{};

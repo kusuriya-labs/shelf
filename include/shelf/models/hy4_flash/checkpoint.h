@@ -35,6 +35,7 @@ struct Checkpoint {
     std::map<std::string, std::array<int, 2>> shape;
     std::array<std::array<int, 16>, 4> moduli{};
     std::array<std::array<uint8_t, 512>, 41> expert_bits{};
+    bool rdma = false;
     bool mixed = false;
     Owners owners{};
     bool has_draft = false;
