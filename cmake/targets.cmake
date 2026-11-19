@@ -28,6 +28,7 @@ shelf_set_hip_archs(shelf_gpu)
 
 # File I/O.
 add_library(shelf_io STATIC
+    src/shelf/io/token_ids.cpp
     src/shelf/io/safetensors_reader.cpp
     src/shelf/io/safetensors_writer.cpp
 )
@@ -37,6 +38,33 @@ target_include_directories(shelf_io PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
 target_include_directories(shelf_io SYSTEM PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/vendor")
 target_link_libraries(shelf_io PUBLIC shelf_core hip::host)
 target_compile_options(shelf_io PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
+
+add_library(shelf_hy4_wmma OBJECT src/shelf/kernels/hy4_flash/wmma.hip src/shelf/kernels/hy4_flash/mla_prefill.hip)
+target_link_libraries(shelf_hy4_wmma PRIVATE shelf_core hip::host)
+set_target_properties(shelf_hy4_wmma PROPERTIES HIP_ARCHITECTURES gfx1201 POSITION_INDEPENDENT_CODE ON)
+add_library(shelf_hy4_flash SHARED src/shelf/kernels/hy4_flash/linear.hip $<TARGET_OBJECTS:shelf_hy4_wmma>)
+target_link_libraries(shelf_hy4_flash PRIVATE shelf_core hip::host)
+set_target_properties(shelf_hy4_flash PROPERTIES HIP_ARCHITECTURES gfx1201)
+shelf_set_rocm_rpath(shelf_hy4_flash)
+set_property(TARGET shelf_hy4_flash APPEND PROPERTY BUILD_RPATH "${SHELF_LIBCXX_LLVM_ROOT}/lib")
+
+add_library(shelf_hy4_model STATIC
+    src/shelf/models/hy4_flash/checkpoint.cpp
+    src/shelf/models/hy4_flash/residency.cpp
+    src/shelf/models/hy4_flash/ops.hip
+    src/shelf/models/hy4_flash/attention.hip
+    src/shelf/models/hy4_flash/absorbed.hip
+    src/shelf/models/hy4_flash/engram.hip
+    src/shelf/models/hy4_flash/moe.hip
+    src/shelf/models/hy4_flash/generate.hip
+)
+target_include_directories(shelf_hy4_model SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
+target_link_libraries(shelf_hy4_model PUBLIC shelf_io shelf_gpu shelf_hy4_flash)
+set_target_properties(shelf_hy4_model PROPERTIES HIP_ARCHITECTURES gfx1201)
+
+if(SHELF_HY4_ONLY)
+    return()
+endif()
 
 # Generic weight loading (model-independent): safetensors / quantized
 # safetensors -> GPU MatrixWeight / Tensor. Depends on format + quantization
@@ -192,6 +220,7 @@ add_library(shelf_runtime STATIC
 )
 target_compile_features(shelf_runtime PRIVATE cxx_std_20)
 target_include_directories(shelf_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(shelf_runtime SYSTEM PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/vendor")
 target_link_libraries(shelf_runtime PUBLIC shelf_core shelf_gpu shelf_kernels_fused)
 target_compile_options(shelf_runtime PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 shelf_set_hip_archs(shelf_runtime)

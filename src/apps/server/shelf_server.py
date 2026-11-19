@@ -82,6 +82,13 @@ def _resolve_compute_binary(explicit: str | None) -> str:
 
 
 def build_compute_argv(opts) -> list[str]:
+    if getattr(opts, "placement", None):
+        argv = [opts.compute, "hy4", "serve", "--model-dir", opts.model_dir,
+                "--engram-dir", opts.engram_dir or opts.model_dir, "--placement", opts.placement,
+                "--max-seq-len", str(opts.max_seq_len), "--chunk", "1024"]
+        if opts.dfly_dir:
+            argv += ["--dfly-dir", opts.dfly_dir]
+        return argv
     argv = [
         opts.compute,
         "--model-dir", opts.model_dir,
@@ -521,6 +528,9 @@ def tree_budget_value(text: str):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Shelf Server")
     parser.add_argument("--model-dir", required=True, help="model directory")
+    parser.add_argument("--placement", help="Hy4 の expert 配置表")
+    parser.add_argument("--engram-dir", help="Hy4 FP8 Engram のディレクトリ")
+    parser.add_argument("--dfly-dir", help="Hy4 DFly2 のディレクトリ")
     parser.add_argument("--model", default="shelf",
                         help="model name reported by the API")
     parser.add_argument("--host", default="127.0.0.1",
@@ -813,7 +823,9 @@ async def _serve(opts) -> int:
         else:
             _log(f"PLaMo EXL3 chat warmup: {time.monotonic() - started:.2f}s")
 
-    if opts.dflash2_model_dir:
+    if opts.dfly_dir:
+        speculative = {"method": "dfly2", "drafts": 5}
+    elif opts.dflash2_model_dir:
         speculative = {"method": "dflash2", "drafts": opts.dflash2_drafts}
     else:
         speculative = None
@@ -855,6 +867,11 @@ async def _serve(opts) -> int:
         },
     }
 
+    if is_hy4:
+        server_meta["reasoning"]["default_reasoning_effort"] = "medium"
+        server_meta["reasoning"]["default_native_effort"] = "high"
+        server_meta["inference_budget"]["answer_reserve_tokens"] = 0
+        server_meta["inference_budget"]["thinking_budget_tokens"] = 0
     app = create_app(service, compute, server_meta)
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
@@ -883,25 +900,27 @@ async def _serve(opts) -> int:
         _log(_banner("Draft model:", Path(opts.dflash2_model_dir).name))
     _log(_banner("Inference budget:",
                  f"{opts.inference_budget_tokens} tokens "
-                 f"(thinking {thinking_budget_tokens(opts.inference_budget_tokens)}, "
-                 f"answer reserve {answer_reserve_tokens(opts.inference_budget_tokens)})"))
-    if opts.large_context_tokens > 0:
+                 f"(thinking {server_meta['inference_budget']['thinking_budget_tokens']}, "
+                 f"answer reserve {server_meta['inference_budget']['answer_reserve_tokens']})"))
+    if opts.large_context_tokens > 0 and not is_hy4:
         _log(_banner(f"  prompt > {opts.large_context_tokens}:",
                      f"{opts.large_context_inference_budget_tokens} tokens "
                      f"(thinking "
                      f"{thinking_budget_tokens(opts.large_context_inference_budget_tokens)})"))
-    if reasoning_capability["thinking"] and reasoning_capability["close_token"] < 0:
+    if not is_hy4 and reasoning_capability["thinking"] and reasoning_capability["close_token"] < 0:
         _log("  thinking budget is not enforced "
              "(the reasoning close tag is not one token)")
     if reasoning_capability["thinking"]:
         _log(_banner("Reasoning:",
                      f"enabled (thinking on, effort "
-                     f"{codec.DEFAULT_REASONING_EFFORT}, preserve_thinking on)"))
+                     f"{server_meta['reasoning']['default_reasoning_effort']}, preserve_thinking on)"))
         _log(_banner("Efforts:", ", ".join(codec.REASONING_EFFORTS)))
     else:
         _log(_banner("Reasoning:", "disabled"))
     _log("")
-    if is_plamo:
+    if is_hy4:
+        _log(_banner("Hy4-flash:", f"DFly2={bool(opts.dfly_dir)}, SSE"))
+    elif is_plamo:
         _log(_banner("Supported:",
                      "Chat Completions, Responses, SSE, translation, sampling, "
                      "concurrency, cancel"))

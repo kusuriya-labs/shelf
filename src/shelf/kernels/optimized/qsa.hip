@@ -1,4 +1,5 @@
 #include <shelf/kernels/optimized/qsa.h>
+#include <shelf/kernels/fused/detail/radix_select.h>
 #include <shelf/kernels/fused/detail/qsa_common.h>
 
 #include <hip/hip_bf16.h>
@@ -779,7 +780,7 @@ __global__ __launch_bounds__(kQsaTopkMaxThreads) void qsa_topk_kernel(QsaTopkArg
                              usable <= 65536u;
     if (select_once) {
         if (block_max != 0u)
-            qsa_radix_select(
+            ::shelf::kernel::detail::radix_select<2>(
                 args.scores + static_cast<uint64_t>(row) * args.score_row_stride,
                 usable, block_max, &radix_scratch, indices, nullptr, 0u);
     } else {
@@ -796,7 +797,7 @@ __global__ __launch_bounds__(kQsaTopkMaxThreads) void qsa_topk_kernel(QsaTopkArg
 
         if (usable != 0u) {
             const uint32_t want = usable < top_k ? usable : top_k;
-            qsa_radix_select(
+            ::shelf::kernel::detail::radix_select<2>(
                 args.scores + static_cast<uint64_t>(row) * args.score_row_stride,
                 usable, want, &radix_scratch, indices + half, scores + half,
                 args.block_begin);
