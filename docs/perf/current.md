@@ -32,6 +32,17 @@ BF16 GEMM / TP copy（Flash Next MXFP4 TP4）は reference run として下の�
 削除した数値そのものは Git history に残る。実験の経緯・採否判断は
 [../research/](../research/) が正本である。
 
+## Hy4-flash の Engram 固定に関する別構成の参考測定
+
+2026-11-19、R9700×1 と V620×2 の混在構成での測定であり、R9700×3／×4 の値ではない。4 bpw 本体、DFly2、BetterBench 0.6.1・corpus 1.0、各カテゴリ 1 warmup + 5 件、逐次 1 request、予約 2304、温度 0.7 / top_p 0.95 / top_k 20、profiling 無効。各値は decode tok/s の中央値である。
+
+| カテゴリ | 固定前 | 全表 mlock 後 |
+|---|---:|---:|
+| code | 14.22 | 35.10 |
+| chat | 12.31 | 28.98 |
+
+両測定では nonce と生成列が異なり、受理率の変動も含む。固定に使用した表の tensor は 64,680,628,768 byte、観測した `VmLck` は 63,164,684 KiB。測定条件とキャッシュ状態、初回 request の fault の内訳は[研究記録](../research/20261119/hy4_engram_population.md)を参照する。この記録は R9700 同質構成の性能を保証しない。
+
 ## 再計測が必要な断面
 
 現在の performance target（`models/Qwen3.8-27B-FP8`、Qwen3.8-27B BF16、drafter DFlash2）で

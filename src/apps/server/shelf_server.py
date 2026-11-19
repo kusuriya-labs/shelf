@@ -724,6 +724,7 @@ async def _serve(opts) -> int:
     compute = AsyncComputeClient(
         build_compute_argv(opts),
         max_inflight=opts.max_concurrent_requests,
+        startup_timeout=900.0 if is_hy4 else 300.0,
     )
     await compute.start()
 

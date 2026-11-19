@@ -7,6 +7,9 @@
 #include <poll.h>
 #include <unistd.h>
 #include <shelf/io/token_ids.h>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
 #include <cmath>
 #include <charconv>
 #include <cstdio>
@@ -19,6 +22,25 @@ using Json = nlohmann::json;
 
 void reply(const Json &event) {
     std::cout << event.dump() << std::endl;
+}
+
+std::array<unsigned long long, 2> page_faults() {
+    std::ifstream file("/proc/self/stat");
+    std::string line, field;
+    if (!std::getline(file, line))
+        throw std::runtime_error("/proc/self/stat を取得できません");
+    auto close = line.rfind(')');
+    if (close == std::string::npos)
+        throw std::runtime_error("/proc/self/stat の形式が不正です");
+    std::istringstream stream(line.substr(close + 1));
+    std::array<unsigned long long, 2> faults{};
+    for (int i = 3; i <= 12; ++i) {
+        if (!(stream >> field))
+            throw std::runtime_error("/proc/self/stat の項目が不足しています");
+        if (i == 10) faults[0] = std::stoull(field);
+        if (i == 12) faults[1] = std::stoull(field);
+    }
+    return faults;
 }
 
 void serve(Residency &gpu, int chunk) {
@@ -71,8 +93,21 @@ void serve(Residency &gpu, int chunk) {
             };
             fprintf(stderr, "hy4_request=%d input=%zu limit=%d temperature=%.3f top_p=%.3f top_k=%d\n",
                     id, ids.size(), count, temp, request.value("top_p", 1.f), request.value("top_k", 0));
+            const auto profile = std::getenv("SHELF_HY4_PROFILE_EP");
+            bool profiling = profile && std::string_view(profile) == "1";
+            std::array<unsigned long long, 2> before{};
+            if (profiling) {
+                gpu.model.report_engram_residency("request_before");
+                before = page_faults();
+            }
             auto result = generate(gpu, ids, count, chunk, temp, request.value("seed", uint64_t{}), {},
                                    request.value("top_k", 0), request.value("top_p", 1.f), emit);
+            if (profiling) {
+                auto after = page_faults();
+                fprintf(stderr, "hy4_faults request=%d minor=%llu major=%llu\n", id,
+                        after[0] - before[0], after[1] - before[1]);
+                gpu.model.report_engram_residency("request_after");
+            }
             reply({{"event", "done"}, {"request_id", id}, {"generated_ids", result},
                    {"finish_reason", result.back() == 120025 ? "stop" : "length"}});
         } catch (const Interrupted &) {
@@ -167,6 +202,16 @@ int compute(int argc, char **argv) {
                     throw std::runtime_error(status.message());
                 if (mode == "serve") {
                     gpu.upload();
+                    auto populate = std::getenv("SHELF_HY4_ENGRAM_POPULATE");
+                    auto locked = std::getenv("SHELF_HY4_ENGRAM_MLOCK");
+                    bool lock = locked && std::string_view(locked) == "1";
+                    if (lock && populate && std::string_view(populate) == "0")
+                        throw std::invalid_argument("Engram の読み込みを無効にしたまま固定できません");
+                    if (!populate || std::string_view(populate) != "0")
+                        checkpoint.populate_engram(lock);
+                    if (auto profile = std::getenv("SHELF_HY4_PROFILE_EP");
+                        profile && std::string_view(profile) == "1")
+                        checkpoint.report_engram_residency("ready");
                     serve(gpu, chunk);
                 } else if (mode == "generate") {
                     gpu.upload();
