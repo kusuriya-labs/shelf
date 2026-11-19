@@ -320,3 +320,9 @@ rank の HIP event は gather、3 射影、活性化、加重和を含む。各 
 **最終判断は、4 bpw を採用し、3.5 bpw は比較用 checkpoint を維持して記録で終了**。3.5 bpw の decode を再検討する場合は、まず同じ DFly と混在本体との受理数を改善する。54 回の検証が必要なまま単価だけを 4 bpw と同じに戻しても、試算は 30.95 tok/s にとどまる。副因に対する改善候補は、3 bit expert を持たない rank 0 を既存の 4 bit 専用経路に戻し、V620 の少数行 dot4 ではブロックごとに実幅を選び、内積ループを 3 bit / 4 bit に特殊化すること。効果を測る際は同一の routing 列を使う。今回の採用版に変更は加えていない。
 
 生ログ、入力・配置・重み・バイナリの署名、集計値は `hy4-flash-pilot/shelf-qualification-mixed/profile-r8-syOKa6/` の `profile-4.log`、`profile-3.5.log`、`settings-*.json`、`decode-comparison.json` に保存した。
+
+## BB1　BetterBench の code・chat を測るためのサーバー接続
+
+既定の Hy4 ビルドで shelf-server と shelf-compute を構築した。コミット 6e73af9e で既存の Chat Completions・SSE サーバーから、重みを常駐させた EP=3 の Hy4 worker に接続した。生成直後の先頭 token と DFly2 の検証済み token を順次返す。温度付き sampling は各行の top-k に対し top-p を適用し、本体・draft ともその分布で採択・棄却を行う。CPU CTest と既存サーバーの CLI・compute client テストが通った。
+
+BetterBench 0.6.1 の corpus v1（版 1.0）を使い、カテゴリごとに `run --quick --decode --categories code` または `--categories chat` を実行する。各重み・各カテゴリでサーバープロセスを再起動し、prefix cache 無効、逐次 1 リクエスト、nonce 有効、1 warmup + 5 計測。設定は温度 0.7、top_p 0.95、top_k 20。予約長は 2,304 token、prefill chunk は 1,024。サーバーの起動・重み転送を終えた後に HTTP クライアントの計測を開始する。
