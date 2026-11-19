@@ -209,6 +209,13 @@ class ChatService:
                 param="response_format" if request.response_schema is not None else "tools",
                 code="unsupported_parameter")
 
+        template_kwargs = request.template_kwargs
+        if getattr(tokenizer, "_shelf_hy4", False):
+            if tools or request.response_schema is not None:
+                raise OpenAIProtocolError("Hy4 はテキスト生成に対応します")
+            effort = "max" if request.effort_given and request.reasoning_effort == "xhigh" else "high"
+            template_kwargs = {"reasoning_effort": effort if request.enable_thinking else "no_think",
+                               "preserved_thinking": request.preserve_thinking}
         try:
             prompt_ids = codec.prompt_ids(
                 self._processor,
@@ -217,7 +224,7 @@ class ChatService:
                 enable_thinking=request.enable_thinking,
                 reasoning_effort=request.reasoning_effort,
                 preserve_thinking=request.preserve_thinking,
-                template_kwargs=request.template_kwargs,
+                template_kwargs=template_kwargs,
             )
         except OpenAIProtocolError:
             raise

@@ -1,4 +1,5 @@
 #include <shelf/models/hy4_flash/decoder.h>
+#include <shelf/kernels/fused/detail/radix_select.h>
 #include <shelf/models/hy4_flash/generate.h>
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/decode.h>
 #include <algorithm>
@@ -52,6 +53,34 @@ __global__ void best_ids(const float *logits, int *tokens, int position, uint64_
     }
     if (!tid)
         tokens[row] = ids[0];
+}
+__global__ void truncate_logits(float *logits, int k, float p, float temperature) {
+    __shared__ uint32_t histogram[256], state[4];
+    __shared__ int ids[64];
+    __shared__ float values[64], masses[64];
+    float *row = logits + size_t(blockIdx.x) * 120832;
+    ::shelf::kernel::detail::radix_select<3>(row, 120832, k, histogram, state, ids, values, 0);
+    const int t = threadIdx.x;
+    if (t < k) {
+        float peak = values[0];
+        for (int j = 1; j < k; ++j)
+            peak = fmaxf(peak, values[j]);
+        masses[t] = expf((values[t] - peak) / temperature);
+    }
+    __syncthreads();
+    for (int i = t; i < 120832; i += blockDim.x)
+        row[i] = -INFINITY;
+    __syncthreads();
+    if (t < k) {
+        double before = 0, total = 0;
+        for (int j = 0; j < k; ++j) {
+            total += masses[j];
+            if (values[j] > values[t] || (values[j] == values[t] && ids[j] < ids[t]))
+                before += masses[j];
+        }
+        if (p == 1 || before < p * total)
+            row[ids[t]] = values[t];
+    }
 }
 __global__ void probabilities(const float *logits, float *out, float temp) {
     __shared__ float scratch[256];
@@ -108,8 +137,11 @@ struct Target {
     float *target_probs = nullptr;
     float *draft_probs = nullptr;
     float temperature;
+    int top_k;
+    float top_p;
     uint64_t seed;
-    Target(Residency &gpu, float temp, uint64_t rng) : op(gpu), temperature(temp), seed(rng) {
+    Target(Residency &gpu, float temp, uint64_t rng, int k, float p)
+        : op(gpu), temperature(temp), top_k(k), top_p(p), seed(rng) {
         op.arena.cursor = 0;
         if (gpu.model.has_draft && temperature > 0) {
             target_probs = static_cast<float *>(op.arena.next(6 * 120832 * 4));
@@ -143,6 +175,10 @@ struct Target {
             std::ofstream file(dump, std::ios::binary);
             if (!file.write(reinterpret_cast<const char *>(host.data()), host.size() * 4))
                 throw std::runtime_error("logits を保存できません");
+        }
+        if (temperature > 0 && top_k > 0) {
+            truncate_logits<<<hidden.rows, 256>>>(logits, top_k, top_p, temperature);
+            checked(hipGetLastError());
         }
         if (distribution) {
             probabilities<<<hidden.rows, 256>>>(logits, distribution, temperature);
@@ -308,13 +344,15 @@ void decoder_layer(Ops &op, int layer, int start, Mat x, const std::vector<int> 
         op.gpu.ffn_ms += std::chrono::duration<double, std::milli>(now() - start_time).count();
     }
 }
-void generate(Residency &gpu, const std::vector<int> &ids, int count, int chunk, float temperature,
-              uint64_t seed, const Path &logits_file) {
+std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count, int chunk, float temperature,
+              uint64_t seed, const Path &logits_file, int top_k, float top_p, const std::function<void(int)> &emit) {
     if (ids.empty() || !count || ids.size() + count > gpu.tokens || gpu.tokens > 1048576 || chunk < 1 ||
         chunk > max_prefill_chunk)
         throw std::runtime_error("入力・出力長または prefill chunk が範囲外です");
     auto now = std::chrono::steady_clock::now;
-    Target target(gpu, temperature, seed);
+    if (top_k < 0 || top_k > 64 || !(top_p > 0 && top_p <= 1) || (temperature > 0 && top_p < 1 && !top_k))
+        throw std::invalid_argument("top_k は 0〜64、top_p を使う場合は top_k が必要です");
+    Target target(gpu, temperature, seed, top_k, top_p);
     auto begin = now();
     int next = 0;
     for (size_t first = 0; first < ids.size(); first += chunk) {
@@ -331,13 +369,18 @@ void generate(Residency &gpu, const std::vector<int> &ids, int count, int chunk,
     auto pp_expert_ms = gpu.expert_ms;
     auto pp_bytes = gpu.transfer_bytes;
     std::vector<int> generated{next};
+    auto append = [&](int id) {
+        generated.push_back(id);
+        if (emit) emit(id);
+    };
+    if (emit) emit(next);
     int rounds = 0, accepted = 0;
     std::array<int, 6> histogram{};
     while (int(generated.size()) < count && generated.back() != 120025) {
         int anchor = generated.back();
         if (!gpu.model.has_draft || target.history.size() + 6 > gpu.tokens ||
             int(generated.size()) + 1 == count) {
-            generated.push_back(target.forward({anchor}, false)[0]);
+            append(target.forward({anchor}, false)[0]);
             continue;
         }
         std::chrono::steady_clock::time_point draft_begin;
@@ -356,7 +399,7 @@ void generate(Residency &gpu, const std::vector<int> &ids, int count, int chunk,
         ++histogram[keep - 1];
         target.accept(keep, 6);
         for (int i = 0; i < keep && int(generated.size()) < count; ++i) {
-            generated.push_back(actual[i]);
+            append(actual[i]);
             if (actual[i] == 120025)
                 break;
         }
@@ -388,9 +431,6 @@ void generate(Residency &gpu, const std::vector<int> &ids, int count, int chunk,
                 "profile_tg_ms attention=%.3f ffn=%.3f transfer=%.3f head=%.3f draft=%.3f\n",
                 pp_attn, pp_ffn, pp_transfer, pp_head, gpu.attention_ms - pp_attn, gpu.ffn_ms - pp_ffn,
                 gpu.transfer_ms - pp_transfer, target.head_ms - pp_head, draft_ms);
-    printf("GENERATED_IDS=");
-    for (size_t i = 0; i < generated.size(); ++i)
-        printf("%s%d", i ? "," : "", generated[i]);
-    puts("");
+    return generated;
 }
 }

@@ -11,8 +11,8 @@ if(SHELF_HY4_ONLY)
     target_link_libraries(shelf-compute PRIVATE shelf_hy4_model)
     shelf_set_rocm_rpath(shelf-compute)
     set_property(TARGET shelf-compute APPEND PROPERTY BUILD_RPATH "${SHELF_LIBCXX_LLVM_ROOT}/lib")
-    return()
-endif()
+    target_include_directories(shelf-compute SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
+else()
 
 # Inference engine (raw token IDs in, GENERATED_IDS out).
 add_executable(shelf-compute
@@ -29,6 +29,7 @@ target_include_directories(shelf-compute SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/ven
 target_include_directories(shelf-compute PRIVATE "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(shelf-compute PRIVATE shelf shelf_hy4_model)
 shelf_set_hip_archs(shelf-compute)
+endif()
 
 # Server product: Python entrypoint plus the OpenAI protocol adapter, the async
 # compute client and the shared chat codec. Everything the server needs lives
@@ -68,7 +69,7 @@ add_custom_target(shelf-server-stage ALL DEPENDS "${SHELF_SERVER_TARGET}")
 
 # E2E benchmark (pp / tg)
 # + Qwen35 micro-benchmarks
-if(SHELF_BUILD_BENCHMARKS)
+if(SHELF_BUILD_BENCHMARKS AND NOT SHELF_HY4_ONLY)
     add_executable(shelf-bench
         src/apps/bench/main.cpp
         src/apps/bench/pp.hip

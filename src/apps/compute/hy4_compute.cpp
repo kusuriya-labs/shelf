@@ -2,6 +2,10 @@
 #include <shelf/models/hy4_flash/residency.h>
 #include <shelf/models/hy4_flash/generate.h>
 #include <algorithm>
+#include <iostream>
+#include <nlohmann/json.hpp>
+#include <poll.h>
+#include <unistd.h>
 #include <shelf/io/token_ids.h>
 #include <cmath>
 #include <charconv>
@@ -10,11 +14,82 @@
 #include <string_view>
 
 namespace shelf::hy4 {
+namespace {
+using Json = nlohmann::json;
+
+void reply(const Json &event) {
+    std::cout << event.dump() << std::endl;
+}
+
+void serve(Residency &gpu, int chunk) {
+    struct Interrupted {};
+    bool stopping = false;
+    auto control = [&](const Json &request, int active) {
+        const auto op = request.at("op").get<std::string>();
+        if (op == "ping")
+            reply({{"event", "pong"}});
+        else if (op == "stats")
+            reply({{"event", "stats"}});
+        else if (op == "shutdown") {
+            stopping = true;
+            reply({{"event", "shutdown"}});
+            if (active >= 0) throw Interrupted{};
+        } else if (op == "cancel") {
+            if (active >= 0 && request.at("request_id") == active) throw Interrupted{};
+        } else
+            return false;
+        return true;
+    };
+    std::setvbuf(stdin, nullptr, _IONBF, 0);
+    std::string line;
+    while (!stopping && std::getline(std::cin, line)) {
+        int id = -1;
+        try {
+            const auto request = Json::parse(line);
+            if (control(request, -1)) continue;
+            id = request.at("request_id").get<int>();
+            if (request.at("op") != "generate" || request.value("grammar", false) ||
+                request.value("reasoning_budget_tokens", 0) || request.value("min_p", 0.f) != 0)
+                throw std::invalid_argument("Hy4 の生成経路が対応していない指定です");
+            auto ids = request.at("input_ids").get<std::vector<int>>();
+            int count = request.at("max_new_tokens").get<int>();
+            float temp = request.value("temperature", 0.f);
+            if (count <= 0 || ids.empty() || ids.size() + count > gpu.tokens ||
+                !std::isfinite(temp) || temp < 0 ||
+                std::any_of(ids.begin(), ids.end(), [](int t) { return t < 0 || t >= 120832; }))
+                throw std::invalid_argument("入力 ID、生成長、または温度が範囲外です");
+            auto emit = [&](int token) {
+                pollfd input{STDIN_FILENO, POLLIN, 0};
+                while (poll(&input, 1, 0) > 0) {
+                    if (!std::getline(std::cin, line)) { stopping = true; throw Interrupted{}; }
+                    auto cmd = Json::parse(line);
+                    if (!control(cmd, id))
+                        reply({{"event", "error"}, {"request_id", cmd.value("request_id", -1)},
+                               {"message", "Hy4 は一度に 1 件の生成を処理します"}});
+                }
+                reply({{"event", "token"}, {"request_id", id}, {"token_id", token}});
+            };
+            fprintf(stderr, "hy4_request=%d input=%zu limit=%d temperature=%.3f top_p=%.3f top_k=%d\n",
+                    id, ids.size(), count, temp, request.value("top_p", 1.f), request.value("top_k", 0));
+            auto result = generate(gpu, ids, count, chunk, temp, request.value("seed", uint64_t{}), {},
+                                   request.value("top_k", 0), request.value("top_p", 1.f), emit);
+            reply({{"event", "done"}, {"request_id", id}, {"generated_ids", result},
+                   {"finish_reason", result.back() == 120025 ? "stop" : "length"}});
+        } catch (const Interrupted &) {
+            reply({{"event", "done"}, {"request_id", id}, {"finish_reason", "cancelled"}});
+        } catch (const std::invalid_argument &e) {
+            reply({{"event", "error"}, {"request_id", id}, {"code", "invalid_argument"}, {"message", e.what()}});
+        } catch (const Json::exception &e) {
+            reply({{"event", "error"}, {"request_id", id}, {"code", "invalid_argument"}, {"message", e.what()}});
+        }
+    }
+}
+}
 int compute(int argc, char **argv) {
     try {
         if (argc == 1 || std::string_view(argv[1]) == "--help") {
             puts(
-                "shelf-compute [hy4] [inspect|reserve|generate] --model-dir PATH --engram-dir PATH --placement "
+                "shelf-compute [hy4] [inspect|reserve|generate|serve] --model-dir PATH --engram-dir PATH --placement "
                 "PATH [--dfly-dir PATH] [--max-seq-len N] [--input-ids-file PATH] [--max-new-tokens N] "
                 "[--chunk N] [--temperature T] [--seed N] [--dump-logits PATH] [--repeats N]");
             return 0;
@@ -65,12 +140,14 @@ int compute(int argc, char **argv) {
             } else
                 throw std::runtime_error("未知の引数です: " + std::string(key));
         }
-        if (mode != "inspect" && mode != "reserve" && mode != "generate")
+        if (mode != "inspect" && mode != "reserve" && mode != "generate" && mode != "serve")
             throw std::runtime_error("未知の動作です");
         if (model.empty() || engram.empty() || placement.empty())
             throw std::runtime_error("重みと配置表が必要です");
         Checkpoint checkpoint(model, engram, draft, read_owners(placement));
-        printf("DFly=%d weight_bytes=%zu,%zu,%zu\n", checkpoint.has_draft, checkpoint.bytes[0],
+        if (mode == "serve" && (tokens > 1048576 || chunk > max_prefill_chunk))
+            throw std::invalid_argument("サーバーの予約長または chunk が範囲外です");
+        fprintf(mode == "serve" ? stderr : stdout, "DFly=%d weight_bytes=%zu,%zu,%zu\n", checkpoint.has_draft, checkpoint.bytes[0],
                checkpoint.bytes[1], checkpoint.bytes[2]);
         if (mode == "inspect")
             return 0;
@@ -86,10 +163,18 @@ int compute(int argc, char **argv) {
             Residency gpu(checkpoint, tokens);
             try {
                 gpu.reserve();
-                if (mode == "generate") {
+                if (mode == "serve") {
                     gpu.upload();
-                    for (int pass = 0; pass < repeats; ++pass)
-                        generate(gpu, ids, count, chunk, temperature, seed, pass ? Path{} : logits_file);
+                    serve(gpu, chunk);
+                } else if (mode == "generate") {
+                    gpu.upload();
+                    for (int pass = 0; pass < repeats; ++pass) {
+                        auto result = generate(gpu, ids, count, chunk, temperature, seed, pass ? Path{} : logits_file);
+                        printf("GENERATED_IDS=");
+                        for (size_t i = 0; i < result.size(); ++i)
+                            printf("%s%d", i ? "," : "", result[i]);
+                        puts("");
+                    }
                 }
             } catch (const std::bad_alloc &) {
                 gpu.shutdown();
