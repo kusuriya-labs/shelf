@@ -49,6 +49,36 @@ date・build・GPU 割り当て・生成結果の一致アンカーとともに�
 | カテゴリ別 serving | `vendor/BetterBench`（methodology §9） | decode t/s、TTFT p50 |
 | fp8 KV の数値品質 | `tools/quality_gate.py` / `shelf-bench quality` | ppl 差、mean KL、top-1 一致率 |
 
+## 2026-11-19 27B MXFP4 prefill chunk 4096 と GDN f32 state
+
+GDN recurrent state を fp16 から f32 にし、prefill chunk を 2048 から 4096 に
+変えても multi-chunk が single-chunk と一致するようにした。f32 state の経緯は
+[../research/20261119/prefill_chunk_quality.md](../research/20261119/prefill_chunk_quality.md)。
+
+- measurement revision: worktree `perf/qwen38-prefill`、commit `79fba00`、2026-11-19
+- GPU: Radeon AI PRO R9700 × 1（`--device 1`）、bf16 KV
+- command: `shelf-bench pp --model-dir models/Qwen3.8-27B-Quark-AWQ-MXFP4 --device 1
+  --prompt-tokens 8192 --prefill-chunk <2048|4096> --kv-cache-dtype bf16 --warmup 1`
+
+| prefill-chunk | prefill p50 | tokens/s |
+| ---: | ---: | ---: |
+| 2048 | 3,946.0 ms | 2,076 |
+| 4096 | 3,792.0 ms | 2,160 |
+
+`--prefill-chunk 4096` で **3.9% 短縮**。
+
+品質（`shelf-bench quality`、context 8,192、256 positions、bf16 KV、
+4×2048 と 2×4096 の比較）: **KL mean 0、top-1 一致 100%**。
+context 2,048 / 4,096 でも同様に KL 0。
+
+decode への影響（`shelf-bench tg --mode forward --context 512 --tokens 128`）:
+f32 state 32.41 tok/s、fp16 state 32.82 tok/s で約 1.25% 低下
+（state traffic 56.6 → 113 MB/token）。prefill の品質修正と引き換えに許容する。
+
+GDN recurrence 単体（`shelf-bench gdn-recurrence --key-heads 8 --value-heads 48
+--head-k 128 --head-v 128 --nreq 1`）: rows 2,048 1.75 ms/layer、rows 4,096
+2.08 ms/layer。36 層で約 75 ms、prefill 全体の約 4%。
+
 ## 2026-11-19 Qwen3.8-Flash-Next MXFP4 単一リクエスト decode の chunk 非依存化
 
 `--moe-host-experts 448` の TP=1 単一リクエストで、`--prefill-chunk` によらず decode が
