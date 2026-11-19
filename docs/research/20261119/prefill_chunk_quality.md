@@ -49,33 +49,45 @@ scored positions 512、bf16 KV。
   **最初の chunk 境界で既に壊れている。**
 - `SHELF_GDN_RECURRENCE_EXACT=1` でも改善しない。lossy 分解は原因ではない。
 
-## 4. 原因の仮説
+## 4. 原因の確定と修正
 
-single-chunk では GDN recurrence の状態が f32 accumulator のまま次の token に
-渡るが、multi-chunk では chunk 境界で **fp16 の recurrent state** に丸めて
-保存・再ロードする。state は `GdnStatePool` の `fp16_t` で、
-`gdn_recurrence` は境界で fp16 に落とす。
+原因は **GDN recurrent state の fp16 丸め**だった。single-chunk では状態が
+f32 accumulator のまま次 token に渡るが、multi-chunk では境界で fp16 の
+state pool に丸めて保存・再ロードする。36 層分の丸めが context とともに
+増幅し、最初の境界で既に KL 2.4 になっていた。
 
-- conv state は bf16 だが、入力 activation 自体が bf16 なので丸め誤差はない。
-- recurrent state は f32 → fp16 → f32 の round-trip になり、境界ごとに
-  仮数 10 bit へ落ちる。36 層の GDN でこれが増幅される。
-- 512 token のような短い chunk を多数回通す serving では、この誤差が
-  さらに蓄積する。Flash-Next の長文で観測された差とも整合する。
+`GdnStatePool` と recurrence kernel の state を **f32** に変更した。
+`GdnStateScalar = float` を導入し、pool / kernel / spec history / prefix cache /
+footprint の state サイズと load/store を一貫させた。
 
-## 5. 次の実験
+- state サイズ: 36 layer × 48 v_head × 128 × 128 × 4 B = **113 MB/request**
+  （fp16 の 56.6 MB から倍）。4 request でも 452 MB。
+- conv state は bf16 のまま（入力 activation が bf16 なので丸め誤差なし）。
+- history capture は異なる launch 形状の reference と比べるため、テストは
+  bit 一致から相対 1e-3 の比較に変更した（B1）。
 
-recurrent state を f32 にしたとき、2×2,048 が 1×4,096 とどこまで一致するかを
-品質ゲートで測る。
+## 5. f32 state の結果
 
-- state サイズ: 36 layer × 48 v_head × 128 × 128 × 4 B = 113 MB/request
-  （fp16 の 56.6 MB から倍）。4 request でも 452 MB で、arena 31 GB に収まる。
-- 併せて conv state の dtype と、decode / verify / DFlash2 の state copy
-  （`recurrent_state_bytes`）の整合を確認する。
-- f32 化で品質が通れば chunk 4,096 を既定候補にできる。通らなければ
-  chunk 境界の別要因（KV page / RoPE position / 層別 state）を event で追う。
+| 条件 | chunk 比較 | KL | top-1 |
+| --- | --- | ---: | ---: |
+| context 2,048 | 2×1,024 vs 1×2,048 | **0** | **100%** |
+| context 4,096 | 2×2,048 vs 1×4,096 | **0** | **100%** |
+| context 8,192 | 4×2,048 vs 2×4,096 | **0** | **100%** |
 
-## 6. 決定
+multi-chunk と single-chunk が bit 一致した。品質ゲートを通過する。
 
-- `--prefill-chunk` の既定 2,048 は変更しない。
-- ② GDN chunk-parallel は、f32 state の保持と chunk 境界の再現性を
-  前提条件として進める。
+## 6. ① の採否
+
+- 速度: chunk 2,048 3,946 ms → 4,096 3,792 ms（**3.9% 短縮**、f32 state）。
+- 品質: KL 0 / top-1 100%。**① は通過**。
+- decode への影響: 32.41 tok/s（f32）vs 32.82 tok/s（fp16）で **約 1.25% 低下**
+  （state traffic が 56.6 → 113 MB/token）。prefill の改善と引き換えに許容する。
+- `--prefill-chunk 4096` を推奨設定とする。既定値の変更は serving の
+  メモリ / TTFT 判断として別途行う。
+
+## 7. 次の段
+
+② GDN chunk-parallel は、f32 state を前提に recurrence の row 方向の
+並列性を上げる。現在は head 方向（48）だけが並列で、row は serial。
+conv / recurrence の event 内訳を取り、chunk 4,096 での上限を確認してから
+scan の並列化方式を決める。
