@@ -49,6 +49,39 @@ date・build・GPU 割り当て・生成結果の一致アンカーとともに�
 | カテゴリ別 serving | `vendor/BetterBench`（methodology §9） | decode t/s、TTFT p50 |
 | fp8 KV の数値品質 | `tools/quality_gate.py` / `shelf-bench quality` | ppl 差、mean KL、top-1 一致率 |
 
+## 2026-11-19 27B MXFP4 decode の context 依存と server 同時数
+
+`models/Qwen3.8-27B-Quark-AWQ-MXFP4`、R9700 1 枚、bf16 KV、greedy の decode。
+context 依存は `shelf-bench tg --context <N> --tokens 64 --prefill-chunk 4096`、
+server は `shelf-server --device 2 --max-concurrent-requests 4 --max-seq-len 4096
+--prefill-chunk 4096` に prose 519 token・64 token 生成の streaming 要求を
+同時数分だけ並べた client 計測である。
+
+- measurement revision: `961fc78`
+- GPU: Radeon AI PRO R9700 × 1（`--device 2`、sclk 未固定）
+
+| context | per token | tok/s | 512 からの増分 |
+| ---: | ---: | ---: | ---: |
+| 512 | 30.5 ms | 32.8 | — |
+| 8,192 | 31.9 ms | 31.4 | +1.4 ms |
+| 16,384 | 33.5 ms | 29.9 | +3.0 ms |
+| 32,768 | 36.7 ms | 27.3 | +6.2 ms |
+
+32,768 では paged attention（split + reduce）が 6.29 ms/token（17 %）を占め、
+KV 2.15 GB/token を実効 342 GB/s で読む。内訳と棄却した案は
+[../research/20261119/decode_server_gap_long_context.md](../research/20261119/decode_server_gap_long_context.md)
+に置く。
+
+| 同時 stream | aggregate | per-stream |
+| ---: | ---: | ---: |
+| 1 | 28.6 tok/s | 32.8 tok/s |
+| 2 | 57.9 tok/s | 30.1 tok/s |
+| 4 | 102.6 tok/s | 27.1 tok/s |
+
+単一 stream の inter-token は server 経路でも 30.0 ms で、bench と一致する。
+host の折り返しは約 50 us、`hipGraphLaunch` は 11〜29 us であり、
+kernel 合計 28.5 ms との差 1.9 ms は GPU 側の直列化である。
+
 ## 2026-11-19 27B MXFP4 prefill chunk 4096 と GDN f32 state
 
 GDN recurrent state を fp16 から f32 にし、prefill chunk を 2048 から 4096 に
