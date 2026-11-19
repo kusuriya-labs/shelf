@@ -1,7 +1,7 @@
 #pragma once
 
 #include <shelf/models/hy4_flash/residency.h>
-#include <shelf/kernels/hy4_flash/linear.h>
+#include <shelf/models/hy4_flash/linear.h>
 
 namespace shelf::hy4 {
 struct Mat {

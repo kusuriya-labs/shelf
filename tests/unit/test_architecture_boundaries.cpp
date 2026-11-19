@@ -439,7 +439,8 @@ int main() {
         root / "src/shelf/runtime",
     };
     for (const auto& dir : core_dirs) {
-        scan_clean(dir, {"qwen35", "Qwen35", "shelf/models/qwen35", "shelf/models/qwen"});
+        scan_clean(dir, {"qwen35", "Qwen35", "shelf/models/qwen35", "shelf/models/qwen",
+                         "hy4_flash", "shelf_hy4_", "Hy4Expert", "Hy4Route"});
     }
 
     const std::vector<fs::path> generic_dirs = {
@@ -451,8 +452,13 @@ int main() {
         root / "src/shelf/models/common",
     };
     for (const auto& dir : generic_dirs) {
-        scan_clean(dir, {"qwen35", "Qwen35",
-                         "shelf/models/qwen"});
+        scan_clean(dir, {"qwen35", "Qwen35", "shelf/models/qwen",
+                         "hy4_flash", "shelf_hy4_", "Hy4Expert", "Hy4Route"});
+    }
+
+    for (const auto& dir : {root / "src/shelf/kernels/hy4_flash", root / "include/shelf/kernels/hy4_flash"}) {
+        if (fs::exists(dir)) fail(dir.string() + " must be model-local");
+        else ++passed;
     }
 
     const std::vector<fs::path> weights_dirs = {

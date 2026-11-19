@@ -1,5 +1,5 @@
 #include <shelf/models/hy4_flash/absorbed.h>
-#include <shelf/kernels/hy4_flash/mla_prefill.h>
+#include <shelf/models/hy4_flash/mla_prefill.h>
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/decode.h>
 #include <shelf/quantization/exl3/exl3_int8.h>
 
