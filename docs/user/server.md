@@ -74,6 +74,7 @@ Ready.
 | `--compute COMPUTE` | shelf-compute path |
 | `--max-seq-len MAX_SEQ_LEN` | max sequence length (default 32768; PLaMo 3: 2048) |
 | `--max-num-batched-tokens MAX_NUM_BATCHED_TOKENS` | token budget per scheduled step; also sets the executor row bucket (default 2048) |
+| `--prefill-chunk PREFILL_CHUNK` | cap prefill tokens per step and the executor row bucket (default: --max-num-batched-tokens) |
 | `--max-concurrent-requests MAX_CONCURRENT_REQUESTS` | max in-flight requests (default 4) |
 | `--inference-budget-tokens INFERENCE_BUDGET_TOKENS` | max generated tokens per request (default 32768) |
 | `--large-context-tokens LARGE_CONTEXT_TOKENS` | prompt tokens above which the larger inference budget applies (default 262144) |
@@ -549,6 +550,10 @@ DFlash2 有効時は drafter の weight と session pool 領域も確保計算�
 executor の row bucket も決める。prompt が N を超えても prefill は chunk 分割で進む。
 N を下げると program workspace が減り、その分だけ KV capacity が増える
 （context を大きく取る構成では N が実質的な容量ダイヤルになる）。
+
+`--prefill-chunk N` を指定すると、`--max-num-batched-tokens` との小さい方を
+1 step の予算と row bucket に使う。N は 16〜8192 である。指定しない場合は
+`--max-num-batched-tokens` だけが使われる。
 
 client が connection を切断すると、stream / 非 stream のどちらでも in-flight generation は
 cancel される（`finish_reason="cancelled"`）。MTP の prefill は次の chunk 境界（`--max-num-batched-tokens`）、

@@ -26,7 +26,7 @@ TP、pipeline parallel、MTP、DFlash2、2048 token 超の長文は未対応。
 | `--page-tokens N` | paged KV page size in tokens (default 16) |
 | `--max-concurrent-requests N` | max in-flight requests (default 4) |
 | `--max-num-batched-tokens N` | token budget per scheduled step; also sets the executor row bucket (default 2048) |
-| `--prefill-chunk N` | prompt tokens per prefill step; also caps the row bucket of a single request (default 512) |
+| `--prefill-chunk N` | prompt tokens per prefill step; also caps the row bucket (default 512; serve caps max-num-batched-tokens when given) |
 | `--ple-prefetch 0\|1` | prefetch the next PLE rows during prefill (default 1) |
 | `--device N\|N,M` | GPU device(s); count must match --tensor-parallel or --pipeline-parallel (default 0) |
 | `--tensor-parallel N` | tensor parallel degree 1 \| 2 \| 4 (default 1) |

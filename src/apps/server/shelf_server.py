@@ -100,6 +100,8 @@ def build_compute_argv(opts) -> list[str]:
         "--prefix-cache-strategy", opts.prefix_cache_strategy,
         "--prefix-cache-save-interval", str(opts.prefix_cache_save_interval),
     ]
+    if opts.prefill_chunk is not None:
+        argv += ["--prefill-chunk", str(opts.prefill_chunk)]
     if opts.dflash2_model_dir:
         argv += [
             "--dflash2-model-dir", opts.dflash2_model_dir,
@@ -506,6 +508,9 @@ def parse_args(argv=None):
     parser.add_argument("--max-num-batched-tokens", type=int, default=2048,
                         help="token budget per scheduled step; also sets the executor "
                              "row bucket (default 2048)")
+    parser.add_argument("--prefill-chunk", type=int, default=None,
+                        help="cap prefill tokens per step and the executor row bucket "
+                             "(default: --max-num-batched-tokens)")
     parser.add_argument("--max-concurrent-requests", type=int, default=4,
                         help="max in-flight requests (default 4)")
 
@@ -603,6 +608,8 @@ def parse_args(argv=None):
         parser.error("--max-seq-len must be >= 1")
     if not 16 <= opts.max_num_batched_tokens <= 8192:
         parser.error("--max-num-batched-tokens must be between 16 and 8192")
+    if opts.prefill_chunk is not None and not 16 <= opts.prefill_chunk <= 8192:
+        parser.error("--prefill-chunk must be between 16 and 8192")
     if opts.max_concurrent_requests < 1:
         parser.error("--max-concurrent-requests must be >= 1")
     if opts.inference_budget_tokens < 1:

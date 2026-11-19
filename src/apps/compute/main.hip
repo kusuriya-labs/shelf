@@ -187,6 +187,12 @@ int main(int argc, char** argv) {
     std::vector<int32_t> prompt_ids;
     if (opt.serve_stdio) {
         config.max_num_batched_tokens = static_cast<uint32_t>(opt.max_num_batched_tokens);
+        if (opt.prefill_chunk_set) {
+            const uint32_t chunk = static_cast<uint32_t>(opt.prefill_chunk);
+            if (config.max_num_batched_tokens > chunk) {
+                config.max_num_batched_tokens = chunk;
+            }
+        }
         if (config.max_num_batched_tokens < config.max_concurrent_requests) {
             config.max_num_batched_tokens = config.max_concurrent_requests;
         }
