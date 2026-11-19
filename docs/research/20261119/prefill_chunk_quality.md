@@ -132,3 +132,18 @@ norm / residual_norm producer の入力コピー（global → LDS）と residual
 補足: rowref scales の `g=1..groups-1` の zero-fill は GEMM が
 `scales[row*stride+0]` しか読まないため削れるが、書き込み量は codes の約 1/32 で、
 E2E への寄与は 0.1% 未満と見積もり、実装しない。
+
+## 10. ④ attention tile
+
+prefill attention の tile を A/B した（pp 8192、chunk 4096、交互 2 回）。
+
+| tile | 1 | 2 |
+| --- | ---: | ---: |
+| wide 32 row（flat 192、24 wave） | 3,806.5 ms | 3,793.6 ms |
+| legacy 10 row（flat 64、8 wave） | 3,799.2 ms | 3,791.7 ms |
+
+差はなく、KV 再読み込みの amortize は既に効いている。64 row（flat 384）は
+`OctavePrefillShared<384, 24, 16>` が 64KB LDS を超え、static_assert で
+コンパイルできない。tile は 32 row × 6 q_per_kv = 192 flat で LDS 律速の上限。
+
+決定: ④ は不採用。attention の次対象は softmax/LDS の演算側だが、今回の範囲外。
