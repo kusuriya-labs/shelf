@@ -115,3 +115,79 @@ ctest --test-dir "$B" -R gdn --output-on-failure --timeout 180
 追加の chunk 診断では同じ quality コマンドの chunk 2048 dump を基準に前後比較し、さらに `SHELF_GDN_RECURRENCE_EXACT=1` で chunk 4096 dump と 2048 を比較した。
 
 BF16 の試行は `MODEL` を `Qwen3.8-27B-BF16`、context 128、chunk 128、位置 64 とした。非投機生成は DFlash2 引数を除き `--dump-logits` を加えた。MTP の比較は上記 compute コマンドから DFlash2 引数を除き、同時要求 1 と working-set 予約を上記のとおり指定し、MTP 有無で各 1 回実行した。server regression は `SHELF_BUILD_DIR=$PWD/$B SHELF_MODEL_DIR=$MODEL SHELF_DFLASH2_MODEL_DIR=$DRAFT SHELF_TEST_DEVICE=0 python3 -u tests/server/test_compute_dflash2.py`。同じ非投機コマンドを `--dump-logits` なしでも再実行した。測定ログと入力は `/tmp/gdn-fix-evidence/` に保存した一時ファイルである。
+
+## 追試と受入条件の訂正（2026-11-20）
+
+ユーザーの訂正により、必須条件は **DFlash2 と非投機 greedy の全入力での完全一致、GDN テスト通過、速度の悪化がないこと**とする。上記の chunk の KL / top-1 閾値と BF16 参照は採否条件から外す。以下は元の記録を残したまま追加した追試である。判定は **push 保留**。今回の対象の完全一致と GDN 全件通過を確認できていない。
+
+### ROCm と変更前後の比較
+
+| 項目 | 7.14 変更前 | 7.14 変更後 | 10.2 変更前 | 10.2 変更後 |
+| --- | --- | --- | --- | --- |
+| GDN CTest、13 件 | 11 通過、exact-history と fixture 失敗 | 12 通過、fixture 失敗 | 11 通過、exact-history と fixture 失敗 | 12 通過、fixture 失敗 |
+| chunk 4096 → 2048、KL / top-1 | 0 / 100% | 0 / 100% | 0.0868127414 / 96.875% | 同左 |
+| 3 入力、投機 == 非投機 | 0 / 3 | 1 / 3 | 0 / 3 | 1 / 3 |
+| server regression | 93 通過 / 6 失敗 | 97 通過 / 2 失敗 | 93 / 6 | 97 / 2 |
+| pp2048 tok/s、中央値 | 1903.52 | 1891.11 | 1123.83 | 1124.61 |
+| 非投機 tg128 tok/s、中央値 | 31.72 | 31.65 | 31.69 | 31.69 |
+
+GDN fixture は Git LFS ポインターで失敗する。LFS 実体を使った 10.2 の前回試行でも `lm_head_tied disagrees with lm_head storage` で失敗したため、fixture を取得するだけでは全件通過しない。未取得のまま実行した 7.14 については、この二次的な失敗を再検証していない。テストを skip や通過とは数えない。7.14 の tg 変更前 3 回は 31.76 / 23.73 / 31.72 で、1 回の外れ値を含む。pp 変更後は約 -0.65%、tg は約 -0.22%。10.2 はそれぞれ +0.07%、0%。
+
+3 入力の初回分岐は両 ROCm で同一だった。0 始まり、256 は全 256 token 一致を示す。
+
+| 入力 | 変更前: 初回位置（非投機 / 投機 ID） | 変更後: 同左 |
+| --- | --- | --- |
+| shell | 45（321 / 6600） | 37（10966 / 17789） |
+| code | 118（23238 / 348） | 256（一致） |
+| 日本語 | 60（95882 / 246922） | 60（95882 / 246922） |
+
+server の変更前の失敗は BF16 / FP8 / Octave c4v4 各々の serve 対 target-only greedy と single-shot DFlash2。変更後は BF16 と Octave の serve 対 target-only greedy のみ失敗した。これは改善であり完全一致ではない。server regression は `SHELF_GDN_VERIFY_CHUNKED=0` を指定している。
+
+7.14 の build は `fdaa0ad4` の `git archive` と `704b753d` を含む作業ツリーから別々に作成し、`build-rocm714` の compiler、gfx1201、ROCm root、host libc++ 23、vendor include を踏襲した。両方に `/lib/x86_64-linux-gnu/libstdc++.so.6` を EXE linker flags で先頭に追加した。基準 revision では `SHELF_LOAD_LIBSTDCXX_FIRST` が未実装なので、同一のリンク順にするためである。実行時 `LD_LIBRARY_PATH=/opt/rocm/core-7.14/lib:$LIB` で `libamdhip64`・HSA・hipBLASLt が 7.14 から解決されることを確認。GPU は全実行で `flock /tmp/r9700.lock`、`ROCR_VISIBLE_DEVICES=GPU-a8e9ddefa2d60f55`、`HIP_VISIBLE_DEVICES=0`。
+
+chunk 4096 の 64 位置の dump は 7.14 / 10.2 の前後 4 条件で SHA-256 `ce6ce45de88a56062e1c966ef02d1cf217e73676d0f413a94df44c9968951cd5` と一致した。chunk 2048 側は 7.14 と 10.2 で異なるため、このモデル・入力での chunk 差は ROCm compiler/runtime を含む環境に依存する。ただし原因の部品は未確定であり、速度で既知の INT8 WMMA compiler 差が品質差の原因という証拠はない。これは今回の採否条件ではない。過去の f32 通過記録 `792ab093` は Quark AWQ MXFP4、prose 16,384 token、context 8192、評価 512 位置であり、今回の EXL3 と異なる。元記録に入力ファイルの特定情報と完全なコマンドはなく、同モデルも探索範囲で見つからなかったため、完全に同条件での再現はできていない。
+
+### 一致しない経路の診断
+
+10.2、修正版、上記 3 入力、256 token。以下の位置は各設定の非投機と比較した初回差で、256 は一致。exact 設定では非投機にも同じ `SHELF_GDN_RECURRENCE_EXACT=1` を指定した。
+
+| 条件 | shell | code | 日本語 |
+| --- | ---: | ---: | ---: |
+| tree auto、既定 | 37 | 256 | 60 |
+| chain（tree budget 0）、既定 | 47 | 118 | 60 |
+| chain、`SHELF_GDN_VERIFY_CHUNKED=0` と `SHELF_GDN_RECURRENCE_EXACT=1` | 256 | 256 | 60 |
+| tree auto、同 exact 設定 | 30 | 256 | 60 |
+| mul24 の split-K を診断用に常時 1、tree auto | 30 | 246 | 39 |
+
+診断用 split-K 変更は別バイナリのみで、ソースは元に戻した。tree を切っても不一致は残り、exact GDN と serial chain は一部を改善するが全入力を解決しない。split-K 固定も全入力で不一致だった。したがって tree の rollback だけ、または split-K の違いだけが原因とは言えない。異なる verify 行数と 1 行 decode の線形演算経路は、別の実験でも同一入力の投影値に差が出ている（`docs/research/20261111/dflash2_adaptive.md`）。今回の個々の演算での最初の差は未特定である。
+
+shell について診断用バイナリで tree の verify logits をコピーした。初回分岐直前の共通履歴に対応する position 74 の row 2 で、非投機の ID 10966 / 17789 の logits は **23.341351 / 23.188080**、verify は **23.330748 / 23.351402**。前者では 10966、後者では 17789 が最大で、target logits 自体の順位が逆転している。非投機 logit 差は 0.153271、verify は逆方向に約 0.020654。診断時に stream 同期とコピーを追加しており、速度の測定には使わない。
+
+共通 runtime の `gdn_spec_history.hip` は recurrent の確保・コピーに `GdnStateScalar`（float）を使い、修正後の recurrence と compact commit の state load/store も float。`correctness/detail/gdn.inc` の f16 helper は当該ファイル内で呼ばれていない。WMMA 入力分解には `_Float16` が残るが、これを state の保存丸めの取りこぼしと見なす証拠はない。未解決の複数行 verify と decode の数値差を解消し、全入力一致と速度を同時に満たす変更は特定できなかったため、追加の推測的な kernel 修正は加えていない。
+
+### DFlash2 の速度と受理長
+
+最大 256 token、tree budget auto、drafts 7、BF16 KV、各条件 3 process の中央値。単位は tok/s、括弧内は `DFLASH2_MEAN_ACCEPTED`。前後は交互に実行したが、7.14 の shell・code・日本語の最初の 1 回は先行する一致確認で取得した。clock 固定は行っていない。
+
+| 入力 | 7.14 変更前 | 7.14 変更後 | 変化 | 10.2 変更前 | 10.2 変更後 | 変化 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| shell | 87.95 (3.397) | 85.46 (3.250) | -2.83% | 85.64 (3.397) | 82.88 (3.250) | -3.22% |
+| code | 92.95 (3.636) | 94.81 (3.722) | +2.00% | 90.43 (3.636) | 91.95 (3.722) | +1.68% |
+| 日本語 | 29.74 (1.318) | 30.21 (1.217) | +1.58% | 45.75 (1.318) | 43.67 (1.217) | -4.55% |
+| chat | 78.82 (2.923) | 78.83 (2.923) | +0.01% | 76.54 (2.923) | 76.42 (2.923) | -0.16% |
+| debug | 79.33 (2.984) | 82.96 (3.113) | +4.58% | 76.75 (2.984) | 80.09 (3.113) | +4.35% |
+| math | 124.50 (5.220) | 124.36 (5.220) | -0.11% | 120.60 (5.220) | 120.64 (5.220) | +0.03% |
+
+7.14 の日本語は前 47.35 / 29.03 / 29.74、後 45.13 / 28.12 / 30.21 と大きく変動した。10.2 でも日本語の前 1 回が 32.02、chat 後 1 回が 45.36、debug 前 1 回が 57.71 と外れた。中央値でもこのような揺れを取り除ける保証はない。shell では両 ROCm で約 3% 低下が再現し、code / debug は上昇、chat / math はほぼ横ばい。生成列と受理長の変化を伴う入力依存の差であり、一律の速度低下でも純粋な kernel 性能差でもない。一方、shell の低下は実測上存在するため、全入力で速度悪化なしとは判断できない。
+
+追加入力は `docs/research/20261111/gdn_recurrence_data.json` の `base-11`（分散ジョブ queue）、`base-12`（C++ memory leak 調査）、`base-18`（二次方程式）から `input_ids` を使用。PSKLDTOK ではなく、空白区切りの ID と末尾改行。SHA-256 は順に `1e3dc44c3ca1893cfd6b2dbaf5d6269296f0c16eaa848155fe9fbce1d8d957b6`、`fcac825bf8ed0a3dc7fe108683eb298292f41692d40e80273159953ad637a359`、`e77d1125c1e9ee9f74c2c8363dbab34c5bcfbe9b6a7f23990af7c668fc49fbb9`。
+
+追加 3 入力の初回分岐も 7.14 / 10.2 で位置と ID が一致した。chat は変更前後とも 256 token 一致、debug は変更前 171（70 / 2）→変更後 35（40357 / 4499）、math は変更前後とも 135（332 / 9568）。したがって 6 入力の一致は変更前 1 / 6、変更後 2 / 6。debug では最初の不一致が早くなっており、修正が全入力で一致を改善するわけではない。
+
+### 推奨
+
+今回の変更全体は push 保留を推奨する。両 ROCm で投機と非投機の完全一致が未達、GDN reference fixture が未通過、shell の DFlash2 は両方で約 3% 低下した。exact-history の改善と server の 4 件改善は確認できるが、全入力の品質と速度の受入条件を満たす根拠にはならない。テスト配列の型修正だけは領域外書き込みを除去する独立の修正として分離可能だが、それだけでは exact-history は失敗するため、失敗を許容する運用がなければ先行 push も推奨しない。次に必要なのは、同一 prefix の 1 行 decode と複数行 verify の層別中間値・GDN state・線形投影を実測し、最初に食い違う演算を特定した上で、全 6 入力と server regression、GDN fixture、速度を再測定することである。
+
+診断ログ、各回の速度、検証用スクリプトと一時的な logits dump は `/tmp/gdn-compare/` に保存した。元の入力・モデル・共通コマンドは上記「入力」「コマンド」に記載。7.14 は `B=build-gdn-base-714` / `build-gdn-fix-714`、`LD_LIBRARY_PATH=/opt/rocm/core-7.14/lib:$LIB` とし、それ以外は同条件。tree / chain は compute の `--dflash2-tree-budget auto` / `0` で切り替えた。多入力速度の `chat` / `debug` / `math` は上記 ID に差し替え、各 256 token、同じ greedy 設定で実行した。
+
+7.14 の日本語は上表の揺れを受けて、前後交互に各 3 回を追加実行した。前 47.07 / 47.11 / 47.15、後 45.01 / 45.10 / 45.05 tok/s、中央値 47.11 → 45.05（-4.37%）。受理長は各回それぞれ 1.318 / 1.217。この再測定では 10.2 と同様の速度低下が見られた。上表の初回測定を置き換えず両方を報告する。
