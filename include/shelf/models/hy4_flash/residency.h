@@ -23,6 +23,11 @@ struct Residency {
     std::unique_ptr<rdma::Client> engram_client;
     std::future<rdma::Tables> engram_pending;
     rdma::Tables engram_rows;
+    std::vector<uint8_t> snapshot_latest;
+    std::array<uint8_t, 32> snapshot_upload_digest{};
+    bool snapshot_upload_digest_ready = false;
+    std::array<uint8_t, 32> snapshot_model_digest{};
+    bool snapshot_model_digest_ready = false;
 #endif
     Checkpoint &model;
     size_t tokens;

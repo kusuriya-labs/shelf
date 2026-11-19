@@ -49,6 +49,7 @@ set_property(TARGET shelf_hy4_flash APPEND PROPERTY BUILD_RPATH "${SHELF_LIBCXX_
 add_library(shelf_hy4_model STATIC
     src/shelf/models/hy4_flash/checkpoint.cpp
     src/shelf/models/hy4_flash/residency.cpp
+    src/shelf/models/hy4_flash/snapshot_state.cpp
     src/shelf/models/hy4_flash/ops.hip
     src/shelf/models/hy4_flash/attention.hip
     src/shelf/models/hy4_flash/absorbed.hip
@@ -63,7 +64,10 @@ if(SHELF_HY4_RDMA)
     find_package(OpenSSL REQUIRED)
     find_library(SHELF_IBVERBS_LIBRARY ibverbs REQUIRED)
     find_path(SHELF_IBVERBS_INCLUDE_DIR infiniband/verbs.h REQUIRED)
-    target_sources(shelf_hy4_model PRIVATE src/shelf/models/hy4_flash/rdma_client.cpp src/shelf/models/hy4_flash/snapshot_transport.cpp)
+    target_sources(shelf_hy4_model PRIVATE
+        src/shelf/models/hy4_flash/rdma_client.cpp
+        src/shelf/models/hy4_flash/snapshot_transport.cpp
+        src/shelf/models/hy4_flash/snapshot_fingerprint.cpp)
     target_compile_definitions(shelf_hy4_model PUBLIC SHELF_HY4_RDMA=1)
     target_include_directories(shelf_hy4_model PRIVATE "${SHELF_IBVERBS_INCLUDE_DIR}")
     target_link_libraries(shelf_hy4_model PUBLIC "${SHELF_IBVERBS_LIBRARY}" OpenSSL::Crypto)

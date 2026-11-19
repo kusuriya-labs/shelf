@@ -295,6 +295,20 @@ class AsyncComputeClient:
                 if event.get("event") == "pong":
                     return event
 
+    async def snapshot(self, timeout: float = 120.0) -> dict:
+        async with self._semaphore:
+            async with self._control_lock:
+                await self._send({"op": "snapshot"})
+                while True:
+                    try:
+                        event = await asyncio.wait_for(self._control.get(), timeout=timeout)
+                    except asyncio.TimeoutError as exc:
+                        raise ComputeProtocolError("状態の退避がタイムアウトしました") from exc
+                    if isinstance(event, Exception):
+                        raise event
+                    if event.get("event") == "snapshot":
+                        return event
+
     async def kv_stats(self, timeout: float = 5.0) -> Optional[ComputeKVStats]:
         if not self.is_alive():
             return None

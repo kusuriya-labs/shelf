@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <cstdlib>
 #include <cstring>
+#include <cstdio>
 #include <poll.h>
 
 namespace shelf::hy4::snapshot {
@@ -84,6 +85,7 @@ struct Connection {
         rdma::connect_qp(qp, answer.endpoint, 0);
     }
     void transfer_bytes(uint8_t *data, size_t size, const Message &remote, bool write) {
+        std::chrono::steady_clock::duration transfer_time{};
         for (size_t offset = 0; offset < size;) {
             size_t count = std::min(chunk, size - offset);
             if (write) std::memcpy(buffer, data + offset, count);
@@ -99,6 +101,7 @@ struct Connection {
             wr.wr.rdma.remote_addr = remote.address + offset;
             wr.wr.rdma.rkey = remote.rkey;
             ibv_send_wr *bad = nullptr;
+            auto begin = std::chrono::steady_clock::now();
             if (ibv_post_send(qp, &wr, &bad)) throw std::runtime_error("状態 RDMA を発行できません");
             auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
             ibv_wc wc{};
@@ -106,9 +109,12 @@ struct Connection {
             while (!(n = ibv_poll_cq(cq, 1, &wc)))
                 if (std::chrono::steady_clock::now() > deadline) throw std::runtime_error("状態 RDMA がタイムアウトしました");
             if (n < 0 || wc.status != IBV_WC_SUCCESS) throw std::runtime_error("状態 RDMA が失敗しました");
+            transfer_time += std::chrono::steady_clock::now() - begin;
             if (!write) std::memcpy(data + offset, buffer, count);
             offset += count;
         }
+        double seconds = std::chrono::duration<double>(transfer_time).count();
+        std::fprintf(stderr, "snapshot_rdma_%s_bytes=%zu seconds=%.6f GBps=%.3f\n", write ? "write" : "read", size, seconds, size / seconds / 1e9);
     }
 };
 }

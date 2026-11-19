@@ -1,6 +1,9 @@
 #include <shelf/models/hy4_flash/cli.h>
 #include <shelf/models/hy4_flash/residency.h>
 #include <shelf/models/hy4_flash/generate.h>
+#ifdef SHELF_HY4_RDMA
+#include <shelf/models/hy4_flash/snapshot/transport.h>
+#endif
 #include <algorithm>
 #include <iostream>
 #include <nlohmann/json.hpp>
@@ -52,7 +55,20 @@ void serve(Residency &gpu, int chunk) {
             reply({{"event", "pong"}});
         else if (op == "stats")
             reply({{"event", "stats"}});
-        else if (op == "shutdown") {
+        else if (op == "snapshot") {
+#ifdef SHELF_HY4_RDMA
+            try {
+                if (active >= 0) throw std::runtime_error("生成中は状態を退避できません");
+                if (gpu.snapshot_latest.empty()) throw std::runtime_error("退避可能な状態がありません");
+                snapshot::save(gpu.snapshot_latest);
+                reply({{"event", "snapshot"}, {"status", "ok"}, {"bytes", gpu.snapshot_latest.size()}});
+            } catch (const std::exception &e) {
+                reply({{"event", "snapshot"}, {"status", "error"}, {"message", e.what()}});
+            }
+#else
+            reply({{"event", "snapshot"}, {"status", "error"}, {"message", "RDMA が無効です"}});
+#endif
+        } else if (op == "shutdown") {
             stopping = true;
             reply({{"event", "shutdown"}});
             if (active >= 0) throw Interrupted{};
