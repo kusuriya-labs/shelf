@@ -213,6 +213,8 @@ class ChatService:
         if getattr(tokenizer, "_shelf_hy4", False):
             if tools or request.response_schema is not None:
                 raise OpenAIProtocolError("Hy4 はテキスト生成に対応します")
+            if request.min_p or request.top_k > 64 or (request.temperature > 0 and request.top_p < 1 and not request.top_k):
+                raise OpenAIProtocolError("Hy4 の sampling は top_k 0〜64、top_p を使う場合は top_k が必要です")
             effort = "max" if request.effort_given and request.reasoning_effort == "xhigh" else "high"
             template_kwargs = {"reasoning_effort": effort if request.enable_thinking else "no_think",
                                "preserved_thinking": request.preserve_thinking}

@@ -682,6 +682,9 @@ async def _serve(opts) -> int:
         opts.max_num_batched_tokens = 1024
         opts.kv_cache_dtype = "octave"
         opts.prefix_cache = 0
+        opts.prefix_cache_strategy = "off"
+        opts.prefix_cache_checkpoints = 0
+        opts.prefix_cache_save_interval = 0
         opts.device = "0,1,2"
 
     if opts.max_seq_len is None:
@@ -810,6 +813,10 @@ async def _serve(opts) -> int:
 
     if is_hy4:
         server_meta["expert_parallel"] = 3
+        server_meta["reasoning"]["default_reasoning_effort"] = "medium"
+        server_meta["reasoning"]["default_native_effort"] = "high"
+        server_meta["inference_budget"]["answer_reserve_tokens"] = 0
+        server_meta["inference_budget"]["thinking_budget_tokens"] = 0
     app = create_app(service, compute, server_meta)
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
@@ -838,20 +845,20 @@ async def _serve(opts) -> int:
         _log(_banner("Draft model:", Path(opts.dflash2_model_dir).name))
     _log(_banner("Inference budget:",
                  f"{opts.inference_budget_tokens} tokens "
-                 f"(thinking {thinking_budget_tokens(opts.inference_budget_tokens)}, "
-                 f"answer reserve {answer_reserve_tokens(opts.inference_budget_tokens)})"))
-    if opts.large_context_tokens > 0:
+                 f"(thinking {server_meta['inference_budget']['thinking_budget_tokens']}, "
+                 f"answer reserve {server_meta['inference_budget']['answer_reserve_tokens']})"))
+    if opts.large_context_tokens > 0 and not is_hy4:
         _log(_banner(f"  prompt > {opts.large_context_tokens}:",
                      f"{opts.large_context_inference_budget_tokens} tokens "
                      f"(thinking "
                      f"{thinking_budget_tokens(opts.large_context_inference_budget_tokens)})"))
-    if reasoning_capability["thinking"] and reasoning_capability["close_token"] < 0:
+    if not is_hy4 and reasoning_capability["thinking"] and reasoning_capability["close_token"] < 0:
         _log("  thinking budget is not enforced "
              "(the reasoning close tag is not one token)")
     if reasoning_capability["thinking"]:
         _log(_banner("Reasoning:",
                      f"enabled (thinking on, effort "
-                     f"{codec.DEFAULT_REASONING_EFFORT}, preserve_thinking on)"))
+                     f"{server_meta['reasoning']['default_reasoning_effort']}, preserve_thinking on)"))
         _log(_banner("Efforts:", ", ".join(codec.REASONING_EFFORTS)))
     else:
         _log(_banner("Reasoning:", "disabled"))
