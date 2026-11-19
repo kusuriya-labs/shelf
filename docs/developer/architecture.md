@@ -4,7 +4,7 @@
 
 host の C++ と HIP は ROCm clang と libc++ のヘッダでビルドする。GCC と libstdc++ のヘッダは使わない。ROCm の C++ ライブラリが実行時に libstdc++ を読み込むため、その依存順を制御する。ROCm 10 以降は `SHELF_LOAD_LIBSTDCXX_FIRST` の既定値を ON とし、libstdc++ を libc++abi より前の直接依存として読み込む。ROCm 10 未満と版が不明な場合は OFF とする。既存の CMake cache の明示値は維持される。
 
-Tensile host が読み込まれている場合、hipBLASLt を使う前に RTTI と `__dynamic_cast` の束縛先を検査し、libstdc++ 以外に解決された場合は初期化エラーとして停止する。この検査は既知の衝突を検出するもので、混在するすべての C++ ABI の互換性を保証しない。C++ オブジェクトや例外を shelf と ROCm の API 境界で受け渡さない。
+Tensile host が読み込まれている場合、hipBLASLt を使う前に RTTI と `__dynamic_cast` の束縛先を検査し、libstdc++ 以外に解決された場合は初期化エラーとして停止する。この設定を外した ROCm 10 系のビルドでは、hipBLASLt（`libhipblaslt.so.1`）の初期化中に、エラーメッセージなしで SIGSEGV する。libc++abi が先に束縛されると `dynamic_cast` が null を返し、`TensileLite::MasterSolutionLibrary::initLibraryMapping` が null の `this` で落ちる。落ちる場所が原因から離れているため、上記の検査が原因を名指しして止める。hipBLASLt 側で `dynamic_cast` の結果が検査されるようになり、libc++abi 先行でも初期化できると確認できた時点で、この回避策と検査は外せる。この検査は既知の衝突を検出するもので、混在するすべての C++ ABI の互換性を保証しない。C++ オブジェクトや例外を shelf と ROCm の API 境界で受け渡さない。
 
 ## Layer構成
 
