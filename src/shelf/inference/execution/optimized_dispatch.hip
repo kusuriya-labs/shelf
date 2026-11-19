@@ -1584,9 +1584,14 @@ bool mxfp4_quant_consumer_matches(const ::shelf::runtime::Program& program, size
     if (!resolved.ok() || resolved.value() != PhysicalResolveStatus::Applicable)
         return false;
     if (q.row_index != 0u || q.codes == 0u || q.scales == 0u || q.rows == 0u ||
-        q.k == 0u || q.k_padded < q.k || q.code_row_stride == 0u ||
+        q.k == 0u || q.k_padded < q.k || q.code_row_stride < q.k_padded ||
         q.scale_row_stride == 0u)
         return false;
+    {
+        const uint32_t groups = (q.k_padded + 127u) / 128u;
+        if (q.scale_row_stride < groups * static_cast<uint32_t>(sizeof(float)))
+            return false;
+    }
     return w.cols == q.k && w.k_padded == q.k_padded;
 }
 
@@ -1677,7 +1682,7 @@ Result<OptimizedLaunchResult> try_launch_mxfp4_norm_quantize(
     auto input = resolve_host_value(program, ::shelf::runtime::ValueId{norm.input_slots[0]}, ctx);
     if (!input.ok()) return input.status();
     if (input.value().dtype != ValueDType::BF16 || input.value().feature_count != q.k ||
-        input.value().ptr == nullptr)
+        input.value().row_stride < q.k || input.value().ptr == nullptr)
         return miss;
     ::shelf::execution::Mxfp4NormArgs args{};
     args.input = static_cast<const ::shelf::bf16_t*>(input.value().ptr);
@@ -1742,6 +1747,8 @@ Result<OptimizedLaunchResult> try_launch_mxfp4_residual_norm_quantize(
     if (a.value().dtype != ValueDType::BF16 || b.value().dtype != ValueDType::BF16 ||
         r.value().dtype != ValueDType::BF16 || a.value().feature_count != q.k ||
         b.value().feature_count != q.k || r.value().feature_count != q.k ||
+        a.value().row_stride < q.k || b.value().row_stride < q.k ||
+        r.value().row_stride < q.k ||
         a.value().ptr == nullptr || b.value().ptr == nullptr || r.value().ptr == nullptr ||
         rows_for(r.value(), ctx) != q.rows)
         return miss;
@@ -1819,12 +1826,12 @@ Result<OptimizedLaunchResult> try_launch_mxfp4_gdn_gated_quantize(
     if (!resolved_mul.ok()) return resolved_mul.status();
     if (resolved_mul.value() != PhysicalResolveStatus::Applicable ||
         m.profile != ElementwiseProfile::MulF32F32ToBf16 || m.rows != q.rows ||
-        m.features != q.k)
+        m.features != q.k || z.in0_stride < q.k)
         return miss;
     auto rec = resolve_host_value(program, ::shelf::runtime::ValueId{norm.input_slots[0]}, ctx);
     if (!rec.ok()) return rec.status();
     if (rec.value().dtype != ValueDType::F32 || rec.value().feature_count != q.k ||
-        rec.value().ptr == nullptr)
+        rec.value().row_stride < q.k || rec.value().ptr == nullptr)
         return miss;
     ::shelf::execution::Mxfp4GdnGatedArgs args{};
     args.rec = static_cast<const float*>(rec.value().ptr);

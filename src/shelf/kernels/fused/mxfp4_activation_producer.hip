@@ -193,10 +193,10 @@ __global__ __launch_bounds__(kBlock) void mxfp4_norm_quantize_kernel(
     extern __shared__ __align__(16) uint32_t smem[];
     const uint32_t groups = (a.k_padded + kGroup - 1u) / kGroup;
     bf16* x = reinterpret_cast<bf16*>(smem);
-    float* sums = reinterpret_cast<float*>(x + a.k);
-    const uint32_t sums_words = kMaxWaves;
+    const uint32_t x_words = (a.k + 1u) / 2u;
+    float* sums = reinterpret_cast<float*>(smem + x_words);
     RowrefScratch s;
-    s.pack = smem + align_up4(static_cast<uint32_t>(a.k / 2u) + sums_words, 4u);
+    s.pack = smem + align_up4(x_words + kMaxWaves, 4u);
     s.exp = reinterpret_cast<int32_t*>(s.pack + groups * 32u);
     s.wmax = s.exp + groups;
     const uint32_t row = blockIdx.x;
@@ -221,10 +221,10 @@ __global__ __launch_bounds__(kBlock) void mxfp4_residual_norm_quantize_kernel(
     extern __shared__ __align__(16) uint32_t smem[];
     const uint32_t groups = (a.k_padded + kGroup - 1u) / kGroup;
     bf16* x = reinterpret_cast<bf16*>(smem);
-    float* sums = reinterpret_cast<float*>(x + a.k);
-    const uint32_t sums_words = kMaxWaves;
+    const uint32_t x_words = (a.k + 1u) / 2u;
+    float* sums = reinterpret_cast<float*>(smem + x_words);
     RowrefScratch s;
-    s.pack = smem + align_up4(static_cast<uint32_t>(a.k / 2u) + sums_words, 4u);
+    s.pack = smem + align_up4(x_words + kMaxWaves, 4u);
     s.exp = reinterpret_cast<int32_t*>(s.pack + groups * 32u);
     s.wmax = s.exp + groups;
     const uint32_t row = blockIdx.x;
@@ -358,7 +358,7 @@ __global__ __launch_bounds__(kBlock) void mxfp4_gdn_gated_quantize_kernel(
 }
 
 uint32_t norm_smem_bytes(uint32_t k, uint32_t groups) {
-    const uint32_t words = k / 2u + kMaxWaves;
+    const uint32_t words = (k + 1u) / 2u + kMaxWaves;
     return (align_up4(words, 4u) + groups * 32u + groups + kMaxWaves) * 4u;
 }
 
@@ -372,6 +372,14 @@ bool valid_group_geometry(uint32_t k, uint32_t k_padded) {
     return true;
 }
 
+bool valid_plane_strides(uint32_t code_stride, uint32_t scale_stride,
+                         uint32_t k_padded) {
+    if ((code_stride % 16u) != 0u || (scale_stride % 16u) != 0u) return false;
+    if (code_stride < k_padded) return false;
+    const uint32_t groups = (k_padded + kGroup - 1u) / kGroup;
+    return scale_stride >= groups * static_cast<uint32_t>(sizeof(float));
+}
+
 }  // namespace
 
 hipError_t launch_mxfp4_norm_quantize(const Mxfp4NormArgs& args, hipStream_t stream) {
@@ -379,7 +387,7 @@ hipError_t launch_mxfp4_norm_quantize(const Mxfp4NormArgs& args, hipStream_t str
         args.codes == nullptr || args.scales == nullptr)
         return hipErrorInvalidValue;
     if (!valid_group_geometry(args.k, args.k_padded)) return hipErrorNotSupported;
-    if ((args.code_stride % 16u) != 0u || (args.scale_stride % 16u) != 0u)
+    if (!valid_plane_strides(args.code_stride, args.scale_stride, args.k_padded))
         return hipErrorInvalidValue;
     const uint32_t groups = args.k_padded / kGroup;
     if (args.rows <= 32u)
@@ -398,7 +406,7 @@ hipError_t launch_mxfp4_residual_norm_quantize(const Mxfp4ResidualNormArgs& args
         args.scales == nullptr)
         return hipErrorInvalidValue;
     if (!valid_group_geometry(args.k, args.k_padded)) return hipErrorNotSupported;
-    if ((args.code_stride % 16u) != 0u || (args.scale_stride % 16u) != 0u)
+    if (!valid_plane_strides(args.code_stride, args.scale_stride, args.k_padded))
         return hipErrorInvalidValue;
     const uint32_t groups = args.k_padded / kGroup;
     if (args.rows <= 32u)
@@ -415,7 +423,7 @@ hipError_t launch_mxfp4_swiglu_quantize(const Mxfp4SwigluArgs& args, hipStream_t
         args.codes == nullptr || args.scales == nullptr)
         return hipErrorInvalidValue;
     if (!valid_group_geometry(args.k, args.k_padded)) return hipErrorNotSupported;
-    if ((args.code_stride % 16u) != 0u || (args.scale_stride % 16u) != 0u)
+    if (!valid_plane_strides(args.code_stride, args.scale_stride, args.k_padded))
         return hipErrorInvalidValue;
     const uint32_t groups = args.k_padded / kGroup;
     if (args.rows <= 32u)
@@ -437,7 +445,7 @@ hipError_t launch_mxfp4_gdn_gated_quantize(const Mxfp4GdnGatedArgs& args,
         return hipErrorNotSupported;
     const uint32_t groups = args.features / args.group_size;
     if (groups > 256u) return hipErrorNotSupported;
-    if ((args.code_stride % 16u) != 0u || (args.scale_stride % 16u) != 0u)
+    if (!valid_plane_strides(args.code_stride, args.scale_stride, args.features))
         return hipErrorInvalidValue;
     if (args.rows <= 32u)
         mxfp4_gdn_gated_quantize_kernel<kDecodeThreads>
