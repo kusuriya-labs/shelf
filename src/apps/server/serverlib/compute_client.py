@@ -121,9 +121,10 @@ class ComputeKVStats:
 
 
 class AsyncComputeClient:
-    def __init__(self, argv: list[str], max_inflight: int = 4, log=None):
+    def __init__(self, argv: list[str], max_inflight: int = 4, log=None, startup_timeout: float = 300.0):
         self._token_trace_path = os.environ.get("SHELF_DFLASH2_TOKEN_TIMESTAMPS")
         self._token_trace: dict[int, list[int]] = {}
+        self._startup_timeout = startup_timeout
         self._argv = list(argv)
         self._log = log if log is not None else sys.stderr
         self._proc: Optional[asyncio.subprocess.Process] = None
@@ -163,7 +164,7 @@ class AsyncComputeClient:
         self._stdout_task = asyncio.create_task(self._read_stdout())
         self._stderr_task = asyncio.create_task(self._read_stderr())
         try:
-            pong = await self.ping()
+            pong = await self.ping(timeout=self._startup_timeout)
         except Exception:
             await self.shutdown(timeout=2.0)
             raise
@@ -282,12 +283,12 @@ class AsyncComputeClient:
             return ComputeInvalidArgument(message)
         return ComputeError(message)
 
-    async def ping(self) -> dict:
+    async def ping(self, timeout: float = 300.0) -> dict:
         async with self._control_lock:
             await self._send({"op": "ping"})
             while True:
                 try:
-                    event = await asyncio.wait_for(self._control.get(), timeout=300.0)
+                    event = await asyncio.wait_for(self._control.get(), timeout=timeout)
                 except asyncio.TimeoutError as exc:
                     raise ComputeProtocolError("compute ping timed out") from exc
                 if isinstance(event, Exception):

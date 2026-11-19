@@ -27,12 +27,14 @@ PROMPT = [1, 2, 3]
 FAKE_COMPUTE = r'''
 import json
 import sys
+import time
 
 mode = sys.argv[1]
 for line in sys.stdin:
     request = json.loads(line)
     op = request.get("op")
     if op == "ping":
+        if mode == "delayed": time.sleep(0.15)
         event = {"event": "pong", "capabilities": {"prefix_cache": True}}
         sys.stdout.write(json.dumps(event) + "\n")
     elif op == "generate":
@@ -116,6 +118,19 @@ async def run(checker: Checker) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         script = Path(tmp) / "fake_compute.py"
         script.write_text(FAKE_COMPUTE, encoding="utf-8")
+
+        delayed = compute_client.AsyncComputeClient(
+            [sys.executable, "-I", str(script), "delayed"], startup_timeout=1.0)
+        await delayed.start()
+        checker.check("startup-timeout-allows-delayed-pong", delayed.is_alive())
+        await delayed.shutdown()
+        impatient = compute_client.AsyncComputeClient(
+            [sys.executable, "-I", str(script), "delayed"], startup_timeout=0.01)
+        try:
+            await impatient.start()
+            checker.check("startup-timeout-rejects-delayed-pong", False)
+        except compute_client.ComputeProtocolError:
+            checker.check("startup-timeout-rejects-delayed-pong", True)
 
         huge = compute_client.AsyncComputeClient(
             [sys.executable, "-I", str(script), "huge"], max_inflight=1)
