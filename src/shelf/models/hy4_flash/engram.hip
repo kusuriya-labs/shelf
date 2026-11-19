@@ -1,5 +1,7 @@
 #include <shelf/models/hy4_flash/decoder.h>
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/decode.h>
+#include <chrono>
+#include <sys/resource.h>
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
@@ -82,6 +84,12 @@ Mat engram(Ops &op, int layer, Mat x, const std::vector<int> &prior, const std::
             throw std::runtime_error("Engram パラメーターの型が異なります");
         return static_cast<const uint16_t *>(v.p);
     };
+    std::chrono::steady_clock::time_point lookup_begin;
+    rusage before{};
+    if (op.gpu.expert_begin[0]) {
+        getrusage(RUSAGE_THREAD, &before);
+        lookup_begin = std::chrono::steady_clock::now();
+    }
     std::vector<uint8_t> packed(ids.size() * 16 * 98);
     for (int r = 0; r < x.rows; ++r) {
         int64_t mix[3]{};
@@ -105,6 +113,13 @@ Mat engram(Ops &op, int layer, Mat x, const std::vector<int> &prior, const std::
             std::memcpy(dest + 96, scales + idx * 2, 2);
             offset += size;
         }
+    }
+    if (op.gpu.expert_begin[0]) {
+        auto end = std::chrono::steady_clock::now();
+        rusage after{};
+        getrusage(RUSAGE_THREAD, &after);
+        op.gpu.engram_lookup_ms += std::chrono::duration<double, std::milli>(end - lookup_begin).count();
+        op.gpu.engram_major_faults += after.ru_majflt - before.ru_majflt;
     }
     auto memory = static_cast<uint8_t *>(op.arena.next(packed.size()));
     op.copy(memory, packed.data(), packed.size(), hipMemcpyHostToDevice);

@@ -32,7 +32,8 @@ struct Residency {
     Residency &operator=(const Residency &) = delete;
     std::array<hipEvent_t, 3> expert_begin{}, expert_end{};
     std::array<double, 3> expert_ms{};
-    double attention_ms = 0, ffn_ms = 0, transfer_ms = 0;
+    double attention_ms = 0, ffn_ms = 0, transfer_ms = 0, engram_lookup_ms = 0;
+    long engram_major_faults = 0;
     void reserve();
     void upload();
     void upload_experts(int rank, int layer);

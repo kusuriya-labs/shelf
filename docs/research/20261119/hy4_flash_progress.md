@@ -355,3 +355,15 @@ PYTHONPATH=vendor/BetterBench BETTERBENCH_NO_UPDATE_CHECK=1 python3 -m betterben
 `category` は code または chat。sampling は harness 既定（温度 0.7 / top_p 0.95 / top_k 20）、seed 指定なし（サーバー既定 0）。集計と生データは `hy4-flash-pilot/shelf-qualification/betterbench-dy1_7b9r/`。各条件の `results.json` は各 pass の prompt ID、TTFT、速度、入出力 token 数、終了理由を含む。`settings.json` には実コマンド、プロセス ID、起動時負荷、UUID、実行形式・重みの変換報告・配置表・corpus の SHA-256、`server.log` には request ごとの受理統計がある。集計 `summary.json` の SHA-256 は `f1c3647b8d50169aa879cc8f4528e0bf18984f5c74d2341c97d68260ab883c13`。
 
 全測定後、同じ chat 入力で温度 0、温度 0.7・top_k 1、温度 0.7・top_k 20・top_p 0.0000001 の 8 token 応答を照合し、生成テキストが一致した。この 3 リクエストは集計外。計測後にサーバーを停止し、3 台の lock を解放した。
+
+## SP1　server 経路の初期切り分け
+
+4 bpw、配置表 `owners-4bpw.json`、同じ DFly2、予約 2,304、chunk 1,024、3 GPU の UUID 指定と lock を使った。校正由来の 2,000 token をデコードした英文を Chat Completions の user 入力として送り、chat template を含む 2,017 token で測定した。元の qualify の 2,048 token と同一ではないため、下記は経路差の厳密な比較ではない。2 回目の温度 0・128 token は prefill 2.957 秒、decode 4.265 秒、53 検証、75 候補受理、29.78 tok/s、80.47 ms / 検証だった。初回の同じ入力は TTFT 75.70 秒、2 回目は 2.97 秒だった。
+
+同サーバーで英文の先頭を使用した 113 token の入力を各 1 回実行した。温度 0 は decode 16.896 秒 / 59 検証 = 286.37 ms / 検証、7.52 tok/s。温度 0.7、top_p 0.95、top_k 20 は 15.452 秒 / 58 検証 = 266.41 ms / 検証、8.22 tok/s。生成列とアクセス先が異なるため sampling 単独の差ではない。
+
+別サーバーで同じ短入力を再実行し、`SHELF_HY4_PROFILE_EP=1` で区間を計測した。温度 0 の 2 回目は 4.584 秒 / 59 検証 = 77.69 ms / 検証、温度付きは 4.897 秒 / 58 検証 = 84.43 ms / 検証。温度付きの内訳は attention 25.34、FFN 46.18、draft 11.11 ms / 検証。head 9.04 ms / 検証には draft 内の head と sampling を含むため、これらと単純に加算しない。sampling 5.26、出力 ID の host コピー 0.19、採否判定 0.23、compute 側の token 送出 0.016 ms / 検証。rank 間転送呼び出し 0.69 ms / 検証は FFN の内数。プロファイルは同期を追加するため通常速度と直接比較しない。
+
+温度付きの再実行では Engram の host 参照は 0.87 ms / 検証、major page fault は 0 件だった。直前に同一入力と同一 seed の生成列を実行済みなので、遅い回の major fault を直接観測した結果ではない。4 枚の Engram 表は合計約 64 GiB の mmap で、異なる入力・生成列への冷えたアクセスが候補となる。CPU 単体で同表の 4,800 行をランダムに読み出した試行は、逐次 1.80 秒・major fault 4,712 件、8 並列 0.33 秒・4,700 件。アクセス位置は異なり、実サーバーの改善量を示すものではない。生ログと CPU 試験は `hy4-flash-pilot/shelf-qualification/server-path-investigation/` に保存した。
+
+並列読み出しの候補は、同じ 2,048 token 入力の 256 token greedy を既存の `ep3-9ao7j7r7/long-dfly.log` と照合したところ、12 token 目から不一致だった。入力・変換報告・配置表の SHA-256 は一致したが、過去のバイナリと現行ビルドは異なるため、並列化が原因かどうかはこの比較だけでは確定できない。候補は取り外した。現行ビルドの逐次版との比較と、未計測入力での実機性能評価が必要である。CPU 配列試験だけでは生成一致を保証しない。
