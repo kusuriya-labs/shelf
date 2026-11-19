@@ -93,13 +93,38 @@ arena 使用量が 2.23GB 減ったぶん、resident expert か KV に回せる�
 - chunk 512 と chunk 2048 では生成 ID が変わる（chunk 構成による数値差）が、
   同じ chunk 内では決定的である。
 
-## 5. 未解決
+## 5. red zone が隠している越境
 
-- red zone が隠している **range 終端の越境** の実体（どの kernel か）は特定していない。
-  4KB で足りているが、越境量が 4KB を超える入力では再発し得る。
-  red zone を sentinel で埋めて実行後に検査するか、range ごとに `SHELF_OP_SYNC` で
-  切り分ける必要がある。
-- ユーザーが報告した「Flash-Next は長文で壊れる」は、2056 token
-  （chunk 512 / 2048）では再現しなかった。より長い context（QSA の block-sparse が
-  始まる 12,288 以上）や DFlash2、複数リクエストなど、別の条件が必要と考えられる。
-  再現条件が特定できれば、同じ red zone/越境の枠組みで切り分ける。
+red zone のサイズを変えて、越境の性質を切り分けた（27B dense、prose 512 token）。
+
+| guard | 生成 ID | 判定 |
+| ---: | --- | --- |
+| 0 B | `760,1379,25293,...`（3 回とも同一） | 決定的に誤り |
+| 16 B | `760,3712,314,...`（3 回とも同一） | 正しい |
+| 32 B / 64 B / 4 KB | 正しい | 正しい |
+
+- 0 B でも **実行ごとに同じ誤り** になる。race ではなく、決定的な範囲外 write である。
+- guard を 0x00 と 0xA5 で埋めても生成 ID は変わらない。guard の bytes は読まれておらず、
+  **read の越境ではない**。write が guard に落ちている。
+- 256 token の prompt では 0 B と 16 B の ID が一致する。越境は 512 row の prefill で
+  だけ起きる（256 row では起きない）。
+- 越境量は 16 B 以下（16 B で隔離できる）。4 KB の red zone は 256 倍以上の余裕がある。
+- どの kernel かは特定できていない。no-reuse にして guard を一意にした probe は
+  128 row では越境を検出せず、512 row の no-reuse workspace（約 16 GB）は
+  重み（約 20 GB）と同時に 32 GB のカードへ収まらない。
+  特定の producer kernel だけに guard を置く scan は、layout が変わることで
+  越境先が変わり、全 kernel で正しい ID になったため切り分けにならなかった。
+
+4 KB の red zone はコスト 9.3 MB で、越境の実体が判明するまで残す。
+
+## 6. Flash-Next の長文
+
+ユーザー報告の「長文で壊れる」を、chat template の 2,056 token と 8,200 token の
+prompt で確認した（16 / 8 token 生成、host expert 448、bf16 KV、1 カード）。
+2,056 token は chunk 512 と chunk 2048、8,200 token は chunk 2048 で、
+それぞれ 2 回とも同一 ID だった。2,056 token では旧 allocator とも一致した。
+8,200 token は QSA の indexer budget（2,048 block、compress 4）に相当する境界だが、
+この条件では再現しなかった。
+
+再現には別の条件（より長い context、DFlash2、複数リクエスト、別 checkpoint）が
+必要と考えられる。
