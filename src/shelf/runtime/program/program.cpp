@@ -1159,7 +1159,7 @@ Status finalize_layout(Ctx& c) {
         uint64_t max_free;
     };
     std::vector<Grow> grows;
-    std::vector<FreeBlock> free_list;
+    std::map<uint64_t, FreeBlock> free_map;
     std::vector<LiveBlock> live;
     std::map<std::string, uint64_t> live_cat;
     std::map<std::string, uint64_t> peak_cat;
@@ -1172,7 +1172,27 @@ Status finalize_layout(Ctx& c) {
     for (const auto& item : items) {
         for (auto it = live.begin(); it != live.end();) {
             if (it->last_command < item.first_command) {
-                free_list.push_back(FreeBlock{it->offset, it->bytes, it->last_command});
+                FreeBlock freed{it->offset, it->bytes, it->last_command};
+                auto inserted = free_map.emplace(freed.offset, freed).first;
+                auto next = std::next(inserted);
+                if (next != free_map.end() &&
+                    inserted->second.offset + inserted->second.bytes ==
+                        next->second.offset) {
+                    inserted->second.bytes += next->second.bytes;
+                    inserted->second.free_after =
+                        std::max(inserted->second.free_after, next->second.free_after);
+                    free_map.erase(next);
+                }
+                if (inserted != free_map.begin()) {
+                    auto prev = std::prev(inserted);
+                    if (prev->second.offset + prev->second.bytes ==
+                        inserted->second.offset) {
+                        prev->second.bytes += inserted->second.bytes;
+                        prev->second.free_after =
+                            std::max(prev->second.free_after, inserted->second.free_after);
+                        free_map.erase(inserted);
+                    }
+                }
                 live_cat[it->cat] -= it->bytes;
                 live_total -= it->bytes;
                 it = live.erase(it);
@@ -1180,38 +1200,55 @@ Status finalize_layout(Ctx& c) {
                 ++it;
             }
         }
-        auto best = free_list.end();
+        constexpr uint64_t kGuardBytes = 4096u;
+        const uint64_t alloc_bytes =
+            (item.bytes + kGuardBytes + kWorkspaceAlignment - 1u) / kWorkspaceAlignment *
+            kWorkspaceAlignment;
+        uint64_t offset = 0;
+        bool reused = false;
         if (!options.no_workspace_reuse) {
-            for (auto it = free_list.begin(); it != free_list.end(); ++it) {
-                if (it->free_after < item.first_command && it->bytes >= item.bytes &&
-                    (best == free_list.end() || it->bytes < best->bytes)) {
+            auto best = free_map.end();
+            for (auto it = free_map.begin(); it != free_map.end(); ++it) {
+                if (it->second.free_after < item.first_command &&
+                    it->second.bytes >= alloc_bytes &&
+                    (best == free_map.end() || it->second.bytes < best->second.bytes)) {
                     best = it;
                 }
             }
-        }
-        uint64_t offset = 0;
-        if (best != free_list.end()) {
-            offset = best->offset;
-            const uint64_t rem = best->bytes - item.bytes;
-            const uint32_t free_after = best->free_after;
-            free_list.erase(best);
-            if (rem >= kWorkspaceAlignment) {
-                free_list.push_back(FreeBlock{offset + item.bytes, rem, free_after});
+            if (best != free_map.end()) {
+                offset = best->second.offset;
+                const uint64_t remainder = best->second.bytes - alloc_bytes;
+                const uint32_t free_after = best->second.free_after;
+                free_map.erase(best);
+                if (remainder >= kWorkspaceAlignment) {
+                    FreeBlock rest{offset + alloc_bytes, remainder, free_after};
+                    auto inserted = free_map.emplace(rest.offset, rest).first;
+                    auto next = std::next(inserted);
+                    if (next != free_map.end() &&
+                        inserted->second.offset + inserted->second.bytes ==
+                            next->second.offset) {
+                        inserted->second.bytes += next->second.bytes;
+                        inserted->second.free_after =
+                            std::max(inserted->second.free_after, next->second.free_after);
+                        free_map.erase(next);
+                    }
+                }
+                reused = true;
             }
-        } else {
-            const uint64_t before = cursor;
+        }
+        if (!reused) {
             offset = (cursor + kWorkspaceAlignment - 1) / kWorkspaceAlignment *
                      kWorkspaceAlignment;
-            cursor = offset + item.bytes;
-            if (std::getenv("SHELF_WS_DEBUG") != nullptr) {
+            cursor = offset + alloc_bytes;
+            if (ws_debug) {
                 uint64_t free_bytes = 0;
                 uint64_t max_free = 0;
-                for (const auto& f : free_list) {
-                    free_bytes += f.bytes;
-                    max_free = std::max(max_free, f.bytes);
+                for (const auto& f : free_map) {
+                    free_bytes += f.second.bytes;
+                    max_free = std::max(max_free, f.second.bytes);
                 }
-                grows.push_back(Grow{item.bytes, item.cat, item.first_command,
-                                     free_list.size(), free_bytes, max_free});
+                grows.push_back(Grow{item.bytes, item.cat, item.first_command, free_map.size(),
+                                     free_bytes, max_free});
             }
         }
         const uint32_t slot = static_cast<uint32_t>(c.plan->workspace.ranges.size());
@@ -1235,9 +1272,9 @@ Status finalize_layout(Ctx& c) {
             for (uint32_t ref : aw.binding_refs)
                 c.plan->dispatches[ref].workspace_slot = slot;
         }
-        live.push_back(LiveBlock{offset, item.bytes, item.last_command, item.cat});
-        live_cat[item.cat] += item.bytes;
-        live_total += item.bytes;
+        live.push_back(LiveBlock{offset, alloc_bytes, item.last_command, item.cat});
+        live_cat[item.cat] += alloc_bytes;
+        live_total += alloc_bytes;
         if (live_total > peak_live) {
             peak_live = live_total;
             peak_cat = live_cat;
