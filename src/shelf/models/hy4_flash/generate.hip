@@ -1,6 +1,9 @@
 #include <shelf/models/hy4_flash/decoder.h>
 #include <shelf/kernels/fused/detail/radix_select.h>
 #include <shelf/models/hy4_flash/generate.h>
+#include <shelf/models/hy4_flash/snapshot/state.h>
+#include <cstdlib>
+#include <cstring>
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/decode.h>
 #include <algorithm>
 #include <chrono>
@@ -368,13 +371,74 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
         throw std::invalid_argument("top_k は 0〜64、top_p を使う場合は top_k が必要です");
     Target target(gpu, temperature, seed, top_k, top_p);
     auto begin = now();
+    size_t prefix = 0;
+#ifdef SHELF_HY4_RDMA
+    struct SnapshotHeader { uint64_t magic; uint64_t chunk; snapshot::Digest token_digest; snapshot::Digest fingerprint; };
+    constexpr uint64_t snapshot_magic = 0x31504e53484c4853ULL;
+    const auto snapshot_env = std::getenv("SHELF_HY4_SNAPSHOT");
+    const bool snapshots = snapshot_env && std::string_view(snapshot_env) == "1";
+    if (snapshots) {
+        try {
+            auto stored = snapshot::load(size_t(8) << 30);
+            if (stored.size() < sizeof(SnapshotHeader)) throw std::runtime_error("保存状態が短すぎます");
+            SnapshotHeader header{};
+            std::memcpy(&header, stored.data(), sizeof(header));
+            if (header.magic != snapshot_magic || header.chunk != size_t(chunk)) throw std::runtime_error("保存状態の版または chunk が異なります");
+            std::span<const uint8_t> body(stored.data() + sizeof(header), stored.size() - sizeof(header));
+            auto history = snapshot::inspect(gpu, body);
+            auto token_bytes = std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(history.data()), history.size() * sizeof(int));
+            if (snapshot::digest(token_bytes) != header.token_digest) throw std::runtime_error("token 列のチェックサムが一致しません");
+            if (history.size() >= ids.size() || !std::equal(history.begin(), history.end(), ids.begin()))
+                throw std::runtime_error("入力の prefix が保存状態と一致しません");
+            if (snapshot::fingerprint(gpu, history) != header.fingerprint)
+                throw std::runtime_error("フィンガープリントが一致しません");
+            target.history = snapshot::restore(gpu, body);
+            gpu.snapshot_latest = std::move(stored);
+            prefix = target.history.size();
+            fprintf(stderr, "snapshot_restored_tokens=%zu bytes=%zu restore_s=%.6f\n", prefix, body.size(),
+                    std::chrono::duration<double>(now() - begin).count());
+        } catch (const std::exception &e) {
+            target.history.clear();
+            prefix = 0;
+            fprintf(stderr, "snapshot_restore_fallback=%s\n", e.what());
+        }
+    }
+#endif
     int next = 0;
-    for (size_t first = 0; first < ids.size(); first += chunk) {
+#ifdef SHELF_HY4_RDMA
+    std::vector<uint8_t> pending_state;
+    std::vector<int> pending_history;
+#endif
+    for (size_t first = prefix; first < ids.size(); first += chunk) {
         auto end = std::min(first + chunk, ids.size());
         auto output =
             target.forward({ids.begin() + first, ids.begin() + end}, false, end == ids.size(), logits_file);
         if (!output.empty())
             next = output.back();
+#ifdef SHELF_HY4_RDMA
+        if (snapshots && end == ids.size() / chunk * chunk && end > prefix &&
+            end >= std::max(size_t(12), std::min(gpu.tokens, size_t(518)))) {
+            try {
+                auto capture_begin = now();
+                pending_history = target.history;
+                pending_state = snapshot::capture(gpu, pending_history);
+                fprintf(stderr, "snapshot_capture_bytes=%zu seconds=%.6f\n", pending_state.size(),
+                        std::chrono::duration<double>(now() - capture_begin).count());
+            } catch (const std::exception &e) {
+                pending_state.clear();
+                pending_history.clear();
+                fprintf(stderr, "snapshot_capture_failed=%s\n", e.what());
+            }
+        }
+#endif
+        if (first == 0 && end < ids.size() && std::getenv("SHELF_HY4_SNAPSHOT_SELFTEST")) {
+            auto data = snapshot::capture(gpu, target.history);
+            snapshot::clear_for_test(gpu);
+            auto history = snapshot::restore(gpu, data);
+            if (history != target.history || snapshot::capture(gpu, history) != data)
+                throw std::runtime_error("状態の同一プロセス復元が一致しません");
+            fprintf(stderr, "snapshot_selftest_bytes=%zu tokens=%zu\n", data.size(), history.size());
+        }
     }
     auto prefill = now();
     double pp_attn = gpu.attention_ms, pp_ffn = gpu.ffn_ms, pp_transfer = gpu.transfer_ms,
@@ -431,8 +495,27 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
                 break;
         }
     }
+    auto decode_end = now();
+#ifdef SHELF_HY4_RDMA
+    if (snapshots && !pending_state.empty()) {
+        try {
+            auto save_begin = now();
+            auto token_bytes = std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(pending_history.data()), pending_history.size() * sizeof(int));
+            SnapshotHeader header{snapshot_magic, size_t(chunk), snapshot::digest(token_bytes), snapshot::fingerprint(gpu, pending_history)};
+            std::vector<uint8_t> data(sizeof(header) + pending_state.size());
+            std::memcpy(data.data(), &header, sizeof(header));
+            std::memcpy(data.data() + sizeof(header), pending_state.data(), pending_state.size());
+            gpu.snapshot_latest = std::move(data);
+            snapshot::save(gpu.snapshot_latest);
+            fprintf(stderr, "snapshot_saved_tokens=%zu bytes=%zu save_s=%.6f\n", pending_history.size(), gpu.snapshot_latest.size(),
+                    std::chrono::duration<double>(now() - save_begin).count());
+        } catch (const std::exception &e) {
+            fprintf(stderr, "snapshot_save_failed=%s\n", e.what());
+        }
+    }
+#endif
     double pp = std::chrono::duration<double>(prefill - begin).count();
-    double tg = std::chrono::duration<double>(now() - prefill).count();
+    double tg = std::chrono::duration<double>(decode_end - prefill).count();
     fprintf(stderr,
             "prefill_tokens=%zu prefill_s=%.6f decode_tokens=%zu decode_s=%.6f draft_rounds=%d accepted=%d\n",
             ids.size(), pp, generated.size() - 1, tg, rounds, accepted);

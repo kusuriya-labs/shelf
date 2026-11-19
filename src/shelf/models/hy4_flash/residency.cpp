@@ -6,6 +6,9 @@
 #include <cstdio>
 #include <stdexcept>
 #include <string_view>
+#ifdef SHELF_HY4_RDMA
+#include <openssl/evp.h>
+#endif
 
 namespace shelf::hy4 {
 namespace {
@@ -199,6 +202,17 @@ void Residency::upload() {
             fprintf(stderr, "transfer=%d->%d method=%s\n", src, dst, peer[dst][src] ? "peer" : "host");
         }
     const auto begin = std::chrono::steady_clock::now();
+#ifdef SHELF_HY4_RDMA
+    auto snapshot_env = std::getenv("SHELF_HY4_SNAPSHOT");
+    bool snapshot_enabled = snapshot_env && std::string_view(snapshot_env) == "1";
+    std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> digest_ctx(snapshot_enabled ? EVP_MD_CTX_new() : nullptr, EVP_MD_CTX_free);
+    if (snapshot_enabled && (!digest_ctx || EVP_DigestInit_ex(digest_ctx.get(), EVP_sha256(), nullptr) != 1))
+        throw std::runtime_error("重みのフィンガープリントを初期化できません");
+    auto hash = [&](const void *data, size_t length) {
+        if (snapshot_enabled && EVP_DigestUpdate(digest_ctx.get(), data, length) != 1)
+            throw std::runtime_error("重みのフィンガープリントを計算できません");
+    };
+#endif
     constexpr size_t chunk = 16ull << 20;
     void *buffer = nullptr;
     check(hipHostMalloc(&buffer, 3 * chunk, hipHostMallocPortable));
@@ -215,6 +229,11 @@ void Residency::upload() {
         };
         for (const auto *w : model.upload_order) {
             const int r = w->rank;
+#ifdef SHELF_HY4_RDMA
+            hash(&w->rank, sizeof(w->rank));
+            hash(&w->offset, sizeof(w->offset));
+            hash(&w->bytes, sizeof(w->bytes));
+#endif
             for (size_t n = 0; n < w->bytes;) {
                 size_t pos = w->offset + n, first = pos / chunk * chunk;
                 if (first != base[r]) {
@@ -224,6 +243,9 @@ void Residency::upload() {
                 size_t local = pos - first, bytes = std::min(chunk - local, w->bytes - n);
                 std::memcpy(static_cast<uint8_t *>(buffer) + r * chunk + local,
                             static_cast<const uint8_t *>(w->host) + n, bytes);
+#ifdef SHELF_HY4_RDMA
+                hash(static_cast<uint8_t *>(buffer) + r * chunk + local, bytes);
+#endif
                 used[r] = local + bytes;
                 n += bytes;
             }
@@ -235,6 +257,15 @@ void Residency::upload() {
         throw;
     }
     check(hipHostFree(buffer));
+#ifdef SHELF_HY4_RDMA
+    if (snapshot_enabled) {
+        unsigned length = 0;
+        if (EVP_DigestFinal_ex(digest_ctx.get(), snapshot_upload_digest.data(), &length) != 1 ||
+            length != snapshot_upload_digest.size())
+            throw std::runtime_error("重みのフィンガープリントを確定できません");
+        snapshot_upload_digest_ready = true;
+    }
+#endif
     fprintf(stderr, "weight_upload_s=%.3f\n",
             std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count());
     for (int r = 0; r < 3; ++r) {

@@ -431,6 +431,16 @@ async def handle_meta(request: web.Request) -> web.Response:
     return web.json_response(meta)
 
 
+async def handle_snapshot(request: web.Request) -> web.Response:
+    if request.app["server_meta"].get("expert_parallel") != 3 or os.environ.get("SHELF_HY4_SNAPSHOT") != "1":
+        raise web.HTTPNotFound()
+    try:
+        result = await request.app["compute"].snapshot()
+    except (ComputeError, asyncio.TimeoutError) as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=503)
+    return web.json_response(result, status=200 if result.get("status") == "ok" else 503)
+
+
 def create_app(service: ChatService, compute: AsyncComputeClient,
                server_meta: dict | None = None) -> web.Application:
     app = web.Application(
@@ -446,6 +456,7 @@ def create_app(service: ChatService, compute: AsyncComputeClient,
     app.router.add_post("/v1/chat/completions", handle_chat_completions)
     app.router.add_get("/v1/responses", handle_not_found)
     app.router.add_post("/v1/responses", handle_responses)
+    app.router.add_post("/admin/snapshot", handle_snapshot)
     app.router.add_route("*", "/{tail:.*}", handle_not_found)
 
     app.cleanup_ctx.append(compute_cleanup)
