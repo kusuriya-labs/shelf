@@ -377,7 +377,23 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
                     aw.activation = contract.activation;
                     aw.activation_kernel = contract.activation_kernel;
                     aw.total_bytes = a8l.total_bytes;
-                    aw.first_command = cmd_idx;
+                    uint32_t first_command = cmd_idx;
+                    if (cmd_idx >= 1u) {
+                        const auto& prev = c.plan->dispatches[cmd_idx - 1u];
+                        if (prev.kernel_id == KernelId::RMS_NORM &&
+                            prev.output_count == 1u && prev.input_count >= 1u &&
+                            prev.output_slots[0] == node.inputs[0].id) {
+                            first_command = cmd_idx - 1u;
+                            if (cmd_idx >= 2u) {
+                                const auto& prev2 = c.plan->dispatches[cmd_idx - 2u];
+                                if (prev2.kernel_id == KernelId::RESIDUAL_ADD &&
+                                    prev2.output_count == 1u &&
+                                    prev2.output_slots[0] == prev.input_slots[0])
+                                    first_command = cmd_idx - 2u;
+                            }
+                        }
+                    }
+                    aw.first_command = first_command;
                     aw.last_command = cmd_idx;
                     c.activation_workspaces.push_back(aw);
                     c.activation_ws_by_input[act_ws_key] = ws_idx;
@@ -1200,9 +1216,8 @@ Status finalize_layout(Ctx& c) {
                 ++it;
             }
         }
-        constexpr uint64_t kGuardBytes = 4096u;
         const uint64_t alloc_bytes =
-            (item.bytes + kGuardBytes + kWorkspaceAlignment - 1u) / kWorkspaceAlignment *
+            (item.bytes + kWorkspaceAlignment - 1u) / kWorkspaceAlignment *
             kWorkspaceAlignment;
         uint64_t offset = 0;
         bool reused = false;
