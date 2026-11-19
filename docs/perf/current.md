@@ -32,6 +32,15 @@ BetterBench 0.6.1、corpus v1（1.0）、各セル 1 warmup + 5 passes の quick
 
 prefill は BetterBench がリクエストごとに入力 token 数を TTFT で割った値。DFly2 受理候補 / 検証は 5 件の合計同士の比。入力長は 76〜120 token、生成上限はプロンプトごとに 160〜800 token。上の固定英文の行とは入力長・sampling・計測区間が異なる。[プロンプト別記録と再現条件](../research/20261119/hy4_flash_progress.md)
 
+同じ 4 bpw で Engram 4 表を **`SHELF_HY4_ENGRAM_MLOCK=1` により固定**し、十分な memlock 上限と RAM を用意した条件では、以下を実測した。上表は固定しない従来測定であり、固定なしの既定動作をこの値に置き換えない。測定日 2026-11-19、BetterBench 0.6.1 / corpus 1.0、各カテゴリで server を再起動し 1 warmup + 5 件、profiling 無効。各値は 5 件の中央値、受理は合計比。
+
+| 本体 | カテゴリ | decode (tok/s) | TTFT (ms) | prefill (tok/s) | DFly2 受理候補 / 検証 | 検証回数計 |
+|---|---|---:|---:|---:|---:|---:|
+| 4 bpw・Engram 固定 | code | 35.10 | 318.00 | 243.15 | 2.00 | 966 |
+| 4 bpw・Engram 固定 | chat | 28.98 | 373.83 | 281.92 | 1.50 | 446 |
+
+固定は 64,680,628,768 byte の表とページ端を含み、観測した `VmLck` は 63,164,684 KiB。起動時の GPU 転送は code / chat で 255.60 / 187.19 秒、固定は 58.12 / 57.21 秒だった。生成された nonce と列は前測定と異なり、値の差には入力・受理率の変動も含まれる。詳細と cold / warm の fault 計測は[研究記録](../research/20261119/hy4_flash_progress.md)。
+
 ## 現在の状態
 
 **現在の build に対する qualified baseline は、2026-11-03 の long-context prefill、

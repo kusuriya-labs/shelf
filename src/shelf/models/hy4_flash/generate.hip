@@ -133,7 +133,7 @@ struct Target {
     std::array<Selection, 5> tapped;
     Mat state{};
     size_t base = 0;
-    double head_ms = 0;
+    double head_ms = 0, sampling_ms = 0, output_copy_ms = 0;
     float *target_probs = nullptr;
     float *draft_probs = nullptr;
     float temperature;
@@ -149,7 +149,8 @@ struct Target {
         }
         gpu.routed_rows = {};
         gpu.expert_ms = {};
-        gpu.attention_ms = gpu.ffn_ms = gpu.transfer_ms = 0;
+        gpu.attention_ms = gpu.ffn_ms = gpu.transfer_ms = gpu.engram_lookup_ms = 0;
+        gpu.engram_major_faults = 0;
         gpu.transfer_bytes = {};
         state = op.mat(6, 3072);
         base = op.arena.cursor;
@@ -176,6 +177,11 @@ struct Target {
             if (!file.write(reinterpret_cast<const char *>(host.data()), host.size() * 4))
                 throw std::runtime_error("logits を保存できません");
         }
+        std::chrono::steady_clock::time_point sample_begin, copy_begin;
+        if (op.gpu.expert_begin[0]) {
+            checked(hipStreamSynchronize(nullptr));
+            sample_begin = std::chrono::steady_clock::now();
+        }
         if (temperature > 0 && top_k > 0) {
             truncate_logits<<<hidden.rows, 256>>>(logits, top_k, top_p, temperature);
             checked(hipGetLastError());
@@ -188,8 +194,15 @@ struct Target {
         best_ids<<<hidden.rows, 256>>>(logits, device_ids, position, seed ^ (draft ? 0x735a7ec51b09ull : 0ull),
                                        temperature);
         checked(hipGetLastError());
+        if (op.gpu.expert_begin[0]) {
+            checked(hipStreamSynchronize(nullptr));
+            copy_begin = std::chrono::steady_clock::now();
+            sampling_ms += std::chrono::duration<double, std::milli>(copy_begin - sample_begin).count();
+        }
         std::vector<int> result(hidden.rows);
         op.copy(result.data(), device_ids, result.size() * 4, hipMemcpyDeviceToHost);
+        if (op.gpu.expert_begin[0])
+            output_copy_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - copy_begin).count();
         op.arena.cursor = mark;
         if (op.gpu.expert_begin[0])
             head_ms +=
@@ -364,14 +377,23 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
     }
     auto prefill = now();
     double pp_attn = gpu.attention_ms, pp_ffn = gpu.ffn_ms, pp_transfer = gpu.transfer_ms,
-           pp_head = target.head_ms, draft_ms = 0;
+           pp_head = target.head_ms, pp_sampling = target.sampling_ms, pp_copy = target.output_copy_ms,
+           draft_ms = 0, decision_ms = 0, emit_ms = 0;
+    double pp_engram = gpu.engram_lookup_ms;
+    long pp_faults = gpu.engram_major_faults;
     auto pp_routes = gpu.routed_rows;
     auto pp_expert_ms = gpu.expert_ms;
     auto pp_bytes = gpu.transfer_bytes;
     std::vector<int> generated{next};
     auto append = [&](int id) {
         generated.push_back(id);
-        if (emit) emit(id);
+        if (emit) {
+            std::chrono::steady_clock::time_point emit_begin;
+            if (gpu.expert_begin[0]) emit_begin = now();
+            emit(id);
+            if (gpu.expert_begin[0])
+                emit_ms += std::chrono::duration<double, std::milli>(now() - emit_begin).count();
+        }
     };
     if (emit) emit(next);
     int rounds = 0, accepted = 0;
@@ -392,8 +414,12 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
         std::vector<int> block{anchor};
         block.insert(block.end(), draft.begin(), draft.end());
         auto actual = target.forward(block, true);
+        std::chrono::steady_clock::time_point decision_begin;
+        if (gpu.expert_begin[0]) decision_begin = now();
         int keep = verify_speculation(target.op, target.target_probs, target.draft_probs,
                                       target.history.size() - 5, seed, draft, actual);
+        if (gpu.expert_begin[0])
+            decision_ms += std::chrono::duration<double, std::milli>(now() - decision_begin).count();
         ++rounds;
         accepted += keep - 1;
         ++histogram[keep - 1];
@@ -431,6 +457,12 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
                 "profile_tg_ms attention=%.3f ffn=%.3f transfer=%.3f head=%.3f draft=%.3f\n",
                 pp_attn, pp_ffn, pp_transfer, pp_head, gpu.attention_ms - pp_attn, gpu.ffn_ms - pp_ffn,
                 gpu.transfer_ms - pp_transfer, target.head_ms - pp_head, draft_ms);
+    if (gpu.expert_begin[0])
+        fprintf(stderr, "profile_tg_detail_ms sampling=%.3f output_copy=%.3f decision=%.3f emit=%.3f\n",
+                target.sampling_ms - pp_sampling, target.output_copy_ms - pp_copy, decision_ms, emit_ms);
+    if (gpu.expert_begin[0])
+        fprintf(stderr, "profile_engram pp_ms=%.3f tg_ms=%.3f pp_major_faults=%ld tg_major_faults=%ld\n",
+                pp_engram, gpu.engram_lookup_ms - pp_engram, pp_faults, gpu.engram_major_faults - pp_faults);
     return generated;
 }
 }

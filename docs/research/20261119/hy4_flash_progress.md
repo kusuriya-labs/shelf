@@ -355,3 +355,56 @@ PYTHONPATH=vendor/BetterBench BETTERBENCH_NO_UPDATE_CHECK=1 python3 -m betterben
 `category` は code または chat。sampling は harness 既定（温度 0.7 / top_p 0.95 / top_k 20）、seed 指定なし（サーバー既定 0）。集計と生データは `hy4-flash-pilot/shelf-qualification/betterbench-dy1_7b9r/`。各条件の `results.json` は各 pass の prompt ID、TTFT、速度、入出力 token 数、終了理由を含む。`settings.json` には実コマンド、プロセス ID、起動時負荷、UUID、実行形式・重みの変換報告・配置表・corpus の SHA-256、`server.log` には request ごとの受理統計がある。集計 `summary.json` の SHA-256 は `f1c3647b8d50169aa879cc8f4528e0bf18984f5c74d2341c97d68260ab883c13`。
 
 全測定後、同じ chat 入力で温度 0、温度 0.7・top_k 1、温度 0.7・top_k 20・top_p 0.0000001 の 8 token 応答を照合し、生成テキストが一致した。この 3 リクエストは集計外。計測後にサーバーを停止し、3 台の lock を解放した。
+
+## SP1　server 経路の初期切り分け
+
+4 bpw、配置表 `owners-4bpw.json`、同じ DFly2、予約 2,304、chunk 1,024、3 GPU の UUID 指定と lock を使った。校正由来の 2,000 token をデコードした英文を Chat Completions の user 入力として送り、chat template を含む 2,017 token で測定した。元の qualify の 2,048 token と同一ではないため、下記は経路差の厳密な比較ではない。2 回目の温度 0・128 token は prefill 2.957 秒、decode 4.265 秒、53 検証、75 候補受理、29.78 tok/s、80.47 ms / 検証だった。初回の同じ入力は TTFT 75.70 秒、2 回目は 2.97 秒だった。
+
+同サーバーで英文の先頭を使用した 113 token の入力を各 1 回実行した。温度 0 は decode 16.896 秒 / 59 検証 = 286.37 ms / 検証、7.52 tok/s。温度 0.7、top_p 0.95、top_k 20 は 15.452 秒 / 58 検証 = 266.41 ms / 検証、8.22 tok/s。生成列とアクセス先が異なるため sampling 単独の差ではない。
+
+別サーバーで同じ短入力を再実行し、`SHELF_HY4_PROFILE_EP=1` で区間を計測した。温度 0 の 2 回目は 4.584 秒 / 59 検証 = 77.69 ms / 検証、温度付きは 4.897 秒 / 58 検証 = 84.43 ms / 検証。温度付きの内訳は attention 25.34、FFN 46.18、draft 11.11 ms / 検証。head 9.04 ms / 検証には draft 内の head と sampling を含むため、これらと単純に加算しない。sampling 5.26、出力 ID の host コピー 0.19、採否判定 0.23、compute 側の token 送出 0.016 ms / 検証。rank 間転送呼び出し 0.69 ms / 検証は FFN の内数。プロファイルは同期を追加するため通常速度と直接比較しない。
+
+温度付きの再実行では Engram の host 参照は 0.87 ms / 検証、major page fault は 0 件だった。直前に同一入力と同一 seed の生成列を実行済みなので、遅い回の major fault を直接観測した結果ではない。4 枚の Engram 表は合計約 64 GiB の mmap で、異なる入力・生成列への冷えたアクセスが候補となる。CPU 単体で同表の 4,800 行をランダムに読み出した試行は、逐次 1.80 秒・major fault 4,712 件、8 並列 0.33 秒・4,700 件。アクセス位置は異なり、実サーバーの改善量を示すものではない。生ログと CPU 試験は `hy4-flash-pilot/shelf-qualification/server-path-investigation/` に保存した。
+
+並列読み出しの候補は、同じ 2,048 token 入力の 256 token greedy を既存の `ep3-9ao7j7r7/long-dfly.log` と照合したところ、12 token 目から不一致だった。入力・変換報告・配置表の SHA-256 は一致したが、過去のバイナリと現行ビルドは異なるため、並列化が原因かどうかはこの比較だけでは確定できない。候補は取り外した。現行ビルドの逐次版との比較と、未計測入力での実機性能評価が必要である。CPU 配列試験だけでは生成一致を保証しない。
+
+## SP2　Engram 起動時読み込みの実装と検証準備
+
+Engram の 4 表は safetensors の `mmap(PROT_READ, MAP_PRIVATE)` を参照し、従来は `MAP_POPULATE` と `mlock` のいずれも使わない。検査時の memlock の soft / hard 上限はともに 14,741,741,568 byte で、4 表の 64,680,628,768 byte を固定するには足りない。ホスト RAM は約 109 GiB。server は GPU 重み転送の後、各表に `MADV_POPULATE_READ` を適用し、読み込み完了後に ready になる。`SHELF_HY4_ENGRAM_POPULATE=0` で従来の遅延読み込みに戻せる。ページは固定しないため、読み込み後もメモリ圧迫で退避される。システムコールが失敗した場合は server 起動を失敗させる。読み込み後に全ページを同時に常駐できなければ stderr に記録し、実際の常駐率を評価する。Hy4 の起動時 ping 待ちは 900 秒に延長した。
+
+`SHELF_HY4_PROFILE_EP=1` では、各 request の前後に `mincore` で常駐ページを数え、`/proc/self/stat` の minor / major fault 増分を記録する。計測の同期と常駐確認は HTTP の時間を変えるので、性能本測定とは分ける。小さな safetensors の読み込み後の常駐ページ数・内容を CPU で検査し、CPU CTest と server の compute client / CLI テストは通った。固定英文の 2,017 token と qualify の 2,048 token の約 30 token 差は、本調査では近似として扱う。
+
+本体の Hugging Face upload が進行しているため、ページキャッシュの評価と BetterBench の再測定は `upload.log` の `verified` を確認するまで実施しない。現段階では populate の実機効果、初回・後続 request の fault 増分、改善後の BetterBench 値は未測定である。
+
+### 固定の有無による 110 token 入力の比較
+
+upload の `verified 2026-11-19T12:04:51+09:00` を確認後、同じ BetterBench chat-followup の入力を server の HTTP/SSE に送った。各 server は別起動、4 bpw、同一配置・DFly2、予約 2,304、chunk 1,024。128 token、seed 0、温度 0.7・top_p 0.95・top_k 20 を同一入力で 2 回、その後に温度 0 を 1 回実行した。以下は `SHELF_HY4_PROFILE_EP=1` のため同期と request 前後の `mincore` を含む。decode は compute 内計測で、128 token の先頭を除く 127 token を分子とする。fault は `/proc/self/stat` の request 中の増分。
+
+| 条件 | request | decode tok/s | ms / 検証 | 受理候補 / 検証 | minor / major fault |
+|---|---|---:|---:|---:|---:|
+| 遅延 mmap | 初回 | 7.30 | 370.09 | 82 / 47 = 1.74 | 613 / 35,850 |
+| 遅延 mmap | 2 回目 | 32.17 | 83.99 | 82 / 47 = 1.74 | 0 / 0 |
+| populate のみ | 初回 | 15.10 | 178.95 | 82 / 47 = 1.74 | 1,325 / 16,801 |
+| populate のみ | 2 回目 | 32.20 | 83.90 | 82 / 47 = 1.74 | 1 / 10 |
+| populate + mlock | 初回 | 32.11 | 84.15 | 82 / 47 = 1.74 | 1,350 / 2,649 |
+| populate + mlock | 2 回目 | 32.35 | 83.53 | 82 / 47 = 1.74 | 24 / 35 |
+| populate + mlock・温度 0 | 3 回目 | 34.06 | 88.78 | 84 / 42 = 2.00 | 6 / 2 |
+
+遅延 mmap の初回 decode は Engram 参照が 12,628 ms、23,363 major fault、2 回目は 3.62 ms、0 fault。固定版の初回は Engram 参照 4.06 ms、2 major fault。初回 request 全体の fault 2,649 件には Engram 以外が含まれる。温度 0 と温度付きは生成列が異なるため受理数はこの 1 入力の参考値である。
+
+populate のみは ready 時の `mincore` が 9,874,781 / 15,791,171 ページ（62.5%）だった。4 表の読み込みには 258.63 秒かかり、同時常駐を維持できなかった。固定版は 15,791,171 / 15,791,171 ページ（100%）で、4 表の読み込み・固定は 241.94 秒、GPU への重み転送は 230.23 秒。固定版は通常ユーザー UID で実行し、当該 compute プロセスの memlock 上限のみ 72 GiB に設定した。実行中の `VmLck` は 63,164,684 KiB、停止後にプロセスと lock が解放された。全表固定は `SHELF_HY4_ENGRAM_MLOCK=1` で要求でき、上限不足や固定失敗時は起動を失敗させる。既定の populate は固定なしで、常駐不足を stderr に記録する。
+
+この比較は upload 後のページキャッシュ状態で実施し、遅延 mmap の ready 時の常駐は 77 / 15,791,171 ページだった。OS 全体のキャッシュを消去せず、異なる server 起動の状態を `mincore` と fault 数で確認した。起動時間と RAM 固定量との交換が必要で、固定なしでは常駐を保証できない。生ログは `hy4-flash-pilot/shelf-qualification/server-path-investigation/populate-{before,after,locked}/`。
+
+### 固定後の BetterBench 4 bpw 再測定
+
+upload の `verified` 後に各カテゴリで server を再起動し、全表を `SHELF_HY4_ENGRAM_MLOCK=1` で固定した。compute のみ通常ユーザーの UID / GPU group を保持したまま memlock 上限を 72 GiB とし、4 表すべての `mincore` が 100% と確認できてから client を開始した。BetterBench 0.6.1、corpus 1.0、`--quick --decode`、各カテゴリ 1 warmup + 5 件、逐次 1 request、nonce 有効、prefix cache 無効、予約 2,304、温度 0.7 / top_p 0.95 / top_k 20。profiling は無効。指定 UUID の 3 台を lock で排他し、開始時の load average は全値 8 未満。両カテゴリの 10 / 10 件が成功し、harness の入出力 token と compute ログが一致した。
+
+| カテゴリ | 固定前 decode (tok/s) | 固定後 decode (tok/s) | 固定前 TTFT (ms) | 固定後 TTFT (ms) | 固定前 受理 / 検証 | 固定後 受理 / 検証 |
+|---|---:|---:|---:|---:|---:|---:|
+| code | 14.22 | 35.10 | 2,198.36 | 318.00 | 1,920 / 969 = 1.98 | 1,936 / 966 = 2.00 |
+| chat | 12.31 | 28.98 | 571.78 | 373.83 | 716 / 402 = 1.78 | 670 / 446 = 1.50 |
+
+速度・TTFT は 5 件の中央値。compute の decode 秒数を検証回数合計で割った参考値は固定前 code / chat 213.00 / 207.06 ms、固定後 88.87 / 83.39 ms / 検証。最終回の出力上限にかかる候補も受理数に含む。nonce が異なり生成列と受理率も変化するため、完全に同じ実行列の比較ではない。固定後の code / chat の GPU 重み転送は 255.60 / 187.19 秒、Engram 固定は 58.12 / 57.21 秒。先の初回アクセス実験では固定に 241.94 秒かかっており、起動時間はページキャッシュに依存する。
+
+測定バイナリ SHA-256 は `2f561e3d670fabde15518b2fa17adc5ed49ad3caa929db45a10e759ea22ec93a`。結果 JSON の SHA-256 は code `9b0aa8b23b822c57afe600dce79928a07d29438b22d2dc124c00159e8c1a4e37`、chat `af18988a8ad74a5fdc976600cfd9799b7f92109972a9c3c0745fb58b159dc49f`。ログ、コマンド、GPU UUID、入力条件は `hy4-flash-pilot/shelf-qualification/server-path-investigation/after-{code,chat}/` に保存した。両測定後に server と compute が終了し、GPU lock とホスト固定メモリが解放された。
