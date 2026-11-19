@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdio>
 #include <unistd.h>
+#include <sys/resource.h>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -50,25 +51,43 @@ const Weight &Checkpoint::at(const std::string &key) const {
         throw std::runtime_error("重みがありません: " + key);
     return it->second;
 }
-void Checkpoint::populate_engram() const {
+void Checkpoint::populate_engram(bool lock) const {
     auto begin = std::chrono::steady_clock::now();
+    if (lock) {
+        rlimit limit{};
+        if (getrlimit(RLIMIT_MEMLOCK, &limit) != 0)
+            throw std::runtime_error("memlock 上限を取得できません");
+        long page = sysconf(_SC_PAGESIZE);
+        if (page <= 0) throw std::runtime_error("page size の取得に失敗しました");
+        size_t bytes = 0;
+        for (auto index : engram_files)
+            bytes += (files.at(index).file_size() + page - 1) / page * page;
+        if (limit.rlim_cur != RLIM_INFINITY && bytes > limit.rlim_cur)
+            throw std::runtime_error("Engram の固定に必要な memlock 上限が不足しています");
+    }
     for (auto index : engram_files) {
-        auto status = files.at(index).populate_read();
+        auto status = lock ? files.at(index).lock_pages() : files.at(index).populate_read();
         if (!status.ok())
             throw std::runtime_error("Engram の populate に失敗しました: " + status.message());
     }
-    fprintf(stderr, "engram_populate_s=%.3f\n",
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count());
+    fprintf(stderr, "engram_populate_s=%.3f locked=%d\n",
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count(), lock);
     long page = sysconf(_SC_PAGESIZE);
     if (page <= 0)
         throw std::runtime_error("page size の取得に失敗しました");
-    for (auto index : engram_files) {
-        const auto &file = files.at(index);
+    bool complete = true;
+    for (size_t g = 0; g < engram_files.size(); ++g) {
+        const auto &file = files.at(engram_files[g]);
         auto count = file.resident_pages();
         if (!count.ok())
             throw std::runtime_error("Engram の常駐確認に失敗しました: " + count.status().message());
-        if (count.value() != (file.file_size() + page - 1) / page)
-            throw std::runtime_error("Engram の全ページを常駐させられません");
+        size_t total = (file.file_size() + page - 1) / page;
+        fprintf(stderr, "engram_populate layer=%zu pages=%zu total=%zu\n", 1 + 10 * g, count.value(), total);
+        complete &= count.value() == total;
+    }
+    if (!complete) {
+        if (lock) throw std::runtime_error("固定した Engram の常駐確認に失敗しました");
+        fprintf(stderr, "engram_populate_incomplete=1\n");
     }
 }
 void Checkpoint::report_engram_residency(const char *phase) const {

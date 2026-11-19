@@ -63,6 +63,7 @@ class SafetensorsReader {
                                    std::uint64_t unit_count) const;
       std::uint64_t file_size() const;
       Status populate_read() const;
+      Status lock_pages() const;
       Result<std::size_t> resident_pages() const;
 
       // Parsed "__metadata__" header entry (empty if absent).

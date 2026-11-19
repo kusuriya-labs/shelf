@@ -334,6 +334,12 @@ Status SafetensorsReader::populate_read() const {
     return Status::make_ok();
 }
 
+Status SafetensorsReader::lock_pages() const {
+    if (mlock(pimpl_->file_map.data, pimpl_->file_map.size) != 0)
+        return Status::invalid_state(std::strerror(errno), __FILE__, __LINE__);
+    return Status::make_ok();
+}
+
 Result<std::size_t> SafetensorsReader::resident_pages() const {
     long page_size = sysconf(_SC_PAGESIZE);
     if (page_size <= 0)

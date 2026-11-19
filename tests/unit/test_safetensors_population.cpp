@@ -21,6 +21,7 @@ int main() {
     if (!opened.ok()) return 2;
     auto reader = opened.release();
     if (!reader.populate_read().ok()) return 3;
+    if (!reader.lock_pages().ok()) return 6;
     auto resident = reader.resident_pages();
     long page = sysconf(_SC_PAGESIZE);
     if (page <= 0 || !resident.ok() || resident.value() != (reader.file_size() + page - 1) / page) return 4;

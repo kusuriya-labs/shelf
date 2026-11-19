@@ -61,7 +61,7 @@ Structured output:  json_object, json_schema, strict tools (requires xgrammar)
 Ready.
 ```
 
-Hy4-flash の server は、GPU への重み転送後に Engram 表をホストのページキャッシュへ読み込んでから ready になる。表の容量に応じた空き RAM が必要で、起動時間が長くなる。ページは `mlock` されないため、メモリ圧迫時は退避される。読み込みを省略する場合は `SHELF_HY4_ENGRAM_POPULATE=0` を指定する。
+Hy4-flash の server は、GPU への重み転送後に Engram 表をホストのページキャッシュへ読み込んでから ready になる。表の容量に応じた空き RAM が必要で、起動時間が長くなる。既定ではページは `mlock` されず、メモリ圧迫時は退避される。読み込み直後に全ページが常駐していない場合は stderr に `engram_populate_incomplete=1` を出す。`SHELF_HY4_ENGRAM_MLOCK=1` を指定すると全表を固定する。この場合はプロセスの memlock 上限を表の総量以上に設定し、十分な空き RAM を用意する。固定に失敗した場合は起動しない。読み込みを省略する場合は `SHELF_HY4_ENGRAM_POPULATE=0` を指定する。
 
 ## options
 

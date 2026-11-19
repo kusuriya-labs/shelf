@@ -201,8 +201,12 @@ int compute(int argc, char **argv) {
                 if (mode == "serve") {
                     gpu.upload();
                     auto populate = std::getenv("SHELF_HY4_ENGRAM_POPULATE");
+                    auto locked = std::getenv("SHELF_HY4_ENGRAM_MLOCK");
+                    bool lock = locked && std::string_view(locked) == "1";
+                    if (lock && populate && std::string_view(populate) == "0")
+                        throw std::invalid_argument("Engram の読み込みを無効にしたまま固定できません");
                     if (!populate || std::string_view(populate) != "0")
-                        checkpoint.populate_engram();
+                        checkpoint.populate_engram(lock);
                     if (auto profile = std::getenv("SHELF_HY4_PROFILE_EP");
                         profile && std::string_view(profile) == "1")
                         checkpoint.report_engram_residency("ready");
