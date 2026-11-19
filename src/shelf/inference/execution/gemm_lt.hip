@@ -1,4 +1,5 @@
 #include <shelf/inference/execution/gemm_lt.h>
+#include <shelf/inference/execution/hipblaslt_abi.h>
 
 #include <hipblaslt/hipblaslt.h>
 
@@ -77,6 +78,7 @@ hipError_t ensure_workspace(LtState& lt, size_t bytes) {
 
 hipError_t ensure_handle(LtState& lt) {
     if (lt.handle != nullptr) return hipSuccess;
+    if (!hipblaslt_abi_compatible()) return hipErrorInitializationError;
     if (hipblasLtCreate(&lt.handle) != HIPBLAS_STATUS_SUCCESS) {
         lt.handle = nullptr;
         return hipErrorInitializationError;

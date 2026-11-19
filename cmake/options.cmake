@@ -3,7 +3,7 @@
 # Included from root CMakeLists.txt.
 
 # ---------------------------------------------------------------------------
-# Toolchain enforcement: GCC and libstdc++ are banned.
+# Toolchain enforcement: GCC and libstdc++ headers are banned.
 # All C++ / HIP translation units are compiled by the ROCm toolchain clang
 # with the libc++ standard library (see overview.md "Toolchain").
 # ---------------------------------------------------------------------------
@@ -95,6 +95,38 @@ add_compile_options(
 # non-ELF file (then dedups it against the absolute-path library), leaving
 # every std::__* symbol undefined. Linking the pinned libraries directly,
 # with no -lc++ on the line, makes resolution independent of -l search.
+# shelf は clang と libc++ でコンパイルする。ROCm の C++ ライブラリが
+# 実行時に libstdc++ を読み込むため、必要な版ではその依存順を制御する。
+set(_shelf_stdcxx_default OFF)
+set(_shelf_rocm_major "")
+if(EXISTS "${SHELF_ROCM_ROOT}/.info/version")
+    file(STRINGS "${SHELF_ROCM_ROOT}/.info/version" _shelf_rocm_version LIMIT_COUNT 1)
+    if(_shelf_rocm_version MATCHES "^([0-9]+)\\.[0-9]+")
+        set(_shelf_rocm_major "${CMAKE_MATCH_1}")
+    endif()
+endif()
+if(_shelf_rocm_major STREQUAL "" AND EXISTS "${SHELF_ROCM_ROOT}/include/rocm-core/rocm_version.h")
+    file(STRINGS "${SHELF_ROCM_ROOT}/include/rocm-core/rocm_version.h" _shelf_rocm_version_line
+        REGEX "^#[ 	]*define[ 	]+ROCM_VERSION_MAJOR[ 	]+[0-9]+")
+    if(_shelf_rocm_version_line MATCHES "ROCM_VERSION_MAJOR[ 	]+([0-9]+)")
+        set(_shelf_rocm_major "${CMAKE_MATCH_1}")
+    endif()
+endif()
+if(_shelf_rocm_major STREQUAL "")
+    get_filename_component(_shelf_rocm_real_root "${SHELF_ROCM_ROOT}" REALPATH)
+    if(_shelf_rocm_real_root MATCHES "/(rocm|core)-([0-9]+)\\.[0-9]+/?$")
+        set(_shelf_rocm_major "${CMAKE_MATCH_2}")
+    endif()
+endif()
+if(NOT _shelf_rocm_major STREQUAL "" AND _shelf_rocm_major GREATER_EQUAL 10)
+    set(_shelf_stdcxx_default ON)
+endif()
+option(SHELF_LOAD_LIBSTDCXX_FIRST "Load libstdc++ before libc++abi for ROCm library compatibility" ${_shelf_stdcxx_default})
+if(SHELF_LOAD_LIBSTDCXX_FIRST)
+    find_file(SHELF_LIBSTDCXX_LIBRARY NAMES libstdc++.so.6
+        PATHS /lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu NO_DEFAULT_PATH REQUIRED)
+    add_link_options("${SHELF_LIBSTDCXX_LIBRARY}")
+endif()
 add_link_options(
     "${SHELF_LIBCXX_LLVM_ROOT}/lib/libc++abi.so"
     "${SHELF_LIBCXX_LLVM_ROOT}/lib/libc++.so"

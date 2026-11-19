@@ -279,6 +279,19 @@ shelf_add_test(NAME test_gpu_arena_vmm SOURCE unit/test_gpu_arena_vmm.hip LABELS
 shelf_add_test(NAME test_gemm_bf16_correctness SOURCE kernels/linear/test_gemm_bf16_correctness.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_correctness)
 shelf_add_test(NAME test_gemm_bf16_exact_rows SOURCE kernels/linear/test_gemm_bf16_exact_rows.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_gemm_lt SOURCE unit/test_gemm_lt.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_inference_execution shelf_gpu)
+shelf_add_test(NAME test_hipblaslt_abi SOURCE unit/test_hipblaslt_abi.cpp LABELS "cpu;required" LIBRARIES shelf_gpu ${CMAKE_DL_LIBS} DEFS SHELF_TEST_HIPBLASLT="${SHELF_HIPBLASLT_LIBRARY}")
+set(_shelf_abi_fixture "${CMAKE_CURRENT_BINARY_DIR}/libtest_hipblaslt_abi_fixture.so")
+add_custom_command(OUTPUT "${_shelf_abi_fixture}"
+    COMMAND "${CMAKE_CXX_COMPILER}" -std=c++20 -stdlib=libstdc++ -fPIC -shared
+        "${_SHELF_TESTS_ROOT}/unit/hipblaslt_abi_fixture.cpp" -o "${_shelf_abi_fixture}"
+    DEPENDS "${_SHELF_TESTS_ROOT}/unit/hipblaslt_abi_fixture.cpp" VERBATIM)
+add_custom_target(test_hipblaslt_abi_fixture DEPENDS "${_shelf_abi_fixture}")
+add_dependencies(test_hipblaslt_abi test_hipblaslt_abi_fixture)
+target_compile_definitions(test_hipblaslt_abi PRIVATE SHELF_TEST_ABI_FIXTURE="${_shelf_abi_fixture}")
+if(EXISTS "${SHELF_ROCM_ROOT}/lib/libtensilelite-host.so.1")
+    add_test(NAME test_hipblaslt_abi_preload COMMAND test_hipblaslt_abi reject)
+    set_tests_properties(test_hipblaslt_abi_preload PROPERTIES LABELS "cpu;required" ENVIRONMENT "LD_PRELOAD=${SHELF_LIBCXX_LLVM_ROOT}/lib/libc++abi.so")
+endif()
 shelf_add_test(NAME test_activation_quantize_fp8_finegrained SOURCE kernels/optimized/test_activation_quantize_fp8_finegrained.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_fp8_activation_producer SOURCE kernels/optimized/test_fp8_activation_producer.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_inference_execution shelf_kernels_optimized shelf_runtime shelf_gpu)
 shelf_add_test(NAME test_mxfp4_activation_producer SOURCE kernels/optimized/test_mxfp4_activation_producer.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_inference_execution shelf_kernels_optimized shelf_runtime shelf_gpu)

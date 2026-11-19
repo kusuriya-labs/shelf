@@ -1,4 +1,5 @@
 #include <shelf/inference/execution/exl3_dense_gemm.h>
+#include <shelf/inference/execution/hipblaslt_abi.h>
 
 #include <hipblaslt/hipblaslt.h>
 #include <hipblaslt/hipblaslt-ext.hpp>
@@ -81,6 +82,7 @@ hipError_t run_dense_gemm(bool int8, uint32_t rows, uint32_t out_features, uint3
         lt.handle = nullptr;
     }
     if (lt.handle == nullptr) {
+        if (!hipblaslt_abi_compatible()) return hipErrorInitializationError;
         lt.device = cur_device;
         if (hipblasLtCreate(&lt.handle) != HIPBLAS_STATUS_SUCCESS) {
             lt.handle = nullptr;

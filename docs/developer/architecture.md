@@ -1,5 +1,11 @@
 # Architecture
 
+## Toolchain と C++ ABI
+
+host の C++ と HIP は ROCm clang と libc++ のヘッダでビルドする。GCC と libstdc++ のヘッダは使わない。ROCm の C++ ライブラリが実行時に libstdc++ を読み込むため、その依存順を制御する。ROCm 10 以降は `SHELF_LOAD_LIBSTDCXX_FIRST` の既定値を ON とし、libstdc++ を libc++abi より前の直接依存として読み込む。ROCm 10 未満と版が不明な場合は OFF とする。既存の CMake cache の明示値は維持される。
+
+Tensile host が読み込まれている場合、hipBLASLt を使う前に RTTI と `__dynamic_cast` の束縛先を検査し、libstdc++ 以外に解決された場合は初期化エラーとして停止する。この検査は既知の衝突を検出するもので、混在するすべての C++ ABI の互換性を保証しない。C++ オブジェクトや例外を shelf と ROCm の API 境界で受け渡さない。
+
 ## Layer構成
 
 apps から下方向への依存のみ。矢印は「参照する」向きで、上位ほど具体的なモデル／実行編成、下位ほど汎用の仕組みを置く。
