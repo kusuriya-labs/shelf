@@ -98,6 +98,31 @@ def stop_orphan():
     emit(f'管理外サーバーを停止しました。現在の VRAM: {vram()} byte')
 
 
+def stop_pending():
+    path = STATE / 'manager.pid'
+    if not path.exists():
+        return
+    pid = int(path.read_text().strip())
+    try:
+        command = Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
+        if str(Path(__file__).resolve()).encode() not in command or b'manager' not in command:
+            raise RuntimeError('管理プロセスの PID を確認できません')
+        os.kill(pid, signal.SIGTERM)
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            try:
+                if not Path(f'/proc/{pid}/cmdline').read_bytes():
+                    break
+            except FileNotFoundError:
+                break
+            time.sleep(0.2)
+        else:
+            raise RuntimeError('管理プロセスが停止しません')
+    except FileNotFoundError:
+        pass
+    path.unlink(missing_ok=True)
+
+
 class Manager:
     def __init__(self):
         self.server = None
@@ -320,6 +345,7 @@ def start():
         stop_orphan()
         log = open(STATE / 'manager.log', 'ab', buffering=0)
         proc = subprocess.Popen([sys.executable, __file__, 'manager'], cwd=ROOT, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+        (STATE / 'manager.pid').write_text(str(proc.pid) + '\n')
         while True:
             if proc.poll() is not None:
                 emit(f'起動失敗。ログ: {STATE / "manager.log"}'); return 1
@@ -372,6 +398,7 @@ def main():
         try: result = client(action)
         except (OSError, ValueError, ConnectionError):
             if action == 'stop':
+                stop_pending()
                 stop_orphan()
             emit('Hy4 は停止しています'); return 0 if action == 'stop' else 1
         emit(json.dumps(result, ensure_ascii=False))
