@@ -237,7 +237,7 @@ class Manager:
                '--engram-dir', str(Path.home() / 'datapool/hy4-hf-staging-20261119/body'),
                '--placement', str(BASE / 'hy4-flash-pilot/shelf-placement/owners-4bpw.json'),
                '--dfly-dir', str(BASE / 'hy4-flash-pilot/shelf-dfly/Hy4-flash-dfly-4bpw'),
-               '--model', MODEL, '--port', str(PORT), '--max-seq-len', '8192', '--max-concurrent-requests', '1']
+               '--model', MODEL, '--port', str(PORT), '--max-seq-len', '1048576', '--inference-budget-tokens', '65536', '--max-concurrent-requests', '1']
         directory = STATE / 'diagnostics' / (datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f'))
         directory.mkdir(parents=True, mode=0o700)
         self.diagnostics = directory

@@ -34,9 +34,9 @@ Hy4 には GPU を使うコマンドを必ず `with-gpu` 経由で呼ばせる�
 
 ## コンテキストとツール形式
 
-`--max-seq-len` と OpenCode の context 上限はともに 8192、出力上限は 1024。3 GPU の実機でこの長さの予約と短い生成を確認した。OpenCode の通常タスクで送信されたツール定義を含む入力は 2113 token、再起動直後の会話履歴は 2415 token だった。自動 compaction は有効、保持 1024 token、buffer 25% とした。長い作業での十分性や compaction の品質は未測定。
+`--max-seq-len` と OpenCode の context 上限はともに 1,048,576、出力上限とサーバーの inference budget は 65,536。1Mi の起動と長い生成は未検証。以前の 8192 token 設定では 3 GPU の予約と短い生成を確認した。OpenCode の通常タスクで送信されたツール定義を含む入力は 2113 token、再起動直後の会話履歴は 2415 token だった。自動 compaction は有効、保持 1024 token、buffer 25% とした。実用上の作業 context は 128k 程度を目安とし、長い出力はファイルに保存する。長い作業での十分性や compaction の品質は未測定。
 
-Hy4 のテンプレートは `<tool_calls:opensource>` と `<tool_call:opensource>`、`<arg_key:opensource>`、`<arg_value:opensource>` を使う。サーバーは Hy4 のテンプレートへ `tools` と過去のツール結果を渡し、この形式を OpenAI の `tool_calls` に変換する。通常応答と SSE の両方に対応する。SSE の Hy4 ツール応答は生成全体を保持してから返すため、reasoning も逐次表示されない。`tool_choice` の auto / none / required / 指定関数に対応する。strict tools と構造化出力は未対応であり拒否する。
+Hy4 のテンプレートは `<tool_calls:opensource>` と `<tool_call:opensource>`、`<arg_key:opensource>`、`<arg_value:opensource>` を使う。サーバーは Hy4 のテンプレートへ `tools` と過去のツール結果を渡し、この形式を OpenAI の `tool_calls` に変換する。通常応答と SSE の両方に対応する。SSE の Hy4 ツール応答は生成全体を保持してから返すため、reasoning も逐次表示されない。65,536 token を 50 tok/s で生成すると約 22 分かかるため OpenCode の headerTimeout と chunkTimeout を 30 分に設定する。`tool_choice` の auto / none / required / 指定関数に対応する。strict tools と構造化出力は未対応であり拒否する。
 
 ## 実測
 

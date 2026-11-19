@@ -7,13 +7,13 @@
     "hy4": {
       "name": "Hy4 RDMA",
       "package": "@opencode/ai/providers/openai-compatible",
-      "settings": {"baseURL": "http://127.0.0.1:18123/v1", "headerTimeout": 900000, "chunkTimeout": 900000},
+      "settings": {"baseURL": "http://127.0.0.1:18123/v1", "headerTimeout": 1800000, "chunkTimeout": 1800000},
       "models": {
         "Hy4-flash-4bpw": {
           "name": "Hy4-flash 4bpw",
           "body": {"temperature": 0},
           "capabilities": {"tools": true, "input": ["text"], "output": ["text"]},
-          "limit": {"context": 8192, "output": 1024}
+          "limit": {"context": 1048576, "output": 65536}
         }
       }
     }
