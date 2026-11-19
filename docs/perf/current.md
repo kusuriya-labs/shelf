@@ -65,7 +65,10 @@ GDN recurrent state を fp16 から f32 にし、prefill chunk を 2048 から 4
 | 2048 | 3,946.0 ms | 2,076 |
 | 4096 | 3,792.0 ms | 2,160 |
 
-`--prefill-chunk 4096` で **3.9% 短縮**。
+`--prefill-chunk 4096` で **3.9% 短縮**。MXFP4 producer の norm/residual 入力を
+16B ベクトル化した後の最終値は 3,780.5 ms（2 run p50）。
+ベクトル化単体の A/B は scalar 3,766.1 / 3,772.3 / 3,781.9 ms に対し
+vector 3,757.3 / 3,763.5 / 3,768.4 ms で約 0.3% 短縮（3 ペア、KL 0）。
 
 品質（`shelf-bench quality`、context 8,192、256 positions、bf16 KV、
 4×2048 と 2×4096 の比較）: **KL mean 0、top-1 一致 100%**。
