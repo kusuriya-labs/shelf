@@ -19,6 +19,19 @@ R9700 と V620 2 台を使用する。V620 は routed expert を担当する。D
 
 4 bpw の測定バイナリの SHA-256 は `a7365f79d3684159121c4cef1d162c2b7757ed6874c9657bdfe9113c357763db`。入力 ID、配置、実行条件、各反復の時間と受理長分布は `hy4-flash-pilot/shelf-qualification/ep3-9ao7j7r7` に保存した。[再現手順](../research/20261119/hy4_flash_plan.md)・[受入記録](../research/20261119/hy4_flash_progress.md)
 
+### BetterBench の code・chat（shelf-server）
+
+BetterBench 0.6.1、corpus v1（1.0）、各セル 1 warmup + 5 passes の quick 測定。各セルでサーバーを再起動した。EP=3、DFly2 有効、予約長 2,304、温度 0.7・top_p 0.95・top_k 20。先頭の reasoning を含む HTTP ストリームを測定した。
+
+| 本体 | カテゴリ | decode 中央値 (tok/s) | TTFT 中央値 (ms) | prefill 中央値 (tok/s) | DFly2 受理候補 / 検証 | 検証回数計 |
+|---|---|---:|---:|---:|---:|---:|
+| 4 bpw | code | 14.22 | 2,198.36 | 36.94 | 1.98 | 969 |
+| 4 bpw | chat | 12.31 | 571.78 | 180.14 | 1.78 | 402 |
+| 3.5 bpw | code | 11.40 | 2,474.50 | 34.92 | 2.16 | 889 |
+| 3.5 bpw | chat | 10.40 | 713.87 | 147.74 | 1.76 | 403 |
+
+prefill は BetterBench がリクエストごとに入力 token 数を TTFT で割った値。DFly2 受理候補 / 検証は 5 件の合計同士の比。入力長は 76〜120 token、生成上限はプロンプトごとに 160〜800 token。上の固定英文の行とは入力長・sampling・計測区間が異なる。[プロンプト別記録と再現条件](../research/20261119/hy4_flash_progress.md)
+
 ## 現在の状態
 
 **現在の build に対する qualified baseline は、2026-11-03 の long-context prefill、

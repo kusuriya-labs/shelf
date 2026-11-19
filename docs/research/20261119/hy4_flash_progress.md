@@ -326,3 +326,32 @@ rank の HIP event は gather、3 射影、活性化、加重和を含む。各 
 既定の Hy4 ビルドで shelf-server と shelf-compute を構築した。コミット 6e73af9e で既存の Chat Completions・SSE サーバーから、重みを常駐させた EP=3 の Hy4 worker に接続した。生成直後の先頭 token と DFly2 の検証済み token を順次返す。温度付き sampling は各行の top-k に対し top-p を適用し、本体・draft ともその分布で採択・棄却を行う。CPU CTest と既存サーバーの CLI・compute client テストが通った。
 
 BetterBench 0.6.1 の corpus v1（版 1.0）を使い、カテゴリごとに `run --quick --decode --categories code` または `--categories chat` を実行する。各重み・各カテゴリでサーバープロセスを再起動し、prefix cache 無効、逐次 1 リクエスト、nonce 有効、1 warmup + 5 計測。設定は温度 0.7、top_p 0.95、top_k 20。予約長は 2,304 token、prefill chunk は 1,024。サーバーの起動・重み転送を終えた後に HTTP クライアントの計測を開始する。
+
+## BB2　BetterBench code・chat の実測
+
+09:51〜10:14 JST に実施。測定リビジョンは 6e73af9e。4 bpw と 3.5 bpw それぞれで code・chat を独立に起動し、合計 4 サーバープロセスで実 HTTP/SSE を測った。各起動で `locked.py ep3` が 3 台の lock を取得し、R9700、V620、V620 の UUID を指定した。開始時の load average は全指標が 2 未満。各プロセスの expert 配置は 7,332 / 6,830 / 6,830、再配置 0。2,304 token の予約で corpus の全入力と要求された出力長を収容した。
+
+| 本体 | カテゴリ | decode (tok/s) | TTFT (ms) | prefill (tok/s) | DFly2 受理候補 / 検証 | 受理候補合計 / 検証回数 | 固定英文からの decode 差 |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 4 bpw | code | 14.22 | 2,198.36 | 36.94 | 1.98 | 1,920 / 969 | −71.9% |
+| 4 bpw | chat | 12.31 | 571.78 | 180.14 | 1.78 | 716 / 402 | −75.7% |
+| 3.5 bpw | code | 11.40 | 2,474.50 | 34.92 | 2.16 | 1,924 / 889 | −54.5% |
+| 3.5 bpw | chat | 10.40 | 713.87 | 147.74 | 1.76 | 711 / 403 | −58.5% |
+
+BetterBench 0.6.1、corpus v1（1.0）、各セル 1 warmup + 5 measured passes。20/20 件成功。decode・TTFT・prefill はそれぞれ 5 件の中央値。TTFT は送信から最初のテキストを含む SSE（思考も含む）まで。prefill は各入力 token 数 / TTFT、decode は（生成 token 数 − 1）/（最後と最初のテキスト更新の時間差）。DFly2 は server.log の受理候補数と検証回数をそれぞれ 5 件分合計した。全件で入出力長が harness と一致し、受理長分布から再計算した検証回数・受理候補数もログの値と一致した。受理数には最終ラウンドで生成長上限にかかる候補も含まれる。
+
+code は 4 プロンプトを一巡後に先頭をもう 1 回、chat は 3 プロンプトを一巡後に先頭 2 件をもう 1 回測定した。各リクエストに harness が新しい nonce を付けた。入力は code が 76〜88 token、chat が 101〜120 token。生成合計は 4 bpw の code / chat が 2,887 / 1,120 token、3.5 bpw が 2,815 / 1,120 token。Hy4 の標準の high 思考を使い、思考中に生成上限に達したのは 4 bpw が code 3/5・chat 5/5、3.5 bpw が code 3/5・chat 3/5。速度にはこの思考区間を含む。4 bpw は両カテゴリで 3.5 bpw より速かった。従来の 50.65 / 25.06 tok/s は固定英文 2,048 token、温度 0、常駐 compute 内の 127 token の測定であり、今回の差から HTTP 単独の負荷は求められない。
+
+### 再現条件と保存先
+
+サーバーは `cmake --build build-hy4 --target shelf-compute shelf-server-stage` で作成した。このホストでは `/tmp/shelfvenv/bin/python build-hy4/shelf-server` に `--model-dir`、`--engram-dir`、`--placement`、`--dfly-dir`、`--max-seq-len 2304 --max-concurrent-requests 1` を渡した。クライアントも同じ排他下で、各サーバーの起動完了後に次の形で実行した。
+
+```bash
+PYTHONPATH=vendor/BetterBench BETTERBENCH_NO_UPDATE_CHECK=1 python3 -m betterbench.cli run \
+  --endpoint http://127.0.0.1:18123/v1 --model "$model" --quick --decode \
+  --categories "$category" --max-model-len 2304 --out "$output" --no-html
+```
+
+`category` は code または chat。sampling は harness 既定（温度 0.7 / top_p 0.95 / top_k 20）、seed 指定なし（サーバー既定 0）。集計と生データは `hy4-flash-pilot/shelf-qualification/betterbench-dy1_7b9r/`。各条件の `results.json` は各 pass の prompt ID、TTFT、速度、入出力 token 数、終了理由を含む。`settings.json` には実コマンド、プロセス ID、起動時負荷、UUID、実行形式・重みの変換報告・配置表・corpus の SHA-256、`server.log` には request ごとの受理統計がある。集計 `summary.json` の SHA-256 は `f1c3647b8d50169aa879cc8f4528e0bf18984f5c74d2341c97d68260ab883c13`。
+
+全測定後、同じ chat 入力で温度 0、温度 0.7・top_k 1、温度 0.7・top_k 20・top_p 0.0000001 の 8 token 応答を照合し、生成テキストが一致した。この 3 リクエストは集計外。計測後にサーバーを停止し、3 台の lock を解放した。
