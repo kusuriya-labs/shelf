@@ -6,6 +6,10 @@
 #include <cstdio>
 #include <stdexcept>
 #include <string_view>
+#include <atomic>
+#include <sys/mman.h>
+#include <thread>
+#include <unistd.h>
 #ifdef SHELF_HY4_RDMA
 #include <openssl/evp.h>
 #endif
@@ -231,6 +235,41 @@ void Residency::upload() {
                             hipMemcpyHostToDevice));
             used[r] = 0;
         };
+#ifdef SHELF_HY4_RDMA
+        // 重み全体の SHA-256（約 44 秒）をやめ、shard の大きさと配置で同一性を見る。
+        // shortcut: 同じ大きさのまま中身だけ書き換えられた場合は検出できない、重みを差し替えるときは snapshot を消すこと。
+        for (const auto &file : model.files) {
+            auto size = file.file_size();
+            hash(&size, sizeof(size));
+        }
+#endif
+        // 先読み: ファイルの mmap をページフォルトで同期的に読むと遅いので、読み出し位置の少し先に MADV_WILLNEED を出す。
+        std::atomic<size_t> consumed{0};
+        std::atomic<bool> stop_prefetch{false};
+        std::thread prefetch([&] {
+            constexpr size_t ahead = size_t(8) << 30;
+            const uintptr_t page = static_cast<uintptr_t>(sysconf(_SC_PAGESIZE));
+            size_t advised = 0;
+            for (const auto *w : model.upload_order) {
+                while (!stop_prefetch && advised > consumed + ahead)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                if (stop_prefetch)
+                    return;
+                auto begin_address = reinterpret_cast<uintptr_t>(w->host) & ~(page - 1);
+                auto end_address = reinterpret_cast<uintptr_t>(w->host) + w->bytes;
+                (void)madvise(reinterpret_cast<void *>(begin_address), end_address - begin_address, MADV_WILLNEED);
+                advised += w->bytes;
+            }
+        });
+        struct Join {
+            std::atomic<bool> &stop;
+            std::thread &thread;
+            ~Join() {
+                stop = true;
+                if (thread.joinable())
+                    thread.join();
+            }
+        } join{stop_prefetch, prefetch};
         for (const auto *w : model.upload_order) {
             const int r = w->rank;
 #ifdef SHELF_HY4_RDMA
@@ -247,12 +286,10 @@ void Residency::upload() {
                 size_t local = pos - first, bytes = std::min(chunk - local, w->bytes - n);
                 std::memcpy(static_cast<uint8_t *>(buffer) + r * chunk + local,
                             static_cast<const uint8_t *>(w->host) + n, bytes);
-#ifdef SHELF_HY4_RDMA
-                hash(static_cast<uint8_t *>(buffer) + r * chunk + local, bytes);
-#endif
                 used[r] = local + bytes;
                 n += bytes;
             }
+            consumed += w->bytes;
         }
         for (int r = 0; r < 3; ++r)
             flush(r);
