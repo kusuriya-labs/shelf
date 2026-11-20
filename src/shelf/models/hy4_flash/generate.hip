@@ -164,7 +164,7 @@ struct Target {
     std::vector<int> predict(Mat hidden, int position, bool draft = false, const Path &dump = {},
                              float *distribution = nullptr) {
         std::chrono::steady_clock::time_point begin;
-        if (op.rank == 0 && op.gpu.expert_begin[0])
+        if (op.gpu.tp_size == 1 && op.rank == 0 && op.gpu.expert_begin[0])
             begin = std::chrono::steady_clock::now();
         size_t mark = op.arena.cursor;
         auto codes = static_cast<int8_t *>(op.arena.next(size_t(hidden.rows) * 3072));
@@ -198,7 +198,7 @@ struct Target {
         std::vector<int> result(hidden.rows);
         op.copy(result.data(), device_ids, result.size() * 4, hipMemcpyDeviceToHost);
         op.arena.cursor = mark;
-        if (op.rank == 0 && op.gpu.expert_begin[0])
+        if (op.gpu.tp_size == 1 && op.rank == 0 && op.gpu.expert_begin[0])
             head_ms +=
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
         if (std::find(result.begin(), result.end(), -1) != result.end())
@@ -207,11 +207,20 @@ struct Target {
     }
     std::vector<int> forward(const std::vector<int> &ids, bool verify, bool need_head = true,
                              const Path &dump = {}) {
+        checked(hipStreamSynchronize(nullptr));
         op.arena.cursor = base;
         int start = history.size();
         if (ids.empty() || start + ids.size() > op.gpu.tokens || (verify && ids.size() > 6))
             throw std::runtime_error("入力列が KV の範囲外です");
         Mat x = op.embed(ids, true);
+        std::vector<int> prior;
+        if (history.size() > 3)
+            prior.assign(history.end() - 3, history.end());
+        else
+            prior = history;
+        auto prefetch = std::getenv("SHELF_HY4_ENGRAM_PREFETCH");
+        if (!prefetch || prefetch[0] != '0')
+            op.prefetch_engram(ids, prior);
         for (int layer = 0; layer < 42; ++layer) {
             Selection selection;
             decoder_layer(op, layer, start, x, history, ids, selection);
@@ -230,7 +239,9 @@ struct Target {
         float *unused;
         Mat h = op.norm(op.collapse(x, "model.hc_head.hc_head_", unused), "model.norm.weight");
         checked(hipMemcpyAsync(state.p, h.p, h.bytes(), hipMemcpyDeviceToDevice));
-        return predict(h, history.size() - h.rows + 1, false, dump, verify ? target_probs : nullptr);
+        auto result = predict(h, history.size() - h.rows + 1, false, dump, verify ? target_probs : nullptr);
+        checked(hipStreamSynchronize(nullptr));
+        return result;
     }
     std::vector<int> propose(int anchor) {
         op.arena.cursor = base;
@@ -271,6 +282,7 @@ struct Target {
                                draft_probs ? draft_probs + (i - 1) * 120832 : nullptr)[0];
             draft.push_back(previous);
         }
+        checked(hipStreamSynchronize(nullptr));
         return draft;
     }
     void accept(int keep, int submitted) {
@@ -318,14 +330,20 @@ void decoder_layer(Ops &op, int layer, int start, Mat x, const std::vector<int> 
                    const std::vector<int> &ids, Selection &selection) {
     auto now = std::chrono::steady_clock::now;
     std::chrono::steady_clock::time_point start_time;
-    if (op.rank == 0 && op.gpu.expert_begin[0]) {
+    if (op.gpu.tp_size == 1 && op.rank == 0 && op.gpu.expert_begin[0]) {
         checked(hipStreamSynchronize(nullptr));
         start_time = now();
     }
     size_t save = op.arena.cursor;
     auto p = "model.layers." + std::to_string(layer) + ".";
-    if (layer % 10 == 1 && layer <= 31)
-        engram(op, layer, x, history, ids);
+    if (layer % 10 == 1 && layer <= 31) {
+        std::vector<int> prior;
+        if (history.size() > 3)
+            prior.assign(history.end() - 3, history.end());
+        else
+            prior = history;
+        engram(op, layer, x, prior, ids);
+    }
     float *post;
     Mat a = op.collapse(x, p + "hc_attn_layer.hc_pre.hc_", post);
     a = op.norm(a, p + "input_layernorm.weight");
@@ -333,7 +351,7 @@ void decoder_layer(Ops &op, int layer, int start, Mat x, const std::vector<int> 
     Mat z = op.expand(x, a, post);
     checked(hipMemcpyAsync(x.p, z.p, z.bytes(), hipMemcpyDeviceToDevice));
     op.arena.cursor = save;
-    if (op.rank == 0 && op.gpu.expert_begin[0]) {
+    if (op.gpu.tp_size == 1 && op.rank == 0 && op.gpu.expert_begin[0]) {
         checked(hipStreamSynchronize(nullptr));
         auto end = now();
         op.gpu.attention_ms += std::chrono::duration<double, std::milli>(end - start_time).count();
@@ -348,7 +366,7 @@ void decoder_layer(Ops &op, int layer, int start, Mat x, const std::vector<int> 
     z = op.expand(x, f, post);
     checked(hipMemcpyAsync(x.p, z.p, z.bytes(), hipMemcpyDeviceToDevice));
     op.arena.cursor = save;
-    if (op.rank == 0 && op.gpu.expert_begin[0]) {
+    if (op.gpu.tp_size == 1 && op.rank == 0 && op.gpu.expert_begin[0]) {
         checked(hipStreamSynchronize(nullptr));
         op.gpu.ffn_ms += std::chrono::duration<double, std::milli>(now() - start_time).count();
     }
@@ -416,10 +434,10 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
                     continue;
                 }
                 std::chrono::steady_clock::time_point draft_begin;
-                if (target.op.rank == 0 && gpu.expert_begin[0])
+                if (gpu.tp_size == 1 && target.op.rank == 0 && gpu.expert_begin[0])
                     draft_begin = now();
                 auto draft = target.propose(anchor);
-                if (target.op.rank == 0 && gpu.expert_begin[0])
+                if (gpu.tp_size == 1 && target.op.rank == 0 && gpu.expert_begin[0])
                     stats.draft += std::chrono::duration<double, std::milli>(now() - draft_begin).count();
                 std::vector<int> block{anchor};
                 block.insert(block.end(), draft.begin(), draft.end());
@@ -446,13 +464,16 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
                 failure = std::current_exception();
         }
     };
-    std::vector<std::thread> threads;
-    const int lanes = gpu.tp_size > 1 ? gpu.ranks : 1;
-    threads.reserve(lanes);
-    for (int r = 0; r < lanes; ++r)
-        threads.emplace_back(run, r);
-    for (auto &thread : threads)
-        thread.join();
+    if (gpu.tp_size == 1) {
+        run(0);
+    } else {
+        std::vector<std::thread> threads;
+        threads.reserve(gpu.ranks);
+        for (int r = 0; r < gpu.ranks; ++r)
+            threads.emplace_back(run, r);
+        for (auto &thread : threads)
+            thread.join();
+    }
     if (failure)
         std::rethrow_exception(failure);
     const auto &stats = lane[0];
@@ -476,9 +497,9 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
         fprintf(stderr,
                 "profile_pp_ms attention=%.3f ffn=%.3f transfer=%.3f head=%.3f\n"
                 "profile_tg_ms attention=%.3f ffn=%.3f transfer=%.3f head=%.3f draft=%.3f\n",
-                stats.pp_attn, stats.pp_ffn, stats.pp_transfer, stats.pp_head, gpu.attention_ms - stats.pp_attn,
-                gpu.ffn_ms - stats.pp_ffn, gpu.transfer_ms - stats.pp_transfer,
-                stats.head - stats.pp_head, stats.draft);
+                stats.pp_attn, stats.pp_ffn, stats.pp_transfer, stats.pp_head,
+                gpu.attention_ms - stats.pp_attn, gpu.ffn_ms - stats.pp_ffn,
+                gpu.transfer_ms - stats.pp_transfer, stats.head - stats.pp_head, stats.draft);
     return lane[0].generated;
 }
 }

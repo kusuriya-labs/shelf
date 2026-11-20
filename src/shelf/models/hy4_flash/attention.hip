@@ -253,12 +253,12 @@ Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidd
             stride = std::max(stride, int(selected[r].size()));
         bool tiles = n >= 16 && contiguous && !draft;
         std::vector<int> ids, offsets(tiles ? 0 : n * stride, -1);
-        if (n == 1 || draft) {
+        if (n == 1) {
             ids = selected[i + n - 1];
             for (int r = 0; r < n; ++r)
                 std::iota(offsets.begin() + r * stride, offsets.begin() + r * stride + selected[i + r].size(),
                           0);
-        } else if (contiguous) {
+        } else if (contiguous && !draft) {
             int first = selected[i][0];
             ids.resize(selected[i + n - 1].back() + 1 - first);
             std::iota(ids.begin(), ids.end(), first);

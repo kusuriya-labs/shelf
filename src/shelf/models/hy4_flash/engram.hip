@@ -66,6 +66,44 @@ __global__ void add_memory(Mat x, Mat k, Mat q, Mat value, const uint16_t *scale
     }
 }
 }
+std::vector<uint8_t> gather_engram(const Checkpoint &model, int layer, int rows, const std::vector<int> &ids,
+                                   const std::vector<int> &prior) {
+    int g = (layer - 1) / 10;
+    auto p = "model.layers." + std::to_string(layer) + ".engram_layer.";
+    auto table = p + "multi_head_embedding.embedding.weight";
+    const auto &lookup = model.at(p + "lookup_table", -1);
+    if (lookup.spec.dtype != io::SType::I32 || lookup.bytes != 120818 * 4)
+        throw std::runtime_error("Engram の語彙写像が異なります");
+    auto lut = static_cast<const int32_t *>(lookup.host);
+    auto bits = static_cast<const uint8_t *>(model.at(table, -1).host);
+    auto scales = static_cast<const uint8_t *>(model.at(table + ".scale", -1).host);
+    std::vector<uint8_t> packed(size_t(rows) * 16 * 98);
+    for (int r = 0; r < rows; ++r) {
+        int64_t mix[3]{};
+        for (int j = 0; j < 3; ++j) {
+            int index = r - j, id = 120002;
+            if (index >= 0)
+                id = ids[index];
+            else if (int(prior.size()) + index >= 0)
+                id = prior[int(prior.size()) + index];
+            int normalized = lut[id >= 0 && id < 120818 ? id : 120002];
+            if (normalized < 0 || normalized > 92619)
+                throw std::runtime_error("Engram の正規化 ID が不正です");
+            mix[j] = normalized * multipliers[g][j];
+        }
+        size_t offset = 0;
+        for (int h = 0; h < 16; ++h) {
+            int size = model.moduli[g][h];
+            size_t idx = offset + ((mix[0] ^ mix[1] ^ (h < 8 ? 0 : mix[2])) % size);
+            auto dest = packed.data() + (r * 16 + h) * 98;
+            std::memcpy(dest, bits + idx * 96, 96);
+            std::memcpy(dest + 96, scales + idx * 2, 2);
+            offset += size;
+        }
+    }
+    return packed;
+}
+
 Mat engram(Ops &op, int layer, Mat x, const std::vector<int> &prior, const std::vector<int> &ids) {
     int g = (layer - 1) / 10;
     auto p = "model.layers." + std::to_string(layer) + ".engram_layer.";
@@ -82,32 +120,12 @@ Mat engram(Ops &op, int layer, Mat x, const std::vector<int> &prior, const std::
             throw std::runtime_error("Engram パラメーターの型が異なります");
         return static_cast<const uint16_t *>(v.p);
     };
-    std::vector<uint8_t> packed(ids.size() * 16 * 98);
-    for (int r = 0; r < x.rows; ++r) {
-        int64_t mix[3]{};
-        for (int j = 0; j < 3; ++j) {
-            int index = r - j, id = 120002;
-            if (index >= 0)
-                id = ids[index];
-            else if (int(prior.size()) + index >= 0)
-                id = prior[int(prior.size()) + index];
-            int normalized = lut[id >= 0 && id < 120818 ? id : 120002];
-            if (normalized < 0 || normalized > 92619)
-                throw std::runtime_error("Engram の正規化 ID が不正です");
-            mix[j] = normalized * multipliers[g][j];
-        }
-        size_t offset = 0;
-        for (int h = 0; h < 16; ++h) {
-            int size = op.gpu.model.moduli[g][h];
-            size_t idx = offset + ((mix[0] ^ mix[1] ^ (h < 8 ? 0 : mix[2])) % size);
-            auto dest = packed.data() + (r * 16 + h) * 98;
-            std::memcpy(dest, bits + idx * 96, 96);
-            std::memcpy(dest + 96, scales + idx * 2, 2);
-            offset += size;
-        }
-    }
+    auto packed = op.take_engram(g);
+    if (packed.size() != size_t(x.rows) * 16 * 98)
+        packed = gather_engram(op.gpu.model, layer, x.rows, ids, prior);
     auto memory = static_cast<uint8_t *>(op.arena.next(packed.size()));
     op.copy(memory, packed.data(), packed.size(), hipMemcpyHostToDevice);
+    checked(hipStreamSynchronize(nullptr));
     auto embed = op.mat(x.rows, 1536);
     Norms norms{};
     for (int i = 0; i < 16; ++i)
@@ -130,5 +148,25 @@ Mat engram(Ops &op, int layer, Mat x, const std::vector<int> &prior, const std::
         checked(hipGetLastError());
     }
     return x;
+}
+
+void Ops::prefetch_engram(const std::vector<int> &ids, const std::vector<int> &prior) {
+    if (engram_future.valid())
+        engram_future.wait();
+    engram_data.reset();
+    engram_future = std::async(std::launch::async, [this, ids, prior] {
+        std::array<std::vector<uint8_t>, 4> result;
+        for (int g = 0; g < 4; ++g)
+            result[g] = gather_engram(gpu.model, 1 + 10 * g, ids.size(), ids, prior);
+        return result;
+    });
+}
+std::vector<uint8_t> Ops::take_engram(int group) {
+    if (!engram_data) {
+        if (!engram_future.valid())
+            return {};
+        engram_data = engram_future.get();
+    }
+    return std::move((*engram_data)[group]);
 }
 }

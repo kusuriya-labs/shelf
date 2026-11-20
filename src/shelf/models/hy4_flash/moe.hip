@@ -131,7 +131,7 @@ Mat moe_ep(Ops &op, int layer, Mat x) {
         if (group_bytes)
             std::memcpy(host + route_bytes + offset_bytes + undo_bytes, groups.data(), group_bytes);
         auto dev = static_cast<uint8_t *>(rank.arena.next(total));
-        checked(hipMemcpyAsync(dev, host, total, hipMemcpyHostToDevice));
+        checked(hipMemcpy(dev, host, total, hipMemcpyHostToDevice));
         auto gpu_routes = reinterpret_cast<const Hy4Route *>(dev);
         auto offsets_gpu = reinterpret_cast<const int *>(dev + route_bytes);
         auto inverse = undo_bytes ? reinterpret_cast<const int *>(dev + route_bytes + offset_bytes) : nullptr;
@@ -219,7 +219,7 @@ Mat moe(Ops &op, int layer, Mat x) {
         if (group_bytes)
             std::memcpy(host_routes + route_bytes + offset_bytes + undo_bytes, groups.data(), group_bytes);
         auto dev = static_cast<uint8_t *>(op.arena.next(total));
-        checked(hipMemcpyAsync(dev, host_routes, total, hipMemcpyHostToDevice));
+        checked(hipMemcpy(dev, host_routes, total, hipMemcpyHostToDevice));
         auto gpu_routes = reinterpret_cast<const Hy4Route *>(dev);
         auto offsets_gpu = reinterpret_cast<const int *>(dev + route_bytes);
         auto inverse = undo_bytes ? reinterpret_cast<const int *>(dev + route_bytes + offset_bytes) : nullptr;

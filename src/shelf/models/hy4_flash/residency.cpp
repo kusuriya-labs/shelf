@@ -110,6 +110,7 @@ Status Residency::reserve() {
         auto allocation = arenas.back().allocate_aligned(bytes, 256);
         if (!allocation.ok())
             throw std::runtime_error(allocation.status().message());
+        check(hipMemset(allocation.value().data(), 0, bytes));
         Region buffer{static_cast<uint8_t *>(allocation.value().data()), bytes};
         weight_base[r] = static_cast<uint8_t *>(buffer.next(model.bytes[r]));
         if (attention_rank) {
@@ -184,11 +185,13 @@ void Residency::upload() {
                     (void)hipGetLastError();
             }
             if (peer[dst][src]) {
-                check(hipSetDevice(physical[src]));
-                check(hipEventCreateWithFlags(&ready[src][dst],
-                                              hipEventDisableTiming | hipEventReleaseToSystem));
-                check(hipSetDevice(physical[dst]));
-                check(hipEventCreateWithFlags(&ack[dst][src], hipEventDisableTiming));
+                for (int q = 0; q < 2; ++q) {
+                    check(hipSetDevice(physical[src]));
+                    check(hipEventCreateWithFlags(&ready[src][dst][q],
+                                                  hipEventDisableTiming | hipEventReleaseToSystem));
+                    check(hipSetDevice(physical[dst]));
+                    check(hipEventCreateWithFlags(&ack[dst][src][q], hipEventDisableTiming));
+                }
             }
             if (!peer[dst][src] && !staging)
                 check(hipHostMalloc(&staging, max_prefill_chunk * 3072u * 2u, hipHostMallocPortable));
@@ -255,20 +258,24 @@ void Residency::transfer(void *dst, int destination, const void *src, int source
     if (expert_begin[0])
         begin = std::chrono::steady_clock::now();
     if (peer[destination][source]) {
+        const int p = parity[source][destination];
+        hipEvent_t ready_event = ready[source][destination][p];
+        hipEvent_t ack_event = ack[destination][source][p];
+        parity[source][destination] = p ^ 1;
         if (push) {
             check(hipSetDevice(physical[destination]));
-            check(hipEventRecord(ack[destination][source], nullptr));
+            check(hipEventRecord(ack_event, nullptr));
             check(hipSetDevice(physical[source]));
-            check(hipStreamWaitEvent(nullptr, ack[destination][source], 0));
+            check(hipStreamWaitEvent(nullptr, ack_event, 0));
             peer_copy(dst, src, bytes);
-            check(hipEventRecord(ready[source][destination], nullptr));
+            check(hipEventRecord(ready_event, nullptr));
             check(hipSetDevice(physical[destination]));
-            check(hipStreamWaitEvent(nullptr, ready[source][destination], 0));
+            check(hipStreamWaitEvent(nullptr, ready_event, 0));
         } else {
             check(hipSetDevice(physical[source]));
-            check(hipEventRecord(ready[source][destination], nullptr));
+            check(hipEventRecord(ready_event, nullptr));
             check(hipSetDevice(physical[destination]));
-            check(hipStreamWaitEvent(nullptr, ready[source][destination], 0));
+            check(hipStreamWaitEvent(nullptr, ready_event, 0));
             check(hipMemcpyPeerAsync(dst, physical[destination], src, physical[source], bytes, nullptr));
         }
     } else {
@@ -349,8 +356,10 @@ void *Residency::route_buffer(int rank, size_t bytes) {
         sizeof(int);
     if (bytes > capacity)
         throw std::runtime_error("routing 情報が作業域の上限を超えました");
-    if (!route_host[rank])
+    if (!route_host[rank]) {
         check(hipHostMalloc(&route_host[rank], capacity, hipHostMallocPortable));
+        std::memset(route_host[rank], 0, capacity);
+    }
     return route_host[rank];
 }
 void Residency::shutdown() {
@@ -394,22 +403,24 @@ void Residency::shutdown() {
             collect(hipHostFree(route_host[r]));
             route_host[r] = nullptr;
         }
-        for (auto &event : ready[r])
-            if (event) {
-                auto status = hipSetDevice(physical[r]);
-                collect(status);
-                if (status == hipSuccess)
-                    collect(hipEventDestroy(event));
-                event = nullptr;
-            }
-        for (auto &event : ack[r])
-            if (event) {
-                auto status = hipSetDevice(physical[r]);
-                collect(status);
-                if (status == hipSuccess)
-                    collect(hipEventDestroy(event));
-                event = nullptr;
-            }
+        for (auto &row : ready[r])
+            for (auto &event : row)
+                if (event) {
+                    auto status = hipSetDevice(physical[r]);
+                    collect(status);
+                    if (status == hipSuccess)
+                        collect(hipEventDestroy(event));
+                    event = nullptr;
+                }
+        for (auto &row : ack[r])
+            for (auto &event : row)
+                if (event) {
+                    auto status = hipSetDevice(physical[r]);
+                    collect(status);
+                    if (status == hipSuccess)
+                        collect(hipEventDestroy(event));
+                    event = nullptr;
+                }
     }
     if (staging) {
         collect(hipHostFree(staging));
