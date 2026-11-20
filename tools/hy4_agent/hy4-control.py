@@ -476,6 +476,10 @@ def start():
         logfile = STATE / 'manager.log'
         names = [k for k in os.environ if k in ('PATH', 'LD_LIBRARY_PATH', 'LANG') or k.startswith(('SHELF_', 'HSA_', 'ROCM', 'HIP_', 'ROCR_'))]
         subprocess.run(['systemctl', '--user', 'reset-failed', unit], capture_output=True)
+        for _ in range(60):  # stop 直後は前の unit がまだ残っていることがある
+            if subprocess.run(['systemctl', '--user', 'show', '-p', 'LoadState', '--value', unit], capture_output=True, text=True).stdout.strip() == 'not-found':
+                break
+            time.sleep(0.5)
         launch = subprocess.run(['systemd-run', '--user', '--quiet', '--collect', '--unit', unit,
                                  '-p', f'WorkingDirectory={ROOT}', '-p', 'KillMode=mixed', '-p', 'TimeoutStopSec=600',
                                  '-p', f'StandardOutput=append:{logfile}', '-p', f'StandardError=append:{logfile}',
