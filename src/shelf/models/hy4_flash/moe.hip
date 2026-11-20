@@ -134,7 +134,8 @@ Mat moe(Ops &op, int layer, Mat x) {
             for (int j = 0; j < count; ++j) {
                 sorted[j] = route[order[j]];
                 undo[order[j]] = j;
-                if (!j || sorted[j - 1].expert != sorted[j].expert || groups.back().count == 16)
+                if (!j || sorted[j - 1].expert != sorted[j].expert ||
+                    groups.back().count == (use_wmma ? 16 : 8))
                     groups.push_back({j, 0});
                 ++groups.back().count;
             }
