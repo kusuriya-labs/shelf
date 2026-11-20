@@ -238,21 +238,32 @@ drafter の scratch・session pool・MTP batch の予約、`runtime workspace` �
 capture slot である。checkpoint は host memory に置かれるため arena を消費しない。
 rank 間で private weight が異なるため、`KV budget` も rank ごとに違ってよい。
 
-arena 外の page-locked host memory は、上の表とは別に 1 ブロックで出す。
+arena 外の host memory は、上の表とは別に 1 ブロックで出す。
 
 ```text
 MEMORY_PLAN host memory tp=2
   embedding rank 0    0.52 GiB
   embedding rank 1    0.52 GiB
+  PLE table           1.20 GiB
+  offload experts     9.30 GiB
   prefix checkpoint   1.79 GiB
-  total               2.83 GiB
+  total              13.33 GiB
 ```
 
 `embedding` は rank ごとの語彙 shard を pinned host RAM に置いた量である
 （tied embedding のモデルでは 0。量子化 checkpoint と BF16 checkpoint のどちらも
-pinned host に置く）。`prefix checkpoint` は prefix cache が保持する
-checkpoint の全 rank 分で、`MEMORY_PLAN host memory` の `total` は両者の合計である。
+pinned host に置く）。`PLE table` は `qwen4_exp` の ngram embedding テーブルで、
+プロセス内で 1 つだけ共有するため rank ごとに重複計上しない。`offload experts`
+は `--moe-host-experts` で VRAM から host へ移した冷たい routed expert の plane で、
+rank ごとの合計を出す。`prefix checkpoint` は prefix cache が保持する
+checkpoint の全 rank 分で、`MEMORY_PLAN host memory` の `total` はこれら全項目の合計である。
 pipeline parallel では `MEMORY_PLAN host memory pipeline=N` の見出しで stage ごとに出す。
+
+配置が VRAM 側の項目は `MEMORY_PLAN mode=auto` の表に含まれる。`target weights` は
+weight load 直後の arena 使用量なので、offload と一緒に作られる `expert_slot_map` や
+`expert_route_freq` のような GPU 上のテンソルもここに計上される。host へ移した
+expert plane は arena を消費しないため `target weights` には入らず、上の
+`offload experts` にのみ表示される。
 
 ## Scheduler
 

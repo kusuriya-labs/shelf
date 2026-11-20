@@ -1063,25 +1063,7 @@ std::uint64_t Qwen4ExpRankWeights::resident_bytes() const noexcept {
 }
 
 std::uint64_t Qwen4ExpRankWeights::host_expert_bytes() const noexcept {
-    std::uint64_t total = 0;
-    for (const Qwen4ExpLayerWeights& layer : layers) {
-        const shelf::weights::MatrixWeight* planes[] = {
-            &layer.mlp.gate_experts_host, &layer.mlp.up_experts_host,
-            &layer.mlp.down_experts_host};
-        for (const shelf::weights::MatrixWeight* plane : planes) {
-            if (plane->experts == 0u) continue;
-            total += static_cast<std::uint64_t>(plane->codes_batch_stride_bytes) *
-                     plane->experts;
-            total += static_cast<std::uint64_t>(plane->scales_batch_stride_bytes) *
-                     plane->experts;
-            total += static_cast<std::uint64_t>(plane->rows) * plane->experts;
-        }
-    }
-    if (expert_slot_map.ndim() != 0u) {
-        std::size_t bytes = 0;
-        if (expert_slot_map.required_span_bytes(bytes).ok()) total += bytes;
-    }
-    return total;
+    return expert_host.used();
 }
 
 std::vector<std::string> qwen4exp_rank_logical_names(const Qwen4ExpTextConfig& config,

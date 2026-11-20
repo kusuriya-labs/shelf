@@ -14,10 +14,21 @@
 #include <hip/hip_runtime.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 
+namespace shelf::qwen4exp {
+class PleTable;
+}
+
 namespace shelf::models {
+
+struct HostMemoryBytes {
+    std::uint64_t embedding = 0;
+    std::uint64_t ple_table = 0;
+    std::uint64_t offload_experts = 0;
+};
 
 // A loaded model and the one runtime entry that runs it. The family is decided once, when
 // the directory is read; from there the model is lowered by its own family and handed to the
@@ -102,6 +113,10 @@ public:
     [[nodiscard]]
     std::uint64_t host_pinned_bytes() const noexcept;
 
+    // Host bytes held outside the arena, split by purpose for the memory plan.
+    [[nodiscard]]
+    HostMemoryBytes host_memory_bytes() const noexcept;
+
     // The arena bytes the executor needs: the shared part plus, for grouped experts, the
     // group-row planes and the routing plan.
     [[nodiscard]]
@@ -169,6 +184,7 @@ private:
     const shelf::qwen35moe::Qwen35MoeModel* moe_ = nullptr;
     const shelf::qwen4exp::Qwen4ExpModel* qwen4exp_ = nullptr;
     const shelf::qwen35qsa::Qwen35QsaModel* qsa_ = nullptr;
+    mutable std::shared_ptr<const shelf::qwen4exp::PleTable> ple_table_;
     std::string model_dir_;
 };
 

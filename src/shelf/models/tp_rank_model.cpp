@@ -246,8 +246,14 @@ public:
         return total;
     }
 
-    std::uint64_t host_pinned_bytes() const override {
+    std::uint64_t host_pinned_bytes() const override { return 0u; }
+
+    std::uint64_t host_offload_expert_bytes() const override {
         return model_.weights().host_expert_bytes();
+    }
+
+    std::uint64_t host_ple_table_bytes() const override {
+        return ple_table_ != nullptr ? ple_table_->payload_bytes() : 0u;
     }
 
     std::size_t token_row_ffn_size() const override {

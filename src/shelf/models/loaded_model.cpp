@@ -8,6 +8,7 @@
 #include <shelf/models/qwen35moe/runtime/executor_footprint.h>
 #include <shelf/models/qwen4exp/model/lower_to_primitives.h>
 #include <shelf/models/qwen4exp/runtime/executor_footprint.h>
+#include <shelf/models/qwen4exp/weights/ple_table.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -194,6 +195,16 @@ std::uint64_t LoadedModel::host_pinned_bytes() const noexcept {
     return 0u;
 }
 
+HostMemoryBytes LoadedModel::host_memory_bytes() const noexcept {
+    HostMemoryBytes out;
+    out.embedding = host_pinned_bytes();
+    if (qwen4exp_ != nullptr) {
+        out.offload_experts = qwen4exp_->weights().host_expert_bytes();
+        if (ple_table_ != nullptr) out.ple_table = ple_table_->payload_bytes();
+    }
+    return out;
+}
+
 std::size_t LoadedModel::executor_reserve_bytes(std::size_t max_batch_rows,
                                                 std::size_t max_scheduled_requests,
                                                 std::size_t max_scheduled_output_rows,
@@ -294,6 +305,7 @@ Result<shelf::qwen35::Executor> LoadedModel::create_executor(
     }
     if (qwen4exp_ != nullptr) {
         auto ple_table = shelf::models::get_qwen4exp_ple_table(model_dir_);
+        ple_table_ = ple_table;
         auto created = shelf::models::create_qwen4exp_model_executor(
             *qwen4exp_, ple_table, sequence_pool, gdn_state_pool, kv_pool, arena, config);
         if (created.ok() && moe_cache_ != nullptr) {

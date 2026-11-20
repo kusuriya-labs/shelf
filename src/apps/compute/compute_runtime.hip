@@ -82,9 +82,10 @@ void print_memory_plan(const MemoryPlan& plan, const char* scope = "") {
 }
 
 void print_host_memory(const std::vector<std::size_t>& embeddings,
+                       std::size_t ple_bytes, std::size_t offload_bytes,
                        std::size_t prefix_bytes, const char* scope = "",
                        const char* unit = "rank") {
-    std::size_t total = prefix_bytes;
+    std::size_t total = prefix_bytes + ple_bytes + offload_bytes;
     for (std::size_t bytes : embeddings) total += bytes;
     if (total == 0u) return;
     fprintf(stderr, "MEMORY_PLAN host memory%s\n", scope);
@@ -97,6 +98,13 @@ void print_host_memory(const std::vector<std::size_t>& embeddings,
             fprintf(stderr, "  embedding %s %zu     %s\n", unit, index,
                     gpu::format_gib(embeddings[index]).c_str());
         }
+    }
+    if (ple_bytes != 0u) {
+        fprintf(stderr, "  PLE table            %s\n", gpu::format_gib(ple_bytes).c_str());
+    }
+    if (offload_bytes != 0u) {
+        fprintf(stderr, "  offload experts      %s\n",
+                gpu::format_gib(offload_bytes).c_str());
     }
     if (prefix_bytes != 0u) {
         fprintf(stderr, "  prefix checkpoint    %s\n",
@@ -520,7 +528,10 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         batcher_->set_prefix_cache(&prefix_cache_.value());
     }
 
-    print_host_memory({model_->host_pinned_bytes()},
+    const shelf::models::HostMemoryBytes host_bytes = model_->host_memory_bytes();
+    print_host_memory({static_cast<std::size_t>(host_bytes.embedding)},
+                      static_cast<std::size_t>(host_bytes.ple_table),
+                      static_cast<std::size_t>(host_bytes.offload_experts),
                       prefix_cache_.has_value() ? prefix_cache_->reserved_bytes() : 0u);
 
     if (std::getenv("SHELF_BATCH_TRACE") != nullptr) {
@@ -687,7 +698,7 @@ Status Qwen35ComputeRuntime::initialize_pipeline_parallel() {
     char host_scope[32];
     std::snprintf(host_scope, sizeof(host_scope), " pipeline=%u",
                   static_cast<unsigned>(config_.pipeline_parallel));
-    print_host_memory(host_embeddings, 0u, host_scope, "stage");
+    print_host_memory(host_embeddings, 0u, 0u, 0u, host_scope, "stage");
 
     qwen35::runtime::ContinuousBatcherConfig batcher_config;
     batcher_config.max_num_batched_tokens = exec_max_tokens_;
@@ -898,14 +909,20 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
 
     std::vector<std::size_t> host_embeddings;
     host_embeddings.reserve(static_cast<std::size_t>(tp_coordinator_->tp_size()));
+    std::uint64_t host_ple = 0u;
+    std::uint64_t host_offload = 0u;
     for (int r = 0; r < tp_coordinator_->tp_size(); ++r) {
         const shelf::models::TpRankModel* rank_model =
             tp_coordinator_->rank(static_cast<std::size_t>(r)).rank_model();
         host_embeddings.push_back(rank_model != nullptr ? rank_model->host_pinned_bytes() : 0u);
+        if (rank_model == nullptr) continue;
+        host_offload += rank_model->host_offload_expert_bytes();
+        if (r == 0) host_ple = rank_model->host_ple_table_bytes();
     }
     char host_scope[32];
     std::snprintf(host_scope, sizeof(host_scope), " tp=%d", config_.tp);
-    print_host_memory(host_embeddings,
+    print_host_memory(host_embeddings, static_cast<std::size_t>(host_ple),
+                      static_cast<std::size_t>(host_offload),
                       prefix_cache_.has_value() ? prefix_cache_->reserved_bytes() : 0u,
                       host_scope);
 
