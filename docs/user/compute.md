@@ -60,7 +60,7 @@ TP、pipeline parallel、MTP、DFlash2、2048 token 超の長文は未対応。
 | `--pcie-frac F` | share of PCIe the runtime may use (default 0.25) |
 | `--pcie-gbps F` | assumed PCIe bandwidth in GB/s (default 25) |
 | `--dflash2-model-dir PATH` | DFlash2 draft model directory; enables speculative decoding (greedy / stochastic) |
-| `--dflash2-tree-budget N\|auto` | tree verify rows (default 0; 0 disables) auto: 10 for one decoding request if speculative, else 8 |
+| `--dflash2-tree-budget N\|auto` | tree verify rows (default auto; 0 disables) auto: 10 for one decoding request if speculative, else 8 |
 | `--dflash2-tree-extra B` | enable experimental tree verification (B=0,1,2,4) |
 | `--dflash2-drafts N` | speculative draft tokens per round (default 7) |
 | `--dflash2-adaptive` | control speculation with a batch policy |

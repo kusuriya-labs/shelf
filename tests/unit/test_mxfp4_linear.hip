@@ -569,8 +569,15 @@ int main() {
     run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::SplitK, 8u, 2u}, kTokens, "splitk8-mb2", kRows, false);
     run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::Prefill2D, 0u}, 256u, "prefill2d", kRows, false);
     run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::Prefill2D, 0u}, 256u, "2d-fold", kRows, true);
-    run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::Prefill2D, 0u}, 256u, "2d-guard", 100u, false);
-    run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::Prefill2D, 0u}, 256u, "2d-fold-g", 100u, true);
+    check(opt::launch_gemm_mxfp4_w4a8_auto(
+              opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::Prefill2D, 0u},
+              d.codes, d.scales, d.row_ref,
+              reinterpret_cast<const int8_t*>(d.ws + layout.codes_offset),
+              reinterpret_cast<const float*>(d.ws + layout.scales_offset),
+              d.out_opt, opt::Mxfp4GemmOutputDType::BF16, 256u, 100u, kCols,
+              f.native_scale_stride, layout.code_row_stride_bytes,
+              layout.scale_row_stride_bytes, kRows, stream) == hipErrorNotSupported,
+          "prefill2d refuses an output width that is not a 64-column block");
     run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::RowBlock1, 0u}, kTokens, "1d-fold", kRows, true);
     run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::SplitK, 4u}, kTokens, "sk-fold", kRows, true);
     check(opt::launch_gemm_mxfp4_w4a8_auto(

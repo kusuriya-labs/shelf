@@ -2,6 +2,7 @@
 
 #include <shelf/core/status.h>
 #include <shelf/models/common/qwen_hybrid/lowered_primitives.h>
+#include <shelf/models/common/qwen_hybrid/stage_range.h>
 #include <shelf/models/qwen4exp/model/qwen4exp_config.h>
 #include <shelf/models/qwen4exp/weights/qwen4exp_weights.h>
 
@@ -24,6 +25,7 @@ struct Qwen4ExpLowerOptions {
     // Expose the pre-mixer wide residual (hc * hidden) after the hidden taps. The MTP
     // drafter consumes it; the Qwen4Exp trunk has no separate post-norm hidden.
     bool expose_wide_hidden = false;
+    shelf::qwen_hybrid::PipelineStage stage;
 };
 
 // Lowers one loaded rank: embedding repeated into the hc stream stack, every decoder layer

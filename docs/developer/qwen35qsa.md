@@ -126,7 +126,8 @@ prefill は `max_visible_tokens < 12288` の間 masked tiled kernel を使い、
 
 ## 制約
 
-- pipeline stage は未実装（明示的に `Status::unsupported`）。
+- pipeline stage に対応する。stage ごとに担当層の indexer と QSA state pool を
+  保持し、stage 間の hidden は `hidden_size` 幅で受け渡す。
 - tensor parallel は **TP=2** まで。1 rank あたりの attention は local head
   （Qwen3.8-27B では q 12 / kv 2）で、QSA の block-sparse kernel 条件
   `q_heads == 6 * kv_heads` を満たす。`tp_size > 2` は `TpCoordinator` が拒否する。

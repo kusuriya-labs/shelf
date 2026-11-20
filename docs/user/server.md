@@ -80,10 +80,10 @@ Ready.
 | `--large-context-tokens LARGE_CONTEXT_TOKENS` | prompt tokens above which the larger inference budget applies (default 262144) |
 | `--large-context-inference-budget-tokens LARGE_CONTEXT_INFERENCE_BUDGET_TOKENS` | max generated tokens for a request whose prompt is longer than --large-context-tokens (default 65536) |
 | `--arena-gib N\|auto\|-N` | GPU arena capacity in GiB; auto = free VRAM minus 0.5 GiB, -N = total VRAM minus N GiB (default auto) |
-| `--device DEVICE` | comma separated GPU devices, one per rank; count must match pipeline_parallel * expert_parallel * tensor_parallel (default 0) |
+| `--device DEVICE` | comma separated GPU devices, one per rank; count must match --tensor-parallel (default 0) |
 | `--tensor-parallel {1,2}` | tensor parallel size forwarded to compute (default 1) |
 | `--expert-parallel {1,2,4}` | expert parallel size forwarded to compute (default 1) |
-| `--pipeline-parallel {1,2,4}` | pipeline parallel size forwarded to compute; requires --prefix-cache 0 (default 1) |
+| `--pipeline-parallel {1,2,4}` | pipeline parallel size forwarded to compute (mutually exclusive with --tensor-parallel; default 1) |
 | `--kv-cache-dtype KV_CACHE_DTYPE` | KV cache dtype (default bf16) |
 | `--page-tokens PAGE_TOKENS` | paged KV page size in tokens (default 16) |
 | `--working-set-reserve-gib WORKING_SET_RESERVE_GIB` | arena headroom kept free for the working set (0 = size it from the row bucket, default 0) |
@@ -106,6 +106,7 @@ Ready.
 | `--pcie-frac PCIE_FRAC` | runtime が使ってよい PCIe の割合（default 0.25） |
 | `--pcie-gbps PCIE_GBPS` | 想定する PCIe 帯域 GB/s（default 25） |
 | `--ple-prefetch {0,1}` | prefill 中に次の PLE 行を先読みする（default 1） |
+| `--ple-hot-cache-gib PLE_HOT_CACHE_GIB` | PLE の pinned host ブロックキャッシュ容量 GiB（default 0 = 全量常駐） |
 | `--tp-transport TP_TRANSPORT` | tensor parallel transport の選択 |
 | `--verify-weights` | verify quantized payload CRC32 on load |
 <!-- /cli:server -->

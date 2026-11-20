@@ -20,7 +20,9 @@ Result<Qwen4ExpModel> Qwen4ExpModel::load_from_safetensors(
     auto weights = load_qwen4exp_rank(model_dir, arena, stream, options);
     if (!weights.ok()) return weights.status();
 
-    Status valid = validate_qwen4exp_rank(weights.value(), config.value(), tp_size, tp_rank);
+    Status valid = options.stage.enabled
+        ? validate_qwen4exp_stage(weights.value(), config.value(), options.stage)
+        : validate_qwen4exp_rank(weights.value(), config.value(), tp_size, tp_rank);
     if (!valid.ok()) return valid;
     return Qwen4ExpModel(weights.release(), config.release());
 }

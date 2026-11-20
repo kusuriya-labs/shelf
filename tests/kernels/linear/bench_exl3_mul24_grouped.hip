@@ -167,7 +167,10 @@ double time_launch(const Plane& pl, const Plan& plan, const void* input, uint32_
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string model_dir = "/home/homelab1/datapool/rocm-exl3-rdna2/models/qwen38-flash-next-exl3-3.05bpw-mul24";
+    std::string model_dir;
+    if (const char* env = std::getenv("SHELF_QWEN4EXP_MODEL_DIR")) {
+        model_dir = env;
+    }
     uint32_t bits = 3;
     bool skew = false;
     int iters = 20;
@@ -176,6 +179,10 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--bits") && i + 1 < argc) bits = static_cast<uint32_t>(std::atoi(argv[++i]));
         else if (!std::strcmp(argv[i], "--iters") && i + 1 < argc) iters = std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--skew")) skew = true;
+    }
+    if (model_dir.empty()) {
+        std::fprintf(stderr, "set SHELF_QWEN4EXP_MODEL_DIR to the EXL3 model directory\n");
+        return 1;
     }
     nlohmann::json cfg;
     {

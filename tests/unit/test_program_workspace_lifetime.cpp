@@ -197,6 +197,93 @@ int main() {
         }
     }
 
+    {
+        rt::PrimitiveGraph swiglu_graph;
+        const auto input = swiglu_graph.alloc_value(
+            64, rt::ValueDType::BF16, rt::ValueRowDomain::TOKEN_ROWS);
+        const auto gate = swiglu_graph.alloc_value(
+            64, rt::ValueDType::BF16, rt::ValueRowDomain::TOKEN_ROWS);
+        const auto up = swiglu_graph.alloc_value(
+            64, rt::ValueDType::BF16, rt::ValueRowDomain::TOKEN_ROWS);
+        const auto swiglu_out = swiglu_graph.alloc_value(
+            64, rt::ValueDType::BF16, rt::ValueRowDomain::TOKEN_ROWS);
+        const auto out = swiglu_graph.alloc_value(
+            64, rt::ValueDType::BF16, rt::ValueRowDomain::TOKEN_ROWS);
+        swiglu_graph.external_inputs.push_back(input);
+        swiglu_graph.external_outputs.push_back(out);
+
+        const rt::MatrixwiseShapeKey shape{64, 64};
+        const uint32_t gate_weight = swiglu_graph.register_weight(shape);
+        const uint32_t up_weight = swiglu_graph.register_weight(shape);
+        const uint32_t ffn_weight = swiglu_graph.register_weight(shape);
+        for (uint32_t weight : {gate_weight, up_weight}) {
+            rt::LinearNode node{};
+            node.shape = shape;
+            node.weight_index = weight;
+            node.out_dtype = rt::ValueDType::BF16;
+            auto& graph_node = swiglu_graph.add_node(node);
+            graph_node.inputs = {input};
+            graph_node.outputs = {weight == gate_weight ? gate : up};
+        }
+        {
+            rt::SwiGluNode node{};
+            node.shape = rt::RowwiseShapeKey{64};
+            auto& graph_node = swiglu_graph.add_node(node);
+            graph_node.inputs = {gate, up};
+            graph_node.outputs = {swiglu_out};
+        }
+        {
+            rt::LinearNode node{};
+            node.shape = shape;
+            node.weight_index = ffn_weight;
+            node.out_dtype = rt::ValueDType::BF16;
+            auto& graph_node = swiglu_graph.add_node(node);
+            graph_node.inputs = {swiglu_out};
+            graph_node.outputs = {out};
+        }
+
+        auto graph_status = rt::validate_primitive_graph(swiglu_graph);
+        check(graph_status.ok(), "swiglu graph validation");
+        if (!graph_status.ok()) {
+            std::printf("FAIL: swiglu graph validation: %s\n",
+                        graph_status.message().c_str());
+        } else {
+            std::array<rt::WeightSlot, 3> weights{};
+            weights[gate_weight].rows = 64;
+            weights[gate_weight].cols = 64;
+            weights[gate_weight].k_padded = 64;
+            weights[up_weight] = weights[gate_weight];
+            weights[ffn_weight] = weights[gate_weight];
+            weights[ffn_weight].encoding = static_cast<uint8_t>(
+                shelf::weights::MatrixEncoding::Fp8Finegrained);
+            weights[ffn_weight].compute_spec = static_cast<uint8_t>(
+                shelf::quantization::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16);
+
+            const rt::WeightTableView view{weights.data(), weights.size()};
+            auto result = rt::build_program(swiglu_graph, view, rt::RowBucket::R16,
+                                            rt::ExecutionClass::DECODE, options);
+            check(result.ok(), "swiglu program builds");
+            if (result.ok()) {
+                auto program = result.release();
+                check(program.dispatches.size() == 5,
+                      "swiglu emits five physical dispatches");
+                if (program.dispatches.size() == 5) {
+                    check(program.dispatches[2].kernel_id == rt::KernelId::SWIGLU,
+                          "swiglu is dispatch 2");
+                    const uint32_t slot = program.dispatches[3].workspace_slot;
+                    check(slot != rt::kNoWorkspace, "swiglu activation has workspace slot");
+                    if (slot != rt::kNoWorkspace && slot < program.workspace.ranges.size()) {
+                        const auto& range = program.workspace.ranges[slot];
+                        check(range.first_command <= 2u,
+                              "activation workspace starts no later than swiglu");
+                        check(range.last_command >= 4u,
+                              "activation workspace lives through fp8 linear");
+                    }
+                }
+            }
+        }
+    }
+
     std::printf("test_program_workspace_lifetime: passed=%d failed=%d\n",
                 passed, failed);
     return failed == 0 ? 0 : 1;

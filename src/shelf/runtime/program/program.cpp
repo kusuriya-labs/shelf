@@ -391,6 +391,10 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
                                     prev2.output_slots[0] == prev.input_slots[0])
                                     first_command = cmd_idx - 2u;
                             }
+                        } else if (prev.kernel_id == KernelId::SWIGLU &&
+                                   prev.output_count == 1u &&
+                                   prev.output_slots[0] == node.inputs[0].id) {
+                            first_command = cmd_idx - 1u;
                         }
                     }
                     aw.first_command = first_command;

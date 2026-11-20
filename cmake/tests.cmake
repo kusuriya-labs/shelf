@@ -119,10 +119,14 @@ shelf_add_test(NAME test_exl3_mul24_linear SOURCE kernels/linear/test_exl3_mul24
 shelf_add_test(NAME test_exl3_mul24_grouped SOURCE kernels/linear/test_exl3_mul24_grouped.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_optimized shelf_quant_reference shelf_gpu)
 shelf_add_test(NAME bench_exl3_mul24_grouped SOURCE kernels/linear/bench_exl3_mul24_grouped.hip LABELS "gpu1;optional;external_files;benchmark" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES shelf_kernels_optimized shelf_gpu)
 target_include_directories(bench_exl3_mul24_grouped SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
+set_tests_properties(bench_exl3_mul24_grouped PROPERTIES
+    ENVIRONMENT "SHELF_QWEN4EXP_MODEL_DIR=${CMAKE_SOURCE_DIR}/models/kusuriya-labs/Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw")
 shelf_add_test(NAME bench_exl3_mul24_prefill_wmma SOURCE kernels/linear/bench_exl3_mul24_prefill_wmma.hip LABELS "gpu1;optional;benchmark" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES shelf_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_exl3_mul24_tp SOURCE kernels/linear/test_exl3_mul24_tp.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_inference_execution shelf_kernels_optimized shelf_quant_reference shelf_weights shelf_gpu)
 shelf_add_test(NAME test_exl3_mul1_grouped SOURCE unit/test_exl3_mul1_grouped.cpp LABELS "gpu1;optional;external_files" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_optimized shelf_quant_reference shelf_io)
 target_include_directories(test_exl3_mul1_grouped SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
+set_tests_properties(test_exl3_mul1_grouped PROPERTIES
+    ENVIRONMENT "SHELF_QWEN4EXP_MODEL_DIR=${CMAKE_SOURCE_DIR}/models/kusuriya-labs/Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw")
 find_library(SHELF_TEST_HIPBLASLT_LIBRARY NAMES hipblaslt PATHS "${SHELF_ROCM_ROOT}/lib" NO_DEFAULT_PATH)
 if(SHELF_TEST_HIPBLASLT_LIBRARY)
     target_link_libraries(test_exl3_mul1_dense PRIVATE "${SHELF_TEST_HIPBLASLT_LIBRARY}")
@@ -154,9 +158,9 @@ target_include_directories(test_qwen35moe_tp_execution PRIVATE "${CMAKE_SOURCE_D
 shelf_add_test(NAME test_qwen35_tp_e2e SOURCE unit/test_qwen35_tp_e2e.cpp LABELS "gpu2;optional;external_files" TIMEOUT 2400 GPU_COUNT 2 GPU_COST_GB 20 LIBRARIES shelf_qwen35_runtime)
 
 # Qwen3.8-Flash-Next (qwen4_exp) EXL3 load: TP=2 expert-axis split, body + PLE table.
-shelf_add_test(NAME test_qwen4exp_load SOURCE unit/test_qwen4exp_load.cpp LABELS "gpu2;optional;external_files" TIMEOUT 3600 GPU_COUNT 2 GPU_COST_GB 30 LIBRARIES shelf_qwen4exp shelf_qwen_hybrid shelf_inference_execution shelf_gpu shelf_io shelf_quant_bundle)
+shelf_add_test(NAME test_qwen4exp_load SOURCE unit/test_qwen4exp_load.cpp LABELS "gpu2;optional;external_files" TIMEOUT 3600 GPU_COUNT 2 GPU_COST_GB 30 DEFS SHELF_REPO_DIR="${CMAKE_SOURCE_DIR}" LIBRARIES shelf_qwen4exp shelf_qwen_hybrid shelf_inference_execution shelf_gpu shelf_io shelf_quant_bundle)
 target_include_directories(test_qwen4exp_load SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
-shelf_add_test(NAME test_qwen4exp_load_tiered SOURCE unit/test_qwen4exp_load.cpp LABELS "cpu;optional;external_files" TIMEOUT 900 DEFS SHELF_PLE_TIERED_TEST LIBRARIES shelf_qwen4exp shelf_qwen_hybrid shelf_inference_execution shelf_gpu shelf_io shelf_quant_bundle)
+shelf_add_test(NAME test_qwen4exp_load_tiered SOURCE unit/test_qwen4exp_load.cpp LABELS "cpu;optional;external_files" TIMEOUT 900 DEFS SHELF_PLE_TIERED_TEST SHELF_REPO_DIR="${CMAKE_SOURCE_DIR}" LIBRARIES shelf_qwen4exp shelf_qwen_hybrid shelf_inference_execution shelf_gpu shelf_io shelf_quant_bundle)
 target_include_directories(test_qwen4exp_load_tiered SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
 shelf_add_test(NAME test_qwen35_tp_weight_load SOURCE unit/test_qwen35_tp_weight_load.cpp LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_qwen35)
 target_include_directories(test_qwen35_tp_e2e PRIVATE "${CMAKE_SOURCE_DIR}/src")

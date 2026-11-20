@@ -17,6 +17,12 @@ PLE conv state を shadow slot に保持し（[prefix_cache.md](prefix_cache.md)
 PLE の n-gram history を復元 prefix で再 seed する。MTP は無効である。DFlash2 は
 `--dflash2-model-dir` で有効になる。
 
+`--pipeline-parallel` にも対応する。各 stage は担当地の層だけをロードし、
+embedding は先頭、final mixer と lm_head は末尾の stage が持つ。stage 間では
+HyperConnection の stream 全体（`hc_count * hidden_size`）を bf16 で受け渡す。
+`--tensor-parallel` と `--pipeline-parallel` は同時に指定できるが、
+MoE の expert 軸分割は現状 TP が担うため、PP stage 内での EP / TP 展開は未配線である。
+
 ## 2. 重みの形式とロード
 
 | 領域 | checkpoint の形式 | rank の持ち方 |

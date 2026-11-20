@@ -158,10 +158,6 @@ Result<shelf::qwen35::Qwen35LoweredPrimitives> lower_qwen35qsa_to_primitives(
     const auto& backbone_options = options.backbone;
     const bool tp_active =
         backbone_options.tp != nullptr && backbone_options.tp->tp_size > 1u;
-    if (backbone_options.stage.enabled) {
-        return Status::unsupported(
-            "qwen35qsa: pipeline stage lowering is not implemented", __FILE__, __LINE__);
-    }
     if (config.indexer.declared == false) {
         return Status::invalid_argument(
             "qwen35qsa: the config does not declare an indexer", __FILE__, __LINE__);
@@ -189,10 +185,23 @@ Result<shelf::qwen35::Qwen35LoweredPrimitives> lower_qwen35qsa_to_primitives(
             "qwen35qsa: sparse selection requires the default rope profile", __FILE__,
             __LINE__);
     }
-    Status model_st = shelf::qwen35::validate_qwen35_weights(weights.backbone, config);
+    Status model_st =
+        shelf::qwen35::validate_qwen35_weights(
+            weights.backbone, config,
+            backbone_options.stage.enabled ? backbone_options.stage
+                                           : shelf::qwen_hybrid::PipelineStage{});
     if (!model_st.ok()) return model_st;
 
     const std::uint32_t num_layers = static_cast<std::uint32_t>(config.num_hidden_layers);
+    const bool stage_load = backbone_options.stage.enabled;
+    const std::uint32_t layer_lo = stage_load ? backbone_options.stage.layer_lo() : 0u;
+    const std::uint32_t layer_hi = stage_load ? backbone_options.stage.layer_hi() : num_layers;
+    const bool first_stage = !stage_load || backbone_options.stage.first();
+    const bool last_stage = !stage_load || backbone_options.stage.last(num_layers);
+    if (stage_load && (layer_lo >= layer_hi || layer_hi > num_layers)) {
+        return Status::invalid_argument(
+            "qwen35qsa: pipeline stage layer range mismatch", __FILE__, __LINE__);
+    }
     const std::uint32_t hidden_size = static_cast<std::uint32_t>(config.hidden_size);
     const std::uint32_t q_heads = static_cast<std::uint32_t>(config.num_attention_heads);
     const std::uint32_t kv_heads = static_cast<std::uint32_t>(config.num_key_value_heads);
@@ -258,7 +267,7 @@ Result<shelf::qwen35::Qwen35LoweredPrimitives> lower_qwen35qsa_to_primitives(
             "qwen35qsa: indexer count does not match the layer count", __FILE__,
             __LINE__);
     }
-    for (std::uint32_t li = 0; li < num_layers; ++li) {
+    for (std::uint32_t li = layer_lo; li < layer_hi; ++li) {
         const auto& lw = weights.backbone.layers[li];
         Status st = validate_dense_ffn(lw.ffn, hidden_size, intermediate);
         if (!st.ok()) return st;
@@ -308,13 +317,14 @@ Result<shelf::qwen35::Qwen35LoweredPrimitives> lower_qwen35qsa_to_primitives(
         return static_cast<std::uint32_t>(lowered.parameters.size() - 1);
     };
 
-    const std::uint32_t embed_index = add_weight(weights.backbone.embed_tokens);
+    const std::uint32_t embed_index =
+        first_stage ? add_weight(weights.backbone.embed_tokens) : UINT32_MAX;
     const bool lm_tied = weights.backbone.lm_head_tied;
     const std::uint32_t lm_index =
-        lm_tied ? embed_index : add_weight(weights.backbone.lm_head);
-
+        !last_stage ? UINT32_MAX
+                    : (lm_tied ? embed_index : add_weight(weights.backbone.lm_head));
     std::vector<LayerWeightIndices> layer_weights(weights.backbone.layers.size());
-    for (std::uint32_t li = 0; li < num_layers; ++li) {
+    for (std::uint32_t li = layer_lo; li < layer_hi; ++li) {
         const auto& lw = weights.backbone.layers[li];
         auto& idx = layer_weights[li];
         if (lw.is_gdn) {
@@ -339,7 +349,7 @@ Result<shelf::qwen35::Qwen35LoweredPrimitives> lower_qwen35qsa_to_primitives(
     }
 
     std::vector<LayerParamIndices> layer_params(weights.backbone.layers.size());
-    for (std::uint32_t li = 0; li < num_layers; ++li) {
+    for (std::uint32_t li = layer_lo; li < layer_hi; ++li) {
         const auto& lw = weights.backbone.layers[li];
         auto& lp = layer_params[li];
         if (lw.input_layernorm_weight.ndim() > 0)
@@ -372,9 +382,9 @@ Result<shelf::qwen35::Qwen35LoweredPrimitives> lower_qwen35qsa_to_primitives(
     Emitter em{pg};
     const RT::RowwiseShapeKey hidden_key{hidden_size};
 
-    RT::ValueId tokens = em.value(0, RT::ValueDType::I32);
     RT::ValueId layer_input = em.value(hidden_size);
-    {
+    if (first_stage) {
+        RT::ValueId tokens = em.value(0, RT::ValueDType::I32);
         RT::EmbeddingLookupNode n;
         n.vocab_size = static_cast<std::uint32_t>(config.vocab_size);
         n.hidden_size = hidden_size;
@@ -386,12 +396,14 @@ Result<shelf::qwen35::Qwen35LoweredPrimitives> lower_qwen35qsa_to_primitives(
         if (weights.backbone.embed_tokens.partition.has_value())
             pg.nodes.back().tp_combine = 1;
         pg.external_inputs.push_back(tokens);
+    } else {
+        pg.external_inputs.push_back(layer_input);
     }
 
     std::vector<RT::ValueId> hidden_tap_values(backbone_options.hidden_taps.size());
     std::vector<std::uint8_t> hidden_tap_found(backbone_options.hidden_taps.size(), 0);
 
-    for (std::uint32_t li = 0; li < num_layers; ++li) {
+    for (std::uint32_t li = layer_lo; li < layer_hi; ++li) {
         const auto& lw = weights.backbone.layers[li];
         const auto& lw_idx = layer_weights[li];
         const auto& lp = layer_params[li];
@@ -520,48 +532,52 @@ Result<shelf::qwen35::Qwen35LoweredPrimitives> lower_qwen35qsa_to_primitives(
         }
     }
 
-    const MW* lmw = lm_tied ? &weights.backbone.embed_tokens : &weights.backbone.lm_head;
-    const std::uint64_t global_vocab = config.vocab_size;
-    bool vocab_parallel = false;
-    std::uint32_t lm_head_col_offset = 0;
-    const bool shardable_encoding =
-        lmw->encoding == shelf::weights::MatrixEncoding::Bf16 ||
-        lmw->encoding == shelf::weights::MatrixEncoding::Int8W32 ||
-        lmw->encoding == shelf::weights::MatrixEncoding::Exl3;
-    if (!lm_tied && backbone_options.tp != nullptr &&
-        backbone_options.tp->vocab_parallel_lm_head && shardable_encoding &&
-        lmw->partition.has_value()) {
-        const auto& part = lmw->partition.value();
-        vocab_parallel = part.axis == 0 && part.count == backbone_options.tp->tp_size &&
-            part.index == backbone_options.tp->tp_rank &&
-            lmw->rows == backbone_options.tp->local_vocab_size &&
-            static_cast<std::uint64_t>(lmw->rows) * part.count == global_vocab;
-        if (vocab_parallel) {
-            lm_head_col_offset = static_cast<std::uint32_t>(part.index) * lmw->rows;
+    if (last_stage) {
+        const MW* lmw = lm_tied ? &weights.backbone.embed_tokens : &weights.backbone.lm_head;
+        const std::uint64_t global_vocab = config.vocab_size;
+        bool vocab_parallel = false;
+        std::uint32_t lm_head_col_offset = 0;
+        const bool shardable_encoding =
+            lmw->encoding == shelf::weights::MatrixEncoding::Bf16 ||
+            lmw->encoding == shelf::weights::MatrixEncoding::Int8W32 ||
+            lmw->encoding == shelf::weights::MatrixEncoding::Exl3;
+        if (!lm_tied && backbone_options.tp != nullptr &&
+            backbone_options.tp->vocab_parallel_lm_head && shardable_encoding &&
+            lmw->partition.has_value()) {
+            const auto& part = lmw->partition.value();
+            vocab_parallel = part.axis == 0 && part.count == backbone_options.tp->tp_size &&
+                part.index == backbone_options.tp->tp_rank &&
+                lmw->rows == backbone_options.tp->local_vocab_size &&
+                static_cast<std::uint64_t>(lmw->rows) * part.count == global_vocab;
+            if (vocab_parallel) {
+                lm_head_col_offset = static_cast<std::uint32_t>(part.index) * lmw->rows;
+            }
         }
-    }
-    if (!vocab_parallel && lmw->rows != global_vocab) {
-        return Status::unsupported(
-            "qwen35qsa: vocab sharded lm_head requires vocab parallel lowering",
-            __FILE__, __LINE__);
-    }
-    const std::uint32_t out_vocab =
-        vocab_parallel ? static_cast<std::uint32_t>(global_vocab)
-                       : static_cast<std::uint32_t>(lmw->rows);
-    QH::HybridHeadLowering head;
-    head.hidden_features = hidden_size;
-    head.eps = eps;
-    head.final_norm_param = final_norm_param;
-    head.lm_shape = RT::MatrixwiseShapeKey{lmw->rows, lmw->cols};
-    head.lm_weight_index = lm_index;
-    head.out_vocab = out_vocab;
-    const QH::HybridHeadOutput head_out =
-        QH::emit_hybrid_head(em, head, layer_input);
-    if (vocab_parallel) {
-        pg.nodes[head_out.logits_node_index].tp_combine = 1;
-        pg.nodes[head_out.logits_node_index].tp_combine_local_cols = lmw->rows;
-        lowered.weights[lm_index].output_col_offset = lm_head_col_offset;
-        lowered.weights[lm_index].output_col_total = out_vocab;
+        if (!vocab_parallel && lmw->rows != global_vocab) {
+            return Status::unsupported(
+                "qwen35qsa: vocab sharded lm_head requires vocab parallel lowering",
+                __FILE__, __LINE__);
+        }
+        const std::uint32_t out_vocab =
+            vocab_parallel ? static_cast<std::uint32_t>(global_vocab)
+                           : static_cast<std::uint32_t>(lmw->rows);
+        QH::HybridHeadLowering head;
+        head.hidden_features = hidden_size;
+        head.eps = eps;
+        head.final_norm_param = final_norm_param;
+        head.lm_shape = RT::MatrixwiseShapeKey{lmw->rows, lmw->cols};
+        head.lm_weight_index = lm_index;
+        head.out_vocab = out_vocab;
+        const QH::HybridHeadOutput head_out =
+            QH::emit_hybrid_head(em, head, layer_input);
+        if (vocab_parallel) {
+            pg.nodes[head_out.logits_node_index].tp_combine = 1;
+            pg.nodes[head_out.logits_node_index].tp_combine_local_cols = lmw->rows;
+            lowered.weights[lm_index].output_col_offset = lm_head_col_offset;
+            lowered.weights[lm_index].output_col_total = out_vocab;
+        }
+    } else {
+        pg.external_outputs.push_back(layer_input);
     }
 
     for (std::size_t t = 0; t < hidden_tap_values.size(); ++t) {

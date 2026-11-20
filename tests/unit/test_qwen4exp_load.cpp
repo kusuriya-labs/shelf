@@ -297,7 +297,12 @@ int main(int argc, char** argv) {
 #ifdef SHELF_PLE_TIERED_TEST
     ::setenv("SHELF_PLE_HOT_CACHE_GIB", "1", 1);
 #endif
-    std::string model_dir = "/mnt/Qwen3.8-Flash-Next-exl3";
+#ifdef SHELF_REPO_DIR
+    std::string model_dir = std::string(SHELF_REPO_DIR) +
+        "/models/kusuriya-labs/Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw";
+#else
+    std::string model_dir = "models/kusuriya-labs/Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw";
+#endif
     if (const char* env = std::getenv("SHELF_QWEN4EXP_MODEL_DIR")) {
         model_dir = env;
     } else if (const char* home = std::getenv("HOME")) {

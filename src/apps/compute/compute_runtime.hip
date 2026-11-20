@@ -8,6 +8,7 @@
 #include <shelf/models/common/qwen_hybrid/stage_range.h>
 #include <shelf/models/pipeline_stage_model.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
+#include <shelf/models/qwen4exp/model/qwen4exp_config.h>
 #include <shelf/models/qwen35/runtime/dflash2_footprint.h>
 #include <shelf/models/qwen35/runtime/executor_footprint.h>
 #include <shelf/models/qwen35/runtime/mtp_drafter.h>
@@ -644,17 +645,6 @@ void Qwen35ComputeRuntime::apply_auto_working_set_reserve() {
 Status Qwen35ComputeRuntime::initialize_pipeline_parallel() {
     const auto family = shelf::models::probe_model_dir(config_.model_dir);
     if (!family.ok()) return family.status();
-    if (family.value() == shelf::models::ModelFamily::Qwen4Exp) {
-        return Status::unsupported(
-            "Qwen4Exp is loaded by the qwen4exp load path; pipeline execution is not "
-            "wired yet",
-            __FILE__, __LINE__);
-    }
-    if (family.value() == shelf::models::ModelFamily::Qsa) {
-        return Status::unsupported(
-            "Qwen35Qsa runs single-stage; pipeline execution is not implemented",
-            __FILE__, __LINE__);
-    }
     auto config_result = qwen_hybrid::read_qwen_hybrid_config(config_.model_dir);
     if (!config_result.ok()) return config_result.status();
     const qwen_hybrid::QwenHybridConfig& text_config = config_result.value();
@@ -688,6 +678,12 @@ Status Qwen35ComputeRuntime::initialize_pipeline_parallel() {
     pp_config.max_scheduled_output_rows = config_.max_scheduled_output_rows;
     pp_config.max_seq_len = config_.max_seq_len;
     pp_config.page_tokens = config_.page_tokens;
+    if (family.value() == shelf::models::ModelFamily::Qwen4Exp) {
+        auto q4_config = shelf::qwen4exp::read_qwen4exp_text_config(config_.model_dir);
+        if (!q4_config.ok()) return q4_config.status();
+        pp_config.pipeline_hidden_width = static_cast<uint32_t>(
+            q4_config.value().hc_count * q4_config.value().hidden_size);
+    }
     pp_config.kv_cache_dtype = config_.kv_cache_dtype;
     pp_config.octave_kv_format = config_.octave_kv_format;
     pp_config.arena_bytes = config_.arena_bytes;
@@ -708,10 +704,18 @@ Status Qwen35ComputeRuntime::initialize_pipeline_parallel() {
         std::chrono::duration<double, std::milli>(t_load_end - t_load_start).count();
 
     qwen35::runtime::PipelineStageRuntime& stage0 = pp_coordinator_->stage(0);
-    pp_model_ = std::make_unique<shelf::models::LoadedModel>(
-        stage0.model().dense_model() != nullptr
-            ? shelf::models::LoadedModel::borrow(*stage0.model().dense_model())
-            : shelf::models::LoadedModel::borrow(*stage0.model().grouped_model()));
+    if (stage0.model().qwen4exp_model() != nullptr) {
+        pp_model_ = std::make_unique<shelf::models::LoadedModel>(
+            shelf::models::LoadedModel::borrow(*stage0.model().qwen4exp_model()));
+    } else if (stage0.model().qsa_model() != nullptr) {
+        pp_model_ = std::make_unique<shelf::models::LoadedModel>(
+            shelf::models::LoadedModel::borrow(*stage0.model().qsa_model()));
+    } else {
+        pp_model_ = std::make_unique<shelf::models::LoadedModel>(
+            stage0.model().dense_model() != nullptr
+                ? shelf::models::LoadedModel::borrow(*stage0.model().dense_model())
+                : shelf::models::LoadedModel::borrow(*stage0.model().grouped_model()));
+    }
     fprintf(stderr,
             "MEMORY_PLAN mode=%s pipeline=%u arena=%s used=%s available=%s\n",
             auto_arena_ ? "auto" : "fixed",

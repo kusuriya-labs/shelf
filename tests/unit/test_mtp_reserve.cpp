@@ -1,3 +1,4 @@
+#include <shelf/inference/state/gdn_state.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <shelf/models/qwen35/runtime/mtp_drafter.h>
 
@@ -55,7 +56,7 @@ int main() {
         (static_cast<std::size_t>(gdn_full.conv_history_stride) * gdn_full.conv_history *
              sizeof(shelf::bf16_t) +
          static_cast<std::size_t>(gdn_full.num_v_heads) * gdn_full.head_k *
-             gdn_full.head_v * sizeof(shelf::fp16_t));
+             gdn_full.head_v * sizeof(shelf::state::GdnStateScalar));
     check(mtp_batch_rank_state_reserve_bytes(gdn_full, static_cast<std::uint32_t>(rows),
                                              1u) ==
               history + compact + snapshot,

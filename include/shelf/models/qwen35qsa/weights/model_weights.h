@@ -49,7 +49,8 @@ Result<Qwen35QsaModelWeights> load_qwen35qsa_weights_tensor_parallel_rank(
 
 Status validate_qwen35qsa_weights(
     const Qwen35QsaModelWeights& weights,
-    const Qwen35QsaTextConfig& config);
+    const Qwen35QsaTextConfig& config,
+    const shelf::qwen_hybrid::PipelineStage& stage = {});
 
 }
 }

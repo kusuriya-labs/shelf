@@ -21,6 +21,12 @@ class Qwen35Model;
 namespace qwen35moe {
 class Qwen35MoeModel;
 }
+namespace qwen4exp {
+class Qwen4ExpModel;
+}
+namespace qwen35qsa {
+class Qwen35QsaModel;
+}
 }  // namespace shelf
 
 namespace shelf::models {
@@ -64,6 +70,9 @@ public:
     // Exactly one of the two is non-null.
     virtual const shelf::qwen35::Qwen35Model* dense_model() const { return nullptr; }
     virtual const shelf::qwen35moe::Qwen35MoeModel* grouped_model() const { return nullptr; }
+    virtual const shelf::qwen4exp::Qwen4ExpModel* qwen4exp_model() const { return nullptr; }
+    virtual std::uint32_t pipeline_hidden_width() const { return 0u; }
+    virtual const shelf::qwen35qsa::Qwen35QsaModel* qsa_model() const { return nullptr; }
 
 protected:
     PipelineStageModel() = default;

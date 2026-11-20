@@ -567,7 +567,8 @@ static void test_bf16_model_load_bare_lm_head(gpu::GpuArena& arena, hipStream_t 
     check_eq_u64(w.lm_head.rows, 40, "bare lm_head rows");
     check_eq_u64(w.lm_head.cols, 32, "bare lm_head cols");
     check(!w.lm_head_tied, "bare lm_head is untied");
-    check(w.lm_head.bf16.data() != w.embed_tokens.bf16.data(),
+    check(shelf::weights::matrix_payload(w.lm_head) !=
+              shelf::weights::matrix_payload(w.embed_tokens),
           "bare lm_head is its own storage");
 
     auto config_res = qwen35::read_qwen35_text_config(dir.string());

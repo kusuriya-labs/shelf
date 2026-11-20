@@ -37,15 +37,18 @@ K128 一括セットを要求する量子化方式（例: EXL3 INT8 3.05bpw）�
 | --- | --- | --- | --- | --- | --- | --- |
 | `Qwen3.8-27B-Quark-AWQ-MXFP4` | `qwen3_5` | dense / 64 層 | MXFP4 | 対応 | — | 2 |
 | `Qwen3.8-27B-EXL3-INT8-4bpw` | `qwen3_5` | dense / 64 層 | EXL3 INT8 4bpw | 対応 | — | 2 |
-| `Qwen3.8-Flash-Next-Quark-MXFP4` | `qwen4_exp` | MoE / 48 層 / 512 expert | MXFP4 | 未対応 | CLI 可 | 2 |
-| `Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw` | `qwen4_exp` | MoE / 48 層 / 512 expert | EXL3 INT8 3.05bpw | 未対応 | CLI 可 | 2 |
+| `Qwen3.8-Flash-Next-Quark-MXFP4` | `qwen4_exp` | MoE / 48 層 / 512 expert | MXFP4 | 対応 | CLI 可 | 2 |
+| `Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw` | `qwen4_exp` | MoE / 48 層 / 512 expert | EXL3 INT8 3.05bpw | 対応 | CLI 可 | 2 |
 | `Qwen3.8-Flash-Next-DFlash2` | `qwen3` | drafter / 5 層 | — | 未対応 | — | 1 |
 
-- `qwen4_exp` は compute 側が pipeline execution 未対応を返す（`qwen4exp.md` 参照）。
+- `qwen4_exp` の PP は各 stage が担当地の層、QSA state、PLE state を持つ。
+  stage 間では HyperConnection の stream 全体（`hc_count * hidden_size`）を
+ 受け渡す。PP=2 と single-stage で `GENERATED_IDS` が一致することを確認済み。
 - MoE の TP は expert 軸の分割として実装されている。EP は CLI で受け付けるが、
   stage 内での EP / TP 展開は未配線で、PP > 1 のときは各 stage の先頭 GPU
   だけが使われる。
-- QSA family は TP=2 までで PP は未実装（`qwen35qsa.md` 参照）。
+- QSA family は TP=2 までで、PP にも対応する（`qwen35qsa.md` 参照）。
+  ただし QSA checkpoint がリポジトリに無いため実機検証は未実施。
 - MTP は PP と併用できず、grouped expert（MoE）との TP 併用も拒否される
   （`mtp.md` 参照）。
 

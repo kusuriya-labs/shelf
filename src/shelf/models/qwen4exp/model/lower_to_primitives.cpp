@@ -106,6 +106,19 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
         return Status::invalid_argument("Qwen4Exp lowering layer count mismatch", __FILE__,
                                         __LINE__);
     }
+    const bool stage_load = options.stage.enabled;
+    const std::size_t layer_lo = stage_load ? options.stage.layer_lo() : 0u;
+    const std::size_t layer_hi = stage_load ? options.stage.layer_hi() : weights.layers.size();
+    const bool first_stage = !stage_load || options.stage.first();
+    const bool last_stage = !stage_load || options.stage.last(config.num_hidden_layers);
+    if (stage_load && !options.hidden_taps.empty()) {
+        return Status::unsupported(
+            "pipeline stage lowering does not accept hidden taps", __FILE__, __LINE__);
+    }
+    if (stage_load && (layer_lo >= layer_hi || layer_hi > weights.layers.size())) {
+        return Status::invalid_argument("Qwen4Exp stage layer range mismatch", __FILE__,
+                                        __LINE__);
+    }
 
     const std::uint32_t hidden = static_cast<std::uint32_t>(config.hidden_size);
     const std::uint32_t hc = static_cast<std::uint32_t>(config.hc_count);
@@ -151,11 +164,12 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
         "Qwen4Exp linear_num_value_heads must divide by tp_size");
     if (!local_gdn_value_heads.ok()) return local_gdn_value_heads.status();
 
-    const std::uint32_t local_experts =
-        static_cast<std::uint32_t>(weights.layers.front().mlp.experts.local_experts);
-    const std::uint32_t expert_begin =
-        static_cast<std::uint32_t>(weights.layers.front().mlp.experts.expert_begin);
-    for (const auto& layer : weights.layers) {
+    const std::uint32_t local_experts = static_cast<std::uint32_t>(
+        weights.layers[layer_lo].mlp.experts.local_experts);
+    const std::uint32_t expert_begin = static_cast<std::uint32_t>(
+        weights.layers[layer_lo].mlp.experts.expert_begin);
+    for (std::size_t li = layer_lo; li < layer_hi; ++li) {
+        const auto& layer = weights.layers[li];
         if (layer.mlp.experts.local_experts != local_experts ||
             layer.mlp.experts.expert_begin != expert_begin) {
             return Status::invalid_argument(
@@ -203,12 +217,12 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
         return static_cast<std::uint32_t>(lowered.parameters.size() - 1);
     };
 
-    const std::uint32_t embed_index = add_weight(weights.embed_tokens);
-    const std::uint32_t lm_index = add_weight(weights.lm_head);
+    const std::uint32_t embed_index = first_stage ? add_weight(weights.embed_tokens) : UINT32_MAX;
+    const std::uint32_t lm_index = last_stage ? add_weight(weights.lm_head) : UINT32_MAX;
 
     std::vector<LayerWeightIndices> layer_weights(weights.layers.size());
     std::vector<LayerParamIndices> layer_params(weights.layers.size());
-    for (std::size_t li = 0; li < weights.layers.size(); ++li) {
+    for (std::size_t li = layer_lo; li < layer_hi; ++li) {
         const auto& lw = weights.layers[li];
         auto& idx = layer_weights[li];
         if (lw.attention.is_gdn) {
@@ -274,16 +288,19 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
         }
     }
 
-    const std::uint32_t mixer_down = add_weight(weights.mixer.input_mix_down);
-    const std::uint32_t mixer_up = add_weight(weights.mixer.input_mix_up);
-    const std::uint32_t mixer_norm = reg_param(weights.mixer.hc_norm);
+    const std::uint32_t mixer_down =
+        last_stage ? add_weight(weights.mixer.input_mix_down) : UINT32_MAX;
+    const std::uint32_t mixer_up =
+        last_stage ? add_weight(weights.mixer.input_mix_up) : UINT32_MAX;
+    const std::uint32_t mixer_norm =
+        last_stage ? reg_param(weights.mixer.hc_norm) : UINT32_MAX;
 
     QH::Emitter em{pg};
-    RT::ValueId tokens = em.value(0, RT::ValueDType::I32);
-    pg.external_inputs.push_back(tokens);
-
-    RT::ValueId embedded = em.value(hidden);
-    {
+    RT::ValueId hyper;
+    if (first_stage) {
+        RT::ValueId tokens = em.value(0, RT::ValueDType::I32);
+        pg.external_inputs.push_back(tokens);
+        RT::ValueId embedded = em.value(hidden);
         RT::EmbeddingLookupNode n;
         n.vocab_size = weights.embed_tokens.rows;
         n.hidden_size = hidden;
@@ -292,23 +309,23 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
         n.weight_index = embed_index;
         em.emit(RT::PrimitiveNode{n}, {tokens}, {embedded});
         pg.nodes.back().debug_name = "embedding";
-    }
-
-    RT::ValueId hyper = em.value(stream_width);
-    {
-        RT::RepeatStreamsNode n;
-        n.shape = RT::RowwiseShapeKey{stream_width};
-        n.hc = hc;
-        n.hidden = hidden;
-        em.emit(RT::PrimitiveNode{n}, {embedded}, {hyper});
+        hyper = em.value(stream_width);
+        RT::RepeatStreamsNode rs;
+        rs.shape = RT::RowwiseShapeKey{stream_width};
+        rs.hc = hc;
+        rs.hidden = hidden;
+        em.emit(RT::PrimitiveNode{rs}, {embedded}, {hyper});
         pg.nodes.back().debug_name = "hc_init";
+    } else {
+        hyper = em.value(stream_width);
+        pg.external_inputs.push_back(hyper);
     }
 
     const bool has_ple =
         std::any_of(weights.layers.begin(), weights.layers.end(),
                     [](const Qwen4ExpLayerWeights& lw) { return lw.ple.present; });
     RT::ValueId ple_embeddings{0};
-    if (has_ple) {
+    if (has_ple && first_stage) {
         ple_embeddings = em.value(static_cast<std::uint32_t>(config.ple.embed_dim));
         pg.external_inputs.push_back(ple_embeddings);
     }
@@ -330,7 +347,7 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
         }
     }
 
-    for (std::size_t li = 0; li < weights.layers.size(); ++li) {
+    for (std::size_t li = layer_lo; li < layer_hi; ++li) {
         const auto& lw = weights.layers[li];
         const auto& idx = layer_weights[li];
         const auto& lp = layer_params[li];
@@ -481,37 +498,41 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
         }
     }
 
-    HyperConnectionSiteGeometry mixer_geometry;
-    mixer_geometry.hc = hc;
-    mixer_geometry.hidden = hidden;
-    mixer_geometry.lowrank = lowrank;
-    mixer_geometry.eps = eps;
-    mixer_geometry.norm_parameter_index = mixer_norm;
-    HyperConnectionSiteWeights mixer_weights;
-    mixer_weights.down = &weights.mixer.input_mix_down;
-    mixer_weights.up = &weights.mixer.input_mix_up;
-    HyperConnectionSiteIndices mixer_indices{mixer_down, mixer_up, 0u};
-    auto mixed = emit_hyper_connection_mix(em, mixer_geometry, mixer_weights,
-                                           mixer_indices, hyper, false, "mixer.");
-    if (!mixed.ok()) return mixed.status();
+    if (last_stage) {
+        HyperConnectionSiteGeometry mixer_geometry;
+        mixer_geometry.hc = hc;
+        mixer_geometry.hidden = hidden;
+        mixer_geometry.lowrank = lowrank;
+        mixer_geometry.eps = eps;
+        mixer_geometry.norm_parameter_index = mixer_norm;
+        HyperConnectionSiteWeights mixer_weights;
+        mixer_weights.down = &weights.mixer.input_mix_down;
+        mixer_weights.up = &weights.mixer.input_mix_up;
+        HyperConnectionSiteIndices mixer_indices{mixer_down, mixer_up, 0u};
+        auto mixed = emit_hyper_connection_mix(em, mixer_geometry, mixer_weights,
+                                               mixer_indices, hyper, false, "mixer.");
+        if (!mixed.ok()) return mixed.status();
 
-    const VocabParallelHead lm_parallel =
-        vocab_parallel_head(weights.lm_head, tp_size, options.tp_rank, vocab);
-    QH::HybridHeadLowering head;
-    head.hidden_features = hidden;
-    head.eps = eps;
-    head.final_norm_param = UINT32_MAX;
-    head.apply_final_norm = false;
-    head.lm_shape = RT::MatrixwiseShapeKey{weights.lm_head.rows, weights.lm_head.cols};
-    head.lm_weight_index = lm_index;
-    head.out_vocab = vocab;
-    const QH::HybridHeadOutput head_out =
-        QH::emit_hybrid_head(em, head, mixed.value().mixed, "head.");
-    if (lm_parallel.sharded) {
-        pg.nodes[head_out.logits_node_index].tp_combine = 1;
-        pg.nodes[head_out.logits_node_index].tp_combine_local_cols = weights.lm_head.rows;
-        lowered.weights[lm_index].output_col_offset = lm_parallel.col_offset;
-        lowered.weights[lm_index].output_col_total = vocab;
+        const VocabParallelHead lm_parallel =
+            vocab_parallel_head(weights.lm_head, tp_size, options.tp_rank, vocab);
+        QH::HybridHeadLowering head;
+        head.hidden_features = hidden;
+        head.eps = eps;
+        head.final_norm_param = UINT32_MAX;
+        head.apply_final_norm = false;
+        head.lm_shape = RT::MatrixwiseShapeKey{weights.lm_head.rows, weights.lm_head.cols};
+        head.lm_weight_index = lm_index;
+        head.out_vocab = vocab;
+        const QH::HybridHeadOutput head_out =
+            QH::emit_hybrid_head(em, head, mixed.value().mixed, "head.");
+        if (lm_parallel.sharded) {
+            pg.nodes[head_out.logits_node_index].tp_combine = 1;
+            pg.nodes[head_out.logits_node_index].tp_combine_local_cols = weights.lm_head.rows;
+            lowered.weights[lm_index].output_col_offset = lm_parallel.col_offset;
+            lowered.weights[lm_index].output_col_total = vocab;
+        }
+    } else {
+        pg.external_outputs.push_back(hyper);
     }
 
     for (std::size_t t = 0; t < hidden_tap_values.size(); ++t) {

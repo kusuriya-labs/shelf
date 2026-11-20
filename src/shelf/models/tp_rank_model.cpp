@@ -164,18 +164,27 @@ struct Qwen4ExpStatePoolLayouts {
 };
 
 Qwen4ExpStatePoolLayouts qwen4exp_state_pool_layouts(
-    const qwen4exp::Qwen4ExpTextConfig& cfg, std::uint32_t max_context_tokens) {
+    const qwen4exp::Qwen4ExpTextConfig& cfg, std::uint32_t max_context_tokens,
+    const qhy::PipelineStage& stage = {}) {
     const auto counts = qhy::count_layer_topology(cfg);
+    std::uint32_t attention_layers = counts.attention_layers;
+    std::uint32_t ple_layers = static_cast<std::uint32_t>(cfg.ple.layer_ids.size());
+    if (stage.enabled) {
+        attention_layers = 0u;
+        ple_layers = 0u;
+        for (std::uint32_t layer = stage.layer_lo(); layer < stage.layer_hi(); ++layer) {
+            if (!qhy::layer_is_gdn(cfg, layer)) ++attention_layers;
+            if (cfg.layer_has_ple(layer)) ++ple_layers;
+        }
+    }
     Qwen4ExpStatePoolLayouts layouts;
-    layouts.uses_qsa = counts.attention_layers != 0u;
+    layouts.uses_qsa = attention_layers != 0u;
     if (layouts.uses_qsa) {
         const std::uint32_t ratio = static_cast<std::uint32_t>(cfg.indexer.compress_ratio);
         const std::uint32_t blocks = (max_context_tokens + ratio - 1u) / ratio;
         layouts.qsa = ::shelf::state::QsaKeyStatePoolLayout::make(
-            static_cast<std::uint32_t>(counts.attention_layers),
-            ::shelf::kernel::kQsaHeadDim, ratio, blocks);
+            attention_layers, ::shelf::kernel::kQsaHeadDim, ratio, blocks);
     }
-    const std::uint32_t ple_layers = static_cast<std::uint32_t>(cfg.ple.layer_ids.size());
     layouts.uses_ple_conv = ple_layers != 0u;
     if (layouts.uses_ple_conv) {
         layouts.ple_conv = ::shelf::state::PleConvStatePoolLayout::make(
@@ -419,6 +428,7 @@ Result<q35::Executor> create_qwen4exp_model_executor(
     options.hidden_taps = std::span<const std::uint32_t>(
         config.target_hidden_taps.data(), config.target_hidden_tap_count);
     options.expose_wide_hidden = config.emit_normed_token_hidden;
+    options.stage = config.stage;
     auto lowered = qwen4exp::lower_qwen4exp_to_primitives(cfg, model.weights(), options);
     if (!lowered.ok()) return lowered.status();
 
@@ -426,7 +436,8 @@ Result<q35::Executor> create_qwen4exp_model_executor(
     input.model.config = &cfg;
     input.model.embed_tokens = &model.weights().embed_tokens;
     input.lowered = lowered.release();
-    const auto state_layouts = qwen4exp_state_pool_layouts(cfg, options.max_context_tokens);
+    const auto state_layouts =
+        qwen4exp_state_pool_layouts(cfg, options.max_context_tokens, options.stage);
     input.uses_qsa_state = state_layouts.uses_qsa;
     input.qsa_layers = state_layouts.qsa.num_qsa_states;
     input.qsa_head_dim = state_layouts.qsa.head_dim;

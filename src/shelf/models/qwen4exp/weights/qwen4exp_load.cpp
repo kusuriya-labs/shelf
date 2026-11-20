@@ -1066,19 +1066,23 @@ std::uint64_t Qwen4ExpRankWeights::host_expert_bytes() const noexcept {
     return expert_host.used();
 }
 
-std::vector<std::string> qwen4exp_rank_logical_names(const Qwen4ExpTextConfig& config,
-                                                     std::uint32_t tp_size,
-                                                     std::uint32_t tp_rank,
-                                                     bool load_mtp, bool mtp_only) {
-    std::vector<std::string> names = {
-        "model.language_model.embed_tokens.weight",
-        "model.language_model.lm_head.weight",
-        "model.language_model.hyper_connection_mixer.input_mix_weight_down.weight",
-        "model.language_model.hyper_connection_mixer.input_mix_weight_up.weight",
-        "model.language_model.hyper_connection_mixer.hc_norm.weight",
-    };
+std::vector<std::string> qwen4exp_rank_logical_names(
+    const Qwen4ExpTextConfig& config, std::uint32_t tp_size, std::uint32_t tp_rank,
+    bool load_mtp, bool mtp_only, const qhy::PipelineStage& stage) {
+    const bool stage_load = stage.enabled;
+    const bool load_embed = !stage_load || stage.first();
+    const bool load_final = !stage_load || stage.last(config.num_hidden_layers);
+    std::vector<std::string> names;
+    if (load_embed) names.push_back("model.language_model.embed_tokens.weight");
+    if (load_final) names.push_back("model.language_model.lm_head.weight");
+    if (load_final && !mtp_only) {
+        names.push_back(
+            "model.language_model.hyper_connection_mixer.input_mix_weight_down.weight");
+        names.push_back(
+            "model.language_model.hyper_connection_mixer.input_mix_weight_up.weight");
+        names.push_back("model.language_model.hyper_connection_mixer.hc_norm.weight");
+    }
     if (mtp_only) {
-        names.resize(2u);
         if (load_mtp) {
             const std::vector<std::string> mtp = mtp_names(config);
             names.insert(names.end(), mtp.begin(), mtp.end());
@@ -1088,7 +1092,9 @@ std::vector<std::string> qwen4exp_rank_logical_names(const Qwen4ExpTextConfig& c
     const std::uint32_t local_experts =
         static_cast<std::uint32_t>(config.ffn.num_experts) / tp_size;
     const std::uint32_t expert_begin = tp_rank * local_experts;
-    for (std::size_t layer = 0; layer < config.num_hidden_layers; ++layer) {
+    const std::size_t layer_lo = stage_load ? stage.layer_lo() : 0u;
+    const std::size_t layer_hi = stage_load ? stage.layer_hi() : config.num_hidden_layers;
+    for (std::size_t layer = layer_lo; layer < layer_hi; ++layer) {
         const std::string prefix = layer_prefix(layer);
         const std::vector<std::string> hc_attn = hyper_names(prefix + "attn_hyper_connection.");
         const std::vector<std::string> hc_mlp = hyper_names(prefix + "mlp_hyper_connection.");
@@ -1125,6 +1131,19 @@ Result<Qwen4ExpRankWeights> load_qwen4exp_rank(const std::string& model_dir,
     auto config_result = read_qwen4exp_text_config(model_dir);
     if (!config_result.ok()) return config_result.status();
     const Qwen4ExpTextConfig& config = config_result.value();
+    if (options.stage.enabled && options.tp_size > 1u) {
+        return Status::unsupported(
+            "a pipeline stage of a Qwen4Exp expert-axis rank is not wired", __FILE__, __LINE__);
+    }
+    if (options.stage.enabled && options.load_mtp) {
+        return Status::unsupported(
+            "a pipeline stage does not accept an MTP block", __FILE__, __LINE__);
+    }
+    if (options.stage.enabled &&
+        (options.stage.layers.layer_lo >= options.stage.layers.layer_hi ||
+         options.stage.layers.layer_hi > config.num_hidden_layers)) {
+        return Status::invalid_argument("invalid pipeline stage range", __FILE__, __LINE__);
+    }
 
     QuantizedLmHeadSummary lm_head_summary;
     const bool shard_lm_head =
@@ -1135,9 +1154,9 @@ Result<Qwen4ExpRankWeights> load_qwen4exp_rank(const std::string& model_dir,
     if (!plan_result.ok()) return plan_result.status();
     const TensorPartitionPlan& plan = plan_result.value();
 
-    const std::vector<std::string> names =
-        qwen4exp_rank_logical_names(config, options.tp_size, options.tp_rank,
-                                    options.load_mtp, options.mtp_only);
+    const std::vector<std::string> names = qwen4exp_rank_logical_names(
+        config, options.tp_size, options.tp_rank, options.load_mtp, options.mtp_only,
+        options.stage);
     auto reader_result = qhy::open_quantized_model_reader(
         model_dir, names, options.verify_quantized_payload_crc);
     if (!reader_result.ok()) return reader_result.status();
@@ -1148,22 +1167,33 @@ Result<Qwen4ExpRankWeights> load_qwen4exp_rank(const std::string& model_dir,
 
     Qwen4ExpRankWeights out;
     out.layers.resize(config.num_hidden_layers);
+    const bool load_embed = !options.stage.enabled || options.stage.first();
+    const bool load_final =
+        !options.stage.enabled || options.stage.last(config.num_hidden_layers);
 
-    Status st = load_matrix(reader, "model.language_model.embed_tokens.weight", arena, stream,
-                            weight_options, out.embed_tokens);
-    if (!st.ok()) return st;
-    WeightLoadOptions lm_head_options = weight_options;
-    lm_head_options.quantize_int8_w32 = options.quantize_lm_head_int8_w32;
-    st = load_matrix(reader, "model.language_model.lm_head.weight", arena, stream,
-                     lm_head_options, out.lm_head);
-    if (!st.ok()) return st;
-    if (!options.mtp_only) {
+    Status st = Status::make_ok();
+    if (load_embed) {
+        st = load_matrix(reader, "model.language_model.embed_tokens.weight", arena, stream,
+                         weight_options, out.embed_tokens);
+        if (!st.ok()) return st;
+    }
+    if (load_final) {
+        WeightLoadOptions lm_head_options = weight_options;
+        lm_head_options.quantize_int8_w32 = options.quantize_lm_head_int8_w32;
+        st = load_matrix(reader, "model.language_model.lm_head.weight", arena, stream,
+                         lm_head_options, out.lm_head);
+        if (!st.ok()) return st;
+    }
+    if (load_final && !options.mtp_only) {
         st = load_mixer(reader, arena, stream, weight_options, out.mixer);
         if (!st.ok()) return st;
     }
 
     if (!options.mtp_only) {
-        for (std::size_t layer = 0; layer < config.num_hidden_layers; ++layer) {
+        const std::size_t layer_lo = options.stage.enabled ? options.stage.layer_lo() : 0u;
+        const std::size_t layer_hi = options.stage.enabled
+            ? options.stage.layer_hi() : config.num_hidden_layers;
+        for (std::size_t layer = layer_lo; layer < layer_hi; ++layer) {
             const std::string prefix = layer_prefix(layer);
             Qwen4ExpLayerWeights& weights = out.layers[layer];
             st = load_hyper(reader, prefix + "attn_hyper_connection.", arena, stream,
@@ -1257,7 +1287,9 @@ Result<Qwen4ExpRankWeights> load_qwen4exp_rank(const std::string& model_dir,
         }
     }
 
-    Status valid = validate_qwen4exp_rank(out, config, options.tp_size, options.tp_rank);
+    Status valid = options.stage.enabled
+        ? validate_qwen4exp_stage(out, config, options.stage)
+        : validate_qwen4exp_rank(out, config, options.tp_size, options.tp_rank);
     if (!valid.ok()) return valid;
     return out;
 }
@@ -1640,6 +1672,29 @@ Status validate_qwen4exp_rank(const Qwen4ExpRankWeights& weights,
             st = expect_tensor_1d(w.ple.norm_conv, stream_width, "ple.norm_conv");
             if (!st.ok()) return st;
         }
+    }
+    return Status::make_ok();
+}
+
+Status validate_qwen4exp_stage(const Qwen4ExpRankWeights& weights,
+                               const Qwen4ExpTextConfig& config,
+                               const qhy::PipelineStage& stage) {
+    if (weights.layers.size() != config.num_hidden_layers)
+        return Status::invalid_argument("Qwen4Exp stage layer count mismatch", __FILE__,
+                                        __LINE__);
+    const bool load_embed = stage.first();
+    const bool load_final = stage.last(config.num_hidden_layers);
+    if ((weights.embed_tokens.rows != 0u) != load_embed ||
+        (weights.lm_head.rows != 0u) != load_final)
+        return Status::invalid_argument("Qwen4Exp stage head presence mismatch", __FILE__,
+                                        __LINE__);
+    const std::size_t lo = stage.layer_lo();
+    const std::size_t hi = stage.layer_hi();
+    for (std::size_t layer = 0; layer < weights.layers.size(); ++layer) {
+        const bool present = weights.layers[layer].mlp.router.rows != 0u;
+        if (present != (layer >= lo && layer < hi))
+            return Status::invalid_argument("Qwen4Exp stage layer presence mismatch", __FILE__,
+                                            __LINE__);
     }
     return Status::make_ok();
 }

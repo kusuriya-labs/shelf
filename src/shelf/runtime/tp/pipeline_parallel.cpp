@@ -152,6 +152,7 @@ Result<std::unique_ptr<PipelineStageRuntime>> PipelineStageRuntime::create(
     exec_config.max_scheduled_output_rows = config.max_scheduled_output_rows;
     exec_config.rope_profile = config.rope_profile;
     exec_config.stage = config.stage;
+    exec_config.max_context_tokens = config.max_seq_len + 1u;
     if (reserved == 0u) {
         reserved = executor_reserve_bytes(
             tc, stage->model_->token_row_ffn_size(), exec_config, 1u,
@@ -180,7 +181,7 @@ Result<std::unique_ptr<PipelineStageRuntime>> PipelineStageRuntime::create(
 
     std::uint32_t kv_pool_pages = config.kv_pool_pages;
     if (kv_pool_pages == 0u) {
-        constexpr std::size_t kKvSafetyBytes = 256ull * 1024ull * 1024ull;
+        constexpr std::size_t kKvSafetyBytes = 2ull * 1024ull * 1024ull * 1024ull;
         const std::size_t kv_budget = arena_free_now > reserved + kKvSafetyBytes
             ? arena_free_now - reserved - kKvSafetyBytes
             : 0u;
@@ -209,7 +210,6 @@ Result<std::unique_ptr<PipelineStageRuntime>> PipelineStageRuntime::create(
         }
         kv_pool_pages = fit_pages + 1u;
     }
-
     auto kv_result = PagedKVPool::create(
         stage->arena_.value(), kv_pool_pages, config.page_tokens, attention_layers,
         kv_heads, head_dim, config.kv_cache_dtype, config.octave_kv_format);
@@ -306,7 +306,9 @@ Status PipelineParallelCoordinator::initialize(const PipelineParallelConfig& con
 
     const shelf::qwen_hybrid::QwenHybridConfig& tc =
         stages_.front()->model().hybrid_config();
-    hidden_size_ = static_cast<std::uint32_t>(tc.hidden_size);
+    hidden_size_ = config.pipeline_hidden_width != 0u
+        ? config.pipeline_hidden_width
+        : static_cast<std::uint32_t>(tc.hidden_size);
     max_rows_ = config.max_batch_rows;
     max_outputs_ = config.max_scheduled_output_rows > config.max_scheduled_requests
         ? config.max_scheduled_output_rows
@@ -338,7 +340,7 @@ Status PipelineParallelCoordinator::initialize(const PipelineParallelConfig& con
                  "PIPELINE parallel: %zu stages, devices",
                  stages_.size());
     for (int device : devices_) std::fprintf(stderr, " %d", device);
-    std::fprintf(stderr, ", kv pages %u\n", kv_pages);
+    std::fprintf(stderr, "\n");
     return Status::make_ok();
 }
 

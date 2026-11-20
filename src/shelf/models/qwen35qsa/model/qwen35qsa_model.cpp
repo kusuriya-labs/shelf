@@ -19,10 +19,19 @@ std::uint32_t indexer_blocks(const Qwen35QsaTextConfig& config,
 }
 
 ::shelf::state::QsaKeyStatePoolLayout qsa_layout(const Qwen35QsaTextConfig& config,
-                                                 std::uint32_t max_context_tokens) {
+                                                 std::uint32_t max_context_tokens,
+                                                 const shelf::qwen_hybrid::PipelineStage& stage =
+                                                     {}) {
     const auto counts = shelf::qwen_hybrid::count_layer_topology(config);
+    std::uint32_t attention_layers = counts.attention_layers;
+    if (stage.enabled) {
+        attention_layers = 0u;
+        for (std::uint32_t layer = stage.layer_lo(); layer < stage.layer_hi(); ++layer) {
+            if (!shelf::qwen_hybrid::layer_is_gdn(config, layer)) ++attention_layers;
+        }
+    }
     return ::shelf::state::QsaKeyStatePoolLayout::make(
-        static_cast<std::uint32_t>(counts.attention_layers),
+        attention_layers,
         static_cast<std::uint32_t>(config.indexer.head_dim),
         static_cast<std::uint32_t>(config.indexer.block_size),
         indexer_blocks(config, max_context_tokens));
@@ -43,7 +52,7 @@ Result<Qwen35QsaModel> Qwen35QsaModel::load_from_safetensors(
     if (!config.ok()) return config.status();
     auto weights = load_qwen35qsa_weights(model_dir, arena, stream, options);
     if (!weights.ok()) return weights.status();
-    Status valid = validate_qwen35qsa_weights(weights.value(), config.value());
+    Status valid = validate_qwen35qsa_weights(weights.value(), config.value(), options.stage);
     if (!valid.ok()) return valid;
     return Qwen35QsaModel(weights.release(), config.release());
 }
@@ -60,7 +69,7 @@ Result<Qwen35QsaModel> Qwen35QsaModel::load_tensor_parallel_from_safetensors(
     auto weights = load_qwen35qsa_weights_tensor_parallel_rank(
         model_dir, tp_size, tp_rank, arena, stream, options);
     if (!weights.ok()) return weights.status();
-    Status valid = validate_qwen35qsa_weights(weights.value(), config.value());
+    Status valid = validate_qwen35qsa_weights(weights.value(), config.value(), options.stage);
     if (!valid.ok()) return valid;
     return Qwen35QsaModel(weights.release(), config.release());
 }
@@ -85,8 +94,10 @@ Result<shelf::qwen35::Executor> create_qwen35qsa_model_executor(
     lower_options.backbone.hidden_taps = std::span<const std::uint32_t>(
         config.target_hidden_taps.data(), config.target_hidden_tap_count);
     lower_options.backbone.tp = config.tp;
+    lower_options.backbone.stage = config.stage;
     lower_options.backbone.tp_combine_f32 = config.tp_combine_f32 != 0;
-    lower_options.max_context_tokens = config.max_context_tokens;
+    lower_options.max_context_tokens =
+        config.max_context_tokens != 0u ? config.max_context_tokens : 512u;
 
     auto lowered =
         lower_qwen35qsa_to_primitives(model.text_config(), model.weights(), lower_options);
@@ -101,7 +112,8 @@ Result<shelf::qwen35::Executor> create_qwen35qsa_model_executor(
     // the same context length.
     const bool qsa_active = config.max_context_tokens > model.text_config().indexer.budget;
     if (qsa_active) {
-        const auto layout = qsa_layout(model.text_config(), config.max_context_tokens);
+        const auto layout =
+            qsa_layout(model.text_config(), config.max_context_tokens, config.stage);
         input.uses_qsa_state = true;
         input.qsa_layers = layout.num_qsa_states;
         input.qsa_head_dim = layout.head_dim;

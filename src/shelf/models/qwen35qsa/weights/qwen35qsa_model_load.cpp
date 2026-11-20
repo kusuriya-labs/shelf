@@ -34,15 +34,15 @@ Status load_indexer(
                                               stream, weight_options);
     if (!k.ok()) return k.status();
     w.k_proj = k.release();
-    auto qn = shelf::weights::load_bf16_or_f32_tensor(collection, prefix + "q_norm", arena,
+    auto qn = shelf::weights::load_bf16_tensor(collection, prefix + "q_norm", arena,
                                                       stream);
     if (!qn.ok()) return qn.status();
     w.q_norm_weight = qn.release();
-    auto kn = shelf::weights::load_bf16_or_f32_tensor(collection, prefix + "k_norm", arena,
+    auto kn = shelf::weights::load_bf16_tensor(collection, prefix + "k_norm", arena,
                                                       stream);
     if (!kn.ok()) return kn.status();
     w.k_norm_weight = kn.release();
-    auto bn = shelf::weights::load_bf16_or_f32_tensor(collection, prefix + "k_block_norm",
+    auto bn = shelf::weights::load_bf16_tensor(collection, prefix + "k_block_norm",
                                                       arena, stream);
     if (!bn.ok()) return bn.status();
     w.k_block_norm_weight = bn.release();
@@ -61,7 +61,9 @@ Result<std::vector<QsaIndexerLayerWeights>> load_indexer_layers(
     const shelf::weights::WeightLoadOptions replicated{};
     std::vector<QsaIndexerLayerWeights> indexer(backbone.layers.size());
     for (std::size_t layer = 0; layer < backbone.layers.size(); ++layer) {
-        if (backbone.layers[layer].is_gdn) continue;
+        if (backbone.layers[layer].is_gdn ||
+            backbone.layers[layer].attn_q_proj.rows == 0u)
+            continue;
         Status st = load_indexer(collection, arena, stream, replicated, layer,
                                  indexer[layer]);
         if (!st.ok()) return st;
@@ -118,8 +120,9 @@ Result<Qwen35QsaModelWeights> load_qwen35qsa_weights_tensor_parallel_rank(
 
 Status validate_qwen35qsa_weights(
     const Qwen35QsaModelWeights& weights,
-    const Qwen35QsaTextConfig& config) {
-    Status st = shelf::qwen35::validate_qwen35_weights(weights.backbone, config);
+    const Qwen35QsaTextConfig& config,
+    const shelf::qwen_hybrid::PipelineStage& stage) {
+    Status st = shelf::qwen35::validate_qwen35_weights(weights.backbone, config, stage);
     if (!st.ok()) return st;
     st = validate_qsa_indexer_spec(config.indexer);
     if (!st.ok()) return st;
@@ -132,6 +135,12 @@ Status validate_qwen35qsa_weights(
     }
     for (std::size_t layer = 0; layer < weights.backbone.layers.size(); ++layer) {
         const auto& w = weights.indexer[layer];
+        if (weights.backbone.layers[layer].attn_q_proj.rows == 0u) {
+            if (w.q_proj.rows != 0u)
+                return Status::invalid_argument(
+                    "qwen35qsa: an unloaded layer carries an indexer", __FILE__, __LINE__);
+            continue;
+        }
         if (weights.backbone.layers[layer].is_gdn) {
             if (w.q_proj.rows != 0) {
                 return Status::invalid_argument(

@@ -23,6 +23,7 @@ std::size_t full_cols(const MatrixWeight& w) {
 // The tensor that carries a matrix's GPU bytes for its encoding. A tied LM head aliases
 // its embedding, so this is the pointer the tie flag has to agree with.
 const void* payload(const MatrixWeight& w) {
+    if (w.host_resident) return w.host_payload;
     if (w.encoding == shelf::weights::MatrixEncoding::Bf16) return w.bf16.data();
     if (w.codes.ndim() != 0) return w.codes.data();
     return w.data.data();
