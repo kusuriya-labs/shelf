@@ -20,10 +20,13 @@ Result<Qwen35MoeModel> Qwen35MoeModel::load_from_safetensors(
     // A rank of an expert-axis split carries its own range, so the invariants are checked
     // against that range. The plan is the only statement of it.
     const shelf::weights::TensorPartitionPlan* plan = options.weights.partition_plan;
-    Status validation = plan != nullptr
-        ? validate_qwen35moe_weights(weights, text_config, plan->tp_size, plan->tp_rank,
-                                     options.stage)
-        : validate_qwen35moe_weights(weights, text_config, 1u, 0u, options.stage);
+    const std::uint32_t matrix_size = plan != nullptr ? plan->tp_size : 1u;
+    const std::uint32_t matrix_rank = plan != nullptr ? plan->tp_rank : 0u;
+    const std::uint32_t expert_size = options.ep_size == 0u ? matrix_size : options.ep_size;
+    const std::uint32_t expert_rank = options.ep_size == 0u ? matrix_rank : options.ep_rank;
+    Status validation = validate_qwen35moe_weights(
+        weights, text_config, expert_size, expert_rank, matrix_size, matrix_rank,
+        options.stage);
     if (!validation.ok()) return validation;
 
     return Qwen35MoeModel(std::move(weights), std::move(text_config), options.stage);

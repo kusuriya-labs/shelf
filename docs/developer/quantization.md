@@ -60,7 +60,7 @@ quant format / quant bundle / quant reference / io / core / gpu
 
 - model側はencodingの分岐を持たない。
 - tensor partition（weights 層）と TP execution は
-  [tensor_partition.md](tensor_partition.md) / [tensor_parallel_execution.md](tensor_parallel_execution.md) を参照。
+  [tensor_partition.md](tensor_partition.md) / [multi-gpu.md](multi-gpu.md) を参照。
   canonical payload / preshuffle / quantization math は TP の影響を受けない。
 
 ### Tensor partition
@@ -495,7 +495,8 @@ marker の値が `0xDCD12D` の EXL3 を、`EXL3_MUL24_INT8_V1` / `EXL3_MUL24_IN
   `bench_exl3_mul24_grouped`（kernel 単体の速度）、`test_program_moe_plan`（program 構築）。
   dispatch 経由は TP=2 の実モデルで実行し、FP16 活性は生成が安定した。INT8 活性は
   4096 token prefill で FP16 より遅く、512 token prompt の生成が FP16 と一致しないため既定にしない。
-  複数 GPU の expert parallel と collective は未検証。
+  複数 GPU の expert parallel と collective は EP=2 / 4 と EP=2 + TP=2 で
+  生成列が TP=2 と一致することを確認済み（Qwen3.8-Flash-Next EXL3 INT8 3.05bpw）。
 
 ## KV quantization
 

@@ -200,6 +200,10 @@ inline shelf::weights::Exl3LinearShape mtp_exl3_linear_shape(
 struct Qwen4ExpLoadOptions {
     std::uint32_t tp_size = 1;
     std::uint32_t tp_rank = 0;
+    // Routed experts follow the expert-parallel rank; the backbone still follows tp.
+    std::uint32_t ep_size = 0;
+    std::uint32_t ep_rank = 0;
+    bool ep_enabled = false;
     bool verify_quantized_payload_crc = false;
     // Text-only is the first target. MTP and Vision are not loaded by this path.
     bool load_mtp = false;
@@ -223,7 +227,8 @@ struct Qwen4ExpLoadOptions {
 std::vector<std::string> qwen4exp_rank_logical_names(
     const Qwen4ExpTextConfig& config, std::uint32_t tp_size, std::uint32_t tp_rank,
     bool load_mtp = false, bool mtp_only = false,
-    const shelf::qwen_hybrid::PipelineStage& stage = {});
+    const shelf::qwen_hybrid::PipelineStage& stage = {},
+    std::uint32_t ep_size = 0u, std::uint32_t ep_rank = 0u);
 
 // Loads one tensor-parallel rank of a Qwen4Exp checkpoint. Routed experts are split on
 // the expert axis. The canonical partition contract does not split EXL3 matrices yet, so
@@ -239,7 +244,9 @@ Result<Qwen4ExpRankWeights> load_qwen4exp_rank(const std::string& model_dir,
 Status validate_qwen4exp_rank(const Qwen4ExpRankWeights& weights,
                               const Qwen4ExpTextConfig& config,
                               std::uint32_t tp_size,
-                              std::uint32_t tp_rank);
+                              std::uint32_t tp_rank,
+                              std::uint32_t ep_size = 0u,
+                              std::uint32_t ep_rank = 0u);
 
 Status validate_qwen4exp_stage(const Qwen4ExpRankWeights& weights,
                                const Qwen4ExpTextConfig& config,

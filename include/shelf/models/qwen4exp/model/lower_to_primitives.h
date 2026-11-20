@@ -18,6 +18,9 @@ struct Qwen4ExpLowerOptions {
     std::uint32_t max_context_tokens = 512;
     std::uint32_t tp_size = 1;
     std::uint32_t tp_rank = 0;
+    std::uint32_t ep_size = 1;
+    std::uint32_t ep_rank = 0;
+    bool ep_enabled = false;
     float rope_attention_factor = 1.0f;
     // Target layers whose completed output, averaged over the hyper-connection streams,
     // is exposed as a DFlash2 target feature. Appended after the head's four outputs.

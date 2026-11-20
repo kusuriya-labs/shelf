@@ -66,6 +66,8 @@ std::string moe_expert_tensor_name(std::size_t layer, uint32_t expert,
 
 Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig& config,
                                                         std::size_t layer,
+                                                        uint32_t ep_size,
+                                                        uint32_t ep_rank,
                                                         uint32_t tp_size,
                                                         uint32_t tp_rank) {
     if (config.ffn.num_experts == 0)
@@ -78,10 +80,13 @@ Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig
     if (tp_size == 0 || tp_rank >= tp_size)
         return Status::invalid_argument(
             "build_moe_expert_group_plan: tp_size / tp_rank out of range", __FILE__, __LINE__);
+    if (ep_size == 0 || ep_rank >= ep_size)
+        return Status::invalid_argument(
+            "build_moe_expert_group_plan: ep_size / ep_rank out of range", __FILE__, __LINE__);
     const uint32_t global_experts = static_cast<uint32_t>(config.ffn.num_experts);
-    if (global_experts % tp_size != 0u)
+    if (global_experts % ep_size != 0u)
         return Status::unsupported(
-            "build_moe_expert_group_plan: num_experts must divide by tp_size", __FILE__,
+            "build_moe_expert_group_plan: num_experts must divide by ep_size", __FILE__,
             __LINE__);
 
     const uint32_t hidden = static_cast<uint32_t>(config.hidden_size);
@@ -94,9 +99,11 @@ Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig
     MoeExpertGroupPlan plan;
     plan.layer = static_cast<uint32_t>(layer);
     plan.mlp_prefix = moe_mlp_prefix(layer);
-    plan.experts = global_experts / tp_size;
-    plan.expert_begin = tp_rank * plan.experts;
+    plan.experts = global_experts / ep_size;
+    plan.expert_begin = ep_rank * plan.experts;
     plan.global_experts = global_experts;
+    plan.ep_size = ep_size;
+    plan.ep_rank = ep_rank;
     plan.tp_size = tp_size;
     plan.tp_rank = tp_rank;
     plan.scale_block_k = kMxScaleBlockK;
@@ -155,8 +162,15 @@ Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig
 }
 
 Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig& config,
+                                                        std::size_t layer,
+                                                        uint32_t tp_size,
+                                                        uint32_t tp_rank) {
+    return build_moe_expert_group_plan(config, layer, tp_size, tp_rank, tp_size, tp_rank);
+}
+
+Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig& config,
                                                         std::size_t layer) {
-    return build_moe_expert_group_plan(config, layer, 1u, 0u);
+    return build_moe_expert_group_plan(config, layer, 1u, 0u, 1u, 0u);
 }
 
 Result<MoeExpertGroupPlan> build_moe_mtp_expert_group_plan(const Qwen35MoeTextConfig& config,

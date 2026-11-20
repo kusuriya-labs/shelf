@@ -280,6 +280,7 @@ shelf_add_test(NAME test_linear_quant_contract SOURCE unit/test_linear_quant_con
 shelf_add_test(NAME test_activation_workspace_layout SOURCE unit/test_activation_workspace_layout.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
 shelf_add_test(NAME test_program_quant_contract SOURCE unit/test_program_quant_contract.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
 shelf_add_test(NAME test_dispatch_staging_size SOURCE unit/test_dispatch_staging_size.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
+shelf_add_test(NAME test_parallel_topology SOURCE unit/test_parallel_topology.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
 shelf_add_test(NAME test_gpu_arena_vmm SOURCE unit/test_gpu_arena_vmm.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_gpu)
 shelf_add_test(NAME test_gpu_memory_manager SOURCE unit/test_gpu_memory_manager.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_gpu)
 
@@ -503,6 +504,7 @@ add_custom_target(
         test_activation_workspace_layout
         test_program_quant_contract
         test_dispatch_staging_size
+        test_parallel_topology
         test_gpu_arena_vmm
         test_gpu_memory_manager
 )

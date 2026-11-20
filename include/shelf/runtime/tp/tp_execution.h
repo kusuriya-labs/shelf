@@ -30,6 +30,8 @@ struct TpProgramSegment {
     uint32_t dispatch_end = 0;
     uint32_t producer_end = 0;
     TpBarrierKind barrier_after = TpBarrierKind::None;
+    // EP reduce runs after the TP reduce of the same combine value.
+    bool ep_scope = false;
     ValueId combine_value{};
     uint32_t combine_local_cols = 0;
     TpCombineFusion fusion = TpCombineFusion::None;
@@ -46,7 +48,10 @@ struct TpExecutionSchedule {
 
 Result<TpExecutionSchedule> build_tp_execution_schedule(
     const PrimitiveGraph& graph,
-    const Program& program);
+    const Program& program,
+    std::uint32_t tp_size = 0u,
+    std::uint32_t ep_size = 1u,
+    bool ep_enabled = false);
 
 struct TpSumTarget {
     void* ptr = nullptr;

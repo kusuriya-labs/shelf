@@ -76,6 +76,11 @@ inline shelf::weights::Exl3LinearShape exl3_linear_shape(
 
 struct Qwen35MoeLoadOptions : shelf::qwen_hybrid::HybridLoadOptions {
     bool load_mtp_layers = false;
+    // Routed experts follow the expert-parallel rank; the backbone and shared expert still
+    // follow the tensor-partition plan's tp_size / tp_rank.
+    std::uint32_t ep_size = 0;
+    std::uint32_t ep_rank = 0;
+    bool ep_enabled = false;
 
     // A pipeline stage loads only its own layer range. The layers outside the range stay in
     // the vector and hold no tensors, and the embedding / LM head / final norm are loaded
@@ -129,6 +134,16 @@ Status validate_qwen35moe_weights(const Qwen35MoeModelWeights& weights,
                                  const Qwen35MoeTextConfig& config,
                                  std::uint32_t tp_size,
                                  std::uint32_t tp_rank);
+
+// The routed experts follow (ep_rank, ep_size); the shared expert and backbone follow
+// (tp_rank, tp_size).
+Status validate_qwen35moe_weights(const Qwen35MoeModelWeights& weights,
+                                 const Qwen35MoeTextConfig& config,
+                                 std::uint32_t ep_size,
+                                 std::uint32_t ep_rank,
+                                 std::uint32_t tp_size,
+                                 std::uint32_t tp_rank,
+                                 const shelf::qwen_hybrid::PipelineStage& stage = {});
 
 // The MTP block's own invariants: fc is [hidden, 2 * hidden], the three block norms are
 // [hidden], its layer is a full-attention body, and its FFN matches the MTP plan (the

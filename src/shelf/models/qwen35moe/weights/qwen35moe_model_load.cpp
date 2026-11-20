@@ -209,9 +209,9 @@ Status moe_ffn_weights_match(const MoeFfnWeights& w, const MoeExpertGroupPlan& p
         plan.w13_up_rows != ffn.moe_intermediate_size)
         return Status::invalid_argument(
             "moe plan: expert group geometry differs from the config", __FILE__, __LINE__);
-    if (plan.tp_size == 0u || plan.tp_rank >= plan.tp_size ||
-        plan.experts * plan.tp_size != plan.global_experts ||
-        plan.expert_begin != plan.tp_rank * plan.experts)
+    if (plan.ep_size == 0u || plan.ep_rank >= plan.ep_size ||
+        plan.experts * plan.ep_size != plan.global_experts ||
+        plan.expert_begin != plan.ep_rank * plan.experts)
         return Status::invalid_argument(
             "moe plan: the expert range does not split the config's expert count", __FILE__,
             __LINE__);
@@ -258,9 +258,14 @@ Status moe_ffn_weights_match(const MoeFfnWeights& w, const MoeExpertGroupPlan& p
 }
 
 Status validate_qwen35moe_weights(const Qwen35MoeModelWeights& weights,
-                                  const Qwen35MoeTextConfig& config, std::uint32_t tp_size,
+                                  const Qwen35MoeTextConfig& config, std::uint32_t ep_size,
+                                  std::uint32_t ep_rank, std::uint32_t tp_size,
                                   std::uint32_t tp_rank,
                                   const shelf::qwen_hybrid::PipelineStage& stage) {
+    if (ep_size == 0u) {
+        ep_size = tp_size;
+        ep_rank = tp_rank;
+    }
     if (weights.layers.size() != config.num_hidden_layers) {
         return Status::invalid_argument(
             "Qwen35MoeModel: layer count does not match the config",
@@ -279,7 +284,7 @@ Status validate_qwen35moe_weights(const Qwen35MoeModelWeights& weights,
     for (std::size_t l = lo; l < hi; ++l) {
         st = qhy::validate_hybrid_layer_body(weights.layers[l], config, l);
         if (!st.ok()) return st;
-        auto plan = build_moe_expert_group_plan(config, l, tp_size, tp_rank);
+        auto plan = build_moe_expert_group_plan(config, l, ep_size, ep_rank, tp_size, tp_rank);
         if (!plan.ok()) return plan.status();
         st = moe_ffn_weights_match(weights.layers[l].ffn, plan.value(), config.ffn);
         if (!st.ok()) return st;
@@ -298,8 +303,16 @@ Status validate_qwen35moe_weights(const Qwen35MoeModelWeights& weights,
 
 Status validate_qwen35moe_weights(const Qwen35MoeModelWeights& weights,
                                   const Qwen35MoeTextConfig& config, std::uint32_t tp_size,
+                                  std::uint32_t tp_rank,
+                                  const shelf::qwen_hybrid::PipelineStage& stage) {
+    return validate_qwen35moe_weights(weights, config, tp_size, tp_rank, tp_size, tp_rank,
+                                      stage);
+}
+
+Status validate_qwen35moe_weights(const Qwen35MoeModelWeights& weights,
+                                  const Qwen35MoeTextConfig& config, std::uint32_t tp_size,
                                   std::uint32_t tp_rank) {
-    return validate_qwen35moe_weights(weights, config, tp_size, tp_rank,
+    return validate_qwen35moe_weights(weights, config, tp_size, tp_rank, tp_size, tp_rank,
                                       shelf::qwen_hybrid::PipelineStage{});
 }
 

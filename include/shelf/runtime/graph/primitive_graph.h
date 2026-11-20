@@ -66,6 +66,9 @@ struct PrimitiveGraphNode {
     std::string debug_name;
     uint8_t tp_combine = 0;
     uint32_t tp_combine_local_cols = 0;
+    // The combine value mixes an EP-sharded expert partial and a TP-shared contribution.
+    // Its inputs are scaled at the source instead of being scaled by the barrier.
+    uint8_t ep_combine = 0;
 };
 
 struct PrimitiveGraph {

@@ -257,6 +257,10 @@ struct MoeGroupedLinearNode {
 struct MoeCombineNode {
     RowwiseShapeKey shape;
     uint32_t top_k = 0;
+    // With explicit EP the routed sum and the shared contribution are reduced by different
+    // scopes, so a lowering can ask for either part alone.
+    bool include_experts = true;
+    bool include_shared = true;
 };
 
 // Qwen4Exp hyper-connection mix: gate * normed averaged over hc streams.

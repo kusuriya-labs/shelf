@@ -24,7 +24,8 @@ class Qwen4ExpModel final {
     static Result<Qwen4ExpModel> load_from_safetensors(
         const std::string& model_dir, std::uint32_t tp_size, std::uint32_t tp_rank,
         gpu::GpuArena& arena, hipStream_t stream,
-        const Qwen4ExpLoadOptions& options = {});
+        const Qwen4ExpLoadOptions& options = {},
+        std::uint32_t ep_size = 0u, std::uint32_t ep_rank = 0u);
 
     static Result<Qwen4ExpModel> adopt(Qwen4ExpRankWeights&& weights,
                                        Qwen4ExpTextConfig config);

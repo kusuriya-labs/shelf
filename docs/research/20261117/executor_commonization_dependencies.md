@@ -12,7 +12,7 @@ TP=2 を必要とした瞬間に qwen35 配下のファイルを編集しなけ�
 これは将来の仮定ではなく、すでに存在する family についての問題である。
 モデルに依存しない機能は共通側へ切り出す必要がある。
 
-現行の契約は `docs/developer/tensor_parallel_execution.md` の
+現行の契約は `docs/developer/multi-gpu.md` の
 「multi-rank runtime の family 境界」と `docs/developer/architecture.md` にあり、
 `TpRankRuntime` / `TpCoordinator` は `shelf::qwen35` に置くが family をまたぐ判断は
 持たない、としている。本調査はこの記述が配置として正しいかを検証するもの。

@@ -300,7 +300,10 @@ local_shape = [256, 1280, 2560]
 
 descriptor と N-D slicing は 3D tensor を扱える
 （`tests/unit/test_canonical_partition.cpp` の 3D case）。
-ただし **routed expert 平面の分割はここを通さない**。Qwen3.5 MoE は expert 軸を
+ただし **routed expert 平面の分割はここを通さない**。explicit EP では
+`ep_size` / `ep_rank` が expert 軸を担い、`tp_size` / `tp_rank` は backbone と
+shared expert の matrix axis を担う（EP=1 では expert 軸を TP rank に重ねる）。
+Qwen3.5 MoE は expert 軸を
 `MoeExpertGroupPlan` の `expert_begin` / `experts` で切る。matrix axis の
 partition descriptor は backbone と shared expert、そして dense FFN が使う
 （正本は [qwen35moe.md](qwen35moe.md) §3「expert 軸の分割」）。
@@ -309,7 +312,7 @@ partition descriptor は backbone と shared expert、そして dense FFN が使
 
 partition metadata の導入は weight materialization 基盤であり、それ自体は分散実行の
 対応完了を意味しない。dense の TP=2 execution は
-[tensor_parallel_execution.md](tensor_parallel_execution.md) に実装済みで、その局所 geometry は
+[multi-gpu.md](multi-gpu.md) に実装済みで、その局所 geometry は
 plan から来る。現在も未対応なものは以下。
 
 - 単一 GPU の weight load path（`load_qwen35_weights_from_*`）は
@@ -319,7 +322,8 @@ plan から来る。現在も未対応なものは以下。
 - `QuantizedModelReader` 側の rank-3 payload（fused expert 平面）は partition descriptor を
   作らない。expert 範囲で絞るのは plan の責任
 - MTP block は partition しない（plan に entry を作らない）
-- `tp_size > 2` の execution は `TpCoordinator` が `unsupported` で拒否する
+- `TpCoordinator` の TP 幅は CLI の 1 / 2 / 4 に従う。実際に起動できるかは
+  model の head 数など、rank local geometry の分割条件で決まる
 - embedding と norm、router（`mlp.gate.weight`）、`mlp.shared_expert_gate.weight` は
   replicated（partition plan に entry を作らない）
 

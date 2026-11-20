@@ -2,6 +2,7 @@
 
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/memory/gpu_memory_manager.h>
+#include <shelf/runtime/parallel/parallel_topology.h>
 #include <shelf/models/common/qwen_hybrid/weight_loader.h>
 #include <shelf/runtime/dflash2_config.h>
 #include <shelf/models/common/qwen_hybrid/tensor_parallel_context.h>
@@ -88,12 +89,17 @@ struct TpRankRuntimeConfig {
     MtpBatchReserveFn mtp_reserve;
     std::uint32_t tp_size = 1;
     std::uint32_t tp_rank = 0;
+    std::uint32_t ep_size = 1;
+    std::uint32_t ep_rank = 0;
+    bool ep_enabled = false;
+    ExpertPartitionMode expert_partition = ExpertPartitionMode::Replicated;
     int device_id = 0;
     std::uint32_t max_batch_rows = 0;
     std::uint32_t max_scheduled_requests = 0;
     std::uint32_t max_scheduled_output_rows = 0;
     std::uint32_t max_seq_len = 16;
     std::uint32_t page_tokens = 16;
+    std::uint32_t pipeline_hidden_width = 0;
     KVCacheDType kv_cache_dtype = KVCacheDType::BF16;
     ::shelf::kernel::OctaveKVCacheFormat octave_kv_format{};
     gpu::GpuArena* arena = nullptr;
@@ -199,11 +205,17 @@ struct TpCoordinatorConfig {
     TpRankModelPrefetch prefetch_rank_model = nullptr;
     TpRankModelRelease release_rank_model = nullptr;
     std::vector<int> devices;
+    // The mesh inside one pipeline stage: expert_parallel groups of tensor_parallel ranks.
+    // tensor_parallel == 0 uses the whole device list as one TP group (EP=1).
+    std::uint32_t pipeline_rank = 0;
+    std::uint32_t tensor_parallel = 0;
+    std::uint32_t expert_parallel = 1;
     std::uint32_t max_batch_rows = 0;
     std::uint32_t max_scheduled_requests = 0;
     std::uint32_t max_scheduled_output_rows = 0;
     std::uint32_t max_seq_len = 16;
     std::uint32_t page_tokens = 16;
+    std::uint32_t pipeline_hidden_width = 0;
     KVCacheDType kv_cache_dtype = KVCacheDType::BF16;
     ::shelf::kernel::OctaveKVCacheFormat octave_kv_format{};
     gpu::GpuMemoryManager* memory = nullptr;
@@ -293,8 +305,19 @@ private:
 
     std::vector<int> devices_;
     std::vector<std::unique_ptr<TpRankRuntime>> ranks_;
-    std::unique_ptr<::shelf::runtime::TpTransport> transport_;
-    std::unique_ptr<::shelf::runtime::TpBarrierGroup> barrier_group_;
+
+    struct ReduceGroup {
+        std::vector<int> devices;
+        std::unique_ptr<::shelf::runtime::TpTransport> transport;
+        std::unique_ptr<::shelf::runtime::TpBarrierGroup> barrier;
+    };
+
+    std::optional<ParallelTopology> topology_;
+    std::vector<ReduceGroup> tp_groups_;
+    // One EP group per TP lane: a TP rank keeps its lane and only its EP coordinate
+    // varies. Every rank reaches an EP barrier exactly once per collective.
+    std::vector<ReduceGroup> ep_groups_;
+    bool explicit_ep_ = false;
     std::vector<std::unique_ptr<Worker>> workers_;
     std::unordered_map<std::uint64_t, MirrorSequences> mirrors_;
 };

@@ -11,9 +11,10 @@ TP 0 1 0 1 0 1 0 1
 ```
 
 - PP は layer を分割する（例: PP=2 で 0〜23 / 24〜47）。
-- EP は routed expert を分割する。
-- TP は rank 内の並列を表す。現在の MoE では expert 分割が TP に相当するため、
-  EP と TP のランタイムへの展開は未配線である（後述）。
+- EP は routed expert を expert 軸で分割する。
+- TP は backbone と shared expert の matrix 軸を分割する。
+- MoE は TP reduce の後に EP reduce を行い、routed expert の部分和を集約する。
+  shared expert は TP reduce にだけ参加する。
 
 `--device` には `pipeline_parallel * expert_parallel * tensor_parallel` 個の
 GPU を、PP → EP → TP の順で指定する。
@@ -37,16 +38,18 @@ K128 一括セットを要求する量子化方式（例: EXL3 INT8 3.05bpw）�
 | --- | --- | --- | --- | --- | --- | --- |
 | `Qwen3.8-27B-Quark-AWQ-MXFP4` | `qwen3_5` | dense / 64 層 | MXFP4 | 対応 | — | 2 |
 | `Qwen3.8-27B-EXL3-INT8-4bpw` | `qwen3_5` | dense / 64 層 | EXL3 INT8 4bpw | 対応 | — | 2 |
-| `Qwen3.8-Flash-Next-Quark-MXFP4` | `qwen4_exp` | MoE / 48 層 / 512 expert | MXFP4 | 対応 | CLI 可 | 2 |
-| `Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw` | `qwen4_exp` | MoE / 48 層 / 512 expert | EXL3 INT8 3.05bpw | 対応 | CLI 可 | 2 |
+| `Qwen3.8-Flash-Next-Quark-MXFP4` | `qwen4_exp` | MoE / 48 層 / 512 expert | MXFP4 | 対応 | 2 / 4 | 2 |
+| `Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw` | `qwen4_exp` | MoE / 48 層 / 512 expert | EXL3 INT8 3.05bpw | 対応 | 2 / 4 | 2 |
 | `Qwen3.8-Flash-Next-DFlash2` | `qwen3` | drafter / 5 層 | — | 未対応 | — | 1 |
 
 - `qwen4_exp` の PP は各 stage が担当地の層、QSA state、PLE state を持つ。
   stage 間では HyperConnection の stream 全体（`hc_count * hidden_size`）を
  受け渡す。PP=2 と single-stage で `GENERATED_IDS` が一致することを確認済み。
-- MoE の TP は expert 軸の分割として実装されている。EP は CLI で受け付けるが、
-  stage 内での EP / TP 展開は未配線で、PP > 1 のときは各 stage の先頭 GPU
-  だけが使われる。
+- MoE の routed expert は EP で分割し、backbone と shared expert は TP で分割する。
+  EP=1 のときは従来どおり expert 軸を TP rank に重ねる。EP=2 / 4 と EP=2 + TP=2 で
+  生成列が TP=2 と一致することを実機で確認済み。
+- dense model は EP で何も分割せず、EP グループごとに同じ計算を複製する
+  （EP を増やしても高速化しない）。
 - QSA family は TP=2 までで、PP にも対応する（`qwen35qsa.md` 参照）。
   ただし QSA checkpoint がリポジトリに無いため実機検証は未実施。
 - MTP は PP と併用できず、grouped expert（MoE）との TP 併用も拒否される
@@ -57,9 +60,10 @@ K128 一括セットを要求する量子化方式（例: EXL3 INT8 3.05bpw）�
 - PP > 1 では prefix cache を無効にする（`--prefix-cache 0`）。server は
   併用をエラーで拒否する。
 - PP > 1 は DFlash2、MTP、hidden taps、`--dump-logits` と併用できない。
-- octave KV は PP と併用できるが、PP stage 内での EP / TP 展開は未配線のため
-  性能は検証されていない。
+- PP stage 内の EP / TP 展開は配線済みで、`qwen4_exp` の PP + TP も
+  2048 / 4096 token の prefill で single / TP=2 と一致することを確認済み。
+- octave KV は PP と併用できる。PP と EP / TP を同時に使う構成の性能は未検証。
 
 詳細は [compute.md](compute.md)、[server.md](server.md)、
-[developer/tensor_parallel_execution.md](../developer/tensor_parallel_execution.md)、
+[developer/multi-gpu.md](../developer/multi-gpu.md)、
 [developer/quantization.md](../developer/quantization.md) を参照。

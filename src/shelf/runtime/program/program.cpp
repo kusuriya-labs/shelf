@@ -1035,9 +1035,12 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
             if (node.inputs.size() != 3) return fail("moe combine needs three input values");
             if (c.graph->value_dtype(node.inputs[2]) != ValueDType::F32)
                 return fail("moe combine shared expert gate must be f32");
+            const auto& moe_combine = node_as<MoeCombineNode>(node);
             DispatchBinding b = base_binding(KernelId::MOE_COMBINE);
             for (uint32_t i = 0; i < 3; ++i) b.input_slots[i] = node.inputs[i].id;
             b.input_count = 3;
+            b.flags = (moe_combine.include_experts ? 1u : 0u) |
+                      (moe_combine.include_shared ? 2u : 0u);
             c.use_moe_scratch(b);
             auto po = c.produce(node.outputs[0]);
             if (!po.ok()) return po;

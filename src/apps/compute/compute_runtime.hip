@@ -2,6 +2,7 @@
 #include "private_target_weights.h"
 
 #include <shelf/core/memory/size_format.h>
+#include <shelf/inference/execution/gemm_lt.h>
 #include <shelf/inference/state/ple_conv_state_pool.h>
 #include <shelf/inference/state/qsa_state_pool.h>
 #include <shelf/runtime/execution/row_bucket.h>
@@ -30,11 +31,6 @@ constexpr std::size_t kAutoWorkspaceMinimumBytes = 128ull * 1024ull * 1024ull;
 
 uint32_t ceil_div(uint32_t a, uint32_t b) {
     return (a + b - 1) / b;
-}
-
-uint32_t parallel_rank(uint32_t pipeline_rank, uint32_t expert_rank, uint32_t tensor_rank,
-                       uint32_t expert_parallel, uint32_t tp) {
-    return (pipeline_rank * expert_parallel + expert_rank) * tp + tensor_rank;
 }
 
 uint32_t count_attention_layers(const qwen_hybrid::QwenHybridConfig& tc) {
@@ -195,20 +191,24 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     if (hipGetDeviceCount(&dev_count) != hipSuccess || dev_count == 0) {
         return Status::invalid_state("no GPU available", __FILE__, __LINE__);
     }
-    const std::size_t parallel_width =
-        static_cast<std::size_t>(config_.pipeline_parallel) *
-        static_cast<std::size_t>(config_.expert_parallel) *
-        static_cast<std::size_t>(config_.tp);
-    if (config_.devices.size() != parallel_width) {
-        return Status::invalid_argument(
-            "--device count must match pipeline_parallel * expert_parallel * tensor_parallel",
-            __FILE__, __LINE__);
-    }
     for (int device : config_.devices) {
         if (device < 0 || device >= dev_count) {
             return Status::out_of_range("device out of range", __FILE__, __LINE__);
         }
     }
+    shelf::runtime::ParallelShape topology_shape;
+    topology_shape.pp = config_.pipeline_parallel;
+    topology_shape.ep = config_.expert_parallel;
+    topology_shape.tp = config_.tp;
+    auto topology_result =
+        shelf::runtime::ParallelTopology::create(topology_shape, config_.devices);
+    if (!topology_result.ok()) {
+        return Status::invalid_argument(
+            (std::string("--device count must match pipeline_parallel * expert_parallel * "
+                         "tensor_parallel: ") + topology_result.status().message()).c_str(),
+            __FILE__, __LINE__);
+    }
+    topology_.emplace(topology_result.release());
 
     hipError_t herr = hipSetDevice(config_.devices[0]);
     if (herr != hipSuccess) {
@@ -253,6 +253,10 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     auto memory_result = gpu::GpuMemoryManager::create(memory_devices, memory_capacity);
     if (!memory_result.ok()) return memory_result.status();
     memory_.emplace(memory_result.release());
+    for (int device : memory_devices) {
+        Status prepare_status = shelf::execution::prepare_gemm_lt(device);
+        if (!prepare_status.ok()) return prepare_status;
+    }
     auto arena0 = memory_->arena_for(config_.devices[0]);
     if (!arena0.ok()) return arena0.status();
     startup_available_bytes_ = arena0.value()->capacity();
@@ -274,7 +278,7 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     if (config_.pipeline_parallel > 1) {
         return initialize_pipeline_parallel();
     }
-    if (config_.tp > 1) {
+    if (config_.tp > 1 || config_.expert_parallel > 1u) {
         return initialize_tensor_parallel();
     }
 
@@ -647,17 +651,13 @@ Status Qwen35ComputeRuntime::initialize_pipeline_parallel() {
 
     qwen35::runtime::PipelineParallelConfig pp_config;
     pp_config.model_dir = config_.model_dir;
-    if (config_.expert_parallel > 1u || config_.tp > 1u) {
-        std::vector<int> stage_devices;
-        stage_devices.reserve(config_.pipeline_parallel);
-        for (uint32_t stage = 0; stage < config_.pipeline_parallel; ++stage) {
-            stage_devices.push_back(config_.devices[parallel_rank(
-                stage, 0u, 0u, config_.expert_parallel, config_.tp)]);
-        }
-        pp_config.devices = std::move(stage_devices);
-    } else {
-        pp_config.devices = config_.devices;
+    std::vector<int> stage_devices;
+    stage_devices.reserve(config_.pipeline_parallel);
+    for (uint32_t stage = 0; stage < config_.pipeline_parallel; ++stage) {
+        const uint32_t rank = topology_->rank(shelf::runtime::ParallelCoord{stage, 0u, 0u});
+        stage_devices.push_back(topology_->device(rank));
     }
+    pp_config.devices = std::move(stage_devices);
     pp_config.stages = ranges;
     pp_config.max_batch_rows = exec_max_tokens_;
     pp_config.max_scheduled_requests = config_.max_concurrent_requests;
@@ -680,15 +680,18 @@ Status Qwen35ComputeRuntime::initialize_pipeline_parallel() {
     pp_config.load_options.verify_quantized_payload_crc = config_.verify_weights;
     pp_config.build_stage_model = builder_result.value();
 
-    if (config_.tp > 1u) {
+    if (config_.tp > 1u || config_.expert_parallel > 1u) {
         pp_config.stage_tp.resize(config_.pipeline_parallel);
         for (std::uint32_t stage = 0; stage < config_.pipeline_parallel; ++stage) {
             qwen35::runtime::TpCoordinatorConfig tp;
             tp.model_dir = config_.model_dir;
-            tp.devices.reserve(config_.tp);
-            for (std::uint32_t t = 0; t < config_.tp; ++t) {
-                tp.devices.push_back(config_.devices[parallel_rank(
-                    stage, 0u, t, config_.expert_parallel, config_.tp)]);
+            tp.pipeline_hidden_width = pp_config.pipeline_hidden_width;
+            tp.tensor_parallel = config_.tp;
+            tp.expert_parallel = config_.expert_parallel;
+            const std::vector<std::uint32_t> stage_ranks = topology_->stage_ranks(stage);
+            tp.devices.reserve(stage_ranks.size());
+            for (std::uint32_t rank : stage_ranks) {
+                tp.devices.push_back(topology_->device(rank));
             }
             tp.max_batch_rows = exec_max_tokens_;
             tp.max_scheduled_requests = config_.max_concurrent_requests;
@@ -795,6 +798,8 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
     qwen35::runtime::TpCoordinatorConfig tp_config;
     tp_config.model_dir = config_.model_dir;
     tp_config.devices = config_.devices;
+    tp_config.tensor_parallel = config_.tp;
+    tp_config.expert_parallel = config_.expert_parallel;
     tp_config.max_batch_rows = exec_max_tokens_;
     tp_config.max_scheduled_requests = config_.max_concurrent_requests;
     tp_config.max_scheduled_output_rows = config_.max_scheduled_output_rows;

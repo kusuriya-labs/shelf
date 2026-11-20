@@ -314,6 +314,7 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
         if (width != 0u) exec_config.normed_token_hidden_width = width;
     }
     exec_config.max_context_tokens = config.max_seq_len + 1u;
+    exec_config.pipeline_hidden_width = config.pipeline_hidden_width;
     exec_config.rope_profile = config.rope_profile;
     exec_config.stage = config.pipeline_stage;
     exec_config.tp = &rank->context();
@@ -382,7 +383,9 @@ std::uint64_t TpRankRuntime::gdn_state_bytes() const {
 }
 
 const char* TpCoordinator::transport_name() const noexcept {
-    return transport_ != nullptr ? transport_->name() : "none";
+    return !tp_groups_.empty() && tp_groups_.front().transport != nullptr
+        ? tp_groups_.front().transport->name()
+        : "none";
 }
 
 Result<std::unique_ptr<TpCoordinator>> TpCoordinator::create(
@@ -400,6 +403,22 @@ Result<std::unique_ptr<TpCoordinator>> TpCoordinator::create(
 
 Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
     devices_ = config.devices;
+    const std::uint32_t tp_size = config.tensor_parallel == 0u
+        ? static_cast<std::uint32_t>(devices_.size())
+        : config.tensor_parallel;
+    // Without an explicit EP group the routed experts follow the TP ranks (legacy layout):
+    // the expert group overlaps the tensor group instead of adding a device axis.
+    const bool explicit_ep = config.expert_parallel > 1u;
+    const std::uint32_t ep_size = explicit_ep ? config.expert_parallel : tp_size;
+    const std::size_t expected_devices = explicit_ep
+        ? static_cast<std::size_t>(ep_size) * tp_size
+        : tp_size;
+    if (devices_.empty() || tp_size == 0u || ep_size == 0u ||
+        devices_.size() != expected_devices) {
+        return Status::invalid_argument(
+            "tp coordinator device count does not match tensor_parallel / expert_parallel",
+            __FILE__, __LINE__);
+    }
     if (config.memory == nullptr) {
         return Status::invalid_argument(
             "tp coordinator requires a GpuMemoryManager", __FILE__, __LINE__);
@@ -423,10 +442,6 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
             });
     }
 
-    auto transport_result = ::shelf::runtime::create_tp_transport(devices_);
-    if (!transport_result.ok()) return transport_result.status();
-    transport_ = std::move(transport_result.value().transport);
-
     struct RankSlot {
         std::unique_ptr<TpRankRuntime> runtime;
         Status status = Status::make_ok();
@@ -437,14 +452,24 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
     for (std::size_t r = 0; r < devices_.size(); ++r) {
         TpRankRuntimeConfig rank_config;
         rank_config.model_dir = config.model_dir;
-        rank_config.tp_size = static_cast<std::uint32_t>(devices_.size());
-        rank_config.tp_rank = static_cast<std::uint32_t>(r);
+        rank_config.tp_size = tp_size;
+        rank_config.tp_rank = static_cast<std::uint32_t>(r % tp_size);
+        rank_config.ep_size = ep_size;
+        rank_config.ep_rank = explicit_ep
+            ? static_cast<std::uint32_t>(r / tp_size)
+            : static_cast<std::uint32_t>(r % tp_size);
+        rank_config.ep_enabled = explicit_ep;
+        rank_config.expert_partition = explicit_ep
+            ? ExpertPartitionMode::AcrossEP
+            : (tp_size > 1u ? ExpertPartitionMode::LegacyAcrossTP
+                            : ExpertPartitionMode::Replicated);
         rank_config.device_id = devices_[r];
         rank_config.max_batch_rows = config.max_batch_rows;
         rank_config.max_scheduled_requests = config.max_scheduled_requests;
         rank_config.max_scheduled_output_rows = config.max_scheduled_output_rows;
         rank_config.max_seq_len = config.max_seq_len;
         rank_config.page_tokens = config.page_tokens;
+        rank_config.pipeline_hidden_width = config.pipeline_hidden_width;
         rank_config.kv_cache_dtype = config.kv_cache_dtype;
         rank_config.octave_kv_format = config.octave_kv_format;
         rank_config.arena = arenas[r];
@@ -492,23 +517,66 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
         ranks_.push_back(std::move(slot.runtime));
     }
 
-    Status verify_status = transport_->verify();
-    if (!verify_status.ok()) {
-        std::fprintf(stderr,
-                     "[tp] transport %s failed verification (%s); falling back to "
-                     "host-mediated reference transport\n",
-                     transport_->name(), verify_status.message().c_str());
-        transport_ = std::make_unique<::shelf::runtime::HostMediatedTpTransport>(devices_);
+    explicit_ep_ = explicit_ep;
+    ParallelShape shape;
+    shape.pp = 1u;
+    shape.ep = explicit_ep ? config.expert_parallel : 1u;
+    shape.tp = tp_size;
+    auto topology_result = ParallelTopology::create(shape, devices_);
+    if (!topology_result.ok()) return topology_result.status();
+    topology_.emplace(topology_result.release());
+
+    auto make_group = [&](const RankGroup& rank_group) -> Result<ReduceGroup> {
+        ReduceGroup group;
+        for (std::uint32_t member : rank_group.ranks) {
+            group.devices.push_back(topology_->device(member));
+        }
+        if (group.devices.size() < 2u) return group;
+        auto transport_result = ::shelf::runtime::create_tp_transport(group.devices);
+        if (!transport_result.ok()) return transport_result.status();
+        group.transport = std::move(transport_result.value().transport);
+        auto verify_status = group.transport->verify();
+        if (!verify_status.ok()) {
+            std::fprintf(stderr,
+                         "[tp] transport %s failed verification (%s); falling back to "
+                         "host-mediated reference transport\n",
+                         group.transport->name(), verify_status.message().c_str());
+            group.transport =
+                std::make_unique<::shelf::runtime::HostMediatedTpTransport>(group.devices);
+        }
+        group.barrier = std::make_unique<::shelf::runtime::TpBarrierGroup>(
+            static_cast<int>(group.devices.size()), group.devices, group.transport.get());
+        Status barrier_status = group.barrier->initialize();
+        if (!barrier_status.ok()) return barrier_status;
+        return group;
+    };
+
+    for (std::uint32_t e = 0; e < topology_->shape().ep; ++e) {
+        auto group = make_group(topology_->tp_group(0u, e));
+        if (!group.ok()) return group.status();
+        tp_groups_.push_back(group.release());
+    }
+    if (explicit_ep) {
+        ep_groups_.reserve(topology_->shape().tp);
+        for (std::uint32_t t = 0; t < topology_->shape().tp; ++t) {
+            auto group = make_group(topology_->ep_group(0u, t));
+            if (!group.ok()) return group.status();
+            ep_groups_.push_back(group.release());
+        }
     }
 
-    barrier_group_ = std::make_unique<::shelf::runtime::TpBarrierGroup>(
-        static_cast<int>(devices_.size()), devices_, transport_.get());
-    Status barrier_status = barrier_group_->initialize();
-    if (!barrier_status.ok()) return barrier_status;
-
     for (std::size_t r = 0; r < ranks_.size(); ++r) {
-        ranks_[r]->executor().tp_barrier = barrier_group_.get();
-        ranks_[r]->executor().tp_rank = static_cast<int>(r);
+        const ParallelCoord coord = topology_->coord(static_cast<std::uint32_t>(r));
+        auto& executor = ranks_[r]->executor();
+        if (explicit_ep) {
+            executor.tp_barrier = tp_groups_[coord.ep].barrier.get();
+            executor.tp_rank = static_cast<int>(coord.tp);
+            executor.ep_barrier = ep_groups_[coord.tp].barrier.get();
+            executor.ep_rank = static_cast<int>(coord.ep);
+        } else {
+            executor.tp_barrier = tp_groups_.front().barrier.get();
+            executor.tp_rank = static_cast<int>(coord.tp);
+        }
     }
 
     workers_.reserve(ranks_.size());
@@ -534,15 +602,19 @@ TpCoordinator::~TpCoordinator() noexcept {
     }
     workers_.clear();
     mirrors_.clear();
-    if (barrier_group_) barrier_group_->shutdown();
-    barrier_group_.reset();
-    transport_.reset();
+    tp_groups_.clear();
+    ep_groups_.clear();
     for (auto& rank : ranks_) rank.reset();
     ranks_.clear();
 }
 
 void TpCoordinator::abort(const Status& reason) noexcept {
-    if (barrier_group_) barrier_group_->abort(reason);
+    for (auto& group : tp_groups_) {
+        if (group.barrier) group.barrier->abort(reason);
+    }
+    for (auto& group : ep_groups_) {
+        if (group.barrier) group.barrier->abort(reason);
+    }
 }
 
 Status TpCoordinator::on_sequence_created(const PagedSequenceState& source) {
@@ -679,8 +751,10 @@ Result<BatchExecutionOutput> TpCoordinator::on_execute(
         return Status::unsupported(
             "tp speculative verify requires per-rank options", __FILE__, __LINE__);
     }
-    if (barrier_group_->aborted()) {
-        const Status reason = barrier_group_->abort_status();
+    const auto* aborted_barrier = explicit_ep_ ? ep_groups_.front().barrier.get()
+                                               : tp_groups_.front().barrier.get();
+    if (aborted_barrier != nullptr && aborted_barrier->aborted()) {
+        const Status reason = aborted_barrier->abort_status();
         if (!reason.ok()) return reason;
         return Status::invalid_state("tp barrier group is aborted", __FILE__, __LINE__);
     }
@@ -747,10 +821,14 @@ Result<BatchExecutionOutput> TpCoordinator::on_execute(
 
 Status TpCoordinator::draft_sum(const shelf::runtime::TpSumTarget& target,
                                 hipStream_t stream, int rank) {
-    if (barrier_group_ == nullptr) {
+    const ParallelCoord coord = topology_->coord(static_cast<std::uint32_t>(rank));
+    const std::size_t group_index = explicit_ep_ ? coord.ep : 0u;
+    const int local_rank = static_cast<int>(coord.tp);
+    auto* barrier = tp_groups_[group_index].barrier.get();
+    if (barrier == nullptr) {
         return Status::invalid_state("tp barrier group missing", __FILE__, __LINE__);
     }
-    return barrier_group_->arrive(rank, target, stream, false);
+    return barrier->arrive(local_rank, target, stream, false);
 }
 
 void TpCoordinator::worker_loop(std::size_t rank) {
@@ -808,7 +886,7 @@ Status TpCoordinator::run_rank_step(std::size_t rank, const ScheduledBatch& batc
 std::string TpCoordinator::debug_report() const {
     std::ostringstream out;
     out << "tp_size=" << ranks_.size() << " transport="
-        << (transport_ != nullptr ? transport_->name() : "none") << "\n";
+        << transport_name() << "\n";
     for (std::size_t r = 0; r < ranks_.size(); ++r) {
         const TpRankRuntime& runtime = *ranks_[r];
         out << "  rank" << r << " device=" << runtime.device_id()

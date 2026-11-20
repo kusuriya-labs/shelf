@@ -20,14 +20,17 @@ PLE の n-gram history を復元 prefix で再 seed する。MTP は無効であ
 `--pipeline-parallel` にも対応する。各 stage は担当地の層だけをロードし、
 embedding は先頭、final mixer と lm_head は末尾の stage が持つ。stage 間では
 HyperConnection の stream 全体（`hc_count * hidden_size`）を bf16 で受け渡す。
-`--tensor-parallel` と `--pipeline-parallel` は同時に指定できるが、
-MoE の expert 軸分割は現状 TP が担うため、PP stage 内での EP / TP 展開は未配線である。
+routed expert は EP、backbone と shared expert は TP で分割する。EP=1 では
+従来どおり expert 軸を TP rank に重ねる。PP stage 内の EP / TP 展開は実装済みで、
+TP reduce の後に EP reduce を行う。ただし PP と TP の併用は 2048 token の
+prefill で non-finite になる既知の問題があり、PP 単体と短いプロンプトだけを
+確認している。
 
 ## 2. 重みの形式とロード
 
 | 領域 | checkpoint の形式 | rank の持ち方 |
 | --- | --- | --- |
-| routed expert | MXFP4 E2M1 / E8M0 group32 | expert 軸で 512 を tp_size 分割し、rank-3 `MatrixWeight` |
+| routed expert | MXFP4 E2M1 / E8M0 group32 | expert 軸で 512 を EP rank に分割し、rank-3 `MatrixWeight`（EP=1 では TP rank） |
 | shared expert | MXFP4 | 全 rank に複製 |
 | attention / GDN | FP8 E4M3 per-channel + F32 `[n]` | 全 rank に複製、preshuffle して WMMA fragment order |
 | PLE table（BF16 shard checkpoint） | HF shard 内の BF16 `[2500012, 160]`。load 時に INT6 W32 FP16 へオンライン変換して CPU RAM に保持 | CPU RAM に 1 個を共有 |

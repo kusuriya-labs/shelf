@@ -2,7 +2,7 @@
 
 `feature/moe-weights`（MoE weight / executor 配線）と `main` へ入った
 pipeline parallel ポート（`0928674`）の統合記録。確定した contract は
-`docs/developer/pipeline_parallel.md` §4 と `docs/developer/qwen35moe.md` §8 に置き、
+`docs/developer/multi-gpu.md` と `docs/developer/qwen35moe.md` §8 に置き、
 ここには経緯と採否判断だけ残す。
 
 ## 競合の実測
@@ -129,7 +129,7 @@ PASS
 ```
 
 TP=1 と TP=2 の greedy 列一致・logits argmax 一致・rank-local geometry・staging capture の
-同一性まで通っている（test が張っている check 全体）。`tensor_parallel_execution.md` の test 表
+同一性まで通っている（test が張っている check 全体）。`multi-gpu.md` の test 表
 に arena の要求を追記した。上の tok/s は test 内蔵の値で、`docs/perf/current.md` の計測口では
 ないため、ここへのみ記録する。
 

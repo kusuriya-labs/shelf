@@ -587,14 +587,16 @@ Status execute_program_tp_ranges(
     hipStream_t stream,
     const ::shelf::runtime::TpExecutionSchedule& schedule,
     ::shelf::runtime::TpBarrierHook* barrier,
-    int rank) {
+    int rank,
+    ::shelf::runtime::TpBarrierHook* ep_barrier,
+    int ep_rank) {
     struct TpActiveGuard {
         bool& active;
         bool previous;
         ~TpActiveGuard() { active = previous; }
     } guard{ctx.tp_active, ctx.tp_active};
     ctx.tp_active = true;
-    if (barrier == nullptr) {
+    if (barrier == nullptr && ep_barrier == nullptr) {
         return Status::invalid_state("tp barrier hook not bound", __FILE__, __LINE__);
     }
     if (schedule.segments.empty()) {
@@ -615,6 +617,11 @@ Status execute_program_tp_ranges(
         }
         next_begin = segment.dispatch_end;
         const bool combines = segment.barrier_after != ::shelf::runtime::TpBarrierKind::None;
+        auto* active_barrier = segment.ep_scope ? ep_barrier : barrier;
+        const int active_rank = segment.ep_scope ? ep_rank : rank;
+        if (combines && active_barrier == nullptr) {
+            return Status::invalid_state("tp barrier hook not bound", __FILE__, __LINE__);
+        }
         HostResolvedValue value{};
         uint32_t producer_begin = segment.dispatch_begin;
         ctx.tp_peer_armed = false;
@@ -633,8 +640,8 @@ Status execute_program_tp_ranges(
                                        ::shelf::runtime::value_dtype_bytes(value.dtype);
             if (arm_bytes != 0) {
                 void* peer = nullptr;
-                Status peer_status = barrier->peer_write_target(
-                    rank, static_cast<std::size_t>(arm_bytes), peer);
+                Status peer_status = active_barrier->peer_write_target(
+                    active_rank, static_cast<std::size_t>(arm_bytes), peer);
                 if (!peer_status.ok()) return peer_status;
                 if (peer != nullptr) {
                     ctx.tp_peer_value = segment.combine_value.id;
@@ -684,8 +691,9 @@ Status execute_program_tp_ranges(
                 }
             }
         }
-        const bool fuse = segment.fusion != ::shelf::runtime::TpCombineFusion::None &&
-                          barrier->supports_combine_fusion();
+        const bool fuse = !segment.ep_scope &&
+                          segment.fusion != ::shelf::runtime::TpCombineFusion::None &&
+                          active_barrier->supports_combine_fusion();
         const uint32_t run_end =
             segment.fusion != ::shelf::runtime::TpCombineFusion::None
                 ? segment.producer_end
@@ -727,14 +735,14 @@ Status execute_program_tp_ranges(
             std::fprintf(stderr,
                          "SUM rank=%d id=%u ptr=%p rows=%llu stride=%u feat=%u dtype=%d "
                          "actual_rows=%u actual_out=%u\n",
-                         rank, segment.combine_value.id, target.ptr,
+                         active_rank, segment.combine_value.id, target.ptr,
                          static_cast<unsigned long long>(target.rows),
                          target.row_stride, target.feature_count,
                          static_cast<int>(target.dtype), ctx.actual_rows,
                          ctx.actual_outputs);
         }
-        st = barrier->arrive(rank, target, stream,
-                             ctx.tp_peer_armed && ctx.tp_peer_written);
+        st = active_barrier->arrive(active_rank, target, stream,
+                                    ctx.tp_peer_armed && ctx.tp_peer_written);
         ctx.tp_peer_armed = false;
         ctx.tp_peer_out = nullptr;
         ctx.tp_peer_written = false;

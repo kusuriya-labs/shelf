@@ -295,11 +295,11 @@ ContinuousBatcher (global 1個)
  Executor Executor
 ```
 
-詳細は [tensor_parallel_execution.md](tensor_parallel_execution.md) を参照。
+詳細は [multi-gpu.md](multi-gpu.md) を参照。
 
 Pipeline parallel は layer range を stage に分割し、hidden を pinned host 経由で
 直列に hand-off する。stage の選択は `shelf::models` が担う。
-current contract は [pipeline_parallel.md](pipeline_parallel.md) を参照。
+current contract は [multi-gpu.md](multi-gpu.md) を参照。
 
 ## Checkpoint識別（config identity gate）
 

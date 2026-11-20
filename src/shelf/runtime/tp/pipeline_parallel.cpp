@@ -137,6 +137,7 @@ Result<std::unique_ptr<PipelineStageRuntime>> PipelineStageRuntime::create(
     exec_config.rope_profile = config.rope_profile;
     exec_config.stage = config.stage;
     exec_config.max_context_tokens = config.max_seq_len + 1u;
+    exec_config.pipeline_hidden_width = config.pipeline_hidden_width;
     if (reserved == 0u) {
         reserved = executor_reserve_bytes(
             tc, stage->model_->token_row_ffn_size(), exec_config, 1u,
@@ -291,6 +292,8 @@ Status PipelineParallelCoordinator::initialize(const PipelineParallelConfig& con
         stage_config.stage.enabled = true;
         stage_config.stage.layers = config.stages[i];
         if (i < config.stage_tp.size()) stage_config.tp = config.stage_tp[i];
+        stage_config.pipeline_hidden_width = config.pipeline_hidden_width;
+        stage_config.tp.pipeline_hidden_width = config.pipeline_hidden_width;
         stage_config.arena = arena.value();
         stage_config.stream = stream.value();
         stage_config.tp.memory = config.memory;

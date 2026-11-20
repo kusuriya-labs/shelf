@@ -1,8 +1,10 @@
 #include <shelf/inference/execution/gemm_lt.h>
 #include <shelf/inference/execution/hipblaslt_abi.h>
+#include <shelf/core/gpu/scoped_device.h>
 
 #include <hipblaslt/hipblaslt.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -30,6 +32,7 @@ struct AlgoKey {
 
 struct LtState {
     hipblasLtHandle_t handle = nullptr;
+    int device = -1;
     void* workspace = nullptr;
     size_t workspace_bytes = 0;
     std::vector<AlgoKey> cache;
@@ -40,9 +43,13 @@ struct LtState {
     }
 };
 
-LtState& state() {
-    static thread_local LtState value;
-    return value;
+constexpr int kLtMaxDevices = 16;
+constexpr std::size_t kLtPreallocWorkspaceBytes = 64ull * 1024ull * 1024ull;
+
+LtState& state(int device) {
+    static thread_local std::array<LtState, kLtMaxDevices> values;
+    if (device < 0 || device >= kLtMaxDevices) device = 0;
+    return values[static_cast<std::size_t>(device)];
 }
 
 const AlgoKey* find_algo(const LtState& lt, const AlgoKey& key) {
@@ -78,6 +85,9 @@ hipError_t ensure_workspace(LtState& lt, size_t bytes) {
 
 hipError_t ensure_handle(LtState& lt) {
     if (lt.handle != nullptr) return hipSuccess;
+    int current = -1;
+    if (hipGetDevice(&current) != hipSuccess) return hipErrorInvalidDevice;
+    lt.device = current;
     if (!hipblaslt_abi_compatible()) return hipErrorInitializationError;
     if (hipblasLtCreate(&lt.handle) != HIPBLAS_STATUS_SUCCESS) {
         lt.handle = nullptr;
@@ -145,11 +155,11 @@ bool build_descriptors(Descriptors& d,
 
 hipError_t run(const AlgoKey& key,
                Descriptors& d,
+               LtState& lt,
                const void* a,
                const void* b,
                void* c,
                hipStream_t stream) {
-    LtState& lt = state();
     const AlgoKey* cached = find_algo(lt, key);
     hipblasLtMatmulAlgo_t algo{};
     size_t workspace_size = 0u;
@@ -211,7 +221,9 @@ hipError_t gemm_bf16_lt(const shelf::bf16_t* weight,
         output_row_stride < out_features) {
         return hipErrorInvalidValue;
     }
-    LtState& lt = state();
+    int current_device = -1;
+    if (hipGetDevice(&current_device) != hipSuccess) return hipErrorInvalidDevice;
+    LtState& lt = state(current_device);
     const hipError_t handle = ensure_handle(lt);
     if (handle != hipSuccess) return handle;
     const LtKind kind = output_bf16 ? LtKind::Bf16 : LtKind::Bf16F32;
@@ -228,7 +240,27 @@ hipError_t gemm_bf16_lt(const shelf::bf16_t* weight,
     key.activation_row_stride = input_row_stride;
     key.weight_row_stride = k;
     key.output_row_stride = output_row_stride;
-    return run(key, d, weight, input, output, stream);
+    return run(key, d, lt, weight, input, output, stream);
+}
+
+shelf::Status prepare_gemm_lt(int device) {
+    if (device < 0) {
+        return shelf::Status::invalid_argument("invalid device", __FILE__, __LINE__);
+    }
+    auto scope = shelf::gpu::ScopedDevice::create(device);
+    if (!scope.ok()) return scope.status();
+    LtState& lt = state(device);
+    const hipError_t handle = ensure_handle(lt);
+    if (handle != hipSuccess) {
+        return shelf::Status::hip_error("hipblasLtCreate", hipGetErrorString(handle),
+                                        __FILE__, __LINE__);
+    }
+    const hipError_t workspace = ensure_workspace(lt, kLtPreallocWorkspaceBytes);
+    if (workspace != hipSuccess) {
+        return shelf::Status::hip_error("hipMalloc gemm workspace",
+                                        hipGetErrorString(workspace), __FILE__, __LINE__);
+    }
+    return shelf::Status::make_ok();
 }
 
 }  // namespace shelf::execution

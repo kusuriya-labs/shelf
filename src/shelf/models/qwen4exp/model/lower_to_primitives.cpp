@@ -441,6 +441,9 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
             intermediate,
             shared_intermediate,
             options.tp_rank == 0u ? 1.0f : 0.0f,
+            1.0f,
+            options.ep_enabled,
+            options.tp_size,
         };
         layer.moe_weights = lw.mlp;
         layer.moe_indices = {

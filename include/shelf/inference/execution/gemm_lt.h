@@ -1,6 +1,7 @@
 #pragma once
 
 #include <shelf/core/memory/types.h>
+#include <shelf/core/status.h>
 
 #include <hip/hip_runtime.h>
 
@@ -21,5 +22,9 @@ hipError_t gemm_bf16_lt(const shelf::bf16_t* weight,
                         uint32_t output_row_stride,
                         bool output_bf16,
                         hipStream_t stream);
+
+// Creates this device's hipBLASLt handle and reserves the GEMM workspace before any
+// execution. Call once per device at startup. Repeated calls are no-ops.
+shelf::Status prepare_gemm_lt(int device);
 
 }  // namespace shelf::execution

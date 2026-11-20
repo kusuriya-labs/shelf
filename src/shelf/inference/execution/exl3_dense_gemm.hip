@@ -4,6 +4,7 @@
 #include <hipblaslt/hipblaslt.h>
 #include <hipblaslt/hipblaslt-ext.hpp>
 
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -37,9 +38,12 @@ struct LtState {
     }
 };
 
-LtState& state() {
-    static thread_local LtState value;
-    return value;
+constexpr int kLtMaxDevices = 16;
+
+LtState& state(int device) {
+    static thread_local std::array<LtState, kLtMaxDevices> values;
+    if (device < 0 || device >= kLtMaxDevices) device = 0;
+    return values[static_cast<std::size_t>(device)];
 }
 
 const AlgoKey* find_algo(LtState& lt, bool int8, uint32_t rows, uint32_t n, uint32_t k) {
@@ -73,16 +77,11 @@ hipError_t run_dense_gemm(bool int8, uint32_t rows, uint32_t out_features, uint3
     if (dense == nullptr || accum == nullptr || xrot == nullptr) {
         return hipErrorInvalidValue;
     }
-    LtState& lt = state();
-    // A handle is bound to the device current at creation. TP ranks run on one thread per device, so this holds
-    // already; recreate on a mismatch rather than launch on another device's handle.
+    // A handle is bound to the device current at creation. PP stages switch the current
+    // device on one thread, so each device keeps its own handle, workspace and cache.
     int cur_device = -1;
     if (hipGetDevice(&cur_device) != hipSuccess) return hipErrorInvalidDevice;
-    if (lt.handle != nullptr && lt.device != cur_device) {
-        (void) hipblasLtDestroy(lt.handle);
-        lt.handle = nullptr;
-        for (auto& entry : lt.cache) entry = {};
-    }
+    LtState& lt = state(cur_device);
     if (lt.handle == nullptr) {
         if (!hipblaslt_abi_compatible()) return hipErrorInitializationError;
         lt.device = cur_device;

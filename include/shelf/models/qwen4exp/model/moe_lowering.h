@@ -20,6 +20,11 @@ struct Qwen4ExpMoeLoweringGeometry {
     // The shared expert is replicated on every rank. Only one rank contributes it before
     // the TP sum; the others scale it to zero.
     float shared_scale = 1.0f;
+    // With an explicit EP group the expert shard is replicated inside each TP group, so
+    // its contribution is scaled before the global reduce.
+    float expert_scale = 1.0f;
+    bool ep_enabled = false;
+    std::uint32_t tp_size = 1;
 };
 
 struct Qwen4ExpMoeLoweringIndices {

@@ -449,6 +449,8 @@ Result<OptimizedLaunchResult> try_launch_moe_combine(const Program& program,
     if (b.input_count != 3u || b.output_count != 1u)
         return bad("moe combine: bad io count");
 
+    const bool include_experts = (b.flags & 1u) != 0u;
+    const bool include_shared = (b.flags & 2u) != 0u;
     const Result<HostResolvedValue> expert_res =
         resolve_host_value(program, ValueId{b.input_slots[0]}, ctx);
     if (!expert_res.ok()) return expert_res.status();
@@ -466,39 +468,55 @@ Result<OptimizedLaunchResult> try_launch_moe_combine(const Program& program,
     if (!out_res.ok()) return out_res.status();
     const HostResolvedValue out = out_res.value();
 
-    if (expert.dtype != ValueDType::BF16 || shared.dtype != ValueDType::BF16 ||
-        out.dtype != ValueDType::BF16)
-        return bad("moe combine: expert / shared / output must be bf16");
-    if (gate.dtype != ValueDType::F32) return bad("moe combine: shared gate is not f32");
+    if (out.dtype != ValueDType::BF16)
+        return bad("moe combine: output must be bf16");
+    if (include_experts && expert.dtype != ValueDType::BF16)
+        return bad("moe combine: expert output must be bf16");
+    if (include_shared && (shared.dtype != ValueDType::BF16 ||
+                           gate.dtype != ValueDType::F32))
+        return bad("moe combine: shared value / gate dtype");
     if (expert.row_domain != ValueRowDomain::GROUPED_ROWS)
         return bad("moe combine: expert output is not in group rows");
     if (shared.row_domain != ValueRowDomain::TOKEN_ROWS ||
         out.row_domain != ValueRowDomain::TOKEN_ROWS)
         return bad("moe combine: shared or output is not one row per token");
-    if (expert.feature_count != out.feature_count || shared.feature_count != out.feature_count)
-        return bad("moe combine: feature count mismatch");
-    if (gate.feature_count != 1u) return bad("moe combine: shared gate is not one column");
-    if (gate.row_stride == 0u) return bad("moe combine: shared gate row stride is zero");
-    if (expert.ptr == nullptr || shared.ptr == nullptr || gate.ptr == nullptr ||
-        out.ptr == nullptr)
-        return bad("moe combine: value unbound");
-    if (expert.row_stride < expert.feature_count || shared.row_stride < shared.feature_count)
-        return bad("moe combine: row stride too small");
-    const ::shelf::runtime::ValueBinding* expert_binding =
-        program.find_value(ValueId{b.input_slots[0]});
-    if (expert_binding == nullptr) return bad("moe combine: expert output unbound");
-    const uint32_t elem = ::shelf::runtime::value_dtype_bytes(expert.dtype);
-    if (elem == 0u ||
-        expert_binding->bytes <
-            static_cast<uint64_t>(plan.value().row_capacity) * expert.row_stride * elem)
-        return bad("moe combine: group rows exceed the expert output plane");
+    if (include_experts && expert.feature_count != out.feature_count)
+        return bad("moe combine: expert feature count mismatch");
+    if (include_shared && shared.feature_count != out.feature_count)
+        return bad("moe combine: shared feature count mismatch");
+    if (include_shared && gate.feature_count != 1u)
+        return bad("moe combine: shared gate is not one column");
+    if (include_shared && gate.row_stride == 0u)
+        return bad("moe combine: shared gate row stride is zero");
+    if (out.ptr == nullptr) return bad("moe combine: output unbound");
+    if (include_experts && expert.ptr == nullptr) return bad("moe combine: expert unbound");
+    if (include_shared && (shared.ptr == nullptr || gate.ptr == nullptr))
+        return bad("moe combine: shared value unbound");
+    if (include_experts && expert.row_stride < expert.feature_count)
+        return bad("moe combine: expert row stride too small");
+    if (include_shared && shared.row_stride < shared.feature_count)
+        return bad("moe combine: shared row stride too small");
+    if (include_experts) {
+        const ::shelf::runtime::ValueBinding* expert_binding =
+            program.find_value(ValueId{b.input_slots[0]});
+        if (expert_binding == nullptr) return bad("moe combine: expert output unbound");
+        const uint32_t elem = ::shelf::runtime::value_dtype_bytes(expert.dtype);
+        if (elem == 0u ||
+            expert_binding->bytes <
+                static_cast<uint64_t>(plan.value().row_capacity) * expert.row_stride * elem)
+            return bad("moe combine: group rows exceed the expert output plane");
+    }
 
     const hipError_t herr = ::shelf::kernel::launch_moe_combine(
-        static_cast<::shelf::bf16_t*>(out.ptr), static_cast<const ::shelf::bf16_t*>(expert.ptr),
+        static_cast<::shelf::bf16_t*>(out.ptr),
+        include_experts ? static_cast<const ::shelf::bf16_t*>(expert.ptr) : nullptr,
         plan.value().arrays.sel_weight, plan.value().arrays.slot_row_of,
-        static_cast<const ::shelf::bf16_t*>(shared.ptr),
-        static_cast<const float*>(gate.ptr), plan.value().tokens, plan.value().top_k,
-        out.feature_count, expert.row_stride, shared.row_stride, gate.row_stride, stream);
+        include_shared ? static_cast<const ::shelf::bf16_t*>(shared.ptr) : nullptr,
+        include_shared ? static_cast<const float*>(gate.ptr) : nullptr,
+        plan.value().tokens, plan.value().top_k, out.feature_count,
+        include_experts ? expert.row_stride : out.feature_count,
+        include_shared ? shared.row_stride : out.feature_count,
+        include_shared ? gate.row_stride : 0u, include_experts, stream);
     if (herr != hipSuccess)
         return Status::hip_error("moe combine launch", hipGetErrorString(herr), __FILE__,
                                  __LINE__);

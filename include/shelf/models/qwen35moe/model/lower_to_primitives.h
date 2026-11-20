@@ -29,6 +29,11 @@ struct Qwen35MoeLowerOptions {
     // matching partition plan. tp_size == 1 lowers the whole model on one device.
     uint32_t tp_size = 1;
     uint32_t tp_rank = 0;
+    // The routed experts follow the expert-parallel rank; the shared expert and the
+    // backbone follow tp_size / tp_rank.
+    uint32_t ep_size = 0;
+    uint32_t ep_rank = 0;
+    bool ep_enabled = false;
     // One pipeline stage: only the stage's own layers are lowered, the embedding is emitted
     // by the first stage, and the final norm + lm_head + sampling by the last. The other
     // stages take the hidden of the previous stage as their external input and hand their

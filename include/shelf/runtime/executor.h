@@ -224,6 +224,10 @@ struct ExecutorConfig {
     // Empty retains the legacy single-table profile and theta.
     std::vector<EffectiveRopeProfile> rope_profiles;
     ::shelf::qwen_hybrid::PipelineStage stage;
+    // Width of the hidden a pipeline stage receives and emits. 0 uses the model's own
+    // hidden size. A family whose stage boundary carries a wider stream (Qwen4Exp's
+    // hyper-connection stack) states it here so the transfer buffers are sized for it.
+    std::uint32_t pipeline_hidden_width = 0;
     bool emit_normed_token_hidden = false;
     bool external_hidden_input = false;
     // 0 means the family's hidden size. Qwen4Exp's MTP block consumes the pre-mixer wide
@@ -390,6 +394,8 @@ struct Executor {
     std::vector<::shelf::runtime::TpExecutionSchedule> tp_schedules;
     ::shelf::runtime::TpBarrierHook* tp_barrier = nullptr;
     int tp_rank = 0;
+    ::shelf::runtime::TpBarrierHook* ep_barrier = nullptr;
+    int ep_rank = 0;
     gpu::Tensor execution_status;
     gpu::Tensor execution_workspace;
     ::shelf::runtime::WeightSlot* host_weight_table = nullptr;
