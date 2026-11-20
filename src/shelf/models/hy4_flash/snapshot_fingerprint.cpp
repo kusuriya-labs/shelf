@@ -66,6 +66,15 @@ Digest fingerprint(Residency &gpu, const std::vector<int> &history) {
             update(block.data(), executable.gcount());
         }
         if (!executable.eof()) throw std::runtime_error("実行ファイルの読み取りに失敗しました");
+        // host 常駐の重み（静的）も、プロセスごとに 1 回だけ混ぜる（毎回の SHA-256 が復元と保存を各約 1 秒遅くしていた）。
+        for (const auto &[key, weight] : gpu.model.weights) {
+            if (weight.rank >= 0) continue;
+            size_t name_length = key.size();
+            update(&name_length, sizeof(name_length));
+            update(key.data(), key.size());
+            update(&weight.bytes, sizeof(weight.bytes));
+            update(weight.host, weight.bytes);
+        }
         unsigned model_length = 0;
         if (EVP_DigestFinal_ex(ctx.get(), gpu.snapshot_model_digest.data(), &model_length) != 1 ||
             model_length != gpu.snapshot_model_digest.size())
@@ -75,14 +84,6 @@ Digest fingerprint(Residency &gpu, const std::vector<int> &history) {
     if (EVP_DigestInit_ex(ctx.get(), EVP_sha256(), nullptr) != 1)
         throw std::runtime_error("フィンガープリントを初期化できません");
     update(gpu.snapshot_model_digest.data(), gpu.snapshot_model_digest.size());
-    for (const auto &[key, weight] : gpu.model.weights) {
-        if (weight.rank >= 0) continue;
-        size_t name_length = key.size();
-        update(&name_length, sizeof(name_length));
-        update(key.data(), key.size());
-        update(&weight.bytes, sizeof(weight.bytes));
-        update(weight.host, weight.bytes);
-    }
     update(history.data(), history.size() * sizeof(int));
     if (gpu.model.rdma) {
         // 履歴ごとに Engram の行を読み直すと、復元と保存でそれぞれ履歴長に比例（約 80 µs/token）して遅い。
