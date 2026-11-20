@@ -2338,7 +2338,7 @@ Result<Executor> create_executor(
             opts.validate_workspace = true;
             opts.max_token_rows = Npad;
             opts.max_output_rows = MO;
-            if (const char* nwr = std::getenv("PSQ_NO_WORKSPACE_REUSE")) {
+            if (const char* nwr = std::getenv("SHELF_NO_WORKSPACE_REUSE")) {
                 if (nwr[0] != '\0') opts.no_workspace_reuse = true;
             }
             ::shelf::runtime::StaticParameterTableView pview;
