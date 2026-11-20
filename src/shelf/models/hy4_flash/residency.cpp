@@ -81,8 +81,10 @@ void Residency::reserve() {
         check(hipSetDevice(physical[r]));
         size_t total = 0;
         check(hipMemGetInfo(&available[r], &total));
-        // 空きを使い切ると arena 確保や hipBLASLt の追加確保が失敗するため、余裕を残す。
-        available[r] -= std::min(available[r], size_t(256) << 20);
+        // 空きを使い切ると arena の hipMalloc が丸めや他プロセスの揺れで std::bad_alloc になるため、余裕を残す。
+        // 実測では起動後の追加確保は無く、必要なのは数 MiB（余裕 0.29 MiB で 21 回中 1 回失敗、1.7 MiB 以上は成功）。
+        // 失敗が起きるたびに、この値を 2 倍にすること（8 → 16 → 32 → ... MiB）。
+        available[r] -= std::min(available[r], size_t(8) << 20);
         overhead[r] = (r ? size_t(512) << 20 : size_t(2) << 30) + matrix_bytes;
         if (!r)
             for (int i = 0; i < 42; ++i) {
