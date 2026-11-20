@@ -80,8 +80,82 @@ kv_tokens=205808 prefix_est=615776256 rest=615776256 left=102400 reserve=3160606
   arena を 13 GiB 前後に抑えれば KV を 128Ki 分確保したまま
   ピーク VRAM を 15 GiB 以下に収められる見込み。
 
+## 手順2〜4: 128Ki 近傍の実測 (2026-11-21)
+
+方針修正により embedding の実装・環境変数切替は不要と判断（ベースで既にホスト常駐）。
+よって「実装後」の測定を、既存コードのまま起動引数だけを絞って実施した。
+
+- 入力: `/tmp/shelf-prefill-32768.psktok` の 32,768 token を繰り返して 120,000 token の
+  whitespace ids ファイルを作成 (`/tmp/shelf-prefill-120000.ids`)。
+- 条件: 3.05bpw / c5v5 / 投機なし / `--max-seq-len 131072` / `--max-new-tokens 32` /
+  `--prefill-chunk 512` / `--page-tokens 16`。
+- 生ログ: `.hy4-agent/step2-measure-chunk512.log` (成功)、`.hy4-agent/step2-measure.log`
+  (chunk 4096 の失敗例)。スクリプト: `.hy4-agent/step2-measure.sh`。
+
+### 試行結果
+
+| run | arena | prefill chunk | 結果 | ピーク VRAM (delta) |
+| --- | ---: | ---: | --- | ---: |
+| C | 14 GiB | 512 | **成功** (120k prefill + 末尾 decode 31 token) | **14.394 GiB** |
+| D | 13 GiB | 512 | 失敗: KV 97,584 token < 必要 131,073 | 13.260 GiB |
+| (参考) | 14 GiB | 4096 | 失敗: workspace reserve 2.40 GiB で KV 104,048 token | 14.258 GiB |
+| (参考) | 13 GiB | 4096 | 失敗: KV 52,272 token | 13.260 GiB |
+
+`--max-seq-len 131072` を宣言すると、実際の入力長に関わらず arena が
+**131,073 token 分の KV** を確保できる必要がある
+(`compute_runtime.hip:503`)。13 GiB ではこれを満たせない。
+また prefill chunk を 4096 にすると workspace reserve が 0.52 → 2.40 GiB に増え、
+同じ arena でも KV 容量がさらに削れる。chunk 512 が 128Ki には最適。
+
+### 成功時の内訳・速度 (run C)
+
+| 項目 | 値 |
+| --- | ---: |
+| target weights | 9.59 GiB |
+| runtime workspace | 0.52 GiB (row bucket 512) |
+| KV budget | 2.88 GiB (149,360 token) |
+| prefix cache | 0.57 GiB |
+| required / available | 13.57 / 14.00 GiB |
+| embedding (pinned, host) | 2.37 GiB |
+| prefix checkpoint (host) | 2.29 GiB |
+| PROMPT_TOKENS / GENERATED_TOKENS | 120,000 / 32 |
+| PREFILL_MS / PREFILL_CHUNKS | 177,056.5 ms / 236 |
+| prefill 平均 | **677.7 tok/s** (chunk ごと 273〜1,641 tok/s、文脈伸長に伴い低下) |
+| DECODE_MS / DECODE_TOKENS | 4,525.6 ms / 31 |
+| decode | **6.85 tok/s** |
+| ピーク VRAM | **14.394 GiB** (16 GiB 比 -1.61 / 実効 15 GiB 比 -0.61 GiB) |
+
+生成 ID は 31 個すべて出力され、120k token の prefill 後に末尾で decode が通ることを確認。
+embedding の H2D は token あたり 10 KiB で、ピーク VRAM は arena 14 GiB + 0.39 GiB の
+オーバーヘッドに収まった。速度は 4bpw 等と直接比較しないこと（3.05bpw・c5v5・長文脈）。
+
+### `--arena-gib auto` の挙動と推奨設定
+
+コード確認の結果 (`gpu_memory_manager.hip:15-42`, `compute_runtime.hip:367-399`):
+
+- `auto` は `hipMemGetInfo` の空き VRAM から **512 MiB** (`kAutoMarginBytes`) を引いた値を
+  arena capacity にする。16 GiB カードで表示に 0.5 GiB 使われていれば arena ≈ 15 GiB となり、
+  KV が arena いっぱいまで自動拡張されるためピークは 15 GiB を超える。
+- `-N` は total VRAM から N GiB を引く (`TotalMinus`)。
+- 数値 `N` は固定容量。128Ki では KV が 131,073 token 分必要なため、
+  **13 GiB では不足、14 GiB で余裕あり**。
+
+**推奨起動設定 (3.05bpw / c5v5 / 128Ki / 投機なし):**
+
+```sh
+shelf-compute --model-dir <3.05bpw> --input-ids-file <ids> \
+  --max-seq-len 131072 --arena-gib 14 --prefill-chunk 512 \
+  --kv-cache-dtype octave:c5v5 --page-tokens 16 --device 0
+```
+
+ピーク 14.4 GiB で実効 15 GiB を 0.6 GiB 下回る。さらに削る場合は
+`--max-seq-len` を実際の入力長まで下げる（例 120000 なら 13 GiB でも起動可能）か、
+prefix cache / workspace の見直しが候補。
+
 ## 進捗ログ
 
 - 2026-11-20: 土台を準備（worktree `hy4/qwen-embed-host`、origin/main 3682ee07 から）。未着手。
 - 2026-11-20: ビルド完了、measure_vram.py 作成、手順1の VRAM 測定実施 (peak 20.27 / 15.27 GiB)。
 - 2026-11-21: 手順1の結果を本ファイルに記録。embedding はベースコードで既にホスト常駐と判明。
+- 2026-11-21: 方針修正に従い実装を省略。120k token で arena 14 GiB / chunk 512 の prefill+decode 成功、
+  ピーク 14.394 GiB・prefill 678 tok/s・decode 6.85 tok/s を記録。auto の挙動と推奨設定を追記。
