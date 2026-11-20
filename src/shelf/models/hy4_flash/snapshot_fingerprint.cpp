@@ -16,7 +16,7 @@ Digest fingerprint(Residency &gpu, const std::vector<int> &history) {
         if (EVP_DigestUpdate(ctx.get(), data, size) != 1) throw std::runtime_error("フィンガープリントの計算に失敗しました");
     };
     if (!gpu.snapshot_model_digest_ready) {
-        const char version[] = "hy4-snapshot-v1-octave294";
+        const char version[] = "hy4-snapshot-v2-octave294";
         update(version, sizeof(version));
         update(&gpu.tokens, sizeof(gpu.tokens));
         int runtime = 0, driver = 0;
@@ -85,16 +85,30 @@ Digest fingerprint(Residency &gpu, const std::vector<int> &history) {
     }
     update(history.data(), history.size() * sizeof(int));
     if (gpu.model.rdma) {
-        if (!gpu.engram_client) throw std::runtime_error("Engram 接続がありません");
-        for (size_t first = 0; first < history.size(); first += 1024) {
-            size_t end = std::min(first + 1024, history.size());
-            std::vector<int> ids(history.begin() + first, history.begin() + end);
-            std::vector<int> prior(history.begin() + (first > 2 ? first - 2 : 0), history.begin() + first);
+        // 履歴ごとに Engram の行を読み直すと、復元と保存でそれぞれ履歴長に比例（約 80 µs/token）して遅い。
+        // Engram は静的な表なので、固定の token 列で作る同一性ダイジェストをプロセスごとに 1 回だけ計算して使う。
+        // shortcut: 固定の標本でしか表の同一性を見ない、表の一部だけが変わる場合は検出できない。
+        if (!gpu.snapshot_engram_digest_ready) {
+            if (!gpu.engram_client) throw std::runtime_error("Engram 接続がありません");
+            std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> sample(EVP_MD_CTX_new(), EVP_MD_CTX_free);
+            if (!sample || EVP_DigestInit_ex(sample.get(), EVP_sha256(), nullptr) != 1)
+                throw std::runtime_error("フィンガープリントを初期化できません");
+            std::vector<int> ids(1024);
+            for (size_t i = 0; i < ids.size(); ++i) ids[i] = int((i * 7919 + 13) % 120832);
+            std::vector<int> prior{1, 2};
             rdma::Indices indices;
             for (int g = 0; g < 4; ++g) indices[g] = engram_indices(gpu.model, g, prior, ids);
             auto rows = gpu.engram_client->read(indices);
-            for (auto data : rows) update(data.data(), data.size());
+            for (auto data : rows)
+                if (EVP_DigestUpdate(sample.get(), data.data(), data.size()) != 1)
+                    throw std::runtime_error("フィンガープリントの計算に失敗しました");
+            unsigned sample_length = 0;
+            if (EVP_DigestFinal_ex(sample.get(), gpu.snapshot_engram_digest.data(), &sample_length) != 1 ||
+                sample_length != gpu.snapshot_engram_digest.size())
+                throw std::runtime_error("Engram のフィンガープリントを確定できません");
+            gpu.snapshot_engram_digest_ready = true;
         }
+        update(gpu.snapshot_engram_digest.data(), gpu.snapshot_engram_digest.size());
     }
     Digest result{};
     unsigned length = 0;

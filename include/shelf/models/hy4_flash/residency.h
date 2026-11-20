@@ -28,6 +28,8 @@ struct Residency {
     bool snapshot_upload_digest_ready = false;
     std::array<uint8_t, 32> snapshot_model_digest{};
     bool snapshot_model_digest_ready = false;
+    std::array<uint8_t, 32> snapshot_engram_digest{};
+    bool snapshot_engram_digest_ready = false;
 #endif
     Checkpoint &model;
     size_t tokens;
