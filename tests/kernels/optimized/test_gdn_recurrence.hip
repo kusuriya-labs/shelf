@@ -387,13 +387,7 @@ bool run_case(const Case& c) {
         if (out_bad_mask != 0u || state_bad_mask != 0u) ++out_bigdiff;
         if (out_nan_hit == 0u || state_nan_hit == 0u) ++out_bigdiff;
     }
-    const bool lossy = []() {
-        const char* x = std::getenv("SHELF_GDN_RECURRENCE_EXACT");
-        if (x != nullptr && x[0] != '\0' && x[0] != '0') return false;
-        const char* l = std::getenv("SHELF_GDN_RECURRENCE_LOSSY");
-        if (l != nullptr && l[0] == '0') return false;
-        return true;
-    }();
+    const bool lossy = ::shelf::kernel::gdn_recurrence_lossy_enabled();
     const double out_rel_tol = lossy ? 2e-2 : 2e-4;
     const double state_rel_tol = lossy ? 1e-2 : 1e-3;
     for (size_t i = 0; i < oc.size(); ++i) {

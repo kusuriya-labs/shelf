@@ -110,3 +110,72 @@ BETTERBENCH_HOME=/tmp/bb betterbench run --endpoint http://127.0.0.1:8123/v1 \
   「受理（tok/round）」と「round 時間」のどちらで説明できるかをこれで切り分ける。
   `SHELF_BATCH_TRACE=1` は step ごとの `arena_used` を出し、
   per-request の増加がないこと（資源規律の回帰）を確認する。
+
+## 10. モデル精度の比較
+
+GDN decomposition、state の型、量子化などモデル出力に影響する変更は、
+**GSM8K と HumanEval の両方**で teacher-forced logits を比較する。
+片方だけでの判定は認めない。PPL の改善／悪化はモデルとコーパスに依存し、
+単一コーパスの符号で採否を決められない。
+
+### 10.1 corpus の作成
+
+両方とも test split の入力列を連結し、Qwen tokenizer で 2048 トークンに切り、
+PSKLDTOK 形式で保存する。
+
+| データセット | repo | ファイル | 列 |
+| --- | --- | --- | --- |
+| GSM8K | `openai/gsm8k` | `main/test-00000-of-00001.parquet` | `question` |
+| HumanEval | `openai_humaneval` | `openai_humaneval/test-00000-of-00001.parquet` | `prompt` |
+
+```python
+import hashlib, struct
+from huggingface_hub import hf_hub_download
+import pandas as pd
+from transformers import AutoTokenizer
+
+def make(repo, path, column, out):
+    source = hf_hub_download(repo, path, repo_type="dataset")
+    text = "\n\n".join(pd.read_parquet(source)[column].tolist())
+    tok = AutoTokenizer.from_pretrained("models/Qwen3.8-27B-Quark-AWQ-MXFP4")
+    ids = tok.encode(text, add_special_tokens=False)[:2048]
+    data = b"PSKLDTOK" + struct.pack("<IQ", 1, len(ids)) + struct.pack("<%di" % len(ids), *ids)
+    open(out, "wb").write(data)
+    print(out, hashlib.sha256(data).hexdigest())
+
+make("openai/gsm8k", "main/test-00000-of-00001.parquet", "question", "/tmp/shelf-gsm8k.psktok")
+make("openai_humaneval", "openai_humaneval/test-00000-of-00001.parquet", "prompt", "/tmp/shelf-humaneval.psktok")
+```
+
+corpus の SHA-256 を結果に併記する。
+
+### 10.2 比較条件
+
+- 1 GPU = 1 bench process。
+- `--context 128 --positions 128 --prefill-chunk 4096 --kv-cache-dtype bf16`。
+- baseline は環境変数なし（lossy が既定）、candidate は `SHELF_GDN_RECURRENCE_EXACT=1`。
+- 両者で `--dump` を書き、candidate 側の `--compare` に baseline を渡す。
+
+```sh
+B=./build/shelf-bench
+M=models/kusuriya-labs/Qwen3.8-27B-EXL3-INT8-4bpw
+T=/tmp/shelf-gsm8k.psktok
+$B quality --model-dir $M --tokens-file $T --context 128 --positions 128 \
+    --prefill-chunk 4096 --kv-cache-dtype bf16 --dump /tmp/quality-lossy.bin
+SHELF_GDN_RECURRENCE_EXACT=1 $B quality --model-dir $M --tokens-file $T \
+    --context 128 --positions 128 --prefill-chunk 4096 --kv-cache-dtype bf16 \
+    --dump /tmp/quality-exact.bin --compare /tmp/quality-lossy.bin
+```
+
+HumanEval と MXFP4（`models/Qwen3.8-27B-Quark-AWQ-MXFP4`）も同じ手順で実施し、
+2 コーパス × 対象モデルの結果を並べる。
+
+### 10.3 報告する値
+
+- `QUALITY_KL_MEAN`、`QUALITY_TOP1_AGREEMENT`、`QUALITY_TOP5_OVERLAP`
+- `QUALITY_PPL_BASELINE`、`QUALITY_PPL_CANDIDATE`、`QUALITY_PPL_DELTA_PCT`
+- `QUALITY_LOGIT_MAX_ABS_DELTA`
+- corpus の SHA-256、モデル、GPU、KV dtype、chunk
+
+PPL の符号がモデル／コーパスで一貫しない場合は「精度向上」と結論しない。
+top-1 と KL を主指標とし、PPL は参照値として扱う。

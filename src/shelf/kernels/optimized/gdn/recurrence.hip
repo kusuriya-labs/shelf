@@ -855,10 +855,7 @@ void shelf_gdn_recurrence_wmma_verify_tree_exact(GdnRecurrenceArgs a) {
 bool gdn_recurrence_lossy_enabled() {
     static const bool enabled = []() {
         const char* x = std::getenv("SHELF_GDN_RECURRENCE_EXACT");
-        if (x != nullptr && x[0] != '\0' && x[0] != '0') return false;
-        const char* l = std::getenv("SHELF_GDN_RECURRENCE_LOSSY");
-        if (l != nullptr && l[0] == '0') return false;
-        return true;
+        return x == nullptr || x[0] == '\0' || x[0] == '0';
     }();
     return enabled;
 }

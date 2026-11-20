@@ -856,7 +856,8 @@ target verify の GDN recurrence 本体:
   行ごとに `recurrent_history` と compact log を保存し、`row_parent` が示す
   分岐行は history から親 state を復元する。
 - `WmmaVerify` は lossy / exact の両 decomposition を持ち、切替は
-  `SHELF_GDN_RECURRENCE_EXACT` / `SHELF_GDN_RECURRENCE_LOSSY` に従う。
+  `SHELF_GDN_RECURRENCE_EXACT` で行う。未設定または `0` が lossy（既定）、
+  それ以外が exact。`SHELF_GDN_RECURRENCE_LOSSY` は使用しない。
 - decode / prefill は `Wmma` / `F32` の通常選択のままである。
 - batch に verify と decode/prefill が混在する場合、executor 内部で
   verify region（`execution_class == SPEC_VERIFY`）とそれ以外へ分け、

@@ -536,7 +536,6 @@ int main() {
     unsetenv("SHELF_GDN_RECURRENCE_EXACT");
     if (chunk_exact) setenv("SHELF_GDN_VERIFY_CHUNKED_EXACT", "1", 1);
     else unsetenv("SHELF_GDN_VERIFY_CHUNKED_EXACT");
-    unsetenv("SHELF_GDN_RECURRENCE_LOSSY");
 
     int device_count = 0;
     if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
