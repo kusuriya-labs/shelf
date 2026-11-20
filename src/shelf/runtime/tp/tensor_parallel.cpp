@@ -454,8 +454,14 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
         rank_config.tp_size = tp_size;
         rank_config.tp_rank = static_cast<std::uint32_t>(r % tp_size);
         rank_config.ep_size = ep_size;
-        rank_config.ep_rank = static_cast<std::uint32_t>(r / tp_size);
+        rank_config.ep_rank = explicit_ep
+            ? static_cast<std::uint32_t>(r / tp_size)
+            : static_cast<std::uint32_t>(r % tp_size);
         rank_config.ep_enabled = explicit_ep;
+        rank_config.expert_partition = explicit_ep
+            ? ExpertPartitionMode::AcrossEP
+            : (tp_size > 1u ? ExpertPartitionMode::LegacyAcrossTP
+                            : ExpertPartitionMode::Replicated);
         rank_config.device_id = devices_[r];
         rank_config.max_batch_rows = config.max_batch_rows;
         rank_config.max_scheduled_requests = config.max_scheduled_requests;
@@ -510,23 +516,19 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
     }
 
     explicit_ep_ = explicit_ep;
-    coordinates_.reserve(devices_.size());
-    for (std::uint32_t e = 0; e < ep_size; ++e) {
-        for (std::uint32_t t = 0; t < tp_size; ++t) {
-            const std::size_t index = static_cast<std::size_t>(e) * tp_size + t;
-            coordinates_.push_back(TpMeshRank{
-                .pipeline = config.pipeline_rank,
-                .expert = e,
-                .tensor = t,
-                .device = devices_[index],
-            });
-        }
-    }
+    ParallelShape shape;
+    shape.pp = 1u;
+    shape.ep = explicit_ep ? config.expert_parallel : 1u;
+    shape.tp = tp_size;
+    auto topology_result = ParallelTopology::create(shape, devices_);
+    if (!topology_result.ok()) return topology_result.status();
+    topology_.emplace(topology_result.release());
 
-    auto make_group = [&](const std::vector<std::size_t>& members)
-        -> Result<ReduceGroup> {
+    auto make_group = [&](const RankGroup& rank_group) -> Result<ReduceGroup> {
         ReduceGroup group;
-        for (std::size_t r : members) group.devices.push_back(coordinates_[r].device);
+        for (std::uint32_t member : rank_group.ranks) {
+            group.devices.push_back(topology_->device(member));
+        }
         if (group.devices.size() < 2u) return group;
         auto transport_result = ::shelf::runtime::create_tp_transport(group.devices);
         if (!transport_result.ok()) return transport_result.status();
@@ -547,41 +549,31 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
         return group;
     };
 
-    for (std::uint32_t e = 0; e < (explicit_ep ? ep_size : 1u); ++e) {
-        std::vector<std::size_t> members;
-        for (std::size_t r = 0; r < coordinates_.size(); ++r) {
-            if (coordinates_[r].expert == e) members.push_back(r);
-        }
-        auto group = make_group(members);
+    for (std::uint32_t e = 0; e < topology_->shape().ep; ++e) {
+        auto group = make_group(topology_->tp_group(0u, e));
         if (!group.ok()) return group.status();
         tp_groups_.push_back(group.release());
     }
     if (explicit_ep) {
-        std::vector<std::size_t> members;
-        for (std::size_t r = 0; r < coordinates_.size(); ++r) {
-            if (coordinates_[r].tensor == 0u) members.push_back(r);
+        ep_groups_.reserve(topology_->shape().tp);
+        for (std::uint32_t t = 0; t < topology_->shape().tp; ++t) {
+            auto group = make_group(topology_->ep_group(0u, t));
+            if (!group.ok()) return group.status();
+            ep_groups_.push_back(group.release());
         }
-        auto group = make_group(members);
-        if (!group.ok()) return group.status();
-        ep_group_ = group.release();
     }
 
     for (std::size_t r = 0; r < ranks_.size(); ++r) {
-        const TpMeshRank& coord = coordinates_[r];
+        const ParallelCoord coord = topology_->coord(static_cast<std::uint32_t>(r));
         auto& executor = ranks_[r]->executor();
         if (explicit_ep) {
-            const std::size_t group_index = coord.expert;
-            executor.tp_barrier = tp_groups_[group_index].barrier.get();
-            executor.tp_rank = static_cast<int>(coord.tensor);
-            executor.ep_barrier = ep_group_.barrier.get();
-            executor.ep_rank = static_cast<int>(coord.expert);
-            std::fprintf(stderr, "TPMESH rank=%zu pp=%u ep=%u tp=%u tp_bar=%p ep_bar=%p\n",
-                         r, coord.pipeline, coord.expert, coord.tensor,
-                         static_cast<void*>(executor.tp_barrier),
-                         static_cast<void*>(executor.ep_barrier));
+            executor.tp_barrier = tp_groups_[coord.ep].barrier.get();
+            executor.tp_rank = static_cast<int>(coord.tp);
+            executor.ep_barrier = ep_groups_[coord.tp].barrier.get();
+            executor.ep_rank = static_cast<int>(coord.ep);
         } else {
             executor.tp_barrier = tp_groups_.front().barrier.get();
-            executor.tp_rank = static_cast<int>(r);
+            executor.tp_rank = static_cast<int>(coord.tp);
         }
     }
 
@@ -609,7 +601,7 @@ TpCoordinator::~TpCoordinator() noexcept {
     workers_.clear();
     mirrors_.clear();
     tp_groups_.clear();
-    ep_group_ = ReduceGroup{};
+    ep_groups_.clear();
     for (auto& rank : ranks_) rank.reset();
     ranks_.clear();
 }
@@ -618,7 +610,9 @@ void TpCoordinator::abort(const Status& reason) noexcept {
     for (auto& group : tp_groups_) {
         if (group.barrier) group.barrier->abort(reason);
     }
-    if (ep_group_.barrier) ep_group_.barrier->abort(reason);
+    for (auto& group : ep_groups_) {
+        if (group.barrier) group.barrier->abort(reason);
+    }
 }
 
 Status TpCoordinator::on_sequence_created(const PagedSequenceState& source) {
@@ -755,7 +749,7 @@ Result<BatchExecutionOutput> TpCoordinator::on_execute(
         return Status::unsupported(
             "tp speculative verify requires per-rank options", __FILE__, __LINE__);
     }
-    const auto* aborted_barrier = explicit_ep_ ? ep_group_.barrier.get()
+    const auto* aborted_barrier = explicit_ep_ ? ep_groups_.front().barrier.get()
                                                : tp_groups_.front().barrier.get();
     if (aborted_barrier != nullptr && aborted_barrier->aborted()) {
         const Status reason = aborted_barrier->abort_status();
@@ -825,10 +819,9 @@ Result<BatchExecutionOutput> TpCoordinator::on_execute(
 
 Status TpCoordinator::draft_sum(const shelf::runtime::TpSumTarget& target,
                                 hipStream_t stream, int rank) {
-    const std::size_t group_index = explicit_ep_ ? coordinates_[rank].expert : 0u;
-    const int local_rank = explicit_ep_
-        ? static_cast<int>(coordinates_[rank].tensor)
-        : static_cast<int>(rank);
+    const ParallelCoord coord = topology_->coord(static_cast<std::uint32_t>(rank));
+    const std::size_t group_index = explicit_ep_ ? coord.ep : 0u;
+    const int local_rank = static_cast<int>(coord.tp);
     auto* barrier = tp_groups_[group_index].barrier.get();
     if (barrier == nullptr) {
         return Status::invalid_state("tp barrier group missing", __FILE__, __LINE__);

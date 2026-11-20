@@ -2,6 +2,7 @@
 
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/memory/gpu_memory_manager.h>
+#include <shelf/runtime/parallel/parallel_topology.h>
 #include <shelf/models/common/qwen_hybrid/weight_loader.h>
 #include <shelf/runtime/dflash2_config.h>
 #include <shelf/models/common/qwen_hybrid/tensor_parallel_context.h>
@@ -91,6 +92,7 @@ struct TpRankRuntimeConfig {
     std::uint32_t ep_size = 1;
     std::uint32_t ep_rank = 0;
     bool ep_enabled = false;
+    ExpertPartitionMode expert_partition = ExpertPartitionMode::Replicated;
     int device_id = 0;
     std::uint32_t max_batch_rows = 0;
     std::uint32_t max_scheduled_requests = 0;
@@ -240,15 +242,6 @@ struct TpCoordinatorConfig {
     MtpBatchReserveConfig mtp_batch;
 };
 
-// The logical coordinate of one rank in the PP x EP x TP mesh. Device order inside a
-// pipeline stage is (expert * tensor_parallel + tensor), i.e. PP > EP > TP.
-struct TpMeshRank {
-    std::uint32_t pipeline = 0;
-    std::uint32_t expert = 0;
-    std::uint32_t tensor = 0;
-    int device = -1;
-};
-
 class TpCoordinator final : public TpBatchHook {
 public:
     static Result<std::unique_ptr<TpCoordinator>> create(
@@ -317,9 +310,11 @@ private:
         std::unique_ptr<::shelf::runtime::TpBarrierGroup> barrier;
     };
 
-    std::vector<TpMeshRank> coordinates_;
+    std::optional<ParallelTopology> topology_;
     std::vector<ReduceGroup> tp_groups_;
-    ReduceGroup ep_group_;
+    // One EP group per TP lane: a TP rank keeps its lane and only its EP coordinate
+    // varies. Every rank reaches an EP barrier exactly once per collective.
+    std::vector<ReduceGroup> ep_groups_;
     bool explicit_ep_ = false;
     std::vector<std::unique_ptr<Worker>> workers_;
     std::unordered_map<std::uint64_t, MirrorSequences> mirrors_;

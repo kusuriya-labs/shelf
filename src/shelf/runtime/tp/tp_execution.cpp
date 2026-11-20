@@ -111,7 +111,7 @@ Result<TpExecutionSchedule> build_tp_execution_schedule(
             try_fuse_combine_consumer(graph, program, group_end, combine, current);
             const uint32_t next_begin = current.dispatch_end;
             const bool ep_reduce = ep_enabled && node.ep_combine != 0u && ep_size > 1u;
-            const bool tp_reduce = tp_size > 1u;
+            const bool tp_reduce = tp_size != 1u;
             bool pushed = false;
             if (ep_reduce && !tp_reduce) {
                 current.ep_scope = true;

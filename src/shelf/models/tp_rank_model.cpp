@@ -645,7 +645,8 @@ Result<std::unique_ptr<TpRankModel>> build_moe_tp_rank_model(
     if (!model_result.ok()) return model_result.status();
 
     auto context_result = qmoe::make_qwen35moe_tensor_parallel_context(
-        text_config, config.tp_size, config.tp_rank, config.ep_size, config.ep_rank, false);
+        text_config, config.tp_size, config.tp_rank, config.ep_size, config.ep_rank,
+        config.ep_enabled, false);
     if (!context_result.ok()) return context_result.status();
 
     return std::unique_ptr<TpRankModel>(

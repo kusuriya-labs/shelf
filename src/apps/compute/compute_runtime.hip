@@ -32,11 +32,6 @@ uint32_t ceil_div(uint32_t a, uint32_t b) {
     return (a + b - 1) / b;
 }
 
-uint32_t parallel_rank(uint32_t pipeline_rank, uint32_t expert_rank, uint32_t tensor_rank,
-                       uint32_t expert_parallel, uint32_t tp) {
-    return (pipeline_rank * expert_parallel + expert_rank) * tp + tensor_rank;
-}
-
 uint32_t count_attention_layers(const qwen_hybrid::QwenHybridConfig& tc) {
     return static_cast<uint32_t>(qwen_hybrid::count_layer_topology(tc).attention_layers);
 }
@@ -195,20 +190,24 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     if (hipGetDeviceCount(&dev_count) != hipSuccess || dev_count == 0) {
         return Status::invalid_state("no GPU available", __FILE__, __LINE__);
     }
-    const std::size_t parallel_width =
-        static_cast<std::size_t>(config_.pipeline_parallel) *
-        static_cast<std::size_t>(config_.expert_parallel) *
-        static_cast<std::size_t>(config_.tp);
-    if (config_.devices.size() != parallel_width) {
-        return Status::invalid_argument(
-            "--device count must match pipeline_parallel * expert_parallel * tensor_parallel",
-            __FILE__, __LINE__);
-    }
     for (int device : config_.devices) {
         if (device < 0 || device >= dev_count) {
             return Status::out_of_range("device out of range", __FILE__, __LINE__);
         }
     }
+    shelf::runtime::ParallelShape topology_shape;
+    topology_shape.pp = config_.pipeline_parallel;
+    topology_shape.ep = config_.expert_parallel;
+    topology_shape.tp = config_.tp;
+    auto topology_result =
+        shelf::runtime::ParallelTopology::create(topology_shape, config_.devices);
+    if (!topology_result.ok()) {
+        return Status::invalid_argument(
+            (std::string("--device count must match pipeline_parallel * expert_parallel * "
+                         "tensor_parallel: ") + topology_result.status().message()).c_str(),
+            __FILE__, __LINE__);
+    }
+    topology_.emplace(topology_result.release());
 
     hipError_t herr = hipSetDevice(config_.devices[0]);
     if (herr != hipSuccess) {
@@ -647,17 +646,13 @@ Status Qwen35ComputeRuntime::initialize_pipeline_parallel() {
 
     qwen35::runtime::PipelineParallelConfig pp_config;
     pp_config.model_dir = config_.model_dir;
-    if (config_.expert_parallel > 1u || config_.tp > 1u) {
-        std::vector<int> stage_devices;
-        stage_devices.reserve(config_.pipeline_parallel);
-        for (uint32_t stage = 0; stage < config_.pipeline_parallel; ++stage) {
-            stage_devices.push_back(config_.devices[parallel_rank(
-                stage, 0u, 0u, config_.expert_parallel, config_.tp)]);
-        }
-        pp_config.devices = std::move(stage_devices);
-    } else {
-        pp_config.devices = config_.devices;
+    std::vector<int> stage_devices;
+    stage_devices.reserve(config_.pipeline_parallel);
+    for (uint32_t stage = 0; stage < config_.pipeline_parallel; ++stage) {
+        const uint32_t rank = topology_->rank(shelf::runtime::ParallelCoord{stage, 0u, 0u});
+        stage_devices.push_back(topology_->device(rank));
     }
+    pp_config.devices = std::move(stage_devices);
     pp_config.stages = ranges;
     pp_config.max_batch_rows = exec_max_tokens_;
     pp_config.max_scheduled_requests = config_.max_concurrent_requests;
@@ -680,19 +675,17 @@ Status Qwen35ComputeRuntime::initialize_pipeline_parallel() {
     pp_config.load_options.verify_quantized_payload_crc = config_.verify_weights;
     pp_config.build_stage_model = builder_result.value();
 
-    if (config_.tp > 1u) {
+    if (config_.tp > 1u || config_.expert_parallel > 1u) {
         pp_config.stage_tp.resize(config_.pipeline_parallel);
         for (std::uint32_t stage = 0; stage < config_.pipeline_parallel; ++stage) {
             qwen35::runtime::TpCoordinatorConfig tp;
             tp.model_dir = config_.model_dir;
             tp.tensor_parallel = config_.tp;
             tp.expert_parallel = config_.expert_parallel;
-            tp.devices.reserve(static_cast<std::size_t>(config_.expert_parallel) * config_.tp);
-            for (std::uint32_t e = 0; e < config_.expert_parallel; ++e) {
-                for (std::uint32_t t = 0; t < config_.tp; ++t) {
-                    tp.devices.push_back(config_.devices[parallel_rank(
-                        stage, e, t, config_.expert_parallel, config_.tp)]);
-                }
+            const std::vector<std::uint32_t> stage_ranks = topology_->stage_ranks(stage);
+            tp.devices.reserve(stage_ranks.size());
+            for (std::uint32_t rank : stage_ranks) {
+                tp.devices.push_back(topology_->device(rank));
             }
             tp.max_batch_rows = exec_max_tokens_;
             tp.max_scheduled_requests = config_.max_concurrent_requests;

@@ -14,6 +14,7 @@
 #include <shelf/runtime/scheduling_types.h>
 #include <shelf/models/qwen35/runtime/tensor_parallel.h>
 #include <shelf/runtime/state_types.h>
+#include <shelf/runtime/parallel/parallel_topology.h>
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/memory/gpu_memory_manager.h>
 #include <shelf/core/status.h>
@@ -232,6 +233,10 @@ class Qwen35ComputeRuntime {
     bool shutdown_ = false;
     bool auto_arena_ = false;
     std::size_t startup_available_bytes_ = 0;
+
+    // The PP / EP / TP coordinates and device assignment. Every coordinator derives its
+    // rank groups from this one statement.
+    std::optional<::shelf::runtime::ParallelTopology> topology_;
 
     // Outlives every runtime below: they borrow these arenas.
     std::optional<gpu::GpuMemoryManager> memory_;

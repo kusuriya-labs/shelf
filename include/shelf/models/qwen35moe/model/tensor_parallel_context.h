@@ -26,6 +26,7 @@ Result<shelf::qwen_hybrid::TensorParallelContext> make_qwen35moe_tensor_parallel
     std::uint32_t tp_rank,
     std::uint32_t ep_size,
     std::uint32_t ep_rank,
+    bool ep_enabled = false,
     bool vocab_parallel_lm_head = false);
 
 }  // namespace shelf::qwen35moe

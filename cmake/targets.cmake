@@ -179,6 +179,7 @@ add_library(shelf_runtime STATIC
     src/shelf/runtime/graph/primitive_graph.cpp
     src/shelf/runtime/stream_bridge.cpp
     src/shelf/runtime/program/program.cpp
+    src/shelf/runtime/parallel/parallel_topology.cpp
     src/shelf/runtime/tp/tensor_parallel.cpp
     src/shelf/runtime/tp/pipeline_parallel.cpp
     src/shelf/runtime/tp/tp_execution.cpp

@@ -49,7 +49,7 @@ struct TpExecutionSchedule {
 Result<TpExecutionSchedule> build_tp_execution_schedule(
     const PrimitiveGraph& graph,
     const Program& program,
-    std::uint32_t tp_size = 1u,
+    std::uint32_t tp_size = 0u,
     std::uint32_t ep_size = 1u,
     bool ep_enabled = false);
 
