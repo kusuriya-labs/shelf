@@ -1,5 +1,6 @@
 #include <shelf/models/hy4_flash/residency.h>
 #include <shelf/models/hy4_flash/absorbed.h>
+#include <shelf/models/hy4_flash/routes.h>
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -55,7 +56,7 @@ Status Residency::reserve() {
     std::array<int64_t, 4> remaining{};
     for (const auto &row : model.owners)
         for (int r : row) {
-            if (r >= ranks)
+            if (r < 0 || r >= ranks)
                 throw std::runtime_error("配置表の rank が指定 GPU 数を超えています");
             ++used[r];
         }
@@ -156,6 +157,7 @@ void Residency::upload_experts(int r, int layer) {
                                          model.at(name + ".trellis").spec.shape[2] / 16};
             }
         }
+    validate_expert_table(table, model.owners[layer - 1], r);
     check(hipMemcpy(matrices[r] + (layer - 1) * 1536, table.data(), table.size() * sizeof(table[0]),
                     hipMemcpyHostToDevice));
 }

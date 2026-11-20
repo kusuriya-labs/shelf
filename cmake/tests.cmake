@@ -792,6 +792,8 @@ endif()
 
 shelf_add_test(NAME test_token_mask_scheduler SOURCE unit/test_token_mask_scheduler.cpp LABELS "cpu;required" LIBRARIES shelf_qwen35_runtime shelf_qwen35)
 
+shelf_add_test(NAME test_hy4_routes SOURCE unit/test_hy4_routes.cpp LABELS "cpu;required" LIBRARIES shelf_core hip::host)
+
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
     add_test(NAME test_hy4_flash_cpu
