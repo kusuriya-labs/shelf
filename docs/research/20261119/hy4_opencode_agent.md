@@ -34,9 +34,9 @@ Hy4 には GPU を使うコマンドを必ず `with-gpu` 経由で呼ばせる�
 
 ## コンテキストとツール形式
 
-`--max-seq-len` と OpenCode の context 上限はともに 1,048,576、出力上限とサーバーの inference budget は 65,536。1Mi の起動と長い生成は未検証。以前の 8192 token 設定では 3 GPU の予約と短い生成を確認した。OpenCode の通常タスクで送信されたツール定義を含む入力は 2113 token、再起動直後の会話履歴は 2415 token だった。自動 compaction は有効、保持 1024 token、buffer 25% とした。実用上の作業 context は 128k 程度を目安とし、長い出力はファイルに保存する。長い作業での十分性や compaction の品質は未測定。
+`--max-seq-len` と OpenCode の context 上限はともに 1,048,576、出力上限とサーバーの inference budget は 65,536。1Mi の起動と短い生成は実機で確認済み。4096 token の生成も確認済み。以前の 8192 token 設定では 3 GPU の予約と短い生成を確認した。OpenCode の通常タスクで送信されたツール定義を含む入力は 2113 token、再起動直後の会話履歴は 2415 token だった。自動 compaction は有効、保持 1024 token、buffer 25% とした。実用上の作業 context は 128k 程度を目安とし、長い出力はファイルに保存する。長い作業での十分性や compaction の品質は未測定。
 
-Hy4 のテンプレートは `<tool_calls:opensource>` と `<tool_call:opensource>`、`<arg_key:opensource>`、`<arg_value:opensource>` を使う。サーバーは Hy4 のテンプレートへ `tools` と過去のツール結果を渡し、この形式を OpenAI の `tool_calls` に変換する。通常応答と SSE の両方に対応する。SSE の Hy4 ツール応答は生成全体を保持してから返すため、reasoning も逐次表示されない。65,536 token を 50 tok/s で生成すると約 22 分かかるため OpenCode の headerTimeout と chunkTimeout を 30 分に設定する。`tool_choice` の auto / none / required / 指定関数に対応する。strict tools と構造化出力は未対応であり拒否する。
+Hy4 のテンプレートは `<tool_calls:opensource>` と `<tool_call:opensource>`、`<arg_key:opensource>`、`<arg_value:opensource>` を使う。サーバーは Hy4 のテンプレートへ `tools` と過去のツール結果を渡し、この形式を OpenAI の `tool_calls` に変換する。通常応答と SSE の両方に対応する。SSE の Hy4 ツール応答は生成全体を保持してから返すため、reasoning も逐次表示されない。実測の約 26 tok/s で 65,536 token を生成すると約 42 分かかり、prefill の時間も必要なため OpenCode の headerTimeout と chunkTimeout を 2 時間に設定する。`tool_choice` の auto / none / required / 指定関数に対応する。strict tools と構造化出力は未対応であり拒否する。
 
 ## 実測
 
@@ -73,3 +73,7 @@ compute には `SHELF_HY4_SNAPSHOT=1` を設定する。通常停止および `w
 同じ 5,189 token のリクエストで、保存 payload の fingerprint を変更して checksum を再計算した場合は fingerprint 不一致として拒否され、通常 prefill は 10.157 秒だった。状態サーバーを停止した場合も接続失敗から通常 prefill に戻り 9.930 秒だった。どちらも snapshot なしの対照と生成テキストが一致した。専用の 32 MiB 状態サーバーを使った RDMA 単体テストでは、往復、容量超過の拒否と旧世代の保持、世代切り替えが成功した。
 
 統合版の実機では、状態サーバー停止中の退避が HTTP 503 となっても GPU コマンドを続行し、コマンド失敗の終了コード 37、クライアントへの SIGTERM の終了コード 143、およびそれぞれの後のサーバー復帰を確認した。制御・ツール変換・snapshot HTTP の Python テストと CTest の CPU テストも成功した。実際の SIGSEGV や core は発生していないため、core 取得と gdb の連携は模擬コマンドによる確認に限る。
+
+### 1Mi 設定の実測
+
+2026-11-20、ROCm alternatives は 10.2 の状態で、7.14 build の `hy4-llm start` を 3 個の GPU ロック下で実行した。1,048,576 token でモデル一覧と短い生成のヘルスチェックが完了し、サーバー起動から 304.52 秒だった。起動直後の VRAM 使用量は R9700（PCI 07:00.0）34,194,051,072 byte、V620（43:00.0）27,301,666,816 byte、V620（03:00.0）27,295,326,208 byte。R9700 の空きは極めて少ない。実行中の compute の HIP・HSA 等は `/opt/rocm/core-7.14` から読み込まれ、起動に追加のライブラリパス固定は不要だった。72 token の入力から `max_tokens=4096` を指定した生成は 157.57 秒で 4096 token を返し、終了理由は `length` だった。decode は 4095 token / 157.18 秒（約 26.05 tok/s）。
