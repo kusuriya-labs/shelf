@@ -477,6 +477,9 @@ def start():
         launch = subprocess.run(['systemd-run', '--user', '--quiet', '--collect', '--unit', unit,
                                  '-p', f'WorkingDirectory={ROOT}', '-p', 'KillMode=mixed', '-p', 'TimeoutStopSec=600',
                                  '-p', f'StandardOutput=append:{logfile}', '-p', f'StandardError=append:{logfile}',
+                                 *[f'--property=Limit{n}={"infinity" if v == resource.RLIM_INFINITY else v}'
+                                   for n, v in (('NOFILE', resource.getrlimit(resource.RLIMIT_NOFILE)[0]),
+                                                ('MEMLOCK', resource.getrlimit(resource.RLIMIT_MEMLOCK)[0]))],
                                  *[f'--setenv={k}' for k in names],
                                  sys.executable, str(Path(__file__).resolve()), 'manager'])
         if launch.returncode:
