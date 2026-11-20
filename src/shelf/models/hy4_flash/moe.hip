@@ -1,8 +1,8 @@
 #include <shelf/models/hy4_flash/decoder.h>
+#include <shelf/models/hy4_flash/routes.h>
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/decode.h>
 #include <algorithm>
 #include <cstring>
-#include <numeric>
 
 namespace shelf::hy4 {
 namespace {
@@ -97,14 +97,7 @@ Mat moe(Ops &op, int layer, Mat x) {
     op.copy(host.data(), picks, host.size() * sizeof(Hy4Route), hipMemcpyDeviceToHost);
     std::array<std::vector<Hy4Route>, 4> routes;
     std::array<std::vector<int>, 4> offsets;
-    for (int row = 0; row < x.rows; ++row) {
-        for (int r = 0; r < op.gpu.ranks; ++r)
-            offsets[r].push_back(routes[r].size());
-        auto first = host.begin() + row * 16;
-        std::sort(first, first + 16, [](const auto &a, const auto &b) { return a.expert < b.expert; });
-        for (auto it = first; it != first + 16; ++it)
-            routes[op.gpu.model.owners[layer - 1][it->expert]].push_back(*it);
-    }
+    partition_routes(host, x.rows, op.gpu.model.owners[layer - 1], op.gpu.ranks, routes, offsets);
     std::array<Mat, 4> result{};
     for (int iteration = 0; iteration < op.gpu.ranks; ++iteration) {
         int r = (iteration + 1) % op.gpu.ranks;
@@ -123,23 +116,7 @@ Mat moe(Ops &op, int layer, Mat x) {
         op.gpu.routed_rows[r] += count;
         std::vector<Hy4ExpertBatch> groups;
         std::vector<int> undo;
-        {
-            auto &route = routes[r];
-            std::vector<int> order(count);
-            undo.resize(count);
-            std::iota(order.begin(), order.end(), 0);
-            std::stable_sort(order.begin(), order.end(),
-                             [&](int i, int j) { return route[i].expert < route[j].expert; });
-            std::vector<Hy4Route> sorted(count);
-            for (int j = 0; j < count; ++j) {
-                sorted[j] = route[order[j]];
-                undo[order[j]] = j;
-                if (!j || sorted[j - 1].expert != sorted[j].expert || groups.back().count == 16)
-                    groups.push_back({j, 0});
-                ++groups.back().count;
-            }
-            route.swap(sorted);
-        }
+        group_routes(routes[r], undo, groups);
         offsets[r].push_back(count);
         size_t route_bytes = count * sizeof(Hy4Route), offset_bytes = offsets[r].size() * sizeof(int);
         size_t undo_bytes = undo.size() * sizeof(int), group_bytes = groups.size() * sizeof(Hy4ExpertBatch);
