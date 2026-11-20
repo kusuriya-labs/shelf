@@ -15,6 +15,7 @@
 #include <shelf/models/qwen35/runtime/tensor_parallel.h>
 #include <shelf/runtime/state_types.h>
 #include <shelf/core/memory/arena.h>
+#include <shelf/core/memory/gpu_memory_manager.h>
 #include <shelf/core/status.h>
 #include <hip/hip_runtime.h>
 
@@ -232,6 +233,9 @@ class Qwen35ComputeRuntime {
     bool auto_arena_ = false;
     std::size_t startup_available_bytes_ = 0;
 
+    // Outlives every runtime below: they borrow these arenas.
+    std::optional<gpu::GpuMemoryManager> memory_;
+
     // The tensor parallel group owns the ranks, their weights and the loaded-model handle.
     // tp_coordinator_ is a handle into it, so it is cleared before the group is.
     std::unique_ptr<shelf::models::TpGroup> tp_group_;
@@ -246,7 +250,7 @@ class Qwen35ComputeRuntime {
     hipStream_t tp_stream_ = nullptr;
 
     hipStream_t stream_ = nullptr;
-    std::optional<gpu::GpuArena> arena_;
+    gpu::GpuArena* arena_ = nullptr;
     std::unique_ptr<shelf::models::LoadedModel> model_;
     std::optional<state::SequenceSlotPool> slot_pool_;
     std::optional<state::GdnStatePool> gdn_pool_;

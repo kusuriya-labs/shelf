@@ -257,7 +257,6 @@ inline RunResult run_dflash2_tp2(const DFlash2Options& opts) {
         static_cast<std::uint32_t>(dflash_config.block_size);
     config.max_seq_len = o.max_seq_len;
     config.page_tokens = o.page_tokens;
-    config.arena_bytes = o.arena_bytes;
     config.working_set_reserve_bytes = 256ull * 1024ull * 1024ull;
     for (std::size_t i = 0; i < o.taps.size() && i < kMaxTargetHiddenTaps; ++i) {
         config.target_hidden_taps[i] = static_cast<std::uint32_t>(o.taps[i]);
@@ -267,6 +266,13 @@ inline RunResult run_dflash2_tp2(const DFlash2Options& opts) {
     config.load_options.verify_quantized_payload_crc = o.verify_crc;
 
     config.build_rank_model = &build_dense_tp_rank_model;
+    auto memory_result = gpu::GpuMemoryManager::create(config.devices, o.arena_bytes);
+    if (!memory_result.ok()) {
+        result.error = "dflash2 memory manager: " + memory_result.status().message();
+        return result;
+    }
+    gpu::GpuMemoryManager memory = memory_result.release();
+    config.memory = &memory;
     auto coordinator_result = TpCoordinator::create(config);
     if (!coordinator_result.ok()) {
         result.error = "dflash2 tp2 coordinator: " + coordinator_result.status().message();

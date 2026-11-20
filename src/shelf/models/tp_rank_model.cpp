@@ -763,9 +763,10 @@ Result<std::unique_ptr<TpRankModel>> build_qwen35qsa_tp_rank_model(
     const q35r::TpRankRuntimeConfig& config, gpu::GpuArena& arena, hipStream_t stream) {
     auto text_config = qwen35qsa::read_qwen35qsa_text_config(config.model_dir);
     if (!text_config.ok()) return text_config.status();
+    qwen35qsa::Qwen35QsaLoadOptions load_options(config.load_options);
+    load_options.stage = config.pipeline_stage;
     auto model = qwen35qsa::Qwen35QsaModel::load_tensor_parallel_from_safetensors(
-        config.model_dir, config.tp_size, config.tp_rank, arena, stream,
-        config.load_options);
+        config.model_dir, config.tp_size, config.tp_rank, arena, stream, load_options);
     if (!model.ok()) return model.status();
 
     auto context = q35::make_qwen35_tensor_parallel_context(

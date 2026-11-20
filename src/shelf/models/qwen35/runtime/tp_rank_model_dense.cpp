@@ -92,8 +92,10 @@ private:
 
 Result<std::unique_ptr<shelf::models::TpRankModel>> build_dense_tp_rank_model(
     const TpRankRuntimeConfig& config, gpu::GpuArena& arena, hipStream_t stream) {
+    Qwen35LoadOptions load_options(config.load_options);
+    load_options.stage = config.pipeline_stage;
     auto model_result = Qwen35Model::load_tensor_parallel_from_safetensors(
-        config.model_dir, config.tp_size, config.tp_rank, arena, stream, config.load_options);
+        config.model_dir, config.tp_size, config.tp_rank, arena, stream, load_options);
     if (!model_result.ok()) return model_result.status();
 
     auto context_result = make_qwen35_tensor_parallel_context(

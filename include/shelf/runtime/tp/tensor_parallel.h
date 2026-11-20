@@ -1,6 +1,7 @@
 #pragma once
 
 #include <shelf/core/memory/arena.h>
+#include <shelf/core/memory/gpu_memory_manager.h>
 #include <shelf/models/common/qwen_hybrid/weight_loader.h>
 #include <shelf/runtime/dflash2_config.h>
 #include <shelf/models/common/qwen_hybrid/tensor_parallel_context.h>
@@ -95,8 +96,9 @@ struct TpRankRuntimeConfig {
     std::uint32_t page_tokens = 16;
     KVCacheDType kv_cache_dtype = KVCacheDType::BF16;
     ::shelf::kernel::OctaveKVCacheFormat octave_kv_format{};
-    std::size_t arena_bytes = 16ull * 1024ull * 1024ull * 1024ull;
+    gpu::GpuArena* arena = nullptr;
     std::size_t working_set_reserve_bytes = 0;
+    std::uint32_t kv_pool_pages = 0;
     const DFlash2Config* drafter_config = nullptr;
     std::size_t drafter_weights_bytes = 0;
     std::uint32_t drafter_drafts = 0;
@@ -143,7 +145,7 @@ public:
 
     int device_id() const noexcept { return device_id_; }
     hipStream_t stream() const noexcept { return stream_; }
-    gpu::GpuArena& arena() { return arena_.value(); }
+    gpu::GpuArena& arena() { return *arena_; }
     // The rank's model, which owns the weights and states the rank's local geometry.
     const shelf::models::TpRankModel* rank_model() const;
     // The dense family's model. Null for a model whose FFN runs on grouped expert rows.
@@ -169,7 +171,7 @@ private:
 
     int device_id_ = -1;
     hipStream_t stream_ = nullptr;
-    std::optional<gpu::GpuArena> arena_;
+    gpu::GpuArena* arena_ = nullptr;
     std::unique_ptr<shelf::models::TpRankModel> model_;
     std::optional<SequenceSlotPool> seq_pool_;
     std::optional<GdnStatePool> gdn_pool_;
@@ -203,8 +205,9 @@ struct TpCoordinatorConfig {
     std::uint32_t page_tokens = 16;
     KVCacheDType kv_cache_dtype = KVCacheDType::BF16;
     ::shelf::kernel::OctaveKVCacheFormat octave_kv_format{};
-    std::size_t arena_bytes = 16ull * 1024ull * 1024ull * 1024ull;
+    gpu::GpuMemoryManager* memory = nullptr;
     std::size_t working_set_reserve_bytes = 0;
+    std::uint32_t kv_pool_pages = 0;
     const DFlash2Config* drafter_config = nullptr;
     std::size_t drafter_weights_bytes = 0;
     std::uint32_t drafter_drafts = 0;

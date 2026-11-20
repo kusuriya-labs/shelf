@@ -17,6 +17,7 @@ add_library(shelf_gpu STATIC
     src/shelf/core/memory/tensor.cpp
     src/shelf/core/gpu/scoped_device.cpp
     src/shelf/core/memory/arena.hip
+    src/shelf/core/memory/gpu_memory_manager.hip
 )
 target_compile_features(shelf_gpu PRIVATE cxx_std_20)
 target_include_directories(shelf_gpu PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")

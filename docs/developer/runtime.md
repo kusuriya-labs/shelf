@@ -88,7 +88,23 @@ shelf::qwen35::execute_batch(executor, batch, stream)
 `PrefixCache` は非所有ポインタ参照である（`set_prefix_cache` で渡し、
 所有権は compute アプリに残す）。
 destroy順序は app が決定的に管理（executor shutdown → `PrefixCache::shutdown` →
-arena shutdown）。`PrefixCache::shutdown` は必ず arena より前に実行する。
+coordinator/executor の破棄 → `GpuMemoryManager::shutdown`）。
+`PrefixCache::shutdown` は必ず arena より前に実行する。
+
+## GpuMemoryManager
+
+`GpuMemoryManager` は physical device ごとに 1 つの `GpuArena` を所有し、
+PP / EP / TP の実行者へ貸し出す。実行者は arena を生成も破棄もしない。
+
+- `GpuMemoryManager::create(devices, capacity_bytes)` が全 arena をまとめて生成する。
+  `capacity_bytes == 0` は device ごとの空き VRAM から 0.5 GiB を引いた auto。
+- `arena_for(device)` は所有権を移さない `GpuArena*` を返す。
+- `shutdown()` は生成順に全 arena を解放し、最初の失敗を返す。
+- `TpRankRuntime` / `TpCoordinator` / `PipelineStageRuntime` /
+  `PipelineParallelCoordinator` は config で受け取った arena / manager だけを使う。
+  `GpuArena::create()` は `GpuMemoryManager` だけが呼ぶ。
+- manager は coordinator と executor より長生きしなければならない。
+  compute は全 executor / coordinator を破棄した後に `shutdown()` を呼ぶ。
 
 ## GpuArena
 
@@ -105,9 +121,10 @@ allocationのlifetimeを追跡しないため）。
 
 ### arena budget
 
-`Qwen35RuntimeConfig::arena_bytes == 0` は auto である。compute は `hipMemGetInfo`
-を model load 前に 1 回呼び、空き VRAM から 0.5 GiB を引いた値を arena の容量に
-する。TP でも rank ごとに別の値を問い合わせず、この容量を全 rank が使う。
+`Qwen35RuntimeConfig::arena_bytes == 0` は auto である。compute は起動時に
+`GpuMemoryManager` を作り、manager が device ごとに `hipMemGetInfo` を 1 回呼んで
+空き VRAM から 0.5 GiB を引いた値を arena の容量にする。同じ容量が PP / TP の
+全 stage / rank に貸し出される（device ごとの空きが違えば容量も違う）。
 
 起動時 plan は stderr にだけ出す（`--serve-stdio` の stdout を汚さない）。
 

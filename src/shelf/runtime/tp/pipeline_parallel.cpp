@@ -5,6 +5,7 @@
 #include <shelf/core/memory/size_format.h>
 #include <shelf/runtime/gdn_state_layout.h>
 #include <shelf/models/pipeline_stage_model.h>
+#include <shelf/models/tp_rank_model.h>
 #include <shelf/runtime/executor_footprint.h>
 #include <shelf/weights/weight_bytes.h>
 #include <shelf/runtime/execution/row_bucket.h>
@@ -41,7 +42,7 @@ PipelineStageRuntime::~PipelineStageRuntime() noexcept {
         executor_shutdown(executor_);
         executor_ready_ = false;
     }
-    if (stream_ != nullptr) {
+    if (tp_ == nullptr && stream_ != nullptr) {
         shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream_));
         stream_ = nullptr;
     }
@@ -65,47 +66,39 @@ Result<std::unique_ptr<PipelineStageRuntime>> PipelineStageRuntime::create(
     stage->device_id_ = config.device_id;
     stage->stage_ = config.stage;
 
+    if (!config.tp.devices.empty()) {
+        TpCoordinatorConfig tp_config = config.tp;
+        tp_config.pipeline_stage = config.stage;
+        if (tp_config.build_rank_model == nullptr) {
+            Status selected = shelf::models::select_tp_rank_model(tp_config);
+            if (!selected.ok()) return selected;
+        }
+        auto tp_result = TpCoordinator::create(tp_config);
+        if (!tp_result.ok()) return tp_result.status();
+        stage->tp_ = tp_result.release();
+        stage->device_id_ = stage->tp_->rank(0).device_id();
+        stage->stream_ = stage->tp_->rank(0).stream();
+        return stage;
+    }
+
     const hipError_t stream_err = hipStreamCreate(&stage->stream_);
     if (stream_err != hipSuccess) {
         return Status::hip_error("hipStreamCreate pipeline stage",
                                  hipGetErrorString(stream_err), __FILE__, __LINE__);
     }
 
-    std::size_t arena_budget = config.arena_bytes;
-    if (arena_budget == 0) {
-        std::size_t free_bytes = 0;
-        std::size_t total_bytes = 0;
-        const hipError_t info_err = hipMemGetInfo(&free_bytes, &total_bytes);
-        if (info_err != hipSuccess) {
-            return Status::hip_error("hipMemGetInfo pipeline stage",
-                                     hipGetErrorString(info_err), __FILE__, __LINE__);
-        }
-        constexpr std::size_t kMarginBytes = 1ull * 1024ull * 1024ull * 1024ull;
-        const std::size_t available = free_bytes > kMarginBytes
-            ? free_bytes - kMarginBytes
-            : free_bytes / 2u;
-        if (available == 0) {
-            return Status::insufficient_memory(
-                "no VRAM available for the pipeline stage arena", __FILE__, __LINE__);
-        }
-        arena_budget = available;
-        std::fprintf(stderr,
-                     "ARENA auto: pipeline stage %u..%u device=%d free=%s capacity=%s\n",
-                     config.stage.layers.layer_lo, config.stage.layers.layer_hi,
-                     config.device_id, gpu::format_gib(free_bytes).c_str(),
-                     gpu::format_gib(arena_budget).c_str());
+    if (config.arena == nullptr) {
+        return Status::invalid_argument(
+            "pipeline stage requires a borrowed arena", __FILE__, __LINE__);
     }
-
-    auto arena_result = gpu::GpuArena::create(config.device_id, arena_budget);
-    if (!arena_result.ok()) return arena_result.status();
-    stage->arena_.emplace(arena_result.release());
+    stage->arena_ = config.arena;
 
     if (config.build_stage_model == nullptr) {
         return Status::invalid_argument("pipeline stage runtime needs a stage model builder",
                                         __FILE__, __LINE__);
     }
     auto model_result = config.build_stage_model(config.model_dir, config.stage,
-                                                 stage->arena_.value(), stage->stream_,
+                                                 *stage->arena_, stage->stream_,
                                                  config.load_options);
     if (!model_result.ok()) return model_result.status();
     stage->model_ = std::move(model_result.value());
@@ -133,11 +126,11 @@ Result<std::unique_ptr<PipelineStageRuntime>> PipelineStageRuntime::create(
     if (!gdn_layout_result.ok()) return gdn_layout_result.status();
 
     auto seq_result = SequenceSlotPool::create(
-        stage->arena_.value(), config.max_scheduled_requests, max_blocks_per_sequence);
+        *stage->arena_, config.max_scheduled_requests, max_blocks_per_sequence);
     if (!seq_result.ok()) return seq_result.status();
     stage->seq_pool_.emplace(seq_result.release());
 
-    auto gdn_result = GdnStatePool::create(stage->arena_.value(),
+    auto gdn_result = GdnStatePool::create(*stage->arena_,
                                            config.max_scheduled_requests,
                                            gdn_layout_result.value());
     if (!gdn_result.ok()) return gdn_result.status();
@@ -211,7 +204,7 @@ Result<std::unique_ptr<PipelineStageRuntime>> PipelineStageRuntime::create(
         kv_pool_pages = fit_pages + 1u;
     }
     auto kv_result = PagedKVPool::create(
-        stage->arena_.value(), kv_pool_pages, config.page_tokens, attention_layers,
+        *stage->arena_, kv_pool_pages, config.page_tokens, attention_layers,
         kv_heads, head_dim, config.kv_cache_dtype, config.octave_kv_format);
     if (!kv_result.ok()) return kv_result.status();
     stage->kv_pool_.emplace(kv_result.release());
@@ -219,7 +212,7 @@ Result<std::unique_ptr<PipelineStageRuntime>> PipelineStageRuntime::create(
     const std::size_t executor_before = stage->arena_->used();
     auto exec_result = stage->model_->create_executor(
         stage->seq_pool_.value(), stage->gdn_pool_.value(), stage->kv_pool_.value(),
-        stage->arena_.value(), exec_config);
+        *stage->arena_, exec_config);
     std::fprintf(stderr,
                  "MEMORY_PLAN pipeline stage %u..%u device=%d executor footprint: %s\n",
                  config.stage.layers.layer_lo, config.stage.layers.layer_hi,
@@ -233,7 +226,21 @@ Result<std::unique_ptr<PipelineStageRuntime>> PipelineStageRuntime::create(
 }
 
 std::uint32_t PipelineStageRuntime::kv_pool_pages() const {
+    if (tp_) return const_cast<TpCoordinator*>(tp_.get())->rank(0).kv_pool().num_pages();
     return kv_pool_ ? kv_pool_->num_pages() : 0u;
+}
+
+const shelf::qwen_hybrid::QwenHybridConfig& PipelineStageRuntime::hybrid_config() const {
+    if (tp_) return const_cast<TpCoordinator*>(tp_.get())->rank(0).hybrid_config();
+    return model_->hybrid_config();
+}
+
+std::size_t PipelineStageRuntime::host_pinned_bytes() const {
+    if (tp_) {
+        const auto* rank_model = const_cast<TpCoordinator*>(tp_.get())->rank(0).rank_model();
+        return rank_model != nullptr ? rank_model->host_pinned_bytes() : 0u;
+    }
+    return model_->host_pinned_bytes();
 }
 
 PipelineParallelCoordinator::~PipelineParallelCoordinator() noexcept {
@@ -276,14 +283,23 @@ Result<std::unique_ptr<PipelineParallelCoordinator>> PipelineParallelCoordinator
 
 Status PipelineParallelCoordinator::initialize(const PipelineParallelConfig& config) {
     devices_ = config.devices;
+    if (config.memory == nullptr) {
+        return Status::invalid_argument(
+            "pipeline coordinator requires a GpuMemoryManager", __FILE__, __LINE__);
+    }
 
     std::uint32_t kv_pages = 0;
     stages_.reserve(config.stages.size());
     for (std::size_t i = 0; i < config.stages.size(); ++i) {
+        auto arena = config.memory->arena_for(config.devices[i]);
+        if (!arena.ok()) return arena.status();
         PipelineStageRuntimeConfig stage_config;
         stage_config.model_dir = config.model_dir;
         stage_config.stage.enabled = true;
         stage_config.stage.layers = config.stages[i];
+        if (i < config.stage_tp.size()) stage_config.tp = config.stage_tp[i];
+        stage_config.arena = arena.value();
+        stage_config.tp.memory = config.memory;
         stage_config.device_id = config.devices[i];
         stage_config.max_batch_rows = config.max_batch_rows;
         stage_config.max_scheduled_requests = config.max_scheduled_requests;
@@ -292,9 +308,12 @@ Status PipelineParallelCoordinator::initialize(const PipelineParallelConfig& con
         stage_config.page_tokens = config.page_tokens;
         stage_config.kv_cache_dtype = config.kv_cache_dtype;
         stage_config.octave_kv_format = config.octave_kv_format;
-        stage_config.arena_bytes = config.arena_bytes;
         stage_config.working_set_reserve_bytes = config.working_set_reserve_bytes;
         stage_config.kv_pool_pages = i == 0 ? 0u : kv_pages;
+        if (!stage_config.tp.devices.empty() && i != 0 &&
+            stage_config.tp.kv_pool_pages == 0u) {
+            stage_config.tp.kv_pool_pages = kv_pages;
+        }
         stage_config.rope_profile = config.rope_profile;
         stage_config.load_options = config.load_options;
         stage_config.build_stage_model = config.build_stage_model;
@@ -305,7 +324,7 @@ Status PipelineParallelCoordinator::initialize(const PipelineParallelConfig& con
     }
 
     const shelf::qwen_hybrid::QwenHybridConfig& tc =
-        stages_.front()->model().hybrid_config();
+        stages_.front()->hybrid_config();
     hidden_size_ = config.pipeline_hidden_width != 0u
         ? config.pipeline_hidden_width
         : static_cast<std::uint32_t>(tc.hidden_size);
@@ -350,6 +369,10 @@ Status PipelineParallelCoordinator::on_sequence_created(const PagedSequenceState
         return Status::invalid_state("pipeline mirror sequence already exists",
                                      __FILE__, __LINE__);
     }
+    if (stages_[0]->tp() != nullptr) {
+        Status st = stages_[0]->tp()->on_sequence_created(source);
+        if (!st.ok()) return st;
+    }
     MirrorSequences mirror;
     mirror.states.reserve(stages_.size() - 1);
     for (std::size_t i = 1; i < stages_.size(); ++i) {
@@ -367,6 +390,13 @@ Status PipelineParallelCoordinator::on_sequence_created(const PagedSequenceState
             return created.status();
         }
         PagedSequenceState state = created.release();
+        if (stage.tp() != nullptr) {
+            Status st = stage.tp()->on_sequence_created(state);
+            if (!st.ok()) {
+                mirror.states.clear();
+                return st;
+            }
+        }
         if (::shelf::runtime::request_handle_key(state.request_handle()) != key) {
             mirror.states.clear();
             return Status::invalid_state(
@@ -386,12 +416,20 @@ Status PipelineParallelCoordinator::on_sequence_released(const PagedSequenceStat
                                      __LINE__);
     }
     Status first_error = Status::make_ok();
+    if (stages_[0]->tp() != nullptr) {
+        Status st = stages_[0]->tp()->on_sequence_released(source);
+        if (!st.ok()) first_error = st;
+    }
     for (std::size_t i = 1; i < stages_.size(); ++i) {
         PipelineStageRuntime& stage = *stages_[i];
         auto scope = shelf::gpu::ScopedDevice::create(stage.device_id());
         if (!scope.ok()) {
             if (first_error.ok()) first_error = scope.status();
             continue;
+        }
+        if (stage.tp() != nullptr) {
+            Status st = stage.tp()->on_sequence_released(it->second.states[i - 1]);
+            if (!st.ok() && first_error.ok()) first_error = st;
         }
         Status st = release_paged_sequence_state(
             it->second.states[i - 1], stage.stream());
@@ -583,15 +621,32 @@ Status PipelineParallelCoordinator::run_stage(
                                          __FILE__, __LINE__);
         }
         const std::size_t bytes = rows * hidden_size_ * sizeof(uint16_t);
-        hipError_t err = hipMemcpyAsync(
-            const_cast<void*>(stage.executor().pipeline_input_hidden.data()),
-            input_hidden, bytes, hipMemcpyHostToDevice, stage.stream());
-        if (err != hipSuccess) {
-            return Status::hip_error("pipeline hidden copy H2D",
-                                     hipGetErrorString(err), __FILE__, __LINE__);
+        if (stage.tp() != nullptr) {
+            for (int r = 0; r < stage.tp()->tp_size(); ++r) {
+                TpRankRuntime& rank = stage.tp()->rank(static_cast<std::size_t>(r));
+                auto rank_scope = shelf::gpu::ScopedDevice::create(rank.device_id());
+                if (!rank_scope.ok()) return rank_scope.status();
+                hipError_t err = hipMemcpyAsync(
+                    const_cast<void*>(rank.executor().pipeline_input_hidden.data()),
+                    input_hidden, bytes, hipMemcpyHostToDevice, rank.stream());
+                if (err != hipSuccess) {
+                    return Status::hip_error("pipeline hidden copy H2D",
+                                             hipGetErrorString(err), __FILE__, __LINE__);
+                }
+            }
+        } else {
+            hipError_t err = hipMemcpyAsync(
+                const_cast<void*>(stage.executor().pipeline_input_hidden.data()),
+                input_hidden, bytes, hipMemcpyHostToDevice, stage.stream());
+            if (err != hipSuccess) {
+                return Status::hip_error("pipeline hidden copy H2D",
+                                         hipGetErrorString(err), __FILE__, __LINE__);
+            }
         }
     }
-    auto result = execute_batch(stage.executor(), batch, stage.stream());
+    auto result = stage.tp() != nullptr
+        ? stage.tp()->on_execute(batch)
+        : execute_batch(stage.executor(), batch, stage.stream());
     if (!result.ok()) return result.status();
     output = result.release();
     return Status::make_ok();
@@ -606,7 +661,10 @@ std::string PipelineParallelCoordinator::debug_report() const {
             << " device=" << stage.device_id()
             << " layers=[" << stage.stage().layers.layer_lo << ","
             << stage.stage().layers.layer_hi << ")"
-            << " weight_bytes=" << stage.model().weight_bytes()
+            << " weight_bytes="
+            << (stage.tp() != nullptr
+                    ? const_cast<TpCoordinator*>(stage.tp())->rank(0).weight_bytes()
+                    : stage.model().weight_bytes())
             << " kv_pages=" << stage.kv_pool_pages() << "\n";
     }
     return out.str();

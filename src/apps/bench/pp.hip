@@ -1,5 +1,6 @@
 
 #include <shelf/core/memory/arena.h>
+#include <shelf/core/memory/gpu_memory_manager.h>
 #include <shelf/runtime/execution/row_bucket.h>
 #include <shelf/models/loaded_model.h>
 #include <shelf/models/tp_rank_model.h>
@@ -468,6 +469,7 @@ int run_pp(int argc, char** argv) {
     }
 
     hipStream_t stream = nullptr;
+    std::unique_ptr<shelf::gpu::GpuMemoryManager> tp_memory;
     std::unique_ptr<shelf::qwen35::runtime::TpCoordinator> tp_coordinator;
     std::optional<shelf::gpu::GpuArena> tp1_arena;
     std::optional<shelf::models::LoadedModel> tp1_loaded;
@@ -572,7 +574,14 @@ int run_pp(int argc, char** argv) {
                                     : opts.kv_cache_dtype == "fp8"
                                           ? shelf::kernel::KVCacheDType::FP8_E4M3
                                           : shelf::kernel::KVCacheDType::BF16;
-        tp_cfg.arena_bytes = arena_bytes;
+        auto memory_result = shelf::gpu::GpuMemoryManager::create(opts.devices, arena_bytes);
+        if (!memory_result.ok()) {
+            fprintf(stderr, "GpuMemoryManager::create failed: %s\n",
+                    memory_result.status().message().c_str());
+            return 1;
+        }
+        tp_memory = std::make_unique<shelf::gpu::GpuMemoryManager>(memory_result.release());
+        tp_cfg.memory = tp_memory.get();
         tp_cfg.working_set_reserve_bytes = 0;
         shelf::Status sel = shelf::models::select_tp_rank_model(tp_cfg);
         if (!sel.ok()) {

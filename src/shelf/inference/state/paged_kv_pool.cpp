@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 namespace shelf {
 namespace state {
@@ -220,14 +221,14 @@ Result<PagedKVPool> PagedKVPool::create(
     }
 
     pool.in_use_.assign(num_pages, false);
-    pool.free_list_.reserve(num_pages);
+    pool.free_list_.resize(num_pages);
     pool.seq_refs_.assign(num_pages, 0);
     pool.cache_refs_.assign(num_pages, 0);
     pool.page_state_.assign(num_pages, kPageFree);
     pool.free_pos_.assign(num_pages, 0);
     pool.cached_pos_.assign(num_pages, 0);
     for (uint32_t i = 0; i < num_pages; ++i) {
-        pool.free_list_.push_back(i);
+        pool.free_list_[i] = i;
         pool.free_pos_[i] = i;
     }
 
@@ -236,6 +237,12 @@ Result<PagedKVPool> PagedKVPool::create(
 
 void PagedKVPool::free_remove(PageId page) {
     const uint32_t pos = free_pos_[page];
+    if (pos >= free_list_.size() || free_list_[pos] != page) {
+        std::fprintf(stderr,
+                     "KV_POOL free_remove inconsistent page=%u pos=%u size=%zu\n",
+                     page, pos, free_list_.size());
+        return;
+    }
     const PageId last = free_list_.back();
     free_list_[pos] = last;
     free_pos_[last] = pos;
@@ -245,6 +252,12 @@ void PagedKVPool::free_remove(PageId page) {
 
 void PagedKVPool::cached_remove(PageId page) {
     const uint32_t pos = cached_pos_[page];
+    if (pos >= cached_list_.size() || cached_list_[pos] != page) {
+        std::fprintf(stderr,
+                     "KV_POOL cached_remove inconsistent page=%u pos=%u size=%zu\n",
+                     page, pos, cached_list_.size());
+        return;
+    }
     const PageId last = cached_list_.back();
     cached_list_[pos] = last;
     cached_pos_[last] = pos;

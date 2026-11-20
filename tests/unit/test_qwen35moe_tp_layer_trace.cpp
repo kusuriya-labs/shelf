@@ -377,10 +377,17 @@ RunResult run_rank(const std::string& model_dir, int device, std::uint32_t tp_si
     config.max_seq_len = ctx + 8u;
     config.page_tokens = 16u;
     config.kv_cache_dtype = shelf::kernel::KVCacheDType::BF16;
-    config.arena_bytes = 0u;
     // A fixed working-set reserve: the auto estimate competes with a 23 GiB checkpoint for the
     // last hundred MiB of one GPU, and the trace run only needs `ctx` tokens of history.
     config.working_set_reserve_bytes = 2ull * 1024ull * 1024ull * 1024ull;
+
+    auto memory_result = gpu::GpuMemoryManager::create({device}, 0u);
+    if (!memory_result.ok()) {
+        result.error = "memory manager: " + memory_result.status().message();
+        return result;
+    }
+    gpu::GpuMemoryManager memory = memory_result.release();
+    config.arena = memory.arena_for(device).value();
 
     auto rank_result = q35r::TpRankRuntime::create(config);
     if (!rank_result.ok()) {

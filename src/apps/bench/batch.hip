@@ -1,4 +1,5 @@
 #include <shelf/core/memory/arena.h>
+#include <shelf/core/memory/gpu_memory_manager.h>
 #include <shelf/models/loaded_model.h>
 #include <shelf/models/model_weights_factory.h>
 #include <shelf/models/tp_rank_model.h>
@@ -257,6 +258,7 @@ int run_batch(int argc, char** argv) {
     std::unique_ptr<shelf::state::GdnStatePool> tp1_gdn_pool;
     std::unique_ptr<shelf::state::PagedKVPool> tp1_kv_pool;
     std::unique_ptr<shelf::qwen35::Executor> tp1_executor;
+    std::unique_ptr<shelf::gpu::GpuMemoryManager> tp_memory;
     std::unique_ptr<shelf::qwen35::runtime::TpCoordinator> tp_coordinator;
     shelf::state::SequenceSlotPool* seq_pool = nullptr;
     shelf::state::GdnStatePool* gdn_pool = nullptr;
@@ -331,7 +333,14 @@ int run_batch(int argc, char** argv) {
         tp_cfg.max_seq_len = seq_len;
         tp_cfg.page_tokens = static_cast<uint32_t>(opts.page_tokens);
         tp_cfg.kv_cache_dtype = shelf::kernel::KVCacheDType::BF16;
-        tp_cfg.arena_bytes = arena_bytes;
+        auto memory_result = shelf::gpu::GpuMemoryManager::create(opts.devices, arena_bytes);
+        if (!memory_result.ok()) {
+            fprintf(stderr, "GpuMemoryManager::create failed: %s\n",
+                    memory_result.status().message().c_str());
+            return 1;
+        }
+        tp_memory = std::make_unique<shelf::gpu::GpuMemoryManager>(memory_result.release());
+        tp_cfg.memory = tp_memory.get();
         tp_cfg.working_set_reserve_bytes = 0;
         shelf::Status sel = shelf::models::select_tp_rank_model(tp_cfg);
         if (!sel.ok()) {

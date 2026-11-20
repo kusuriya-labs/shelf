@@ -7,6 +7,7 @@
 #include <shelf/runtime/execution/row_bucket.h>
 #include <shelf/models/common/qwen_hybrid/stage_range.h>
 #include <shelf/models/pipeline_stage_model.h>
+#include <shelf/models/tp_rank_model.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <shelf/models/qwen4exp/model/qwen4exp_config.h>
 #include <shelf/models/qwen35/runtime/dflash2_footprint.h>
@@ -25,7 +26,6 @@ namespace app {
 
 namespace {
 
-constexpr std::size_t kAutoArenaMarginBytes = 512ull * 1024ull * 1024ull;
 constexpr std::size_t kAutoWorkspaceMinimumBytes = 128ull * 1024ull * 1024ull;
 
 uint32_t ceil_div(uint32_t a, uint32_t b) {
@@ -221,13 +221,13 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
 
     const bool auto_arena = config_.arena_mode == ArenaBudgetMode::Auto;
     auto_arena_ = auto_arena;
+    std::size_t memory_capacity = config_.arena_bytes;
     if (config_.arena_mode == ArenaBudgetMode::Fixed) {
         if (config_.arena_bytes == 0u) {
             return Status::insufficient_memory(
                 "arena capacity is zero", __FILE__, __LINE__);
         }
-        startup_available_bytes_ = config_.arena_bytes;
-    } else {
+    } else if (!auto_arena) {
         std::size_t free_bytes = 0;
         std::size_t total_bytes = 0;
         herr = hipMemGetInfo(&free_bytes, &total_bytes);
@@ -235,38 +235,32 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
             return Status::hip_error("hipMemGetInfo", hipGetErrorString(herr), __FILE__,
                                      __LINE__);
         }
-        const std::size_t margin =
-            auto_arena ? kAutoArenaMarginBytes : config_.arena_bytes;
-        if (auto_arena) {
-            if (free_bytes == 0) {
-                return Status::insufficient_memory(
-                    "no VRAM available for the arena", __FILE__, __LINE__);
-            }
-            config_.arena_bytes = free_bytes > margin ? free_bytes - margin
-                                                      : free_bytes / 2u;
-            startup_available_bytes_ = free_bytes;
-            if (config_.arena_bytes == 0u) {
-                return Status::insufficient_memory(
-                    "no VRAM available for the arena", __FILE__, __LINE__);
-            }
-            fprintf(stderr, "ARENA auto: free=%s margin=%s capacity=%s\n",
-                    gpu::format_gib(free_bytes).c_str(),
-                    gpu::format_gib(margin).c_str(),
-                    gpu::format_gib(config_.arena_bytes).c_str());
-        } else {
-            if (total_bytes == 0u || margin >= total_bytes) {
-                return Status::invalid_argument(
-                    "--arena-gib margin exceeds the total VRAM", __FILE__, __LINE__);
-            }
-            config_.arena_bytes = total_bytes - margin;
-            startup_available_bytes_ = config_.arena_bytes;
-            fprintf(stderr, "ARENA total-minus: total=%s margin=%s capacity=%s\n",
-                    gpu::format_gib(total_bytes).c_str(),
-                    gpu::format_gib(margin).c_str(),
-                    gpu::format_gib(config_.arena_bytes).c_str());
+        const std::size_t margin = config_.arena_bytes;
+        if (total_bytes == 0u || margin >= total_bytes) {
+            return Status::invalid_argument(
+                "--arena-gib margin exceeds the total VRAM", __FILE__, __LINE__);
         }
-        fflush(stderr);
+        memory_capacity = total_bytes - margin;
+        fprintf(stderr, "ARENA total-minus: total=%s margin=%s capacity=%s\n",
+                gpu::format_gib(total_bytes).c_str(),
+                gpu::format_gib(margin).c_str(),
+                gpu::format_gib(memory_capacity).c_str());
     }
+
+    std::vector<int> memory_devices;
+    if (config_.pipeline_parallel > 1u || config_.expert_parallel > 1u ||
+        config_.tp > 1u) {
+        memory_devices = config_.devices;
+    } else {
+        memory_devices.push_back(config_.devices[0]);
+    }
+    auto memory_result = gpu::GpuMemoryManager::create(memory_devices, memory_capacity);
+    if (!memory_result.ok()) return memory_result.status();
+    memory_.emplace(memory_result.release());
+    auto arena0 = memory_->arena_for(config_.devices[0]);
+    if (!arena0.ok()) return arena0.status();
+    startup_available_bytes_ = arena0.value()->capacity();
+    fflush(stderr);
 
     exec_max_tokens_ = config_.max_num_batched_tokens;
     if (exec_max_tokens_ == 0) {
@@ -293,11 +287,9 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         return Status::hip_error("hipStreamCreate", hipGetErrorString(herr), __FILE__, __LINE__);
     }
 
-    auto arena_result = shelf::gpu::GpuArena::create(config_.devices[0], config_.arena_bytes);
-    if (!arena_result.ok()) {
-        return arena_result.status();
-    }
-    arena_.emplace(arena_result.release());
+    auto arena_ptr = memory_->arena_for(config_.devices[0]);
+    if (!arena_ptr.ok()) return arena_ptr.status();
+    arena_ = arena_ptr.value();
 
     const auto t_load_start = std::chrono::steady_clock::now();
     auto model_result = shelf::models::LoadedModel::load(
@@ -512,7 +504,7 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
             + " needs " + std::to_string(single_request_tokens)
             + " (max supportable max_seq_len " + std::to_string(max_supportable)
             + " with --arena-gib "
-            + std::to_string(config_.arena_bytes / (1024ull * 1024ull * 1024ull))
+            + std::to_string(startup_available_bytes_ / (1024ull * 1024ull * 1024ull))
             + ")",
             __FILE__, __LINE__);
     }
@@ -686,13 +678,52 @@ Status Qwen35ComputeRuntime::initialize_pipeline_parallel() {
     }
     pp_config.kv_cache_dtype = config_.kv_cache_dtype;
     pp_config.octave_kv_format = config_.octave_kv_format;
-    pp_config.arena_bytes = config_.arena_bytes;
+    pp_config.memory = &*memory_;
     pp_config.working_set_reserve_bytes = config_.working_set_reserve_bytes;
     if (config_.rope_profile.has_value()) {
         pp_config.rope_profile = *config_.rope_profile;
     }
     pp_config.load_options.verify_quantized_payload_crc = config_.verify_weights;
     pp_config.build_stage_model = builder_result.value();
+
+    if (config_.tp > 1u) {
+        pp_config.stage_tp.resize(config_.pipeline_parallel);
+        for (std::uint32_t stage = 0; stage < config_.pipeline_parallel; ++stage) {
+            qwen35::runtime::TpCoordinatorConfig tp;
+            tp.model_dir = config_.model_dir;
+            tp.devices.reserve(config_.tp);
+            for (std::uint32_t t = 0; t < config_.tp; ++t) {
+                tp.devices.push_back(config_.devices[parallel_rank(
+                    stage, 0u, t, config_.expert_parallel, config_.tp)]);
+            }
+            tp.max_batch_rows = exec_max_tokens_;
+            tp.max_scheduled_requests = config_.max_concurrent_requests;
+            tp.max_scheduled_output_rows = config_.max_scheduled_output_rows;
+            tp.max_seq_len = config_.max_seq_len;
+            tp.page_tokens = config_.page_tokens;
+            tp.kv_cache_dtype = config_.kv_cache_dtype;
+            tp.octave_kv_format = config_.octave_kv_format;
+            tp.memory = &*memory_;
+            tp.working_set_reserve_bytes = config_.working_set_reserve_bytes;
+            tp.prefix_cache = config_.prefix_cache;
+            tp.prefix_checkpoints = config_.prefix_cache_checkpoints;
+            tp.prefix_spec_ring_bytes = config_.prefix_cache_spec_ring_bytes;
+            tp.prefix_strategy = config_.prefix_cache_strategy;
+            tp.prefix_slot_count = config_.prefix_cache_slot_count;
+            tp.prefix_save_interval = config_.prefix_cache_save_interval;
+            tp.tp_combine_f32 = config_.tp_combine_f32;
+            tp.load_options.verify_quantized_payload_crc = config_.verify_weights;
+            tp.pipeline_stage.enabled = true;
+            tp.pipeline_stage.layers = ranges[stage];
+            if (const char* env = std::getenv("SHELF_KV_POOL_PAGES")) {
+                tp.kv_pool_pages = static_cast<std::uint32_t>(std::strtoul(env, nullptr, 10));
+            }
+            if (config_.rope_profile.has_value()) tp.rope_profile = *config_.rope_profile;
+            Status selected = shelf::models::select_tp_rank_model(tp);
+            if (!selected.ok()) return selected;
+            pp_config.stage_tp[stage] = std::move(tp);
+        }
+    }
 
     const auto t_load_start = std::chrono::steady_clock::now();
     auto coordinator_result =
@@ -704,7 +735,23 @@ Status Qwen35ComputeRuntime::initialize_pipeline_parallel() {
         std::chrono::duration<double, std::milli>(t_load_end - t_load_start).count();
 
     qwen35::runtime::PipelineStageRuntime& stage0 = pp_coordinator_->stage(0);
-    if (stage0.model().qwen4exp_model() != nullptr) {
+    const shelf::models::TpRankModel* tp_rank_model =
+        stage0.tp() != nullptr ? stage0.tp()->rank(0).rank_model() : nullptr;
+    if (tp_rank_model != nullptr) {
+        if (const auto* q4 = tp_rank_model->qwen4exp_model()) {
+            pp_model_ = std::make_unique<shelf::models::LoadedModel>(
+                shelf::models::LoadedModel::borrow(*q4));
+        } else if (const auto* qsa = tp_rank_model->qsa_model()) {
+            pp_model_ = std::make_unique<shelf::models::LoadedModel>(
+                shelf::models::LoadedModel::borrow(*qsa));
+        } else if (const auto* grouped = tp_rank_model->grouped_model()) {
+            pp_model_ = std::make_unique<shelf::models::LoadedModel>(
+                shelf::models::LoadedModel::borrow(*grouped));
+        } else {
+            pp_model_ = std::make_unique<shelf::models::LoadedModel>(
+                shelf::models::LoadedModel::borrow(*tp_rank_model->dense_model()));
+        }
+    } else if (stage0.model().qwen4exp_model() != nullptr) {
         pp_model_ = std::make_unique<shelf::models::LoadedModel>(
             shelf::models::LoadedModel::borrow(*stage0.model().qwen4exp_model()));
     } else if (stage0.model().qsa_model() != nullptr) {
@@ -729,7 +776,7 @@ Status Qwen35ComputeRuntime::initialize_pipeline_parallel() {
     std::vector<std::size_t> host_embeddings;
     host_embeddings.reserve(pp_coordinator_->stage_count());
     for (std::size_t index = 0; index < pp_coordinator_->stage_count(); ++index) {
-        host_embeddings.push_back(pp_coordinator_->stage(index).model().host_pinned_bytes());
+        host_embeddings.push_back(pp_coordinator_->stage(index).host_pinned_bytes());
     }
     char host_scope[32];
     std::snprintf(host_scope, sizeof(host_scope), " pipeline=%u",
@@ -741,7 +788,7 @@ Status Qwen35ComputeRuntime::initialize_pipeline_parallel() {
     batcher_config.max_scheduled_requests = config_.max_concurrent_requests;
     batcher_config.max_seq_len = config_.max_seq_len;
     batcher_config.page_tokens = config_.page_tokens;
-    batcher_config.eos_token_ids = stage0.model().hybrid_config().stop_tokens;
+    batcher_config.eos_token_ids = stage0.hybrid_config().stop_tokens;
 
     batcher_ = std::make_unique<qwen35::runtime::ContinuousBatcher>(
         stage0.executor(), stage0.sequence_pool(), stage0.gdn_pool(), stage0.kv_pool(),
@@ -761,7 +808,7 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
     tp_config.page_tokens = config_.page_tokens;
     tp_config.kv_cache_dtype = config_.kv_cache_dtype;
     tp_config.octave_kv_format = config_.octave_kv_format;
-    tp_config.arena_bytes = config_.arena_bytes;
+    tp_config.memory = &*memory_;
     tp_config.working_set_reserve_bytes = config_.working_set_reserve_bytes;
     tp_config.prefix_cache = config_.prefix_cache;
     tp_config.prefix_checkpoints = config_.prefix_cache_checkpoints;
@@ -1115,11 +1162,6 @@ Status Qwen35ComputeRuntime::shutdown() {
         stream_ = nullptr;
     }
 
-    if (arena_.has_value()) {
-        auto arena_st = arena_->shutdown();
-        if (!arena_st.ok() && first_error.ok()) first_error = arena_st;
-    }
-
     batcher_.reset();
     tp_executor_ = nullptr;
     tp_slots_ = nullptr;
@@ -1131,6 +1173,12 @@ Status Qwen35ComputeRuntime::shutdown() {
     tp_group_.reset();
     pp_model_ = nullptr;
     pp_coordinator_.reset();
+
+    if (memory_.has_value()) {
+        Status st = memory_->shutdown();
+        if (!st.ok() && first_error.ok()) first_error = st;
+    }
+    arena_ = nullptr;
 
     shutdown_ = true;
     return first_error;

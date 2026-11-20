@@ -281,6 +281,7 @@ shelf_add_test(NAME test_activation_workspace_layout SOURCE unit/test_activation
 shelf_add_test(NAME test_program_quant_contract SOURCE unit/test_program_quant_contract.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
 shelf_add_test(NAME test_dispatch_staging_size SOURCE unit/test_dispatch_staging_size.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
 shelf_add_test(NAME test_gpu_arena_vmm SOURCE unit/test_gpu_arena_vmm.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_gpu)
+shelf_add_test(NAME test_gpu_memory_manager SOURCE unit/test_gpu_memory_manager.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_gpu)
 
 shelf_add_test(NAME test_gemm_bf16_correctness SOURCE kernels/linear/test_gemm_bf16_correctness.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_correctness)
 shelf_add_test(NAME test_gemm_bf16_exact_rows SOURCE kernels/linear/test_gemm_bf16_exact_rows.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
@@ -503,6 +504,7 @@ add_custom_target(
         test_program_quant_contract
         test_dispatch_staging_size
         test_gpu_arena_vmm
+        test_gpu_memory_manager
 )
 
 # ---------------------------------------------------------------------------

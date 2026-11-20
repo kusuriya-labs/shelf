@@ -37,9 +37,13 @@ std::uint32_t count_attention_layers(const shelf::qwen_hybrid::QwenHybridConfig&
 }
 
 TpRankRuntime::~TpRankRuntime() noexcept {
-    if (executor_ready_) {
-        executor_shutdown(executor_);
-        executor_ready_ = false;
+    if (device_id_ >= 0) {
+        auto scope = shelf::gpu::ScopedDevice::create(device_id_);
+        (void)scope;
+        if (executor_ready_) {
+            (void)executor_shutdown(executor_);
+            executor_ready_ = false;
+        }
     }
     if (stream_ != nullptr) {
         shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream_));
@@ -59,6 +63,10 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
         return Status::invalid_argument(
             "max_scheduled_requests and max_seq_len must be > 0", __FILE__, __LINE__);
     }
+    if (config.arena == nullptr) {
+        return Status::invalid_argument(
+            "tp rank runtime requires a borrowed arena", __FILE__, __LINE__);
+    }
 
     auto scope = shelf::gpu::ScopedDevice::create(config.device_id);
     if (!scope.ok()) return scope.status();
@@ -72,33 +80,8 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
                                  __FILE__, __LINE__);
     }
 
-    std::size_t arena_budget = config.arena_bytes;
-    if (arena_budget == 0) {
-        std::size_t free_bytes = 0;
-        std::size_t total_bytes = 0;
-        const hipError_t info_err = hipMemGetInfo(&free_bytes, &total_bytes);
-        if (info_err != hipSuccess) {
-            return Status::hip_error("hipMemGetInfo tp rank", hipGetErrorString(info_err),
-                                     __FILE__, __LINE__);
-        }
-        constexpr std::size_t kMarginBytes = 1ull * 1024ull * 1024ull * 1024ull;
-        const std::size_t available = free_bytes > kMarginBytes
-            ? free_bytes - kMarginBytes
-            : free_bytes / 2u;
-        if (available == 0) {
-            return Status::insufficient_memory(
-                "no VRAM available for the tp rank arena", __FILE__, __LINE__);
-        }
-        arena_budget = available;
-        std::fprintf(stderr,
-                     "ARENA auto: tp_rank=%u free=%s capacity=%s\n",
-                     config.tp_rank, gpu::format_gib(free_bytes).c_str(),
-                     gpu::format_gib(arena_budget).c_str());
-    }
-
-    auto arena_result = gpu::GpuArena::create(config.device_id, arena_budget);
-    if (!arena_result.ok()) return arena_result.status();
-    rank->arena_.emplace(arena_result.release());
+    gpu::GpuArena& arena = *config.arena;
+    rank->arena_ = config.arena;
 
     // The rank's model is the caller's choice: which family the checkpoint is, and therefore
     // which weights this rank loads and which local geometry it runs with, is not something
@@ -107,14 +90,15 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
         return Status::invalid_argument(
             "tp rank runtime requires a rank model builder", __FILE__, __LINE__);
     }
-    auto model_result = config.build_rank_model(config, rank->arena_.value(), rank->stream_);
+    auto model_result = config.build_rank_model(config, arena, rank->stream_);
     if (!model_result.ok()) return model_result.status();
     rank->model_ = model_result.release();
 
     const shelf::qwen_hybrid::QwenHybridConfig& tc = rank->hybrid_config();
     const std::uint32_t max_blocks_per_sequence =
         ceil_div(config.max_seq_len + 1u, config.page_tokens) + 1u;
-    const std::uint32_t attention_layers = count_attention_layers(tc);
+    const std::uint32_t attention_layers =
+        stage_attention_layers(tc, config.pipeline_stage);
     const std::uint32_t local_kv_heads = rank->context().local_key_value_heads;
     const std::uint32_t head_dim = static_cast<std::uint32_t>(tc.attention_head_dim);
 
@@ -127,12 +111,12 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
 
     const auto& rank_context = rank->context();
     const auto gdn_layout_result = make_gdn_state_layout_local(
-        tc, stage_gdn_layers(tc, {}), rank_context.local_gdn_key_heads,
+        tc, stage_gdn_layers(tc, config.pipeline_stage), rank_context.local_gdn_key_heads,
         rank_context.local_gdn_value_heads);
 
     if (config.load_private_weights && config.tp_rank == 0u) {
         Status private_status = config.load_private_weights(
-            rank->arena_.value(), rank->stream_, rank->private_lm_head_,
+            arena, rank->stream_, rank->private_lm_head_,
             rank->private_embed_tokens_);
         if (!private_status.ok()) return private_status;
     }
@@ -142,11 +126,11 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
     plan.draft_weights = config.drafter_weights_bytes;
 
     auto seq_result = SequenceSlotPool::create(
-        rank->arena_.value(), config.max_scheduled_requests, max_blocks_per_sequence);
+        arena, config.max_scheduled_requests, max_blocks_per_sequence);
     if (!seq_result.ok()) return seq_result.status();
     rank->seq_pool_.emplace(seq_result.release());
 
-    auto gdn_result = GdnStatePool::create(rank->arena_.value(),
+    auto gdn_result = GdnStatePool::create(arena,
                                            config.max_scheduled_requests,
                                            gdn_layout_result);
     if (!gdn_result.ok()) return gdn_result.status();
@@ -265,6 +249,15 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
                      gpu::format_gib(batch_bytes).c_str(),
                      static_cast<unsigned>(config.mtp_batch.max_requests));
     }
+    std::fprintf(stderr,
+                 "MEMORY_PLAN tp rank %u kv budget: free_after_weights=%s reserve=%s "
+                 "kv_budget=%s page=%s\n",
+                 static_cast<unsigned>(config.tp_rank),
+                 gpu::format_gib(arena_free_now).c_str(),
+                 gpu::format_gib(reserved).c_str(),
+                 gpu::format_gib(arena_free_now > reserved ? arena_free_now - reserved : 0u)
+                     .c_str(),
+                 gpu::format_gib(kv_page_bytes).c_str());
     if (arena_free_now <= reserved) {
         return Status::insufficient_memory(
             "tp rank arena has " + gpu::format_gib(arena_free_now) +
@@ -298,13 +291,14 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
                 ")",
             __FILE__, __LINE__);
     }
-    const std::uint32_t kv_pool_pages = fit_pages + 1u;
+    const std::uint32_t kv_pool_pages =
+        config.kv_pool_pages != 0u ? config.kv_pool_pages : fit_pages + 1u;
     plan.kv = static_cast<std::size_t>(kv_pool_pages) * kv_page_bytes;
-    plan.kv_tokens = fit_pages * config.page_tokens;
+    plan.kv_tokens = (kv_pool_pages - 1u) * config.page_tokens;
     rank->plan_ = plan;
 
     auto kv_result = PagedKVPool::create(
-        rank->arena_.value(), kv_pool_pages, config.page_tokens, attention_layers,
+        arena, kv_pool_pages, config.page_tokens, attention_layers,
         local_kv_heads, head_dim, config.kv_cache_dtype, config.octave_kv_format);
     if (!kv_result.ok()) return kv_result.status();
     rank->kv_pool_.emplace(kv_result.release());
@@ -330,13 +324,14 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
     }
     exec_config.max_context_tokens = config.max_seq_len + 1u;
     exec_config.rope_profile = config.rope_profile;
+    exec_config.stage = config.pipeline_stage;
     exec_config.tp = &rank->context();
     exec_config.exl3_linear_shape = exl3_linear_shape;
 
     const std::size_t executor_before = rank->arena_->used();
     auto exec_result = rank->model_->create_executor(
         rank->seq_pool_.value(), rank->gdn_pool_.value(), rank->kv_pool_.value(),
-        rank->arena_.value(), exec_config);
+        arena, exec_config);
     std::fprintf(stderr,
                  "MEMORY_PLAN tp rank %u executor footprint: %s (reserve %s)\n",
                  static_cast<unsigned>(config.tp_rank),
@@ -414,6 +409,16 @@ Result<std::unique_ptr<TpCoordinator>> TpCoordinator::create(
 
 Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
     devices_ = config.devices;
+    if (config.memory == nullptr) {
+        return Status::invalid_argument(
+            "tp coordinator requires a GpuMemoryManager", __FILE__, __LINE__);
+    }
+    std::vector<gpu::GpuArena*> arenas(devices_.size(), nullptr);
+    for (std::size_t r = 0; r < devices_.size(); ++r) {
+        auto arena = config.memory->arena_for(devices_[r]);
+        if (!arena.ok()) return arena.status();
+        arenas[r] = arena.value();
+    }
 
     std::jthread model_prefetch;
     if (config.prefetch_rank_model != nullptr) {
@@ -447,8 +452,9 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
         rank_config.page_tokens = config.page_tokens;
         rank_config.kv_cache_dtype = config.kv_cache_dtype;
         rank_config.octave_kv_format = config.octave_kv_format;
-        rank_config.arena_bytes = config.arena_bytes;
+        rank_config.arena = arenas[r];
         rank_config.working_set_reserve_bytes = config.working_set_reserve_bytes;
+        rank_config.kv_pool_pages = config.kv_pool_pages;
         rank_config.drafter_config = config.drafter_config;
         rank_config.drafter_footprint = config.drafter_footprint;
         rank_config.mtp_reserve = config.mtp_reserve;
@@ -470,6 +476,7 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
         rank_config.rope_profile = config.rope_profile;
         rank_config.build_rank_model = config.build_rank_model;
         rank_config.load_options = config.load_options;
+        rank_config.pipeline_stage = config.pipeline_stage;
         rank_config.mtp_batch = config.mtp_batch;
         loaders.emplace_back(
             [&slots, r, rank_config = std::move(rank_config)]() {

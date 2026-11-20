@@ -417,7 +417,6 @@ inline RunResult run_tp2(const RunOptions& opts) {
     config.max_scheduled_requests = opts.max_scheduled_requests;
     config.max_seq_len = opts.max_seq_len;
     config.page_tokens = opts.page_tokens;
-    config.arena_bytes = opts.arena_bytes;
     config.working_set_reserve_bytes = 256ull * 1024ull * 1024ull;
     for (std::size_t i = 0; i < opts.taps.size() && i < kMaxTargetHiddenTaps; ++i) {
         config.target_hidden_taps[i] = static_cast<std::uint32_t>(opts.taps[i]);
@@ -427,6 +426,13 @@ inline RunResult run_tp2(const RunOptions& opts) {
     config.load_options.verify_quantized_payload_crc = opts.verify_crc;
 
     config.build_rank_model = &build_dense_tp_rank_model;
+    auto memory_result = gpu::GpuMemoryManager::create(config.devices, opts.arena_bytes);
+    if (!memory_result.ok()) {
+        result.error = "tp2 memory manager: " + memory_result.status().message();
+        return result;
+    }
+    gpu::GpuMemoryManager memory = memory_result.release();
+    config.memory = &memory;
     auto coordinator_result = TpCoordinator::create(config);
     if (!coordinator_result.ok()) {
         result.error = "tp2 coordinator: " + coordinator_result.status().message();
