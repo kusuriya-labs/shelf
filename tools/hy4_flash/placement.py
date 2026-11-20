@@ -25,20 +25,20 @@ def routing_counts(work):
     return layers
 
 
-def assign(capacity, speed, counts, base=None):
+def assign(capacity, speed, counts, base=None, expert_bytes=EXPERT_BYTES):
     if not 1 <= len(capacity) <= 4 or min(capacity) < 0 or len(speed) != len(capacity) or min(speed) <= 0:
         raise ValueError("1〜4 rank の空き容量と帯域が必要です")
     base = base if base is not None else [0] * len(capacity)
     if len(base) != len(capacity) or min(base) < 0:
         raise ValueError("rank ごとの固定使用量が不正です")
-    slots = [value // EXPERT_BYTES for value in capacity]
+    slots = [value // expert_bytes for value in capacity]
     total = len(counts) * 512
     if sum(slots) < total:
         raise MemoryError(f"expert 用の枠が不足しています: {sum(slots)} / {total}")
     quota = [0] * len(capacity)
     for _ in range(total):
         rank = min((r for r in range(len(capacity)) if quota[r] < slots[r]),
-                   key=lambda r: (base[r] + (quota[r] + 1) * EXPERT_BYTES, r))
+                   key=lambda r: (base[r] + (quota[r] + 1) * expert_bytes, r))
         quota[rank] += 1
     result = []
     for layer, histogram in enumerate(counts):
@@ -98,11 +98,14 @@ def main():
     p.add_argument("--capacity", type=float, nargs="+", default=[32,32,32])
     p.add_argument("--workspace", type=float, nargs="+", default=None)
     p.add_argument("--tokens", type=int, default=2097152)
+    p.add_argument("--tensor-parallel", type=int, default=1)
     p.add_argument("--safety-gib", type=float, default=0.5)
     p.add_argument("--output", type=Path)
     args = p.parse_args()
     if not 0 < args.tokens <= 2097152:
         raise ValueError("KV の予約長が範囲外です")
+    if not 1 <= args.tensor_parallel <= 4:
+        raise ValueError("TP の値が範囲外です")
     args.workspace = args.workspace or [2] + [0.5] * (len(args.capacity) - 1)
     if len(args.workspace) != len(args.capacity):
         raise ValueError("作業域と GPU の台数が一致しません")
@@ -118,17 +121,22 @@ def main():
     folded = sum(meta["original_shape"][1] * 512 * 2 for name, meta in storage.items()
                  if name.endswith(".self_attn.kv_b_proj.weight"))
     matrix_bytes = 41 * 512 * 3 * 32
+    expert_bytes = EXPERT_BYTES // args.tensor_parallel
     base = [int(w * GIB) + matrix_bytes for w in args.workspace]
-    base[0] += fixed + draft + kv + indexer + folded
+    if args.tensor_parallel > 1:
+        local = fixed // args.tensor_parallel + draft + kv + indexer + folded // args.tensor_parallel
+        base = [value + local for value in base]
+    else:
+        base[0] += fixed + draft + kv + indexer + folded
     capacities = [int(c * GIB) - used - int(args.safety_gib * GIB)
                   for c, used in zip(args.capacity, base)]
-    owners = assign(capacities, [1] * len(capacities), routing_counts(args.work), base)
+    owners = assign(capacities, [1] * len(capacities), routing_counts(args.work), base, expert_bytes)
     rank_experts = [sum(row.count(r) for row in owners) for r in range(len(capacities))]
     print(json.dumps(dict(fixed_bytes=fixed, draft_bytes=draft, kv_bytes=kv, index_bytes=indexer,
                           folded_bytes=folded, matrix_bytes=matrix_bytes, safety_gib=args.safety_gib,
-                          rank_experts=rank_experts, expert_bytes=EXPERT_BYTES,
-                          peak_estimate=[b+count*EXPERT_BYTES for b,count in zip(base, rank_experts)],
-                          free_after=[b-count*EXPERT_BYTES for b,count in zip(capacities, rank_experts)])))
+                          rank_experts=rank_experts, expert_bytes=expert_bytes,
+                          peak_estimate=[b+count*expert_bytes for b,count in zip(base, rank_experts)],
+                          free_after=[b-count*expert_bytes for b,count in zip(capacities, rank_experts)])))
     if args.output:
         with args.output.open("x") as f:
             json.dump(owners, f)

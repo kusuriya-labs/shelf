@@ -3,6 +3,8 @@
 #include <shelf/core/memory/arena.h>
 #include <shelf/models/hy4_flash/linear.h>
 #include <shelf/models/hy4_flash/checkpoint.h>
+#include <barrier>
+#include <memory>
 
 namespace shelf::hy4 {
 inline constexpr int max_prefill_chunk = 1024;
@@ -18,15 +20,17 @@ struct Residency {
     Checkpoint &model;
     size_t tokens;
     int ranks = 0;
+    int ep_size = 1;
+    int tp_size = 1;
     std::array<int, 4> physical{0, 1, 2, 3};
     std::vector<gpu::GpuArena> arenas;
     std::array<uint8_t *, 4> weight_base{};
     std::array<Region, 4> workspace{};
     std::array<uint64_t, 4> routed_rows{};
     std::array<std::array<uint64_t, 4>, 4> transfer_bytes{};
-    std::map<std::string, void *> folded;
-    std::array<uint8_t *, 42> cache{};
-    std::array<uint16_t *, 42> index_keys{};
+    std::array<std::map<std::string, void *>, 4> folded;
+    std::array<std::array<uint8_t *, 42>, 4> cache{};
+    std::array<std::array<uint16_t *, 42>, 4> index_keys{};
     explicit Residency(Checkpoint &model, size_t tokens);
     ~Residency() noexcept;
     Residency(const Residency &) = delete;
@@ -45,9 +49,18 @@ struct Residency {
     void *staging = nullptr;
     std::array<std::array<hipEvent_t, 4>, 4> ready{}, ack{};
     std::array<void *, 4> route_host{};
+    std::array<void *, 4> tp_recv{};
+    std::array<void *, 4> ep_recv{};
+    std::array<void *, 4> tp_ptr{};
+    std::array<size_t, 4> tp_bytes{};
+    std::array<hipEvent_t, 4> lane_ready{}, lane_done{};
+    std::array<std::unique_ptr<std::barrier<>>, 4> tp_barrier{}, ep_barrier{};
+    void tp_sum(void *data, int rank, size_t bytes);
+    void ep_reduce(void *data, int rank, size_t bytes);
     void *route_buffer(int rank, size_t bytes);
     void shutdown();
     const void *device(const Weight &w) const;
 };
 void peer_copy(void *dst, const void *src, size_t bytes);
+void tp_add_bf16(void *dst, const void *src, size_t bytes);
 }

@@ -162,7 +162,7 @@ Selection select(Ops &op, const std::string &p, int layer, int start, Mat x, Mat
     bool sliding = layer != 0 && layer % 4 != 1;
     if (!sliding) {
         Mat k = op.norm(op.linear(p + "token_key_projection", x), p + "token_key_norm.weight");
-        auto groups = op.gpu.index_keys[layer];
+        auto groups = op.gpu.index_keys[op.rank][layer];
         auto pending = groups + (op.gpu.tokens / 4) * 128;
         int first = start / 4, ng = end / 4 - first;
         if (ng) {
@@ -216,7 +216,8 @@ Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidd
               bool draft) {
     std::string p = prefix + "self_attn.";
     bool sliding = layer != 0 && layer % 4 != 1;
-    int heads = sliding ? 64 : 32;
+    const auto *projection = op.gpu.model.shape_of(p + "q_b_proj", op.rank);
+    int heads = projection ? projection->at(1) / 256 : (sliding ? 64 : 32);
     float theta = sliding ? 1e4f : 1e7f;
     Mat qres = op.norm(op.linear(p + "q_a_proj", hidden), p + "q_a_layernorm.weight");
     Mat q = op.rope(op.linear(p + "q_b_proj", qres), heads, start, theta);
@@ -224,6 +225,13 @@ Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidd
     Mat lat = op.norm(op.slice(ka, 0, 512), p + "kv_a_layernorm.weight");
     Mat rot = op.rope(op.slice(ka, 512, 64), 1, start, theta);
     Mat gate = op.linear(p + "linear_gate", hidden);
+    Param sinks = op.param(p + "learnable_sink_param");
+    if (op.gpu.tp_size > 1) {
+        const int first = (op.rank % op.gpu.tp_size) * heads;
+        sinks.p = sinks.type == io::SType::F32
+                      ? static_cast<const void *>(static_cast<const float *>(sinks.p) + first)
+                      : static_cast<const void *>(static_cast<const uint16_t *>(sinks.p) + first);
+    }
     auto fresh = static_cast<uint8_t *>(op.arena.next(size_t(hidden.rows) * 294));
     pack<256, 29><<<dim3(2, hidden.rows), 256>>>(lat, fresh, 0);
     checked(hipGetLastError());
@@ -233,7 +241,7 @@ Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidd
         selected = select(op, p + "compressed_indexer.", layer, start, hidden, qres);
     Mat out = op.mat(hidden.rows, heads * 256);
     int slots = sliding ? std::min(op.gpu.tokens, size_t(518)) : op.gpu.tokens;
-    auto cache = op.gpu.cache[layer];
+    auto cache = op.gpu.cache[op.rank][layer];
     for (int i = 0; i < hidden.rows;) {
         size_t save = op.arena.cursor;
         bool contiguous = sliding || start + hidden.rows <= 2048;
@@ -284,14 +292,13 @@ Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidd
             size_t size = size_t(n) * heads * ((ids.size() + 15) / 16 * 16);
             auto scores = static_cast<float *>(op.arena.next(size * 4));
             auto probs = static_cast<uint16_t *>(op.arena.next(size * 2));
-            auto sinks = op.param(p + "learnable_sink_param");
             checked(shelf_hy4_mla_prefill(q.row(i, n).p, expanded.p, b.p, gate.row(i, n).p, sinks.p,
                                           sinks.type == io::SType::F32, out.row(i, n).p, scores, probs, n,
                                           heads, ids.size(), ids.front(), start + i, sliding));
         } else {
             auto offsets_gpu = op.indices(offsets);
             attend_absorbed(op, p + "kv_b_proj", a, b, q.row(i, n), gate.row(i, n), offsets_gpu, stride,
-                            op.param(p + "learnable_sink_param"), out.row(i, n));
+                            sinks, out.row(i, n));
         }
         op.arena.cursor = save;
         i += n;

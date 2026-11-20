@@ -7,6 +7,10 @@
 #include <cstdio>
 #include <fstream>
 #include <stdexcept>
+#include <thread>
+#include <mutex>
+#include <exception>
+#include <cstdio>
 
 namespace shelf::hy4 {
 namespace {
@@ -127,6 +131,7 @@ __global__ void fuse_anchor(Mat anchor, Mat fusion, const uint16_t *gate) {
     anchor.p[i] = f32_to_bf16_rne_device(bf16_bits_to_f32(anchor.p[i]) +
                                          bf16_bits_to_f32(fusion.p[i]) * bf16_bits_to_f32(gate[i]));
 }
+
 struct Target {
     Ops op;
     std::vector<int> history;
@@ -140,24 +145,26 @@ struct Target {
     int top_k;
     float top_p;
     uint64_t seed;
-    Target(Residency &gpu, float temp, uint64_t rng, int k, float p)
-        : op(gpu), temperature(temp), top_k(k), top_p(p), seed(rng) {
+    Target(Residency &gpu, float temp, uint64_t rng, int k, float p, int rank = 0)
+        : op(gpu, rank), temperature(temp), top_k(k), top_p(p), seed(rng) {
         op.arena.cursor = 0;
         if (gpu.model.has_draft && temperature > 0) {
             target_probs = static_cast<float *>(op.arena.next(6 * 120832 * 4));
             draft_probs = static_cast<float *>(op.arena.next(5 * 120832 * 4));
         }
-        gpu.routed_rows = {};
-        gpu.expert_ms = {};
-        gpu.attention_ms = gpu.ffn_ms = gpu.transfer_ms = 0;
-        gpu.transfer_bytes = {};
+        gpu.routed_rows[rank] = 0;
+        gpu.expert_ms[rank] = 0;
+        if (rank == 0) {
+            gpu.attention_ms = gpu.ffn_ms = gpu.transfer_ms = 0;
+            gpu.transfer_bytes = {};
+        }
         state = op.mat(6, 3072);
         base = op.arena.cursor;
     }
     std::vector<int> predict(Mat hidden, int position, bool draft = false, const Path &dump = {},
                              float *distribution = nullptr) {
         std::chrono::steady_clock::time_point begin;
-        if (op.gpu.expert_begin[0])
+        if (op.rank == 0 && op.gpu.expert_begin[0])
             begin = std::chrono::steady_clock::now();
         size_t mark = op.arena.cursor;
         auto codes = static_cast<int8_t *>(op.arena.next(size_t(hidden.rows) * 3072));
@@ -191,7 +198,7 @@ struct Target {
         std::vector<int> result(hidden.rows);
         op.copy(result.data(), device_ids, result.size() * 4, hipMemcpyDeviceToHost);
         op.arena.cursor = mark;
-        if (op.gpu.expert_begin[0])
+        if (op.rank == 0 && op.gpu.expert_begin[0])
             head_ms +=
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
         if (std::find(result.begin(), result.end(), -1) != result.end())
@@ -305,11 +312,13 @@ int verify_speculation(Ops &op, const float *target_probs, const float *draft_pr
     }
     return 6;
 }
+
+
 void decoder_layer(Ops &op, int layer, int start, Mat x, const std::vector<int> &history,
                    const std::vector<int> &ids, Selection &selection) {
     auto now = std::chrono::steady_clock::now;
     std::chrono::steady_clock::time_point start_time;
-    if (op.gpu.expert_begin[0]) {
+    if (op.rank == 0 && op.gpu.expert_begin[0]) {
         checked(hipStreamSynchronize(nullptr));
         start_time = now();
     }
@@ -324,7 +333,7 @@ void decoder_layer(Ops &op, int layer, int start, Mat x, const std::vector<int> 
     Mat z = op.expand(x, a, post);
     checked(hipMemcpyAsync(x.p, z.p, z.bytes(), hipMemcpyDeviceToDevice));
     op.arena.cursor = save;
-    if (op.gpu.expert_begin[0]) {
+    if (op.rank == 0 && op.gpu.expert_begin[0]) {
         checked(hipStreamSynchronize(nullptr));
         auto end = now();
         op.gpu.attention_ms += std::chrono::duration<double, std::milli>(end - start_time).count();
@@ -339,7 +348,7 @@ void decoder_layer(Ops &op, int layer, int start, Mat x, const std::vector<int> 
     z = op.expand(x, f, post);
     checked(hipMemcpyAsync(x.p, z.p, z.bytes(), hipMemcpyDeviceToDevice));
     op.arena.cursor = save;
-    if (op.gpu.expert_begin[0]) {
+    if (op.rank == 0 && op.gpu.expert_begin[0]) {
         checked(hipStreamSynchronize(nullptr));
         op.gpu.ffn_ms += std::chrono::duration<double, std::milli>(now() - start_time).count();
     }
@@ -349,88 +358,127 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
     if (ids.empty() || !count || ids.size() + count > gpu.tokens || gpu.tokens > 1048576 || chunk < 1 ||
         chunk > max_prefill_chunk)
         throw std::runtime_error("入力・出力長または prefill chunk が範囲外です");
-    auto now = std::chrono::steady_clock::now;
     if (top_k < 0 || top_k > 64 || !(top_p > 0 && top_p <= 1) || (temperature > 0 && top_p < 1 && !top_k))
         throw std::invalid_argument("top_k は 0〜64、top_p を使う場合は top_k が必要です");
-    Target target(gpu, temperature, seed, top_k, top_p);
-    auto begin = now();
-    int next = 0;
-    for (size_t first = 0; first < ids.size(); first += chunk) {
-        auto end = std::min(first + chunk, ids.size());
-        auto output =
-            target.forward({ids.begin() + first, ids.begin() + end}, false, end == ids.size(), logits_file);
-        if (!output.empty())
-            next = output.back();
-    }
-    auto prefill = now();
-    double pp_attn = gpu.attention_ms, pp_ffn = gpu.ffn_ms, pp_transfer = gpu.transfer_ms,
-           pp_head = target.head_ms, draft_ms = 0;
-    auto pp_routes = gpu.routed_rows;
-    auto pp_expert_ms = gpu.expert_ms;
-    auto pp_bytes = gpu.transfer_bytes;
-    std::vector<int> generated{next};
-    auto append = [&](int id) {
-        generated.push_back(id);
-        if (emit) emit(id);
+    struct Lane {
+        std::vector<int> generated;
+        double prefill = 0, decode = 0, draft = 0, head = 0;
+        double pp_attn = 0, pp_ffn = 0, pp_transfer = 0, pp_head = 0;
+        uint64_t pp_routes = 0;
+        double pp_expert = 0;
+        std::array<uint64_t, 4> pp_routes_all{};
+        std::array<double, 4> pp_expert_all{};
+        int rounds = 0, accepted = 0;
+        std::array<int, 6> histogram{};
     };
-    if (emit) emit(next);
-    int rounds = 0, accepted = 0;
-    std::array<int, 6> histogram{};
-    while (int(generated.size()) < count && generated.back() != 120025) {
-        int anchor = generated.back();
-        if (!gpu.model.has_draft || target.history.size() + 6 > gpu.tokens ||
-            int(generated.size()) + 1 == count) {
-            append(target.forward({anchor}, false)[0]);
-            continue;
+    std::array<Lane, 4> lane;
+    std::exception_ptr failure;
+    std::mutex failure_mutex;
+    auto run = [&](int rank) {
+        try {
+            checked(hipSetDevice(gpu.physical[rank]));
+            auto now = std::chrono::steady_clock::now;
+            Target target(gpu, temperature, seed, top_k, top_p, rank);
+            auto begin = now();
+            int next = 0;
+            for (size_t first = 0; first < ids.size(); first += chunk) {
+                auto end = std::min(first + chunk, ids.size());
+                auto output = target.forward({ids.begin() + first, ids.begin() + end}, false,
+                                             end == ids.size(), rank == 0 ? logits_file : Path{});
+                if (!output.empty())
+                    next = output.back();
+            }
+            auto prefill = now();
+            lane[rank].pp_attn = gpu.attention_ms;
+            lane[rank].pp_ffn = gpu.ffn_ms;
+            lane[rank].pp_transfer = gpu.transfer_ms;
+            lane[rank].pp_head = target.head_ms;
+            lane[rank].pp_routes = gpu.routed_rows[rank];
+            lane[rank].pp_expert = gpu.expert_ms[rank];
+            if (rank == 0 && gpu.tp_size == 1) {
+                lane[0].pp_routes_all = gpu.routed_rows;
+                lane[0].pp_expert_all = gpu.expert_ms;
+            }
+            std::vector<int> generated{next};
+            auto append = [&](int id) {
+                generated.push_back(id);
+                if (rank == 0 && emit)
+                    emit(id);
+            };
+            if (rank == 0 && emit)
+                emit(next);
+            auto &stats = lane[rank];
+            while (int(generated.size()) < count && generated.back() != 120025) {
+                int anchor = generated.back();
+                if (!gpu.model.has_draft || target.history.size() + 6 > gpu.tokens ||
+                    int(generated.size()) + 1 == count) {
+                    append(target.forward({anchor}, false)[0]);
+                    continue;
+                }
+                std::chrono::steady_clock::time_point draft_begin;
+                if (target.op.rank == 0 && gpu.expert_begin[0])
+                    draft_begin = now();
+                auto draft = target.propose(anchor);
+                if (target.op.rank == 0 && gpu.expert_begin[0])
+                    stats.draft += std::chrono::duration<double, std::milli>(now() - draft_begin).count();
+                std::vector<int> block{anchor};
+                block.insert(block.end(), draft.begin(), draft.end());
+                auto actual = target.forward(block, true);
+                int keep = verify_speculation(target.op, target.target_probs, target.draft_probs,
+                                              target.history.size() - 5, seed, draft, actual);
+                ++stats.rounds;
+                stats.accepted += keep - 1;
+                ++stats.histogram[keep - 1];
+                target.accept(keep, 6);
+                for (int i = 0; i < keep && int(generated.size()) < count; ++i) {
+                    append(actual[i]);
+                    if (actual[i] == 120025)
+                        break;
+                }
+            }
+            stats.generated = std::move(generated);
+            stats.head = target.head_ms;
+            stats.prefill = std::chrono::duration<double>(prefill - begin).count();
+            stats.decode = std::chrono::duration<double>(now() - prefill).count();
+        } catch (...) {
+            std::lock_guard<std::mutex> lock(failure_mutex);
+            if (!failure)
+                failure = std::current_exception();
         }
-        std::chrono::steady_clock::time_point draft_begin;
-        if (gpu.expert_begin[0])
-            draft_begin = now();
-        auto draft = target.propose(anchor);
-        if (gpu.expert_begin[0])
-            draft_ms += std::chrono::duration<double, std::milli>(now() - draft_begin).count();
-        std::vector<int> block{anchor};
-        block.insert(block.end(), draft.begin(), draft.end());
-        auto actual = target.forward(block, true);
-        int keep = verify_speculation(target.op, target.target_probs, target.draft_probs,
-                                      target.history.size() - 5, seed, draft, actual);
-        ++rounds;
-        accepted += keep - 1;
-        ++histogram[keep - 1];
-        target.accept(keep, 6);
-        for (int i = 0; i < keep && int(generated.size()) < count; ++i) {
-            append(actual[i]);
-            if (actual[i] == 120025)
-                break;
-        }
-    }
-    double pp = std::chrono::duration<double>(prefill - begin).count();
-    double tg = std::chrono::duration<double>(now() - prefill).count();
+    };
+    std::vector<std::thread> threads;
+    const int lanes = gpu.tp_size > 1 ? gpu.ranks : 1;
+    threads.reserve(lanes);
+    for (int r = 0; r < lanes; ++r)
+        threads.emplace_back(run, r);
+    for (auto &thread : threads)
+        thread.join();
+    if (failure)
+        std::rethrow_exception(failure);
+    const auto &stats = lane[0];
     fprintf(stderr,
             "prefill_tokens=%zu prefill_s=%.6f decode_tokens=%zu decode_s=%.6f draft_rounds=%d accepted=%d\n",
-            ids.size(), pp, generated.size() - 1, tg, rounds, accepted);
-    fprintf(stderr, "accepted_histogram=%d,%d,%d,%d,%d,%d\n", histogram[0], histogram[1], histogram[2],
-            histogram[3], histogram[4], histogram[5]);
+            ids.size(), stats.prefill, stats.generated.size() - 1, stats.decode, stats.rounds, stats.accepted);
+    fprintf(stderr, "accepted_histogram=%d,%d,%d,%d,%d,%d\n", stats.histogram[0], stats.histogram[1],
+            stats.histogram[2], stats.histogram[3], stats.histogram[4], stats.histogram[5]);
     for (int r = 0; r < gpu.ranks; ++r) {
+        const uint64_t prefill_routes = gpu.tp_size == 1 ? stats.pp_routes_all[r] : lane[r].pp_routes;
+        const double prefill_expert = gpu.tp_size == 1 ? stats.pp_expert_all[r] : lane[r].pp_expert;
         fprintf(stderr, "rank=%d prefill_choices=%llu decode_choices=%llu", r,
-                static_cast<unsigned long long>(pp_routes[r]),
-                static_cast<unsigned long long>(gpu.routed_rows[r] - pp_routes[r]));
+                static_cast<unsigned long long>(prefill_routes),
+                static_cast<unsigned long long>(gpu.routed_rows[r] - prefill_routes));
         if (gpu.expert_begin[r])
-            fprintf(stderr, " prefill_expert_ms=%.4f decode_expert_ms=%.4f", pp_expert_ms[r],
-                    gpu.expert_ms[r] - pp_expert_ms[r]);
-        if (r)
-            fprintf(stderr, " prefill_pcie_bytes=%llu decode_pcie_bytes=%llu",
-                    static_cast<unsigned long long>(pp_bytes[0][r] + pp_bytes[r][0]),
-                    static_cast<unsigned long long>(gpu.transfer_bytes[0][r] + gpu.transfer_bytes[r][0] -
-                                                    pp_bytes[0][r] - pp_bytes[r][0]));
+            fprintf(stderr, " prefill_expert_ms=%.4f decode_expert_ms=%.4f", prefill_expert,
+                    gpu.expert_ms[r] - prefill_expert);
         fputc('\n', stderr);
     }
     if (gpu.expert_begin[0])
         fprintf(stderr,
                 "profile_pp_ms attention=%.3f ffn=%.3f transfer=%.3f head=%.3f\n"
                 "profile_tg_ms attention=%.3f ffn=%.3f transfer=%.3f head=%.3f draft=%.3f\n",
-                pp_attn, pp_ffn, pp_transfer, pp_head, gpu.attention_ms - pp_attn, gpu.ffn_ms - pp_ffn,
-                gpu.transfer_ms - pp_transfer, target.head_ms - pp_head, draft_ms);
-    return generated;
+                stats.pp_attn, stats.pp_ffn, stats.pp_transfer, stats.pp_head, gpu.attention_ms - stats.pp_attn,
+                gpu.ffn_ms - stats.pp_ffn, gpu.transfer_ms - stats.pp_transfer,
+                stats.head - stats.pp_head, stats.draft);
+    return lane[0].generated;
 }
 }

@@ -16,7 +16,35 @@ build/shelf-server --model-dir /path/to/model --engram-dir /path/to/engram \
   --dfly-dir /path/to/dfly --placement owners.json --max-seq-len 2097152
 ```
 
-予約に必要な容量が不足する場合はエラーで停止する。予約長を 1Mi に変更する場合は、配置表も `--tokens 1048576` で再生成する。静的容量と前提は[調査記録](../research/20261119/hy4_r9700_capacity.md)を参照。複数台の R9700 による実機予約と生成は未検証である。
+予約に必要な容量が不足する場合はエラーで停止する。予約長を 1Mi に変更する場合は、配置表も `--tokens 1048576` で再生成する。静的容量と前提は[調査記録](../research/20261119/hy4_r9700_capacity.md)を参照。
+
+## EP=2 × TP=2 の例
+
+4 台を 2 つの EP group と 2 つの TP lane で使う。配置表の値は expert の所有 EP group になる。配置表は TP 分割後の 1 lane 分の容量で生成する。
+
+```bash
+python3 tools/hy4_flash/placement.py /path/to/model --draft /path/to/dfly \
+  --capacity 34 34 --workspace 1 1 --tensor-parallel 2 \
+  --tokens 2097152 --output owners.json
+export ROCR_VISIBLE_DEVICES=GPU-UUID0,GPU-UUID1,GPU-UUID2,GPU-UUID3
+build/shelf-compute hy4 inspect --model-dir /path/to/model --engram-dir /path/to/engram \
+  --dfly-dir /path/to/dfly --placement owners.json \
+  --expert-parallel 2 --tensor-parallel 2
+build/shelf-compute hy4 reserve --model-dir /path/to/model --engram-dir /path/to/engram \
+  --dfly-dir /path/to/dfly --placement owners.json \
+  --expert-parallel 2 --tensor-parallel 2 --max-seq-len 2097152
+```
+
+`generate` の予約長上限は 1Mi である。生成する場合は `--max-seq-len 1048576` を指定する。
+
+```bash
+build/shelf-compute hy4 generate --model-dir /path/to/model --engram-dir /path/to/engram \
+  --dfly-dir /path/to/dfly --placement owners.json \
+  --expert-parallel 2 --tensor-parallel 2 --max-seq-len 1048576 \
+  --input-ids-file prompt.ids --max-new-tokens 256 --chunk 1024 --temperature 0
+```
+
+TP の all-reduce は bf16 で行うため、EP のみの構成と token 列が完全一致するとは限らない。数値の比較は logits の相対誤差で行う。複数台の R9700 による実機の長時間運用は未検証である。
 
 ## Engram の起動時読み込み
 

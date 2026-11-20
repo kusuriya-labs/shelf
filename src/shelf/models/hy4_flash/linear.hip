@@ -6,7 +6,7 @@ hipError_t shelf_hy4_wmma(const int8_t *, const float *, const uint32_t *, float
                           hipStream_t, int);
 
 hipError_t shelf_hy4_wmma_experts(const int8_t *, const float *, const Hy4ExpertProjection *, const Hy4Route *,
-                                  const Hy4ExpertBatch *, int, float *, bool);
+                                  const Hy4ExpertBatch *, int, float *, bool, int, int);
 namespace {
 using namespace shelf::kernel::exl3_detail;
 using namespace shelf::kernel::exl3_detail::mul24;
@@ -90,22 +90,25 @@ extern "C" hipError_t shelf_hy4_linear(const uint16_t *input, const uint16_t *su
 extern "C" hipError_t shelf_hy4_expert_linear(const uint16_t *x, const Hy4ExpertProjection *matrices,
                                               int stride, int8_t *codes, float *scales, float *partial,
                                               uint16_t *y, int rows, const Hy4Route *routes,
-                                              const Hy4ExpertBatch *batches, int num_batches, int mixed) {
+                                              const Hy4ExpertBatch *batches, int num_batches, int mixed, int k,
+                                              int n) {
     if (!x || !matrices || !codes || !scales || !partial || !y || rows < 1 || rows > 65535 || stride < 1)
         return hipErrorInvalidValue;
     if (!routes || !batches || num_batches < 1 || num_batches > rows || stride != 3)
         return hipErrorInvalidValue;
-    rotate_input<<<dim3(12, rows), 32>>>(x, nullptr, codes, scales, 1536, 1536, matrices, stride, routes);
+    if (k < 1 || k % 128 || n < 1 || n % 64)
+        return hipErrorInvalidValue;
+    rotate_input<<<dim3(k / 128, rows), 32>>>(x, nullptr, codes, scales, k, k, matrices, stride, routes);
     auto status = hipGetLastError();
     if (status != hipSuccess)
         return status;
-    status = shelf_hy4_wmma_experts(codes, scales, matrices, routes, batches, num_batches, partial, mixed);
+    status = shelf_hy4_wmma_experts(codes, scales, matrices, routes, batches, num_batches, partial, mixed, k, n);
     if (status != hipSuccess)
         return status;
     status = hipGetLastError();
     if (status != hipSuccess)
         return status;
-    rotate_output<<<dim3(12, rows), 32>>>(partial, nullptr, y, 1536, 1536, matrices, stride, nullptr, routes);
+    rotate_output<<<dim3(n / 128, rows), 32>>>(partial, nullptr, y, n, n, matrices, stride, nullptr, routes);
     return hipGetLastError();
 }
 

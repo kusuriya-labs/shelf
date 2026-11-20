@@ -38,12 +38,14 @@ __global__ void quant_latent(Mat latent, const uint16_t *suh, _Float16 *data) {
         data[blockIdx.y * 512 + col + i] = scale ? rintf(v[i] / scale) * scale : 0;
 }
 }
-void fold_kv_weights(Residency &gpu) {
-    for (const auto &[key, dest] : gpu.folded) {
-        auto n = gpu.model.shape.at(key)[1];
+void fold_kv_weights(Residency &gpu, int rank) {
+    for (const auto &[key, dest] : gpu.folded[rank]) {
+        if (!dest)
+            continue;
+        auto n = gpu.model.shape_of(key, rank)->at(1);
         fold<<<dim3(n / 128, 512), 128>>>(
-            static_cast<const uint32_t *>(gpu.device(gpu.model.at(key + ".trellis"))),
-            static_cast<const uint16_t *>(gpu.device(gpu.model.at(key + ".svh"))),
+            static_cast<const uint32_t *>(gpu.device(gpu.model.at(key + ".trellis", rank))),
+            static_cast<const uint16_t *>(gpu.device(gpu.model.at(key + ".svh", rank))),
             static_cast<_Float16 *>(dest), n);
         checked(hipGetLastError());
     }
@@ -51,7 +53,7 @@ void fold_kv_weights(Residency &gpu) {
 }
 void attend_absorbed(Ops &op, const std::string &projection, Mat latent, Mat rotary, Mat q, Mat gate,
                      const int *positions, int stride, Param sinks, Mat out) {
-    auto folded = static_cast<const _Float16 *>(op.gpu.folded.at(projection));
+    auto folded = static_cast<const _Float16 *>(op.gpu.folded[op.rank].at(projection));
     int heads = q.cols / 256, rows = q.rows;
     auto input = static_cast<_Float16 *>(op.arena.next(size_t(latent.rows) * 512 * 2));
     auto query = op.arena.next(size_t(rows) * heads * 512 * 2);

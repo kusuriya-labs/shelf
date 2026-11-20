@@ -37,27 +37,30 @@ hipError_t shelf_hy4_wmma(const int8_t *codes, const float *scales, const uint32
 namespace {
 template <bool Mixed>
 __global__ void expert_batch(const int8_t *codes, const float *scales, const Hy4ExpertProjection *matrices,
-                             const Hy4Route *routes, const Hy4ExpertBatch *batches, float *partial) {
+                             const Hy4Route *routes, const Hy4ExpertBatch *batches, float *partial, int k,
+                             int n) {
     auto batch = batches[blockIdx.y];
     size_t first = batch.first;
     auto matrix = matrices[3 * routes[first].expert];
     auto weight = matrix.trellis;
     if (Mixed && matrix.bits == 3)
         shelf::kernel::exl3_detail::mul24::group_body<3, 1, false, 4, false, true>(
-            codes + first * 1536, scales + first * 12, 1536, 12, weight, partial + first * 1536, batch.count,
-            nullptr, 1536, 1536, 12, 1, blockIdx.x, 0);
+            codes + first * k, scales + first * (k / 128), k, k / 128, weight, partial + first * n, batch.count,
+            nullptr, n, k, k / 128, 1, blockIdx.x, 0);
     else
         shelf::kernel::exl3_detail::mul24::group_body<4, 1, false, 4, false, true>(
-            codes + first * 1536, scales + first * 12, 1536, 12, weight, partial + first * 1536, batch.count,
-            nullptr, 1536, 1536, 12, 1, blockIdx.x, 0);
+            codes + first * k, scales + first * (k / 128), k, k / 128, weight, partial + first * n, batch.count,
+            nullptr, n, k, k / 128, 1, blockIdx.x, 0);
 }
 }
 hipError_t shelf_hy4_wmma_experts(const int8_t *codes, const float *scales, const Hy4ExpertProjection *matrices,
                                   const Hy4Route *routes, const Hy4ExpertBatch *batches, int count,
-                                  float *partial, bool mixed) {
+                                  float *partial, bool mixed, int k, int n) {
+    if (n % 64)
+        return hipErrorInvalidValue;
     if (mixed)
-        expert_batch<true><<<dim3(24, count), 128>>>(codes, scales, matrices, routes, batches, partial);
+        expert_batch<true><<<dim3(n / 64, count), 128>>>(codes, scales, matrices, routes, batches, partial, k, n);
     else
-        expert_batch<false><<<dim3(24, count), 128>>>(codes, scales, matrices, routes, batches, partial);
+        expert_batch<false><<<dim3(n / 64, count), 128>>>(codes, scales, matrices, routes, batches, partial, k, n);
     return hipGetLastError();
 }

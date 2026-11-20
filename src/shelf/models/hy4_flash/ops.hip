@@ -153,21 +153,36 @@ void peer_copy(void *dst, const void *src, size_t bytes) {
                                                      static_cast<const uint8_t *>(src), bytes);
     checked(hipGetLastError());
 }
+namespace {
+__global__ void add_bf16_kernel(uint16_t *dst, const uint16_t *src, size_t count) {
+    size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < count)
+        dst[i] = f32_to_bf16_rne_device(bf16_bits_to_f32(dst[i]) + bf16_bits_to_f32(src[i]));
+}
+}
+void tp_add_bf16(void *dst, const void *src, size_t bytes) {
+    if (!bytes)
+        return;
+    size_t count = bytes / 2;
+    add_bf16_kernel<<<(count + 255) / 256, 256>>>(static_cast<uint16_t *>(dst),
+                                                  static_cast<const uint16_t *>(src), count);
+    checked(hipGetLastError());
+}
 Mat Ops::mat(int rows, int cols) {
     if (rows < 1 || cols < 1)
         throw std::runtime_error("空の作業行列です");
     return {static_cast<uint16_t *>(arena.next(size_t(rows) * cols * 2)), rows, cols};
 }
 Param Ops::param(const std::string &key) const {
-    const auto &w = gpu.model.at(key);
+    const auto &w = gpu.model.at(key, rank);
     if (w.rank != rank)
         throw std::runtime_error("重みの rank が違います: " + key);
     return {gpu.device(w), w.spec.dtype};
 }
 Mat Ops::linear(const std::string &name, Mat x) {
-    auto it = gpu.model.weights.find(name + ".trellis");
-    if (it == gpu.model.weights.end()) {
-        const auto &w = gpu.model.at(name + ".weight");
+    auto it = gpu.model.find(name + ".trellis", rank);
+    if (!it) {
+        const auto &w = gpu.model.at(name + ".weight", rank);
         if (w.spec.shape.size() != 2 || w.spec.shape[1] != size_t(x.cols) ||
             (w.spec.dtype != io::SType::F32 && w.spec.dtype != io::SType::BF16))
             throw std::runtime_error("線形の形状・型が不正です: " + name);
@@ -176,13 +191,13 @@ Mat Ops::linear(const std::string &name, Mat x) {
         checked(hipGetLastError());
         return y;
     }
-    auto shape = gpu.model.shape.find(name);
-    auto logical = shape == gpu.model.shape.end() ? std::array<int, 2>{1536, 1536} : shape->second;
+    auto logical = gpu.model.shape_of(name, rank) ? *gpu.model.shape_of(name, rank)
+                                                  : std::array<int, 2>{1536, 1536};
     if (x.cols != logical[0])
         throw std::runtime_error("線形入力の幅が異なります: " + name);
     Mat y = mat(x.rows, logical[1]);
     size_t save = arena.cursor;
-    int pk = it->second.spec.shape[0] * 16, pn = it->second.spec.shape[1] * 16;
+    int pk = it->spec.shape[0] * 16, pn = it->spec.shape[1] * 16;
     auto codes = static_cast<int8_t *>(arena.next(size_t(x.rows) * pk));
     auto scales = static_cast<float *>(arena.next(size_t(x.rows) * pk / 128 * 4));
     int splits = 1;
@@ -193,8 +208,10 @@ Mat Ops::linear(const std::string &name, Mat x) {
     checked(shelf_hy4_linear(x.p, static_cast<const uint16_t *>(param(name + ".suh").p),
                              static_cast<const uint16_t *>(param(name + ".svh").p),
                              static_cast<const uint32_t *>(param(name + ".trellis").p), codes, scales, partial,
-                             y.p, x.rows, x.cols, y.cols, pk, pn, it->second.spec.shape[2] / 16, nullptr,
+                             y.p, x.rows, x.cols, y.cols, pk, pn, it->spec.shape[2] / 16, nullptr,
                              splits));
+    if (gpu.model.row_parallel(name, rank))
+        gpu.tp_sum(y.p, rank, y.bytes());
     arena.cursor = save;
     return y;
 }
@@ -238,7 +255,7 @@ void Ops::copy(void *dst, const void *src, size_t bytes, hipMemcpyKind kind) {
     checked(hipMemcpy(dst, src, bytes, kind));
 }
 Mat Ops::embed(const std::vector<int> &ids, bool expand) {
-    const auto &w = gpu.model.at("model.embed_tokens.weight");
+    const auto &w = gpu.model.at("model.embed_tokens.weight", rank);
     if (w.spec.shape != std::vector<size_t>{120832, 3072} || w.spec.dtype != io::SType::BF16)
         throw std::runtime_error("embedding の形状・型が異なります");
     for (int id : ids)

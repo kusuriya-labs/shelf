@@ -29,6 +29,87 @@ template <class T> T take(Result<T> value) {
         throw std::runtime_error(value.status().message());
     return value.release();
 }
+enum class Split { None, N, K };
+std::string base_name(const std::string &key) {
+    for (std::string_view suffix : {".suh", ".svh", ".trellis", ".mul1"})
+        if (key.ends_with(suffix))
+            return key.substr(0, key.size() - suffix.size());
+    return key;
+}
+bool expert_name(const std::string &base) { return base.find(".mlp.experts.") != std::string::npos; }
+bool draft_name(const std::string &base) { return base.starts_with("model.dfly_layers."); }
+Split split_name(const std::string &base) {
+    if (draft_name(base))
+        return Split::None;
+    if (expert_name(base)) {
+        if (base.ends_with(".down_proj"))
+            return Split::K;
+        if (base.ends_with(".gate_proj") || base.ends_with(".up_proj"))
+            return Split::N;
+        return Split::None;
+    }
+    if (base.ends_with(".self_attn.q_b_proj") || base.ends_with(".self_attn.kv_b_proj") ||
+        base.ends_with(".self_attn.linear_gate") || base.ends_with(".gate_proj") ||
+        base.ends_with(".up_proj"))
+        return Split::N;
+    if (base.ends_with(".self_attn.o_proj") || base.ends_with(".down_proj"))
+        return Split::K;
+    return Split::None;
+}
+Weight make_view(Checkpoint &checkpoint, const std::string &key, const Weight &source, Split split, int tp_rank,
+                 int tp_size) {
+    Weight view = source;
+    view.rank = 0;
+    view.offset = 0;
+    if (split == Split::None || tp_size == 1)
+        return view;
+    const size_t element = io::stype_elem_size(source.spec.dtype);
+    if (key.ends_with(".suh")) {
+        if (split == Split::N)
+            return view;
+        size_t padded = source.spec.shape.at(0);
+        require(padded % tp_size == 0, "suh を TP で分割できません");
+        size_t local = padded / tp_size;
+        view.host = static_cast<const uint8_t *>(source.host) + size_t(tp_rank) * local * element;
+        view.spec.shape = {local};
+        view.bytes = local * element;
+    } else if (key.ends_with(".svh")) {
+        if (split == Split::K)
+            return view;
+        size_t padded = source.spec.shape.at(0);
+        require(padded % tp_size == 0, "svh を TP で分割できません");
+        size_t local = padded / tp_size;
+        view.host = static_cast<const uint8_t *>(source.host) + size_t(tp_rank) * local * element;
+        view.spec.shape = {local};
+        view.bytes = local * element;
+    } else if (key.ends_with(".trellis")) {
+        size_t rows = source.spec.shape.at(0), cols = source.spec.shape.at(1), bits = source.spec.shape.at(2);
+        if (split == Split::N) {
+            require(cols % tp_size == 0, "trellis の N を TP で分割できません");
+            size_t local_cols = cols / tp_size;
+            size_t row_bytes = cols * bits * element, local_row = local_cols * bits * element;
+            auto buffer = std::make_unique<uint8_t[]>(rows * local_row);
+            for (size_t row = 0; row < rows; ++row)
+                std::memcpy(buffer.get() + row * local_row,
+                            static_cast<const uint8_t *>(source.host) + row * row_bytes + tp_rank * local_row,
+                            local_row);
+            view.host = buffer.get();
+            checkpoint.slices.push_back(std::move(buffer));
+            view.spec.shape = {rows, local_cols, bits};
+            view.bytes = rows * local_row;
+        } else {
+            require(rows % tp_size == 0, "trellis の K を TP で分割できません");
+            size_t local_rows = rows / tp_size;
+            size_t row_bytes = cols * bits * element;
+            view.host = static_cast<const uint8_t *>(source.host) + size_t(tp_rank) * local_rows * row_bytes;
+            view.spec.shape = {local_rows, cols, bits};
+            view.bytes = local_rows * row_bytes;
+        }
+    } else {
+        throw std::runtime_error("TP 分割できない tensor です: " + key);
+    }
+    return view;
+}
 }
 Owners read_owners(const Path &file) {
     const auto data = read_json(file);
@@ -45,11 +126,30 @@ Owners read_owners(const Path &file) {
     }
     return owners;
 }
-const Weight &Checkpoint::at(const std::string &key) const {
-    const auto it = weights.find(key);
-    if (it == weights.end())
+const Weight &Checkpoint::at(const std::string &key, int rank) const {
+    if (rank < 0) {
+        const auto it = source.find(key);
+        if (it == source.end())
+            throw std::runtime_error("重みがありません: " + key);
+        return it->second;
+    }
+    const auto it = local.at(rank).find(key);
+    if (it == local.at(rank).end())
         throw std::runtime_error("重みがありません: " + key);
     return it->second;
+}
+const Weight *Checkpoint::find(const std::string &key, int rank) const {
+    const auto &map = local.at(rank);
+    const auto it = map.find(key);
+    return it == map.end() ? nullptr : &it->second;
+}
+const std::array<int, 2> *Checkpoint::shape_of(const std::string &key, int rank) const {
+    const auto &map = local_shape.at(rank);
+    const auto it = map.find(key);
+    return it == map.end() ? nullptr : &it->second;
+}
+bool Checkpoint::row_parallel(const std::string &key, int rank) const {
+    return row_split.at(rank).contains(base_name(key));
 }
 void Checkpoint::populate_engram(bool lock) const {
     auto begin = std::chrono::steady_clock::now();
@@ -106,8 +206,14 @@ void Checkpoint::report_engram_residency(const char *phase) const {
     fprintf(stderr, "engram_resident phase=%s pages=%zu total=%zu page_size=%ld\n",
             phase, resident, total, page);
 }
-Checkpoint::Checkpoint(const Path &model, const Path &engram, const Path &draft, const Owners &layout)
-    : owners(layout), has_draft(!draft.empty()) {
+Checkpoint::Checkpoint(const Path &model, const Path &engram, const Path &draft, const Owners &layout,
+                       int ep_size, int tp_size)
+    : owners(layout), has_draft(!draft.empty()), ep(ep_size), tp(tp_size), ranks(ep_size * tp_size) {
+    require(ep >= 1 && tp >= 1 && ranks <= 4, "EP / TP の構成が不正です");
+    require(tp == 1 || (ep <= 2 && tp <= 2), "TP を使う場合は EP 2 × TP 2 までに対応します");
+    for (const auto &row : owners)
+        for (int owner : row)
+            require(owner >= 0 && owner < ep, "配置表の expert owner が EP 数を超えています");
     const auto cfg = read_json(model / "config.json");
     require(cfg.value("model_type", std::string{}) == "hy_v4_flash" && cfg.value("exl3_text_only", false) &&
                 cfg.at("num_hidden_layers") == 42 && cfg.at("hc_mult") == 4 &&
@@ -150,7 +256,7 @@ Checkpoint::Checkpoint(const Path &model, const Path &engram, const Path &draft,
                     "Engram 表の型または形状が不正です");
             size_t length;
             auto data = take(reader.tensor_data(name, length));
-            weights.emplace(name, Weight{spec, data, length, -1, 0});
+            source.emplace(name, Weight{spec, data, length, -1, 0});
         }
         engram_files[g] = files.size();
         files.push_back(std::move(reader));
@@ -168,7 +274,7 @@ Checkpoint::Checkpoint(const Path &model, const Path &engram, const Path &draft,
             shape[name] = dims.get<std::array<int, 2>>();
         load(draft, true);
     }
-    for (const auto &[key, w] : weights) {
+    for (const auto &[key, w] : source) {
         if (!key.ends_with(".trellis"))
             continue;
         const auto name = key.substr(0, key.size() - 8);
@@ -180,7 +286,7 @@ Checkpoint::Checkpoint(const Path &model, const Path &engram, const Path &draft,
         require(k > 0 && n > 0 && k <= 120832 && n <= 120832, "線形の幅が不正です: " + name);
         size_t pk = (k + 127) / 128 * 128, pn = (n + 127) / 128 * 128;
         auto matrix = [&](const std::string &suffix, io::SType dtype, std::vector<size_t> dims) {
-            const auto &part = at(name + suffix);
+            const auto &part = source.at(name + suffix);
             require(part.spec.dtype == dtype && part.spec.shape == dims,
                     "量子化 tensor が不正です: " + name + suffix);
         };
@@ -189,17 +295,17 @@ Checkpoint::Checkpoint(const Path &model, const Path &engram, const Path &draft,
         matrix(".trellis", io::SType::I16, {pk / 16, pn / 16, size_t(16 * bits)});
         matrix(".mul1", io::SType::I32, {});
         int32_t marker;
-        std::memcpy(&marker, at(name + ".mul1").host, sizeof(marker));
+        std::memcpy(&marker, source.at(name + ".mul1").host, sizeof(marker));
         require(marker == quantization::exl3::kExl3Mul24Multiplier, "mul24 乗数が不正です");
     }
     auto raw = [&](const std::string &name, io::SType dtype, std::vector<size_t> dims) {
-        const auto &w = at(name);
+        const auto &w = source.at(name);
         require(w.spec.dtype == dtype && w.spec.shape == dims, "未量子化 tensor の型・形状が不正です: " + name);
     };
     auto linear = [&](const std::string &name, int k, int n, bool allow_raw = false) {
         auto it = shape.find(name);
         if (it == shape.end() && allow_raw) {
-            const auto &w = at(name + ".weight");
+            const auto &w = source.at(name + ".weight");
             require(w.spec.shape == std::vector<size_t>{size_t(n), size_t(k)} &&
                         (w.spec.dtype == io::SType::BF16 || w.spec.dtype == io::SType::F32),
                     "indexer 線形の形状・型が不正です: " + name);
@@ -209,7 +315,7 @@ Checkpoint::Checkpoint(const Path &model, const Path &engram, const Path &draft,
         }
     };
     auto norm = [&](const std::string &name, size_t n) {
-        const auto &w = at(name);
+        const auto &w = source.at(name);
         require(w.spec.shape == std::vector<size_t>{n} &&
                     (w.spec.dtype == io::SType::BF16 || w.spec.dtype == io::SType::F32),
                 "正規化係数の型・形状が不正です: " + name);
@@ -235,8 +341,8 @@ Checkpoint::Checkpoint(const Path &model, const Path &engram, const Path &draft,
     raw("model.hc_head.hc_head_fn", io::SType::F32, {4, 12288});
     raw("model.hc_head.hc_head_base", io::SType::F32, {4});
     norm("model.norm.weight", 3072);
-    require(at("model.hc_head.hc_head_scale").bytes == 4 &&
-                at("model.hc_head.hc_head_scale").spec.dtype == io::SType::F32,
+    require(source.at("model.hc_head.hc_head_scale").bytes == 4 &&
+                source.at("model.hc_head.hc_head_scale").spec.dtype == io::SType::F32,
             "head の scale が不正です");
     linear("lm_head", 3072, 120832);
     for (int i = 0; i < 42; ++i) {
@@ -276,7 +382,7 @@ Checkpoint::Checkpoint(const Path &model, const Path &engram, const Path &draft,
         if (i % 10 == 1 && i <= 31) {
             auto e = p + "engram_layer.";
             raw(e + "lookup_table", io::SType::I32, {120818});
-            auto lut = static_cast<const int32_t *>(at(e + "lookup_table").host);
+            auto lut = static_cast<const int32_t *>(source.at(e + "lookup_table").host);
             auto bounds = std::minmax_element(lut, lut + 120818);
             require(*bounds.first >= 0 && *bounds.second == 92619, "Engram の正規化語彙が異なります");
             linear(e + "value_proj", 1536, 3072);
@@ -311,13 +417,13 @@ Checkpoint::Checkpoint(const Path &model, const Path &engram, const Path &draft,
         mlp(p + "hidden_correction", 6144, 3072, 3072);
     }
     for (const auto &[name, dims] : shape)
-        at(name + ".trellis");
+        source.at(name + ".trellis");
     for (int i = 1; i < 42; ++i)
         for (int e = 0; e < 512; ++e) {
             auto stem = "model.layers." + std::to_string(i) + ".mlp.experts." + std::to_string(e) + ".";
-            int bits = at(stem + "gate_proj.trellis").spec.shape[2] / 16;
+            int bits = source.at(stem + "gate_proj.trellis").spec.shape[2] / 16;
             for (auto name : {"up_proj", "down_proj"})
-                require(at(stem + name + ".trellis").spec.shape[2] == size_t(bits * 16),
+                require(source.at(stem + name + ".trellis").spec.shape[2] == size_t(bits * 16),
                         "expert の 3 射影の bpw が一致しません");
             expert_bits[i - 1][e] = bits;
         }
@@ -358,53 +464,57 @@ void Checkpoint::load(const Path &directory, bool draft) {
     for (const auto &[file, keys] : shards) {
         require(Path(file).filename() == file, "shard ファイル名が不正です");
         auto reader = take(io::SafetensorsReader::open((directory / file).string()));
-        size_t first = upload_order.size();
         for (const auto &key : keys) {
-            int rank = 0;
-            if (key.find(".mlp.experts.") != std::string::npos) {
+            size_t length;
+            auto ptr = take(reader.tensor_data(key, length));
+            auto spec = take(reader.tensor_spec(key));
+            auto [entry, inserted] = source.emplace(key, Weight{std::move(spec), ptr, length, -1, 0});
+            require(inserted, "tensor 名の重複");
+            if (key.ends_with(".mul1") || key.ends_with(".lookup_table"))
+                continue;
+            const auto base = base_name(key);
+            std::vector<int> targets;
+            if (expert_name(base)) {
                 int layer = 0, e = 0;
                 require(sscanf(key.c_str(), "model.layers.%d.mlp.experts.%d.", &layer, &e) == 2 && layer >= 1 &&
                             layer <= 41 && e >= 0 && e < 512,
                         "expert 名が不正です");
-                rank = owners[layer - 1][e];
+                int group = owners[layer - 1][e];
+                require(group >= 0 && group < ep, "expert の所有 group が不正です");
+                for (int t = 0; t < tp; ++t)
+                    targets.push_back(group * tp + t);
+            } else {
+                for (int r = 0; r < ranks; ++r)
+                    if (tp > 1 || r == 0)
+                        targets.push_back(r);
             }
-            if (key.ends_with(".mul1") || key.ends_with(".lookup_table"))
-                rank = -1;
-            size_t length;
-            auto ptr = take(reader.tensor_data(key, length));
-            auto spec = take(reader.tensor_spec(key));
-            auto [entry, inserted] = weights.emplace(key, Weight{std::move(spec), ptr, length, rank, 0});
-            require(inserted, "tensor 名の重複");
-            if (rank >= 0)
-                upload_order.push_back(&entry->second);
-        }
-        std::sort(upload_order.begin() + first, upload_order.end(),
-                  [](const Weight *a, const Weight *b) { return a->spec.data_begin < b->spec.data_begin; });
-        for (size_t i = first; i < upload_order.size(); ++i) {
-            auto &w = *upload_order[i];
-            w.offset = (bytes[w.rank] + 15) & ~size_t(15);
-            bytes[w.rank] = w.offset + w.bytes;
+            const Split split = split_name(base);
+            const bool quantized = shape.contains(base) || expert_name(base);
+            const auto dims = shape.contains(base) ? shape.at(base)
+                                                   : (expert_name(base) ? std::array<int, 2>{1536, 1536}
+                                                                        : std::array<int, 2>{0, 0});
+            for (int r : targets) {
+                Weight view = make_view(*this, key, entry->second, split, r % tp, tp);
+                view.rank = r;
+                view.offset = (bytes[r] + 15) & ~size_t(15);
+                bytes[r] = view.offset + view.bytes;
+                auto [it, ok] = local[r].emplace(key, std::move(view));
+                require(ok, "tensor 名の重複: " + key);
+                upload_order[r].push_back(&it->second);
+                if (quantized) {
+                    auto &logical = local_shape[r][base];
+                    logical = dims;
+                    if (split == Split::N)
+                        logical[1] /= tp;
+                    else if (split == Split::K)
+                        logical[0] /= tp;
+                }
+                if (split == Split::K)
+                    row_split[r].insert(base);
+            }
         }
         files.push_back(std::move(reader));
     }
-}
-void Checkpoint::relocate(const Owners &layout) {
-    bytes.fill(0);
-    for (auto &[key, w] : weights) {
-        if (w.rank < 0)
-            continue;
-        if (key.find(".mlp.experts.") != std::string::npos) {
-            int layer = 0, e = 0;
-            if (sscanf(key.c_str(), "model.layers.%d.mlp.experts.%d.", &layer, &e) != 2)
-                throw std::runtime_error("expert 名の解析に失敗しました");
-            w.rank = layout.at(layer - 1).at(e);
-        }
-    }
-    for (auto *w : upload_order) {
-        w->offset = (bytes[w->rank] + 15) & ~size_t(15);
-        bytes[w->rank] = w->offset + w->bytes;
-    }
-    owners = layout;
 }
 
 }

@@ -126,7 +126,8 @@ int compute(int argc, char **argv) {
             puts(
                 "shelf-compute [hy4] [inspect|reserve|generate|serve] --model-dir PATH --engram-dir PATH --placement "
                 "PATH [--dfly-dir PATH] [--max-seq-len N] [--input-ids-file PATH] [--max-new-tokens N] "
-                "[--chunk N] [--temperature T] [--seed N] [--dump-logits PATH] [--repeats N]");
+                "[--chunk N] [--temperature T] [--seed N] [--dump-logits PATH] [--repeats N] "
+                "[--expert-parallel N] [--tensor-parallel N]");
             return 0;
         }
         bool implicit = std::string_view(argv[1]).starts_with("--");
@@ -134,7 +135,7 @@ int compute(int argc, char **argv) {
         Path model, engram, draft, placement;
         size_t tokens = mode == "reserve" ? 2097152 : 4096;
         Path input, logits_file;
-        int count = 32, chunk = 64, repeats = 1;
+        int count = 32, chunk = 64, repeats = 1, ep = 0, tp = 1;
         float temperature = 0;
         uint64_t seed = 0;
         for (int i = implicit ? 1 : 2; i < argc; i += 2) {
@@ -160,7 +161,12 @@ int compute(int argc, char **argv) {
                 logits_file = value;
             else if (key == "--input-ids-file")
                 input = value;
-            else if (key == "--max-new-tokens" || key == "--chunk" || key == "--repeats") {
+            else if (key == "--expert-parallel" || key == "--tensor-parallel") {
+                auto &dest = key == "--tensor-parallel" ? tp : ep;
+                auto [p, err] = std::from_chars(value.data(), value.data() + value.size(), dest);
+                if (p != value.data() + value.size() || err != std::errc{} || dest < 1 || dest > 4)
+                    throw std::runtime_error("EP / TP の値が不正です");
+            } else if (key == "--max-new-tokens" || key == "--chunk" || key == "--repeats") {
                 auto &dest = key == "--chunk" ? chunk : key == "--repeats" ? repeats : count;
                 auto [p, err] = std::from_chars(value.data(), value.data() + value.size(), dest);
                 if (p != value.data() + value.size() || err != std::errc{} || dest <= 0)
@@ -179,7 +185,14 @@ int compute(int argc, char **argv) {
             throw std::runtime_error("未知の動作です");
         if (model.empty() || engram.empty() || placement.empty())
             throw std::runtime_error("重みと配置表が必要です");
-        Checkpoint checkpoint(model, engram, draft, read_owners(placement));
+        int visible = 0;
+        if (hipGetDeviceCount(&visible) != hipSuccess || visible < 1 || visible > 4)
+            throw std::runtime_error("R9700 を 1〜4 台指定してください");
+        if (!ep)
+            ep = visible;
+        if (ep * tp != visible)
+            throw std::runtime_error("EP × TP と GPU 数が一致しません");
+        Checkpoint checkpoint(model, engram, draft, read_owners(placement), ep, tp);
         if (mode == "serve" && (tokens > 2097152 || chunk > max_prefill_chunk))
             throw std::invalid_argument("サーバーの予約長または chunk が範囲外です");
         fprintf(mode == "serve" ? stderr : stdout, "DFly=%d weight_bytes=%zu,%zu,%zu,%zu\n", checkpoint.has_draft, checkpoint.bytes[0],
