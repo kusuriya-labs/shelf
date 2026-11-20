@@ -71,10 +71,10 @@ __global__ void multiply(const int8_t *codes, const float *scales, const uint32_
     const unsigned col = threadIdx.x % 16;
     const unsigned worker = threadIdx.x / 16;
     const int row = blockIdx.y;
-    __shared__ float sums[8][16];
+    __shared__ float sums[16][16];
     float acc = 0;
     const unsigned words = bits * 8;
-    for (unsigned kt = worker; kt < unsigned(k / 16); kt += 8) {
+    for (unsigned kt = worker; kt < unsigned(k / 16); kt += 16) {
         const uint32_t *tile = trellis + (size_t(kt) * (n / 16) + blockIdx.x) * words;
         int dot = 0;
 #pragma unroll
@@ -89,7 +89,7 @@ __global__ void multiply(const int8_t *codes, const float *scales, const uint32_
     sums[worker][col] = acc;
     __syncthreads();
     if (worker == 0) {
-        for (unsigned i = 1; i < 8; ++i)
+        for (unsigned i = 1; i < 16; ++i)
             acc += sums[i][col];
         partial[size_t(row) * n + blockIdx.x * 16 + col] = acc * shelf::quantization::exl3::kExl3Int8GridStep;
     }
@@ -208,10 +208,10 @@ extern "C" hipError_t shelf_hy4_expert_linear(const uint16_t *x, const Hy4Expert
                 <<<dim3(96, num_batches), 256>>>(codes, scales, matrices, routes, batches, partial);
     } else {
         if (mixed)
-            multiply<true><<<dim3(96, rows), 128>>>(codes, scales, nullptr, partial, 1536, 1536, matrices,
+            multiply<true><<<dim3(96, rows), 256>>>(codes, scales, nullptr, partial, 1536, 1536, matrices,
                                                     stride, routes);
         else
-            multiply<false><<<dim3(96, rows), 128>>>(codes, scales, nullptr, partial, 1536, 1536, matrices,
+            multiply<false><<<dim3(96, rows), 256>>>(codes, scales, nullptr, partial, 1536, 1536, matrices,
                                                      stride, routes);
     }
     status = hipGetLastError();
