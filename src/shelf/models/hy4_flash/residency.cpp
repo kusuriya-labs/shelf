@@ -167,9 +167,10 @@ void Residency::upload_experts(int r, int layer) {
 }
 void Residency::upload() {
     auto profile = std::getenv("SHELF_HY4_PROFILE_EP");
-    // 診断用: SHELF_HY4_EP_TRANSPORT=host で rank 間の転送をすべて host 経由にする（peer 転送の切り分け）。
     auto transport = std::getenv("SHELF_HY4_EP_TRANSPORT");
-    const bool force_host = transport && std::string_view(transport) == "host";
+    const std::string_view mode = transport ? transport : "";
+    const bool force_host = mode == "host";
+    push = mode != "host" && mode != "peer";
     for (int dst = 0; dst < ranks; ++dst)
         for (int src = 0; src < ranks; ++src) {
             if (src == dst || (dst && src))
@@ -188,10 +189,13 @@ void Residency::upload() {
                 check(hipSetDevice(physical[src]));
                 check(
                     hipEventCreateWithFlags(&ready[src][dst], hipEventDisableTiming | hipEventReleaseToSystem));
+                check(hipSetDevice(physical[dst]));
+                check(hipEventCreateWithFlags(&ack[dst][src], hipEventDisableTiming));
             }
             if (!peer[dst][src] && !staging)
                 check(hipHostMalloc(&staging, max_prefill_chunk * 1536u * 2u, hipHostMallocPortable));
-            fprintf(stderr, "transfer=%d->%d method=%s\n", src, dst, peer[dst][src] ? "peer" : "host");
+            fprintf(stderr, "transfer=%d->%d method=%s\n", src, dst,
+                    peer[dst][src] ? (push ? "push" : "peer") : "host");
         }
     const auto begin = std::chrono::steady_clock::now();
     constexpr size_t chunk = 16ull << 20;
@@ -251,11 +255,22 @@ void Residency::transfer(void *dst, int destination, const void *src, int source
     if (expert_begin[0])
         begin = std::chrono::steady_clock::now();
     if (peer[destination][source]) {
-        check(hipSetDevice(physical[source]));
-        check(hipEventRecord(ready[source][destination], nullptr));
-        check(hipSetDevice(physical[destination]));
-        check(hipStreamWaitEvent(nullptr, ready[source][destination], 0));
-        check(hipMemcpyPeerAsync(dst, physical[destination], src, physical[source], bytes, nullptr));
+        if (push) {
+            check(hipSetDevice(physical[destination]));
+            check(hipEventRecord(ack[destination][source], nullptr));
+            check(hipSetDevice(physical[source]));
+            check(hipStreamWaitEvent(nullptr, ack[destination][source], 0));
+            peer_copy(dst, src, bytes);
+            check(hipEventRecord(ready[source][destination], nullptr));
+            check(hipSetDevice(physical[destination]));
+            check(hipStreamWaitEvent(nullptr, ready[source][destination], 0));
+        } else {
+            check(hipSetDevice(physical[source]));
+            check(hipEventRecord(ready[source][destination], nullptr));
+            check(hipSetDevice(physical[destination]));
+            check(hipStreamWaitEvent(nullptr, ready[source][destination], 0));
+            check(hipMemcpyPeerAsync(dst, physical[destination], src, physical[source], bytes, nullptr));
+        }
     } else {
         if (!staging || bytes > max_prefill_chunk * 1536u * 2u)
             throw std::runtime_error("転送作業域の範囲外です");
@@ -308,6 +323,14 @@ void Residency::shutdown() {
             route_host[r] = nullptr;
         }
         for (auto &event : ready[r])
+            if (event) {
+                auto status = hipSetDevice(physical[r]);
+                collect(status);
+                if (status == hipSuccess)
+                    collect(hipEventDestroy(event));
+                event = nullptr;
+            }
+        for (auto &event : ack[r])
             if (event) {
                 auto status = hipSetDevice(physical[r]);
                 collect(status);

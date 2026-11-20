@@ -134,6 +134,25 @@ void checked(hipError_t e) {
     if (e != hipSuccess)
         throw std::runtime_error(hipGetErrorString(e));
 }
+namespace {
+__global__ void peer_copy_kernel(uint8_t *dst, const uint8_t *src, size_t bytes) {
+    size_t offset = (size_t(blockIdx.x) * blockDim.x + threadIdx.x) * 16;
+    if (offset + 16 <= bytes) {
+        *reinterpret_cast<uint4 *>(dst + offset) = *reinterpret_cast<const uint4 *>(src + offset);
+        return;
+    }
+    for (size_t i = offset; i < bytes; ++i)
+        dst[i] = src[i];
+}
+}
+void peer_copy(void *dst, const void *src, size_t bytes) {
+    if (!bytes)
+        return;
+    size_t threads = (bytes + 15) / 16;
+    peer_copy_kernel<<<(threads + 255) / 256, 256>>>(static_cast<uint8_t *>(dst),
+                                                     static_cast<const uint8_t *>(src), bytes);
+    checked(hipGetLastError());
+}
 Mat Ops::mat(int rows, int cols) {
     if (rows < 1 || cols < 1)
         throw std::runtime_error("空の作業行列です");
