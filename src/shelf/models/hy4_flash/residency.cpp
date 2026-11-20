@@ -25,9 +25,12 @@ void *Region::next(size_t length) {
     return base + start;
 }
 Residency::Residency(Checkpoint &model, size_t tokens) : model(model), tokens(tokens) {
-    for (const auto &[name, dims] : model.shape)
-        if (name.ends_with(".self_attn.kv_b_proj"))
-            folded[name] = nullptr;
+    ep_size = model.ep;
+    tp_size = model.tp;
+    for (int r = 0; r < model.ranks; ++r)
+        for (const auto &[name, dims] : model.shape)
+            if (name.ends_with(".self_attn.kv_b_proj"))
+                folded[r][name] = nullptr;
     if (!tokens || tokens > 2097152)
         throw std::runtime_error("KV の予約長が範囲外です");
 }
@@ -43,6 +46,8 @@ Status Residency::reserve() {
     check(hipGetDeviceCount(&count));
     if (count < 1 || count > 4)
         throw std::runtime_error("R9700 を 1〜4 台指定してください");
+    if (count != model.ranks)
+        throw std::runtime_error("EP × TP と GPU 数が一致しません");
     ranks = count;
     for (int device = 0; device < count; ++device) {
         hipDeviceProp_t props{};
@@ -52,70 +57,50 @@ Status Residency::reserve() {
         physical[device] = device;
     }
     std::array<size_t, 4> available{}, overhead{};
-    std::array<int, 4> used{};
     std::array<int64_t, 4> remaining{};
+    std::array<int, 4> used{};
     for (const auto &row : model.owners)
         for (int r : row) {
-            if (r < 0 || r >= ranks)
-                throw std::runtime_error("配置表の rank が指定 GPU 数を超えています");
+            if (r < 0 || r >= ep_size)
+                throw std::runtime_error("配置表の group が EP 数を超えています");
             ++used[r];
         }
     for (int r = 0; r < ranks; ++r) {
         check(hipSetDevice(physical[r]));
         size_t total = 0;
         check(hipMemGetInfo(&available[r], &total));
-        // 空きを使い切ると arena の hipMalloc が丸めや他プロセスの揺れで std::bad_alloc になるため、余裕を残す。
-        // 実測では起動後の追加確保は無く、必要なのは数 MiB（余裕 0.29 MiB で 21 回中 1 回失敗、1.7 MiB 以上は成功）。
-        // 失敗が起きるたびに、この値を 2 倍にすること（8 → 16 → 32 → ... MiB）。
         available[r] -= std::min(available[r], size_t(8) << 20);
-        overhead[r] = (r ? size_t(512) << 20 : size_t(2) << 30) + matrix_bytes;
-        if (!r)
+        const bool attention_rank = tp_size > 1 || r == 0;
+        overhead[r] = (tp_size > 1 ? size_t(1) << 30 : (r == 0 ? size_t(2) << 30 : size_t(512) << 20)) + matrix_bytes;
+        if (attention_rank) {
             for (int i = 0; i < 42; ++i) {
                 bool sparse = i == 0 || i % 4 == 1;
                 overhead[r] += align(294 * (sparse ? tokens : std::min(tokens, size_t(518))));
                 if (sparse)
                     overhead[r] += align((tokens / 4 + 12) * 256);
             }
-        if (!r)
-            for (const auto &[name, ignored] : folded)
-                overhead[0] += size_t(model.shape.at(name)[1]) * 512 * 2;
+            for (const auto &[name, ignored] : folded[r])
+                overhead[r] += size_t(model.shape_of(name, r)->at(1)) * 512 * 2;
+        }
+        if (tp_size > 1)
+            overhead[r] += max_prefill_chunk * 3072u * 2u;
+        if (tp_size > 1 && ep_size > 1)
+            overhead[r] += max_prefill_chunk * 1536u * 2u;
         remaining[r] = int64_t(available[r]) - int64_t(align(model.bytes[r]) + overhead[r]);
     }
-    if (std::accumulate(remaining.begin(), remaining.begin() + ranks, int64_t{}) < 0)
-        return Status::unsupported("要求された配置と予約長は GPU の空き容量に収まりません", __FILE__, __LINE__);
-    auto plan = model.owners;
-    int moved = 0;
-    for (int expert = 511; expert >= 0; --expert)
-        for (int layer = 0; layer < 41; ++layer) {
-            int from = plan[layer][expert];
-            if (remaining[from] >= 0)
-                continue;
-            int64_t bytes = 3 * (1536ll * 1536 * model.expert_bits[layer][expert] / 8 + 1536 * 4);
-            int dest = std::max_element(remaining.begin(), remaining.begin() + ranks) - remaining.begin();
-            if (remaining[dest] < bytes)
-                continue;
-            plan[layer][expert] = dest;
-            remaining[from] += bytes;
-            remaining[dest] -= bytes;
-            --used[from];
-            ++used[dest];
-            ++moved;
-        }
     if (*std::min_element(remaining.begin(), remaining.begin() + ranks) < 0)
         return Status::unsupported("要求された配置と予約長は GPU の空き容量に収まりません", __FILE__, __LINE__);
-    if (moved)
-        model.relocate(plan);
-    fprintf(stderr, "relocated_experts=%d rank_counts=%d,%d,%d,%d\n", moved, used[0], used[1], used[2], used[3]);
+    fprintf(stderr, "rank_counts=%d,%d,%d,%d\n", used[0], used[1], used[2], used[3]);
     for (int r = 0; r < ranks; ++r) {
         check(hipSetDevice(physical[r]));
         size_t free, total;
         check(hipMemGetInfo(&free, &total));
-        size_t work = r ? size_t(512) << 20 : size_t(2) << 30;
+        const bool attention_rank = tp_size > 1 || r == 0;
+        size_t work = tp_size > 1 ? size_t(1) << 30 : (r == 0 ? size_t(2) << 30 : size_t(512) << 20);
         size_t bytes = align(model.bytes[r]) + overhead[r];
         fprintf(stderr, "rank=%d weight=%zu workspace=%zu request=%zu free=%zu total=%zu\n", r, model.bytes[r],
                 work, bytes, free, total);
-        auto result =
-            gpu::GpuArena::create(physical[r], bytes);
+        auto result = gpu::GpuArena::create(physical[r], bytes);
         if (!result.ok()) {
             if (result.status().code() == Status::Code::insufficient_memory)
                 return Status::unsupported("要求された配置と予約長は GPU の空き容量に収まりません", __FILE__, __LINE__);
@@ -127,41 +112,54 @@ Status Residency::reserve() {
             throw std::runtime_error(allocation.status().message());
         Region buffer{static_cast<uint8_t *>(allocation.value().data()), bytes};
         weight_base[r] = static_cast<uint8_t *>(buffer.next(model.bytes[r]));
-        if (!r)
+        if (attention_rank) {
             for (int i = 0; i < 42; ++i) {
                 bool sparse = i == 0 || i % 4 == 1;
-                cache[i] = static_cast<uint8_t *>(
+                cache[r][i] = static_cast<uint8_t *>(
                     buffer.next(294 * (sparse ? tokens : std::min(tokens, size_t(518)))));
                 if (sparse)
-                    index_keys[i] = static_cast<uint16_t *>(buffer.next((tokens / 4 + 12) * 256));
+                    index_keys[r][i] = static_cast<uint16_t *>(buffer.next((tokens / 4 + 12) * 256));
             }
-        if (!r)
-            for (auto &[name, ptr] : folded)
-                ptr = buffer.next(size_t(model.shape.at(name)[1]) * 512 * 2);
+            for (auto &[name, ptr] : folded[r])
+                ptr = buffer.next(size_t(model.shape_of(name, r)->at(1)) * 512 * 2);
+        }
+        if (tp_size > 1)
+            tp_recv[r] = buffer.next(max_prefill_chunk * 3072u * 2u);
+        if (tp_size > 1 && ep_size > 1)
+            ep_recv[r] = buffer.next(max_prefill_chunk * 1536u * 2u);
         matrices[r] = static_cast<Hy4ExpertProjection *>(buffer.next(matrix_bytes));
         workspace[r] = {static_cast<uint8_t *>(buffer.next(work)), work};
         check(hipMemGetInfo(&free, &total));
         fprintf(stderr, "rank=%d committed=%zu free_after=%zu\n", r, arenas.back().committed(), free);
     }
     check(hipSetDevice(physical[0]));
+    if (tp_size > 1)
+        for (int g = 0; g < ep_size; ++g)
+            tp_barrier[g] = std::make_unique<std::barrier<>>(tp_size);
+    if (tp_size > 1 && ep_size > 1)
+        for (int t = 0; t < tp_size; ++t)
+            ep_barrier[t] = std::make_unique<std::barrier<>>(2);
     return Status::make_ok();
 }
 void Residency::upload_experts(int r, int layer) {
     std::vector<Hy4ExpertProjection> table(512 * 3);
+    const int group = r / tp_size;
     for (int e = 0; e < 512; ++e)
-        if (model.owners[layer - 1][e] == r) {
+        if (model.owners[layer - 1][e] == group) {
             std::string key =
                 "model.layers." + std::to_string(layer) + ".mlp.experts." + std::to_string(e) + ".";
             int kind = 0;
             for (auto suffix : {"gate_proj", "up_proj", "down_proj"}) {
                 auto name = key + suffix;
-                table[e * 3 + kind++] = {static_cast<const uint16_t *>(device(model.at(name + ".suh"))),
-                                         static_cast<const uint16_t *>(device(model.at(name + ".svh"))),
-                                         static_cast<const uint32_t *>(device(model.at(name + ".trellis"))),
-                                         model.at(name + ".trellis").spec.shape[2] / 16};
+                const auto *shape = model.shape_of(name, r);
+                table[e * 3 + kind++] = {static_cast<const uint16_t *>(device(model.at(name + ".suh", r))),
+                                         static_cast<const uint16_t *>(device(model.at(name + ".svh", r))),
+                                         static_cast<const uint32_t *>(device(model.at(name + ".trellis", r))),
+                                         model.at(name + ".trellis", r).spec.shape[2] / 16,
+                                         shape ? shape->at(0) : 1536, shape ? shape->at(1) : 1536};
             }
         }
-    validate_expert_table(table, model.owners[layer - 1], r);
+    validate_expert_table(table, model.owners[layer - 1], group);
     check(hipMemcpy(matrices[r] + (layer - 1) * 1536, table.data(), table.size() * sizeof(table[0]),
                     hipMemcpyHostToDevice));
 }
@@ -173,7 +171,7 @@ void Residency::upload() {
     push = mode != "host" && mode != "peer";
     for (int dst = 0; dst < ranks; ++dst)
         for (int src = 0; src < ranks; ++src) {
-            if (src == dst || (dst && src))
+            if (src == dst)
                 continue;
             int accessible = 0;
             check(hipSetDevice(physical[dst]));
@@ -187,13 +185,13 @@ void Residency::upload() {
             }
             if (peer[dst][src]) {
                 check(hipSetDevice(physical[src]));
-                check(
-                    hipEventCreateWithFlags(&ready[src][dst], hipEventDisableTiming | hipEventReleaseToSystem));
+                check(hipEventCreateWithFlags(&ready[src][dst],
+                                              hipEventDisableTiming | hipEventReleaseToSystem));
                 check(hipSetDevice(physical[dst]));
                 check(hipEventCreateWithFlags(&ack[dst][src], hipEventDisableTiming));
             }
             if (!peer[dst][src] && !staging)
-                check(hipHostMalloc(&staging, max_prefill_chunk * 1536u * 2u, hipHostMallocPortable));
+                check(hipHostMalloc(&staging, max_prefill_chunk * 3072u * 2u, hipHostMallocPortable));
             fprintf(stderr, "transfer=%d->%d method=%s\n", src, dst,
                     peer[dst][src] ? (push ? "push" : "peer") : "host");
         }
@@ -202,33 +200,32 @@ void Residency::upload() {
     void *buffer = nullptr;
     check(hipHostMalloc(&buffer, ranks * chunk, hipHostMallocPortable));
     try {
-        std::memset(buffer, 0, ranks * chunk);
-        std::array<size_t, 4> base{}, used{};
-        auto flush = [&](int r) {
-            if (!used[r])
-                return;
+        for (int r = 0; r < ranks; ++r) {
             check(hipSetDevice(physical[r]));
-            check(hipMemcpy(weight_base[r] + base[r], static_cast<uint8_t *>(buffer) + r * chunk, used[r],
-                            hipMemcpyHostToDevice));
-            used[r] = 0;
-        };
-        for (const auto *w : model.upload_order) {
-            const int r = w->rank;
-            for (size_t n = 0; n < w->bytes;) {
-                size_t pos = w->offset + n, first = pos / chunk * chunk;
-                if (first != base[r]) {
-                    flush(r);
-                    base[r] = first;
+            std::memset(buffer, 0, chunk);
+            size_t base = 0, used = 0;
+            auto flush = [&] {
+                if (used) {
+                    check(hipMemcpy(weight_base[r] + base, buffer, used, hipMemcpyHostToDevice));
+                    used = 0;
                 }
-                size_t local = pos - first, bytes = std::min(chunk - local, w->bytes - n);
-                std::memcpy(static_cast<uint8_t *>(buffer) + r * chunk + local,
-                            static_cast<const uint8_t *>(w->host) + n, bytes);
-                used[r] = local + bytes;
-                n += bytes;
+            };
+            for (const auto *w : model.upload_order[r]) {
+                for (size_t n = 0; n < w->bytes;) {
+                    size_t pos = w->offset + n, first = pos / chunk * chunk;
+                    if (first != base) {
+                        flush();
+                        base = first;
+                    }
+                    size_t local = pos - first, bytes = std::min(chunk - local, w->bytes - n);
+                    std::memcpy(static_cast<uint8_t *>(buffer) + local,
+                                static_cast<const uint8_t *>(w->host) + n, bytes);
+                    used = local + bytes;
+                    n += bytes;
+                }
             }
+            flush();
         }
-        for (int r = 0; r < ranks; ++r)
-            flush(r);
     } catch (...) {
         check(hipHostFree(buffer));
         throw;
@@ -242,12 +239,15 @@ void Residency::upload() {
             check(hipEventCreate(&expert_begin[r]));
             check(hipEventCreate(&expert_end[r]));
         }
+        if (tp_size > 1) {
+            check(hipEventCreateWithFlags(&lane_ready[r], hipEventDisableTiming));
+            check(hipEventCreateWithFlags(&lane_done[r], hipEventDisableTiming));
+        }
         for (int layer = 1; layer < 42; ++layer)
             upload_experts(r, layer);
+        fold_kv_weights(*this, r);
     }
     check(hipSetDevice(physical[0]));
-    if (!folded.empty())
-        fold_kv_weights(*this);
 }
 void Residency::transfer(void *dst, int destination, const void *src, int source, size_t bytes) {
     transfer_bytes[source][destination] += bytes;
@@ -272,7 +272,7 @@ void Residency::transfer(void *dst, int destination, const void *src, int source
             check(hipMemcpyPeerAsync(dst, physical[destination], src, physical[source], bytes, nullptr));
         }
     } else {
-        if (!staging || bytes > max_prefill_chunk * 1536u * 2u)
+        if (!staging || bytes > max_prefill_chunk * 3072u * 2u)
             throw std::runtime_error("転送作業域の範囲外です");
         check(hipSetDevice(physical[source]));
         check(hipMemcpy(staging, src, bytes, hipMemcpyDeviceToHost));
@@ -282,6 +282,66 @@ void Residency::transfer(void *dst, int destination, const void *src, int source
     if (expert_begin[0])
         transfer_ms +=
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
+}
+void Residency::tp_sum(void *data, int rank, size_t bytes) {
+    if (tp_size == 1)
+        return;
+    const int group = rank / tp_size;
+    tp_ptr[rank] = data;
+    tp_bytes[rank] = bytes;
+    check(hipSetDevice(physical[rank]));
+    check(hipEventRecord(lane_ready[rank], nullptr));
+    tp_barrier[group]->arrive_and_wait();
+    if (rank == group * tp_size) {
+        const int a = group * tp_size;
+        for (int t = 1; t < tp_size; ++t) {
+            const int b = a + t;
+            check(hipSetDevice(physical[b]));
+            check(hipStreamWaitEvent(nullptr, lane_ready[b], 0));
+            peer_copy(tp_recv[a], tp_ptr[b], bytes);
+            check(hipEventRecord(lane_done[b], nullptr));
+            check(hipSetDevice(physical[a]));
+            check(hipStreamWaitEvent(nullptr, lane_ready[a], 0));
+            peer_copy(tp_recv[b], tp_ptr[a], bytes);
+            check(hipEventRecord(lane_done[a], nullptr));
+            check(hipSetDevice(physical[a]));
+            check(hipStreamWaitEvent(nullptr, lane_done[b], 0));
+            tp_add_bf16(tp_ptr[a], tp_recv[a], bytes);
+            check(hipSetDevice(physical[b]));
+            check(hipStreamWaitEvent(nullptr, lane_done[a], 0));
+            tp_add_bf16(tp_ptr[b], tp_recv[b], bytes);
+        }
+    }
+    tp_barrier[group]->arrive_and_wait();
+    check(hipSetDevice(physical[rank]));
+}
+void Residency::ep_reduce(void *data, int rank, size_t bytes) {
+    if (ep_size == 1)
+        return;
+    const int lane = rank % tp_size;
+    const int a = lane, b = lane + tp_size;
+    tp_ptr[rank] = data;
+    check(hipSetDevice(physical[rank]));
+    check(hipEventRecord(lane_ready[rank], nullptr));
+    ep_barrier[lane]->arrive_and_wait();
+    if (rank == a) {
+        check(hipSetDevice(physical[b]));
+        check(hipStreamWaitEvent(nullptr, lane_ready[b], 0));
+        peer_copy(ep_recv[a], tp_ptr[b], bytes);
+        check(hipEventRecord(lane_done[b], nullptr));
+        check(hipSetDevice(physical[a]));
+        check(hipStreamWaitEvent(nullptr, lane_ready[a], 0));
+        peer_copy(ep_recv[b], tp_ptr[a], bytes);
+        check(hipEventRecord(lane_done[a], nullptr));
+        check(hipSetDevice(physical[a]));
+        check(hipStreamWaitEvent(nullptr, lane_done[b], 0));
+        tp_add_bf16(tp_ptr[a], ep_recv[a], bytes);
+        check(hipSetDevice(physical[b]));
+        check(hipStreamWaitEvent(nullptr, lane_done[a], 0));
+        tp_add_bf16(tp_ptr[b], ep_recv[b], bytes);
+    }
+    ep_barrier[lane]->arrive_and_wait();
+    check(hipSetDevice(physical[rank]));
 }
 void *Residency::route_buffer(int rank, size_t bytes) {
     constexpr size_t capacity =
@@ -305,6 +365,18 @@ void Residency::shutdown() {
         if (e != hipSuccess)
             errors += std::string(hipGetErrorString(e)) + "\n";
     };
+    for (int r = 0; r < ranks; ++r)
+        if (lane_ready[r] || lane_done[r]) {
+            auto status = hipSetDevice(physical[r]);
+            collect(status);
+            if (status == hipSuccess) {
+                if (lane_ready[r])
+                    collect(hipEventDestroy(lane_ready[r]));
+                if (lane_done[r])
+                    collect(hipEventDestroy(lane_done[r]));
+            }
+            lane_ready[r] = lane_done[r] = nullptr;
+        }
     for (int r = 0; r < ranks; ++r)
         if (expert_begin[r] || expert_end[r]) {
             auto status = hipSetDevice(physical[r]);

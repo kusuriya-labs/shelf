@@ -70,12 +70,12 @@ Mat engram(Ops &op, int layer, Mat x, const std::vector<int> &prior, const std::
     int g = (layer - 1) / 10;
     auto p = "model.layers." + std::to_string(layer) + ".engram_layer.";
     auto table = p + "multi_head_embedding.embedding.weight";
-    const auto &lookup = op.gpu.model.at(p + "lookup_table");
+    const auto &lookup = op.gpu.model.at(p + "lookup_table", -1);
     if (lookup.spec.dtype != io::SType::I32 || lookup.bytes != 120818 * 4)
         throw std::runtime_error("Engram の語彙写像が異なります");
     auto lut = static_cast<const int32_t *>(lookup.host);
-    auto bits = static_cast<const uint8_t *>(op.gpu.model.at(table).host);
-    auto scales = static_cast<const uint8_t *>(op.gpu.model.at(table + ".scale").host);
+    auto bits = static_cast<const uint8_t *>(op.gpu.model.at(table, -1).host);
+    auto scales = static_cast<const uint8_t *>(op.gpu.model.at(table + ".scale", -1).host);
     auto bf = [&](const std::string &name) {
         auto v = op.param(p + name);
         if (v.type != io::SType::BF16)
