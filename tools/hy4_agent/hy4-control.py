@@ -31,7 +31,7 @@ REMOTE_PID = REMOTE_SERVER + '.pid'
 
 
 def emit(message):
-    print(message, file=sys.stderr, flush=True)
+    print(datetime.datetime.now().strftime('%H:%M:%S'), message, file=sys.stderr, flush=True)
 
 
 def vram():
@@ -469,12 +469,23 @@ def start():
         fcntl.flock(lock, fcntl.LOCK_EX)
         if alive(): return 0
         stop_orphan()
-        log = open(STATE / 'manager.log', 'ab', buffering=0)
-        proc = subprocess.Popen([sys.executable, __file__, 'manager'], cwd=ROOT, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
-        (STATE / 'manager.pid').write_text(str(proc.pid) + '\n')
+        # 起動元セッションの scope と寿命を切り離すため、manager は systemd の user service で動かす。
+        unit = 'hy4-manager-' + REMOTE_SERVER[-12:]
+        logfile = STATE / 'manager.log'
+        names = [k for k in os.environ if k in ('PATH', 'LD_LIBRARY_PATH', 'LANG') or k.startswith(('SHELF_', 'HSA_', 'ROCM', 'HIP_', 'ROCR_'))]
+        subprocess.run(['systemctl', '--user', 'reset-failed', unit], capture_output=True)
+        launch = subprocess.run(['systemd-run', '--user', '--quiet', '--collect', '--unit', unit,
+                                 '-p', f'WorkingDirectory={ROOT}', '-p', 'KillMode=mixed', '-p', 'TimeoutStopSec=600',
+                                 '-p', f'StandardOutput=append:{logfile}', '-p', f'StandardError=append:{logfile}',
+                                 *[f'--setenv={k}' for k in names],
+                                 sys.executable, str(Path(__file__).resolve()), 'manager'])
+        if launch.returncode:
+            emit('systemd-run に失敗しました'); return 1
+        pid = subprocess.run(['systemctl', '--user', 'show', '-p', 'MainPID', '--value', unit], capture_output=True, text=True).stdout.strip()
+        (STATE / 'manager.pid').write_text(pid + '\n')
         while True:
-            if proc.poll() is not None:
-                emit(f'起動失敗。ログ: {STATE / "manager.log"}'); return 1
+            if subprocess.run(['systemctl', '--user', 'is-active', '--quiet', unit]).returncode:
+                emit(f'起動失敗。ログ: {logfile}'); return 1
             if alive():
                 emit(f'Hy4 起動完了。ログ: {STATE / "manager.log"}'); return 0
             time.sleep(1)
