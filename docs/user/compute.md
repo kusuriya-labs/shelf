@@ -308,9 +308,12 @@ K128 一括セットを要求する量子化方式では、各 TP グループ�
 - `--pipeline-parallel` は prefix cache、DFlash2、MTP、hidden taps、
   `--dump-logits` と併用できない。grouped expert checkpoint（Qwen3.6-35B-A3B MoE）も受理する
   （layer を stage で割り、担当外 layer の expert 平面は読まない）。
-- 3 軸の CLI 受付と device 割当は実装済みだが、pipeline stage 内で EP / TP を
-  展開する実行時経路は未配線である。PP > 1 で EP > 1 または TP > 1 の場合、
-  stage ごとに TP グループの先頭 GPU だけが使われる。
+- pipeline stage 内の EP / TP 展開は実装済みである。MoE の routed expert は EP、
+  backbone と shared expert は TP で分割し、TP reduce の後に EP reduce を行う。
+  EP=2 / 4、EP=2 + TP=2 で生成列が TP=2 と一致することを確認済み。
+  dense model は EP で分割せず、EP グループごとに同じ計算を複製する。
+- `qwen4_exp` の PP + TP 併用は 2048 token の prefill で non-finite になる
+  既知の問題がある。PP 単体と短いプロンプトだけを確認している。
 - decode と prefill が同じ batch に混在する実行は未対応である。
   `--max-concurrent-requests 1` で運用するか、phase ごとに batch が分かれる条件で使う。
 - KV の page 数は stage 0 の auto-fit 結果を全 stage で共有する。

@@ -176,14 +176,18 @@ routed expert 平面は matrix axis を持たないため、`TensorPartitionPlan
 ```cpp
 // models/qwen35moe/weights/moe_weight_plan.h
 Result<MoeExpertGroupPlan> build_moe_expert_group_plan(
-    const Qwen35MoeTextConfig&, std::size_t layer, uint32_t tp_size, uint32_t tp_rank);
+    const Qwen35MoeTextConfig&, std::size_t layer, uint32_t ep_size, uint32_t ep_rank,
+    uint32_t tp_size, uint32_t tp_rank);
 ```
 
 - `experts` はその plan が平面に持つ expert 数、`expert_begin` はその最初の global expert id、
   `global_experts` は checkpoint の平面 depth であり router が top-k を選ぶ幅。
-  `experts * tp_size == global_experts` と `expert_begin == tp_rank * experts` が contract
-- `num_experts` が `tp_size` で割り切れない場合は `Status::unsupported`。分割は contiguous な
+  `experts * ep_size == global_experts` と `expert_begin == ep_rank * experts` が contract
+- `tp_size` / `tp_rank` は shared expert の matrix axis 分割を検証するために plan が持つ
+- `num_experts` が `ep_size` で割り切れない場合は `Status::unsupported`。分割は contiguous な
   expert 範囲のみ（非均等な expert 配分は無い）
+- 4 引数の overload は `ep_size = tp_size`, `ep_rank = tp_rank` として旧来の
+  expert-over-TP を表す
 - source の名前は global expert id を保つ（checkpoint の名前は global 単位）。集約時の
   行き先 slot は `expert - expert_begin`
 - fused rank-3（MTP block）も同じ範囲で切る。checkpoint の tensor は `[global_experts][rows][cols]`
@@ -689,7 +693,7 @@ workspace range や workspace storage の value と重ならないことを検�
 | test | label | 固定する内容 |
 | --- | --- | --- |
 | `test_moe_config` | `cpu;required` | MoE field の読込、`num_experts > 0` が正本、dense config の拒否、`intermediate_size` 併記拒否、`output_gate_type` を宣言した config も受理すること。`Qwen35MoeTextConfig` に dense 幅字段が無く `Qwen35TextConfig` に expert 字段が無いことを concept + `static_assert` で固定 |
-| `test_moe_weight_plan` | `cpu;required` | plan の幾何・stride・平面サイズ、実測 payload との一致、source の file order と gate 先行 row range 、expert 軸分割の plan（rank の contiguous 範囲・global 名を持つ source・平面 depth が半分・per-expert layout 不変）、`num_experts` が tp_size で割れない場合と tp_size / tp_rank の範囲外の拒否 |
+| `test_moe_weight_plan` | `cpu;required` | plan の幾何・stride・平面サイズ、実測 payload との一致、source の file order と gate 先行 row range 、expert 軸分割の plan（rank の contiguous 範囲・global 名を持つ source・平面 depth が半分・per-expert layout 不変）、`num_experts` が ep_size で割れない場合と ep_size / ep_rank の範囲外の拒否（4 引数 overload では tp_size / tp_rank） |
 | `test_moe_expert_slice_fixture` | `cpu;required` | 合成 checkpoint の shard 内連続配置、manifest の logical / 物理名契約、payload bit 一致 |
 | `test_moe_expert_load` | `gpu1;required` | GPU 常駐平面が native block layout、expert 単位で dense path と bit 一致、`row_ref_exact` の平面別判定、arena 使用量、不受理条件。fused rank-3 plan では checkpoint の BF16 payload を再量子化して preshuffle した結果と平面が bit 一致すること、fused plan を per-expert checkpoint へ / unfused plan を fused checkpoint へ適用したときの拒否も固定 |
 | `test_moe_router` | `gpu1;required` | softmax/top-k/renorm の決定順（同値は小 index）、group table と slot→group row 写像の不変条件、padding 行 = -1、実行間 bit 一致、容量 bound、外部 zeroing なしの 2 つ目の round が同じ plan になること（scan が `tile_counts` を消費する契約）、non-finite logits で expert index が `[0, experts)` に収まり weight が finite であること、その round が error word へ `NUMERIC_ERROR` を立てること（有限 logits では word が立たないことも一緒に固定）。expert 軸分割では、同じ logits で unsplit と 2 rank を比べ、選択と再正規化 weight が全 slot で完全一致、`sel_expert` が local index か `kMoeSlotNotOwned`、slot がちょうど一方の rank でのみ group row を持つ、両 rank の slot 数の和が全 slot と一致、`group_expert` が local 平面を指すことを固定。範囲外の owned 範囲を要求する launch の拒否も固定 |

@@ -384,6 +384,14 @@ grouped expert checkpoint は §3 の plan だけでは分割できない。rout
 matrix axis を持たないため、分割は expert 軸で起きる（契約は
 [qwen35moe.md](qwen35moe.md) §3「expert 軸の分割」）。
 
+explicit EP では expert 軸を EP rank が担い、backbone と shared expert は TP が担う。
+EP=1 では従来どおり expert 軸を TP rank に重ねる（`ExpertPartitionMode::LegacyAcrossTP`）。
+rank 座標とグループは `ParallelTopology` が一元管理し、`TpCoordinator` は
+`tp_group(pp, ep)` と `ep_group(pp, tp)` から barrier を生成する。
+
+- reduce 順序: 同一 EP グループ内の TP reduce → 各 TP lane の代表 rank による EP reduce。
+- shared expert は TP reduce にだけ参加し、EP reduce の対象にしない。
+
 - 分割されるもの: routed expert（expert 軸で contiguous な範囲）、shared expert
   （dense FFN と同じ matrix axis 分割）、backbone（§4 と同じ）
 - 分割されないもの: router（`mlp.gate.weight`）と `mlp.shared_expert_gate.weight`。
