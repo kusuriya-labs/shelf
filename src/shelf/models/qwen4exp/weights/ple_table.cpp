@@ -839,7 +839,12 @@ Result<bool> PleTable::load_int6_artifact(
     loaded.shards_.resize(shard_count);
 
     if (hot_cache_bytes != 0u) {
-        Status tiered = setup_tiered(loaded, fd, payload_stride,
+        std::vector<std::uint64_t> shard_offsets(shard_count);
+        for (std::uint32_t id = 0; id < shard_count; ++id) {
+            shard_offsets[id] = static_cast<std::uint64_t>(kPleArtifactHeaderBytes) +
+                                static_cast<std::uint64_t>(id) * payload_stride;
+        }
+        Status tiered = setup_tiered(loaded, fd, std::move(shard_offsets), shard_rows,
                                      static_cast<std::size_t>(hot_cache_bytes));
         ::close(fd);
         if (!tiered.ok()) {
@@ -1018,6 +1023,7 @@ Status PleTable::write_int6_artifact(const std::string& model_dir,
 Result<PleTable> PleTable::load(const std::string& model_dir,
                                 const Qwen4ExpTextConfig& config,
                                 bool fadvise_dontneed) {
+    const std::uint64_t hot_cache_bytes = ple_hot_cache_bytes();
     const std::string path = model_dir + "/ngram_embedding.safetensors";
     const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
@@ -1314,6 +1320,7 @@ Result<PleTable> PleTable::load(const std::string& model_dir,
     }
 
     table.shards_.resize(shard_count);
+    std::vector<std::uint64_t> shard_offsets(shard_count);
     for (std::uint32_t index = 0; index < shard_count; ++index) {
         auto it = header.find(shard_names[index].second);
         auto parsed = parse_tensor(it.value());
@@ -1340,6 +1347,8 @@ Result<PleTable> PleTable::load(const std::string& model_dir,
             return Status::invalid_argument("PLE shard is outside the file", __FILE__,
                                             __LINE__);
         }
+        shard_offsets[index] = table.data_base_ + record.begin;
+        if (hot_cache_bytes != 0u) continue;
 
         void* memory = nullptr;
         if (::posix_memalign(&memory, 64u, static_cast<std::size_t>(bytes)) != 0) {
@@ -1349,7 +1358,7 @@ Result<PleTable> PleTable::load(const std::string& model_dir,
         }
         table.shards_[index].data.reset(static_cast<std::uint8_t*>(memory));
         table.shards_[index].bytes = static_cast<std::size_t>(bytes);
-        table.shards_[index].file_offset = table.data_base_ + record.begin;
+        table.shards_[index].file_offset = shard_offsets[index];
         ts = read_exact_at(fd, table.shards_[index].file_offset,
                            table.shards_[index].data.get(),
                            table.shards_[index].bytes);
@@ -1361,6 +1370,14 @@ Result<PleTable> PleTable::load(const std::string& model_dir,
             (void)::posix_fadvise(fd, static_cast<off_t>(table.shards_[index].file_offset),
                                   static_cast<off_t>(bytes), POSIX_FADV_DONTNEED);
         }
+    }
+
+    if (hot_cache_bytes != 0u) {
+        Status tiered = setup_tiered(table, fd, std::move(shard_offsets), shard_rows,
+                                     static_cast<std::size_t>(hot_cache_bytes));
+        ::close(fd);
+        if (!tiered.ok()) return tiered;
+        return table;
     }
 
     ::close(fd);
@@ -1379,8 +1396,9 @@ std::size_t PleTable::cached_blocks() const noexcept {
         std::count(state.slot_block.begin(), state.slot_block.end(), -1));
 }
 
-Status PleTable::setup_tiered(PleTable& table, int fd, std::uint64_t payload_stride,
-                              std::size_t hot_bytes) {
+Status PleTable::setup_tiered(PleTable& table, int fd,
+                              std::vector<std::uint64_t> shard_offsets,
+                              std::uint32_t shard_rows, std::size_t hot_bytes) {
     struct stat mapped_stat {};
     if (::fstat(fd, &mapped_stat) != 0) {
         return Status::invalid_state("PLE artifact stat failed", __FILE__, __LINE__);
@@ -1423,13 +1441,20 @@ Status PleTable::setup_tiered(PleTable& table, int fd, std::uint64_t payload_str
     }
     state->hot = std::shared_ptr<std::uint8_t>(static_cast<std::uint8_t*>(pinned),
                                                PinnedDeleter{});
+    void* scratch = nullptr;
+    const std::size_t scratch_bytes = static_cast<std::size_t>(
+        align_up_u64(4096u + block_bytes, 4096u));
+    if (::posix_memalign(&scratch, 4096u, scratch_bytes) != 0) {
+        return Status::insufficient_memory("cannot allocate PLE block scratch", __FILE__,
+                                           __LINE__);
+    }
+    state->scratch.reset(static_cast<std::uint8_t*>(scratch));
     state->hot_bytes = static_cast<std::uint64_t>(slots) * block_bytes;
     state->hot_slots = slots;
-    state->data_base = kPleArtifactHeaderBytes;
-    state->payload_stride = payload_stride;
+    state->shard_offsets = std::move(shard_offsets);
     state->block_rows = kHotBlockRows;
     state->block_bytes = block_bytes;
-    state->blocks_per_shard = (table.shard_rows_ + kHotBlockRows - 1u) / kHotBlockRows;
+    state->blocks_per_shard = (shard_rows + kHotBlockRows - 1u) / kHotBlockRows;
     state->slot_block.assign(slots, -1);
     const std::uint64_t total_blocks =
         static_cast<std::uint64_t>(table.shard_count_) * state->blocks_per_shard;
@@ -1463,6 +1488,15 @@ std::vector<std::uint64_t> PleTable::tiered_candidates(const TieredState& state,
             static_cast<std::uint32_t>(block % state.blocks_per_shard) == last) {
             continue;
         }
+        const std::uint64_t shard = block / state.blocks_per_shard;
+        const std::uint64_t index = block % state.blocks_per_shard;
+        const std::uint64_t offset =
+            state.shard_offsets[static_cast<std::size_t>(shard)] +
+            index * state.block_bytes;
+        const std::uint64_t aligned = offset & ~std::uint64_t(4095u);
+        const std::uint64_t length =
+            align_up_u64((offset - aligned) + state.block_bytes, 4096u);
+        if (aligned + length > state.mapped_bytes) continue;
         if (heap.size() < count) {
             heap.push({frequency, block});
         } else if (frequency > heap.top().first) {
@@ -1481,14 +1515,28 @@ void PleTable::fill_tiered_block(TieredState& state, std::size_t slot,
                                  std::uint64_t block) {
     const std::uint64_t shard = block / state.blocks_per_shard;
     const std::uint64_t index = block % state.blocks_per_shard;
-    const std::uint64_t offset = state.data_base + shard * state.payload_stride +
-                                 index * state.block_bytes;
+    const std::uint64_t offset =
+        state.shard_offsets[static_cast<std::size_t>(shard)] +
+        index * state.block_bytes;
+    const std::uint64_t aligned = offset & ~std::uint64_t(4095u);
+    const std::size_t delta = static_cast<std::size_t>(offset - aligned);
     const std::int64_t old = state.slot_block[slot];
     if (old >= 0) state.block_slot.erase(static_cast<std::uint64_t>(old));
     state.slot_block[slot] = -1;
     void* dst = state.hot.get() + slot * static_cast<std::size_t>(state.block_bytes);
-    const Status st = read_exact_at(*state.direct_fd, offset, dst,
-                                    static_cast<std::size_t>(state.block_bytes));
+    Status st = Status::make_ok();
+    if (delta == 0u) {
+        st = read_exact_at(*state.direct_fd, aligned, dst,
+                           static_cast<std::size_t>(state.block_bytes));
+    } else {
+        const std::size_t length = static_cast<std::size_t>(
+            align_up_u64(delta + state.block_bytes, 4096u));
+        st = read_exact_at(*state.direct_fd, aligned, state.scratch.get(), length);
+        if (st.ok()) {
+            std::memcpy(dst, state.scratch.get() + delta,
+                        static_cast<std::size_t>(state.block_bytes));
+        }
+    }
     if (!st.ok()) return;
     state.slot_block[slot] = static_cast<std::int64_t>(block);
     state.block_slot[block] = static_cast<std::uint32_t>(slot);
@@ -1589,7 +1637,7 @@ const std::uint8_t* PleTable::row_ptr(std::uint64_t row) const noexcept {
     } else {
         ++state.cold_reads;
         const std::uint64_t offset =
-            state.data_base + shard * state.payload_stride +
+            state.shard_offsets[static_cast<std::size_t>(shard)] +
             block_in_shard * state.block_bytes +
             static_cast<std::uint64_t>(row_in_block) * row_bytes_;
         if (offset + row_bytes_ > state.mapped_bytes) return nullptr;
@@ -1808,8 +1856,19 @@ Result<std::vector<std::uint8_t>> PleTable::read_source_row(const std::string& m
         return Status::out_of_range("PLE row is out of range", __FILE__, __LINE__);
     }
     const std::uint64_t shard = row / shard_rows_;
-    if (shard >= shards_.size()) {
-        return Status::out_of_range("PLE shard is out of range", __FILE__, __LINE__);
+    std::uint64_t shard_offset = 0u;
+    if (tiered_ != nullptr) {
+        TieredState& state = *tiered_;
+        std::lock_guard<std::mutex> lock(state.mutex);
+        if (shard >= state.shard_offsets.size()) {
+            return Status::out_of_range("PLE shard is out of range", __FILE__, __LINE__);
+        }
+        shard_offset = state.shard_offsets[static_cast<std::size_t>(shard)];
+    } else {
+        if (shard >= shards_.size()) {
+            return Status::out_of_range("PLE shard is out of range", __FILE__, __LINE__);
+        }
+        shard_offset = shards_[static_cast<std::size_t>(shard)].file_offset;
     }
     const std::string path = model_dir + "/ngram_embedding.safetensors";
     const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
@@ -1818,8 +1877,7 @@ Result<std::vector<std::uint8_t>> PleTable::read_source_row(const std::string& m
                                         __LINE__);
     }
     std::vector<std::uint8_t> out(row_bytes_);
-    const std::uint64_t offset = shards_[static_cast<std::size_t>(shard)].file_offset +
-                                 (row % shard_rows_) * row_bytes_;
+    const std::uint64_t offset = shard_offset + (row % shard_rows_) * row_bytes_;
     Status st = read_exact_at(fd, offset, out.data(), out.size());
     ::close(fd);
     if (!st.ok()) return st;

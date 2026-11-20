@@ -72,14 +72,18 @@ PLE の n-gram history を復元 prefix で再 seed する。MTP は無効であ
   その artifact を読む。artifact は 4096-byte 境界の shard payload を持ち、
   `--ple-artifact 0` で読み書きを無効にできる。stale / invalid なら再量子化して
   上書きする。書き込み失敗は model load を失敗させない。
-- `--ple-hot-cache-gib N` を 0 以外にすると、artifact を全量 host RAM へ読み込まず、
+- `--ple-hot-cache-gib N` を 0 以外にすると、PLE テーブルを全量 host RAM へ読み込まず、
   mmap のページキャッシュを Cold 側、pinned host のブロックキャッシュを Hot 側として
-  使う。ブロックは 2048 行（260 KiB）で、Hot 側への読み込みは O_DIRECT + pread で
-  行う。行アクセス頻度で 8192 行ごとに入れ替え、ピーク頻度が 4096 に達したら
-  減衰させる。Hot キャッシュの実バイトは `MEMORY_PLAN host memory` の `PLE table`
-  に表示され、`payload_bytes()` はテーブル全体のサイズのままである。
-  `SHELF_PLE_CACHE_LOG_INTERVAL` に 1 以上の整数を設定すると、入れ替えごとに
-  Hot ブロック数と Hit/Miss を stderr に出す（既定は無効）。
+  使う。INT6 artifact（`quanted_ple.bin`）と EXL3 の `ngram_embedding.safetensors`
+  のどちらにも適用される。ブロックは 2048 行で、バイト数は行幅に依存する
+  （INT6 は 260 KiB、EXL3 K=5 は 204 KiB）。Hot 側への読み込みは O_DIRECT + pread で
+  行う。safetensors の shard offset は 4096 バイト境界にないため、境界まで
+  読み下ろして整列 buffer へコピーする。行アクセス頻度で 8192 行ごとに入れ替え、
+  ピーク頻度が 4096 に達したら減衰させる。Hot キャッシュの実バイトは
+  `MEMORY_PLAN host memory` の `PLE table` に表示され、`payload_bytes()` は
+  テーブル全体のサイズのままである。`SHELF_PLE_CACHE_LOG_INTERVAL` に 1 以上の
+  整数を設定すると、入れ替えごとに Hot ブロック数と Hit/Miss を stderr に出す
+  （既定は無効）。
 - MXFP4 / FP8 の preshuffle staging は関数ローカルの buffer を非同期コピーしない。
   同期コピーで device へ移してから buffer を破棄する。
 

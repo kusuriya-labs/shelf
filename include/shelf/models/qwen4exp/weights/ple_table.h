@@ -152,10 +152,10 @@ private:
         std::size_t mapped_bytes = 0;
         std::shared_ptr<int> direct_fd;
         std::shared_ptr<std::uint8_t> hot;
+        std::unique_ptr<std::uint8_t, FreeDeleter> scratch;
         std::uint64_t hot_bytes = 0;
         std::size_t hot_slots = 0;
-        std::uint64_t data_base = 0;
-        std::uint64_t payload_stride = 0;
+        std::vector<std::uint64_t> shard_offsets;
         std::uint32_t block_rows = 0;
         std::uint64_t block_bytes = 0;
         std::uint32_t blocks_per_shard = 0;
@@ -170,8 +170,9 @@ private:
     };
     std::shared_ptr<TieredState> tiered_;
 
-    static Status setup_tiered(PleTable& table, int fd, std::uint64_t payload_stride,
-                               std::size_t hot_bytes);
+    static Status setup_tiered(PleTable& table, int fd,
+                               std::vector<std::uint64_t> shard_offsets,
+                               std::uint32_t shard_rows, std::size_t hot_bytes);
     static void rebalance_tiered(TieredState& state, std::uint32_t shard_rows);
     static void fill_tiered_block(TieredState& state, std::size_t slot, std::uint64_t block);
     static std::vector<std::uint64_t> tiered_candidates(const TieredState& state,

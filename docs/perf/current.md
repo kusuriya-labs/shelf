@@ -1363,6 +1363,17 @@ in-memory 量子化（1,048,576 行、入力 1 GiB）:
 - 両構成で `GENERATED_IDS=24`（sha1 `4d134bc072212ace2df385dae143139da74ec0ef`）が一致した。
 - 各値は 1 回の測定。cold page cache と Hot キャッシュの学習途中は含めない。
 
+EXL3-INT8 3.05bpw モデル（`models/kusuriya-labs/Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw`）
+でも同じ CLI が有効。PLE は K=5 の trellis（行 102 バイト）で、shard offset が
+4 KiB 境界にないため、Hot ブロックは境界まで整列読みしてからコピーする。
+
+| 構成 | PLE host | load wall | peak RSS |
+| --- | ---: | ---: | ---: |
+| full resident | 30.40 GiB | 13.29 s | 30.56 GiB |
+| tiered 1 GiB | 1.00 GiB | **2.34 s** | **1.17 GiB** |
+
+- 同一入力で full / tiered ともに `GENERATED_IDS=24` が一致した。
+
 ## 記録規則
 
 - 新しい計測をしていない数値は更新しない。
