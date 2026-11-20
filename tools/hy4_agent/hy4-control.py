@@ -25,6 +25,8 @@ DEVICES = 'GPU-a8e9ddefa2d60f55,GPU-08b2ddcbd6e6b36c,GPU-76a08c022586fed6'
 PORT = 18123
 MODEL = 'Hy4-flash-4bpw'
 BASE = Path.home() / 'datapool/rocm-exl3-rdna2'
+# 起動時の読み込みを速くするため、ext4（NVMe）へ複製した使用ファイルがあればそちらを使う（ZFS の mmap 読みが遅い）。
+FAST = Path.home() / 'llm-fast-load'
 REMOTE = 'user@192.168.0.148'
 REMOTE_SERVER = '/tmp/shelf-hy4-snapshot-agent-' + hashlib.sha256(str(ROOT).encode()).hexdigest()[:12]
 REMOTE_PID = REMOTE_SERVER + '.pid'
@@ -233,10 +235,10 @@ class Manager:
         env.pop('SHELF_HY4_ENGRAM_MLOCK', None)
         env.pop('SHELF_HY4_ENGRAM_POPULATE', None)
         cmd = [str(Path('/tmp/shelfvenv/bin/python')), str(ROOT / 'build-hy4-agent/shelf-server'),
-               '--model-dir', str(BASE / 'models/Hy4-flash-exl3-4bpw-mul24'),
+               '--model-dir', str(FAST / 'Hy4-flash-exl3-4bpw-mul24' if (FAST / 'Hy4-flash-exl3-4bpw-mul24/config.json').exists() else BASE / 'models/Hy4-flash-exl3-4bpw-mul24'),
                '--engram-dir', str(Path.home() / 'datapool/hy4-hf-staging-20261119/body'),
                '--placement', str(BASE / 'hy4-flash-pilot/shelf-placement/owners-4bpw.json'),
-               '--dfly-dir', str(BASE / 'hy4-flash-pilot/shelf-dfly/Hy4-flash-dfly-4bpw'),
+               '--dfly-dir', str(FAST / 'Hy4-flash-dfly-4bpw' if (FAST / 'Hy4-flash-dfly-4bpw/conversion_report.json').exists() else BASE / 'hy4-flash-pilot/shelf-dfly/Hy4-flash-dfly-4bpw'),
                '--model', MODEL, '--port', str(PORT), '--max-seq-len', '1048576', '--inference-budget-tokens', '65536', '--max-concurrent-requests', '1']
         directory = STATE / 'diagnostics' / (datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f'))
         directory.mkdir(parents=True, mode=0o700)
