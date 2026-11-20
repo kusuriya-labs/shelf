@@ -283,7 +283,7 @@ DFlash2 経路でも prefix cache を使う。
 
 `--serve-stdio` も同じ runtime の TP 経路を使う。TP2 の serve 性能は未計測であり、
 性能値は [../perf/current.md](../perf/current.md)、数値互換性・対応範囲の契約は
-[../developer/tensor_parallel_execution.md](../developer/tensor_parallel_execution.md)
+[../developer/multi-gpu.md](../developer/multi-gpu.md)
 を参照。
 
 ### pipeline parallel
@@ -318,7 +318,7 @@ K128 一括セットを要求する量子化方式では、各 TP グループ�
   `--max-concurrent-requests 1` で運用するか、phase ごとに batch が分かれる条件で使う。
 - KV の page 数は stage 0 の auto-fit 結果を全 stage で共有する。
 
-契約の詳細は [../developer/pipeline_parallel.md](../developer/pipeline_parallel.md)
+契約の詳細は [../developer/multi-gpu.md](../developer/multi-gpu.md)
 を参照。
 
 ## serve-stdio

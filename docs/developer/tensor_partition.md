@@ -312,7 +312,7 @@ partition descriptor は backbone と shared expert、そして dense FFN が使
 
 partition metadata の導入は weight materialization 基盤であり、それ自体は分散実行の
 対応完了を意味しない。dense の TP=2 execution は
-[tensor_parallel_execution.md](tensor_parallel_execution.md) に実装済みで、その局所 geometry は
+[multi-gpu.md](multi-gpu.md) に実装済みで、その局所 geometry は
 plan から来る。現在も未対応なものは以下。
 
 - 単一 GPU の weight load path（`load_qwen35_weights_from_*`）は

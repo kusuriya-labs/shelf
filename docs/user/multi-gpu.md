@@ -60,11 +60,10 @@ K128 一括セットを要求する量子化方式（例: EXL3 INT8 3.05bpw）�
 - PP > 1 では prefix cache を無効にする（`--prefix-cache 0`）。server は
   併用をエラーで拒否する。
 - PP > 1 は DFlash2、MTP、hidden taps、`--dump-logits` と併用できない。
-- PP stage 内の EP / TP 展開は配線済み。ただし `qwen4_exp` の PP + TP 併用は
-  2048 token の prefill で non-finite になる既知の問題があり、PP 単体と短い
-  プロンプトだけを確認している。
+- PP stage 内の EP / TP 展開は配線済みで、`qwen4_exp` の PP + TP も
+  2048 / 4096 token の prefill で single / TP=2 と一致することを確認済み。
 - octave KV は PP と併用できる。PP と EP / TP を同時に使う構成の性能は未検証。
 
 詳細は [compute.md](compute.md)、[server.md](server.md)、
-[developer/tensor_parallel_execution.md](../developer/tensor_parallel_execution.md)、
+[developer/multi-gpu.md](../developer/multi-gpu.md)、
 [developer/quantization.md](../developer/quantization.md) を参照。

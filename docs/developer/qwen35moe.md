@@ -411,7 +411,7 @@ expert 数）で softmax / top-k / 再正規化を行い、`expert_begin` から
 選択は `kMoeSlotNotOwned`（-1）を書く。`sel_weight` は全 selection に対する再正規化値のまま
 どの rank でも同じなので、rank の combine 出力は部分和となり、その和が分割しない run と
 同じ値になる（barrier の f32 累積 → 1 回だけ bf16 へ丸める契約は
-[tensor_parallel_execution.md](tensor_parallel_execution.md) §6）。
+[multi-gpu.md](multi-gpu.md) の collective 節）。
 `moe_slot_scatter_kernel` はマーカーの slot を plan に載せず `slot_row_of` へ -1 を書く。
 `tile_counts`・`expert_row_begin`・`group_expert`・grouped 行容量は `owned_experts` 基準で、
 plan scratch と activation 平面もその分だけ小さくなる（footprint は
@@ -764,7 +764,7 @@ decode は `shelf-compute` で通る。実行の経緯と計測値は `docs/rese
 - MoE の expert 軸分割は weight load・lowering・program・kernel・executor・multi-rank runtime
   まで配線済みで、`test_qwen35moe_tp_execution` が 2 GPU で TP=1 と TP=2 の greedy 一致を
   検証する（契約は §3「expert 軸の分割」と §6 の routing、
-  [tensor_parallel_execution.md](tensor_parallel_execution.md) §11-1）。multi-rank runtime は
+  [multi-gpu.md](multi-gpu.md) の expert 分割節）。multi-rank runtime は
   `shelf::qwen35` にあるので family をまたぐ判断は持てず、rank の model は
   `shelf::models::TpRankModel` 経由で注入される（builder の選択は `shelf::models`）
 - 実 model（Qwen3.6-35B-A3B）でも TP=2 と TP=1 の生成列は一致する。E2E 48 token が全一致し、
@@ -781,4 +781,4 @@ decode は `shelf-compute` で通る。実行の経緯と計測値は `docs/rese
   `shelf::models::PipelineStageModel` 経由で注入され、executor footprint は
   `token_row_ffn_size`（shared expert 幅）と `ffn_workspace_reserve_bytes`
   （group 行平面 + plan scratch）の 2 項で組む。契約は
-  [pipeline_parallel.md](pipeline_parallel.md) §2 が正本
+  [multi-gpu.md](multi-gpu.md) の pipeline parallel 節が正本

@@ -7,7 +7,7 @@ moe_intermediate 512・shared_expert_intermediate 512）を TP=2 で動かすた
 実測は合成 fixture（experts 4・layers 2）と実 model（Qwen3.6-35B-A3B）の TP=2 まで。
 実 model で最初に破綻していた箇所と原因は §6 に残す。
 
-確定した contract は [../../developer/tensor_parallel_execution.md](../../developer/tensor_parallel_execution.md) §11-1 と
+確定した contract は [../../developer/multi-gpu.md](../../developer/multi-gpu.md) と
 [../../developer/qwen35moe.md](../../developer/qwen35moe.md) §3 / §6 に置く。ここでは採否の理由だけを残す。
 
 ## 1. 分割軸の候補と採否
@@ -68,7 +68,7 @@ decode 2 step、`max_batch_rows 16`。transport は `hip-p2p`（peer access 有�
 | rank の expert 平面 depth / shared 幅 / KV heads / router logits | 2 / 64 / 1 / 4（experts 4・shared 128・kv heads 2） |
 
 logits の 1.35 % は dense TP と同じ帯（dense は層別 0.6〜2.7 % を
-[../../developer/tensor_parallel_execution.md](../../developer/tensor_parallel_execution.md) §10 に記録済み）。
+[../../developer/multi-gpu.md](../../developer/multi-gpu.md) に記録済み）。
 barrier が部分和を f32 で累積し bf16 へ 1 度だけ丸める契約のため、rank 間では bit 一致する。
 
 weight 側は `test_qwen35moe_model_load` が固定する: rank 平面の byte 列は単一 GPU load の
@@ -176,7 +176,7 @@ ctx=96 の 8.2e-2 だけは帯より広く、TP=1 側の chunk 感度ともう�
 
 数値が一致するようになった直後、TP=2 の prefill が TP=1 の 1/25 であった。原因は rank local
 shape が registered 側の allowlist に無く backbone が correctness path へ落ちていたこと。
-現在の契約（登録済み shape）は [../../developer/tensor_parallel_execution.md](../../developer/tensor_parallel_execution.md) §11-1 に置く。
+現在の契約（登録済み shape）は [../../developer/multi-gpu.md](../../developer/multi-gpu.md) に置く。
 
 ### 切り分け
 

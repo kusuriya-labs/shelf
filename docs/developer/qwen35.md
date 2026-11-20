@@ -401,7 +401,7 @@ Auto モードでは `execute_program` が単体 launcher を試す。
 - **rope**: `try_launch_rope` — head_dim=256 / rotary=64 / features%256==0 で pointer/stride aligned かつ inv_freq table が存在するなら専用 pair kernel、でなければ generic kernel を自動選択する。pair と generic は同じ `inv_freq` table を参照し、`cos`/`sin` に `attention_factor` を掛ける。correctness 経路も `DeviceBatchContext.rope_inv_freq` で同じ table と binding の `scalar_a`（attention factor）を参照する。table は `create_model_executor` が model setup 時に 32 要素の double として生成し、`HostExecutionContext.rope_inv_freq` 経由で渡す（rotary_dim=64 前提で table 長は 32 固定、half が 32 を超える geometry では table を使わず theta から計算する）
 - **output_gather**: `try_launch_output_gather`
 
-各 launcher は selector（`select_*_implementation` / `select_*_config`）で `Correctness` / `Optimized` を判定し、`Optimized` でなければ `NotApplicable` を返す。量子化 linear は対応 weight が native layout に preshuffle 済みであることも検証する。Tensor Parallel の local geometry は半分の次元になるため、各 selector（`linear_selector` / `paged_attention_selector` / `gdn_recurrence_selector` / `rope_selector` / `kv_append_selector` / `l2_normalize_selector` / `gdn_conv_selector` / `rmsnorm_selector` / `elementwise_selector`）には TP=2 の validated shape を個別に登録する（[tensor_parallel_execution.md](tensor_parallel_execution.md) §10）。
+各 launcher は selector（`select_*_implementation` / `select_*_config`）で `Correctness` / `Optimized` を判定し、`Optimized` でなければ `NotApplicable` を返す。量子化 linear は対応 weight が native layout に preshuffle 済みであることも検証する。Tensor Parallel の local geometry は半分の次元になるため、各 selector（`linear_selector` / `paged_attention_selector` / `gdn_recurrence_selector` / `rope_selector` / `kv_append_selector` / `l2_normalize_selector` / `gdn_conv_selector` / `rmsnorm_selector` / `elementwise_selector`）には TP=2 の validated shape を個別に登録する（[multi-gpu.md](multi-gpu.md) の対応範囲を参照）。
 
 `PAGED_ATTENTION` で split-KV を使うかは `plan_paged_attention` の 1 箇所だけが決め、`append_decode_region` はその `splits` を引数で受け取る（region 単位の tree 判定のみ受け手側で行う）。kernel 側の capability（kv dtype ごとに bf16 が `q_per_kv` 4 / 6 / 8、fp8 が 4 / 6）は
 `paged_attention_bf16_split_supports` / `paged_attention_fp8_split_supports` を正本とし、planner
@@ -454,7 +454,7 @@ Auto モードでは `execute_program` が単体 launcher を試す。
 `validate_host_weight_slot` がこの制約を検証する。
 
 Tensor Parallel の rank-local weight と execution は
-[tensor_parallel_execution.md](tensor_parallel_execution.md) を参照
+[multi-gpu.md](multi-gpu.md) を参照
 （plan builder は `include/shelf/models/qwen35/weights/tensor_parallel_plan.h`）。
 
 weight の load 時 logical TP partition（`WeightLoadOptions.partition_plan`）は

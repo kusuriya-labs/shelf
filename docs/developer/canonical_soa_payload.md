@@ -597,7 +597,7 @@ disk 上の canonical payload は global tensor のままで、rank-local partit
 load 時に行われ、その rank-local canonical の後に native preshuffle が実行される。
 native payload を disk contract にしない現在の方針を維持する。
 順序 contract は [tensor_partition.md](tensor_partition.md)、runtime execution は
-[tensor_parallel_execution.md](tensor_parallel_execution.md) を参照する。
+[multi-gpu.md](multi-gpu.md) を参照する。
 
 canonical disk format は **TP-independent** である。tensor parallel を使う場合も
 disk 上の canonical payload は global tensor のままで、rank-local partition は

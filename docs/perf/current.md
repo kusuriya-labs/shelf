@@ -1178,7 +1178,7 @@ shared expert の寄与が落ちていた**（原因と修正は
 
 `models/Qwen3.6-35B-A3B-Quark-AWQ-MXFP4`（40 層・experts 256・top_k 8・moe_intermediate 512・
 shared 512）を TP=2 / device 0,1 で測った。分割方針と契約は
-[../developer/tensor_parallel_execution.md](../developer/tensor_parallel_execution.md) §11-1、
+[../developer/multi-gpu.md](../developer/multi-gpu.md)、
 expert 軸を選んだ理由・数値破綻の経過・allowlist 登録の内訳は
 [../research/20261105/moe_tp_expert_axis.md](../research/20261105/moe_tp_expert_axis.md) §6 / §7。
 
@@ -1258,7 +1258,7 @@ corpus は `vendor/BetterBench/corpus/v1` を `tools/quality_gate.py corpus` し
 
 `models/Qwen3.6-35B-A3B-Quark-AWQ-MXFP4`（40 層・experts 256・top_k 8）を device 0,1 の
 PP=2（stage `[0,20)` / `[20,40)`）で測った。分割契約と stage model の interface は
-[../developer/pipeline_parallel.md](../developer/pipeline_parallel.md) §2、
+[../developer/multi-gpu.md](../developer/multi-gpu.md)、
 実装の経過と採否は
 [../research/20261105/moe_pipeline_parallel.md](../research/20261105/moe_pipeline_parallel.md)。
 
