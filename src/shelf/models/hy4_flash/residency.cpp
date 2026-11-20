@@ -163,6 +163,9 @@ void Residency::upload_experts(int r, int layer) {
 }
 void Residency::upload() {
     auto profile = std::getenv("SHELF_HY4_PROFILE_EP");
+    // 診断用: SHELF_HY4_EP_TRANSPORT=host で rank 間の転送をすべて host 経由にする（peer 転送の切り分け）。
+    auto transport = std::getenv("SHELF_HY4_EP_TRANSPORT");
+    const bool force_host = transport && std::string_view(transport) == "host";
     for (int dst = 0; dst < ranks; ++dst)
         for (int src = 0; src < ranks; ++src) {
             if (src == dst || (dst && src))
@@ -170,7 +173,7 @@ void Residency::upload() {
             int accessible = 0;
             check(hipSetDevice(physical[dst]));
             check(hipDeviceCanAccessPeer(&accessible, physical[dst], physical[src]));
-            if (accessible) {
+            if (accessible && !force_host) {
                 auto status = hipDeviceEnablePeerAccess(physical[src], 0);
                 peer[dst][src] = status == hipSuccess || status == hipErrorPeerAccessAlreadyEnabled;
                 owns_peer[dst][src] = status == hipSuccess;
