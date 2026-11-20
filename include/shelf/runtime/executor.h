@@ -346,6 +346,19 @@ struct Executor {
     SequenceSlotPool* sequence_pool = nullptr;
     GdnStatePool* gdn_state_pool = nullptr;
     PagedKVPool* kv_pool = nullptr;
+    void bind_kv_pool(PagedKVPool& pool) {
+        kv_pool = &pool;
+        auto ms = host_model_state;
+        if (pool.dtype() == KVCacheDType::FP8_E4M3) {
+            ms.kv_fp8 = make_paged_kv_fp8_view(pool);
+        } else if (pool.dtype() == KVCacheDType::OCTAVE) {
+            ms.kv_octave = make_paged_kv_octave_view(pool);
+        } else {
+            ms.kv_bf16 = make_paged_kv_bf16_view(pool);
+        }
+        ms.kv_dtype = static_cast<uint32_t>(pool.dtype());
+        host_model_state = ms;
+    }
     bool uses_qsa_state = false;
     bool uses_ple_conv_state = false;
     std::unique_ptr<::shelf::state::QsaKeyStatePool> qsa_state_pool;

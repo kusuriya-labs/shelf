@@ -404,8 +404,56 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         return plan;
     };
 
+    auto create_kv_pool = [&](std::size_t pages) -> Status {
+        kv_pool_ = std::nullopt;
+        auto result = state::PagedKVPool::create(
+            *arena_, static_cast<std::uint32_t>(pages), config_.page_tokens,
+            num_attn_layers, kv_heads, head_dim, config_.kv_cache_dtype,
+            config_.octave_kv_format);
+        if (!result.ok()) return result.status();
+        kv_pool_.emplace(std::move(result.release()));
+        return Status::make_ok();
+    };
+
+    qwen35::ExecutorConfig exec_config;
+    exec_config.max_batch_rows = exec_max_tokens_;
+    exec_config.max_scheduled_requests = max_concurrent;
+    exec_config.max_scheduled_output_rows = config_.max_scheduled_output_rows;
+    exec_config.target_hidden_taps = config_.target_hidden_taps;
+    exec_config.target_hidden_tap_count = config_.target_hidden_tap_count;
+    exec_config.tp_combine_f32 = config_.tp_combine_f32;
+    exec_config.max_context_tokens = config_.max_seq_len + 1u;
+    exec_config.backend = config_.decode_backend;
+    exec_config.emit_normed_token_hidden = config_.mtp;
+    if (config_.rope_profile.has_value()) {
+        exec_config.rope_profile = *config_.rope_profile;
+    }
+
+    auto create_executor_now = [&]() -> Status {
+        auto result = model_->create_executor(
+            *slot_pool_, *gdn_pool_, *kv_pool_, *arena_, exec_config);
+        if (!result.ok()) return result.status();
+        executor_ = std::move(result.release());
+        return Status::make_ok();
+    };
+
+    Status probe_status = create_kv_pool(required_pages);
+    if (!probe_status.ok()) return probe_status;
+    const std::size_t executor_before = arena_->used();
+    probe_status = create_executor_now();
+    if (!probe_status.ok()) return probe_status;
+    const std::size_t executor_bytes = arena_->used() - executor_before;
+    if (executor_bytes > config_.working_set_reserve_bytes) {
+        config_.working_set_reserve_bytes = executor_bytes;
+    }
+    fprintf(stderr,
+            "MEMORY_PLAN executor footprint: %s (reserve %s)\n",
+            gpu::format_gib(executor_bytes).c_str(),
+            gpu::format_gib(config_.working_set_reserve_bytes).c_str());
+    fflush(stderr);
+
     const std::size_t reserved_bytes = prefix_bytes.total() + prefix_capture_bytes +
-        config_.working_set_reserve_bytes + drafter_total_bytes;
+        config_.working_set_reserve_bytes + drafter_total_bytes + kv_required_bytes;
     const std::size_t arena_free = arena_->capacity() - arena_->used();
     if (arena_free <= reserved_bytes) {
         print_memory_plan(make_plan(kv_required_bytes, max_seq + 1u));
@@ -446,41 +494,10 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     print_memory_plan(make_plan(
         static_cast<std::size_t>(kv_pool_pages) * kv_page_bytes, physical_capacity_tokens));
 
-    auto kv_pool_result = state::PagedKVPool::create(
-        *arena_, kv_pool_pages, config_.page_tokens, num_attn_layers, kv_heads, head_dim,
-        config_.kv_cache_dtype, config_.octave_kv_format);
-    if (!kv_pool_result.ok()) {
-        return kv_pool_result.status();
-    }
-    kv_pool_.emplace(std::move(kv_pool_result.release()));
+    Status kv_status = create_kv_pool(kv_pool_pages);
+    if (!kv_status.ok()) return kv_status;
+    executor_.bind_kv_pool(*kv_pool_);
     const std::size_t used_after_kv = arena_->used();
-
-    qwen35::ExecutorConfig exec_config;
-    exec_config.max_batch_rows = exec_max_tokens_;
-    exec_config.max_scheduled_requests = max_concurrent;
-    exec_config.max_scheduled_output_rows = config_.max_scheduled_output_rows;
-    exec_config.target_hidden_taps = config_.target_hidden_taps;
-    exec_config.target_hidden_tap_count = config_.target_hidden_tap_count;
-    exec_config.tp_combine_f32 = config_.tp_combine_f32;
-    exec_config.max_context_tokens = config_.max_seq_len + 1u;
-    exec_config.backend = config_.decode_backend;
-    exec_config.emit_normed_token_hidden = config_.mtp;
-    if (config_.rope_profile.has_value()) {
-        exec_config.rope_profile = *config_.rope_profile;
-    }
-
-    const std::size_t executor_before = arena_->used();
-    auto exec_result = model_->create_executor(
-        *slot_pool_, *gdn_pool_, *kv_pool_, *arena_, exec_config);
-    fprintf(stderr,
-            "MEMORY_PLAN executor footprint: %s (reserve %s)\n",
-            gpu::format_gib(arena_->used() - executor_before).c_str(),
-            gpu::format_gib(config_.working_set_reserve_bytes).c_str());
-    fflush(stderr);
-    if (!exec_result.ok()) {
-        return exec_result.status();
-    }
-    executor_ = std::move(exec_result.release());
 
     qwen35::runtime::ContinuousBatcherConfig batcher_config;
     batcher_config.max_num_batched_tokens = exec_max_tokens_;
