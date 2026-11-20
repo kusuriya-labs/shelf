@@ -69,8 +69,18 @@ int main() {
         check(arena.used() == 4096u, "borrowed arena tracks the allocation");
     }
 
+    auto stream_result = manager.stream_for(0);
+    check(stream_result.ok(), "stream_for(0) ok");
+    if (stream_result.ok()) {
+        check(stream_result.value() != nullptr, "borrowed stream is valid");
+        const hipError_t sync_err = hipStreamSynchronize(stream_result.value());
+        check(sync_err == hipSuccess, "borrowed stream synchronizes");
+    }
+
     auto missing = manager.arena_for(device_count + 1);
     check(!missing.ok(), "unknown device rejected");
+    auto missing_stream = manager.stream_for(device_count + 1);
+    check(!missing_stream.ok(), "unknown device stream rejected");
 
     const shelf::Status shutdown_status = manager.shutdown();
     check(shutdown_status.ok(), "shutdown ok");

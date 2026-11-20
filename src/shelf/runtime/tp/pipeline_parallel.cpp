@@ -42,10 +42,6 @@ PipelineStageRuntime::~PipelineStageRuntime() noexcept {
         executor_shutdown(executor_);
         executor_ready_ = false;
     }
-    if (tp_ == nullptr && stream_ != nullptr) {
-        shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream_));
-        stream_ = nullptr;
-    }
 }
 
 Result<std::unique_ptr<PipelineStageRuntime>> PipelineStageRuntime::create(
@@ -81,17 +77,12 @@ Result<std::unique_ptr<PipelineStageRuntime>> PipelineStageRuntime::create(
         return stage;
     }
 
-    const hipError_t stream_err = hipStreamCreate(&stage->stream_);
-    if (stream_err != hipSuccess) {
-        return Status::hip_error("hipStreamCreate pipeline stage",
-                                 hipGetErrorString(stream_err), __FILE__, __LINE__);
-    }
-
-    if (config.arena == nullptr) {
+    if (config.arena == nullptr || config.stream == nullptr) {
         return Status::invalid_argument(
-            "pipeline stage requires a borrowed arena", __FILE__, __LINE__);
+            "pipeline stage requires a borrowed arena and stream", __FILE__, __LINE__);
     }
     stage->arena_ = config.arena;
+    stage->stream_ = config.stream;
 
     if (config.build_stage_model == nullptr) {
         return Status::invalid_argument("pipeline stage runtime needs a stage model builder",
@@ -293,12 +284,15 @@ Status PipelineParallelCoordinator::initialize(const PipelineParallelConfig& con
     for (std::size_t i = 0; i < config.stages.size(); ++i) {
         auto arena = config.memory->arena_for(config.devices[i]);
         if (!arena.ok()) return arena.status();
+        auto stream = config.memory->stream_for(config.devices[i]);
+        if (!stream.ok()) return stream.status();
         PipelineStageRuntimeConfig stage_config;
         stage_config.model_dir = config.model_dir;
         stage_config.stage.enabled = true;
         stage_config.stage.layers = config.stages[i];
         if (i < config.stage_tp.size()) stage_config.tp = config.stage_tp[i];
         stage_config.arena = arena.value();
+        stage_config.stream = stream.value();
         stage_config.tp.memory = config.memory;
         stage_config.device_id = config.devices[i];
         stage_config.max_batch_rows = config.max_batch_rows;

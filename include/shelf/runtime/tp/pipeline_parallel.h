@@ -56,6 +56,7 @@ struct PipelineStageRuntimeConfig {
     KVCacheDType kv_cache_dtype = KVCacheDType::BF16;
     ::shelf::kernel::OctaveKVCacheFormat octave_kv_format{};
     gpu::GpuArena* arena = nullptr;
+    hipStream_t stream = nullptr;
     std::size_t working_set_reserve_bytes = 0;
     std::uint32_t kv_pool_pages = 0;
     ::shelf::runtime::EffectiveRopeProfile rope_profile;

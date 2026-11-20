@@ -59,18 +59,44 @@ Result<GpuMemoryManager> GpuMemoryManager::create(const std::vector<int>& device
     }
 
     GpuMemoryManager manager;
-    manager.arenas_.reserve(devices.size());
+    manager.devices_.reserve(devices.size());
     for (int device : devices) {
         auto capacity = resolve_capacity(device, capacity_bytes);
         if (!capacity.ok()) return capacity.status();
         auto arena_result = GpuArena::create(device, capacity.value());
         if (!arena_result.ok()) return arena_result.status();
-        manager.arenas_.push_back(DeviceArena{
+
+        auto scope = ScopedDevice::create(device);
+        if (!scope.ok()) return scope.status();
+        hipStream_t stream = nullptr;
+        const hipError_t stream_err = hipStreamCreate(&stream);
+        if (stream_err != hipSuccess) {
+            return Status::hip_error(
+                "hipStreamCreate", hipGetErrorString(stream_err), __FILE__, __LINE__);
+        }
+        manager.devices_.push_back(DeviceResources{
             .physical_device = device,
             .arena = arena_result.release(),
+            .stream = stream,
         });
     }
     return manager;
+}
+
+GpuMemoryManager::GpuMemoryManager(GpuMemoryManager&& other) noexcept
+    : devices_(std::move(other.devices_)), shutdown_(other.shutdown_) {
+    other.devices_.clear();
+    other.shutdown_ = true;
+}
+
+GpuMemoryManager& GpuMemoryManager::operator=(GpuMemoryManager&& other) noexcept {
+    if (this == &other) return *this;
+    (void)shutdown();
+    devices_ = std::move(other.devices_);
+    shutdown_ = other.shutdown_;
+    other.devices_.clear();
+    other.shutdown_ = true;
+    return *this;
 }
 
 GpuMemoryManager::~GpuMemoryManager() noexcept {
@@ -78,9 +104,18 @@ GpuMemoryManager::~GpuMemoryManager() noexcept {
 }
 
 Result<GpuArena*> GpuMemoryManager::arena_for(int physical_device) noexcept {
-    for (auto& device_arena : arenas_) {
-        if (device_arena.physical_device == physical_device) {
-            return &device_arena.arena;
+    for (auto& device_resources : devices_) {
+        if (device_resources.physical_device == physical_device) {
+            return &device_resources.arena;
+        }
+    }
+    return Status::out_of_range("device not in GpuMemoryManager", __FILE__, __LINE__);
+}
+
+Result<hipStream_t> GpuMemoryManager::stream_for(int physical_device) noexcept {
+    for (auto& device_resources : devices_) {
+        if (device_resources.physical_device == physical_device) {
+            return device_resources.stream;
         }
     }
     return Status::out_of_range("device not in GpuMemoryManager", __FILE__, __LINE__);
@@ -91,10 +126,23 @@ Status GpuMemoryManager::shutdown() {
         return Status::make_ok();
     }
     Status first_error = Status::make_ok();
-    for (auto& device_arena : arenas_) {
-        Status st = device_arena.arena.shutdown();
-        if (!first_error.ok()) continue;
-        if (!st.ok()) first_error = st;
+    for (auto& device_resources : devices_) {
+        auto scope = ScopedDevice::create(device_resources.physical_device);
+        if (!scope.ok()) {
+            if (first_error.ok()) first_error = scope.status();
+        }
+        if (device_resources.stream != nullptr) {
+            const hipError_t err = hipStreamDestroy(device_resources.stream);
+            device_resources.stream = nullptr;
+            if (first_error.ok() && err != hipSuccess) {
+                first_error = Status::hip_error(
+                    "hipStreamDestroy", hipGetErrorString(err), __FILE__, __LINE__);
+            }
+        }
+    }
+    for (auto& device_resources : devices_) {
+        Status st = device_resources.arena.shutdown();
+        if (first_error.ok() && !st.ok()) first_error = st;
     }
     shutdown_ = true;
     return first_error;

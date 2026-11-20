@@ -388,6 +388,7 @@ RunResult run_rank(const std::string& model_dir, int device, std::uint32_t tp_si
     }
     gpu::GpuMemoryManager memory = memory_result.release();
     config.arena = memory.arena_for(device).value();
+    config.stream = memory.stream_for(device).value();
 
     auto rank_result = q35r::TpRankRuntime::create(config);
     if (!rank_result.ok()) {

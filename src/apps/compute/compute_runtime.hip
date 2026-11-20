@@ -142,10 +142,6 @@ Qwen35ComputeRuntime::~Qwen35ComputeRuntime() noexcept {
         auto st = shutdown();
         (void)st;
     }
-    if (stream_ != nullptr) {
-        (void)hipStreamDestroy(stream_);
-        stream_ = nullptr;
-    }
 }
 
 Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
@@ -282,14 +278,12 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         return initialize_tensor_parallel();
     }
 
-    herr = hipStreamCreate(&stream_);
-    if (herr != hipSuccess) {
-        return Status::hip_error("hipStreamCreate", hipGetErrorString(herr), __FILE__, __LINE__);
-    }
-
     auto arena_ptr = memory_->arena_for(config_.devices[0]);
     if (!arena_ptr.ok()) return arena_ptr.status();
     arena_ = arena_ptr.value();
+    auto stream_ptr = memory_->stream_for(config_.devices[0]);
+    if (!stream_ptr.ok()) return stream_ptr.status();
+    stream_ = stream_ptr.value();
 
     const auto t_load_start = std::chrono::steady_clock::now();
     auto model_result = shelf::models::LoadedModel::load(
@@ -1151,15 +1145,6 @@ Status Qwen35ComputeRuntime::shutdown() {
         Status st = prefix_cache_->shutdown();
         if (!st.ok() && first_error.ok()) first_error = st;
         prefix_cache_.reset();
-    }
-
-    if (stream_ != nullptr) {
-        hipError_t herr = hipStreamDestroy(stream_);
-        if (herr != hipSuccess && first_error.ok()) {
-            first_error = Status::hip_error(
-                "hipStreamDestroy", hipGetErrorString(herr), __FILE__, __LINE__);
-        }
-        stream_ = nullptr;
     }
 
     batcher_.reset();

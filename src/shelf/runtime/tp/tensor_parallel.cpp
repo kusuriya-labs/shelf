@@ -45,10 +45,6 @@ TpRankRuntime::~TpRankRuntime() noexcept {
             executor_ready_ = false;
         }
     }
-    if (stream_ != nullptr) {
-        shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream_));
-        stream_ = nullptr;
-    }
 }
 
 Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
@@ -63,9 +59,9 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
         return Status::invalid_argument(
             "max_scheduled_requests and max_seq_len must be > 0", __FILE__, __LINE__);
     }
-    if (config.arena == nullptr) {
+    if (config.arena == nullptr || config.stream == nullptr) {
         return Status::invalid_argument(
-            "tp rank runtime requires a borrowed arena", __FILE__, __LINE__);
+            "tp rank runtime requires a borrowed arena and stream", __FILE__, __LINE__);
     }
 
     auto scope = shelf::gpu::ScopedDevice::create(config.device_id);
@@ -73,12 +69,7 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
 
     std::unique_ptr<TpRankRuntime> rank(new TpRankRuntime());
     rank->device_id_ = config.device_id;
-
-    const hipError_t stream_err = hipStreamCreate(&rank->stream_);
-    if (stream_err != hipSuccess) {
-        return Status::hip_error("hipStreamCreate tp rank", hipGetErrorString(stream_err),
-                                 __FILE__, __LINE__);
-    }
+    rank->stream_ = config.stream;
 
     gpu::GpuArena& arena = *config.arena;
     rank->arena_ = config.arena;
@@ -414,10 +405,14 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
             "tp coordinator requires a GpuMemoryManager", __FILE__, __LINE__);
     }
     std::vector<gpu::GpuArena*> arenas(devices_.size(), nullptr);
+    std::vector<hipStream_t> streams(devices_.size(), nullptr);
     for (std::size_t r = 0; r < devices_.size(); ++r) {
         auto arena = config.memory->arena_for(devices_[r]);
         if (!arena.ok()) return arena.status();
         arenas[r] = arena.value();
+        auto stream = config.memory->stream_for(devices_[r]);
+        if (!stream.ok()) return stream.status();
+        streams[r] = stream.value();
     }
 
     std::jthread model_prefetch;
@@ -453,6 +448,7 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
         rank_config.kv_cache_dtype = config.kv_cache_dtype;
         rank_config.octave_kv_format = config.octave_kv_format;
         rank_config.arena = arenas[r];
+        rank_config.stream = streams[r];
         rank_config.working_set_reserve_bytes = config.working_set_reserve_bytes;
         rank_config.kv_pool_pages = config.kv_pool_pages;
         rank_config.drafter_config = config.drafter_config;

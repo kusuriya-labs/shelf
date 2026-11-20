@@ -93,16 +93,18 @@ coordinator/executor の破棄 → `GpuMemoryManager::shutdown`）。
 
 ## GpuMemoryManager
 
-`GpuMemoryManager` は physical device ごとに 1 つの `GpuArena` を所有し、
-PP / EP / TP の実行者へ貸し出す。実行者は arena を生成も破棄もしない。
+`GpuMemoryManager` は physical device ごとに 1 つの `GpuArena` と 1 つの
+`hipStream_t` を所有し、PP / EP / TP の実行者へ貸し出す。実行者は arena も stream も
+生成も破棄もしない。
 
-- `GpuMemoryManager::create(devices, capacity_bytes)` が全 arena をまとめて生成する。
-  `capacity_bytes == 0` は device ごとの空き VRAM から 0.5 GiB を引いた auto。
-- `arena_for(device)` は所有権を移さない `GpuArena*` を返す。
-- `shutdown()` は生成順に全 arena を解放し、最初の失敗を返す。
+- `GpuMemoryManager::create(devices, capacity_bytes)` が全 device の arena と stream を
+  まとめて生成する。`capacity_bytes == 0` は device ごとの空き VRAM から 0.5 GiB を
+  引いた auto。
+- `arena_for(device)` / `stream_for(device)` は所有権を移さないハンドルを返す。
+- `shutdown()` は stream → arena の順で全リソースを解放し、最初の失敗を返す。
 - `TpRankRuntime` / `TpCoordinator` / `PipelineStageRuntime` /
-  `PipelineParallelCoordinator` は config で受け取った arena / manager だけを使う。
-  `GpuArena::create()` は `GpuMemoryManager` だけが呼ぶ。
+  `PipelineParallelCoordinator` は config で受け取った arena / stream / manager だけを使う。
+  `GpuArena::create()` と `hipStreamCreate()` は `GpuMemoryManager` だけが呼ぶ。
 - manager は coordinator と executor より長生きしなければならない。
   compute は全 executor / coordinator を破棄した後に `shutdown()` を呼ぶ。
 
