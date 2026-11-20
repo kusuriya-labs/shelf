@@ -200,7 +200,7 @@ HostMemoryBytes LoadedModel::host_memory_bytes() const noexcept {
     out.embedding = host_pinned_bytes();
     if (qwen4exp_ != nullptr) {
         out.offload_experts = qwen4exp_->weights().host_expert_bytes();
-        if (ple_table_ != nullptr) out.ple_table = ple_table_->payload_bytes();
+        if (ple_table_ != nullptr) out.ple_table = ple_table_->host_bytes();
     }
     return out;
 }

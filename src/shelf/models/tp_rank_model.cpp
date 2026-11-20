@@ -253,7 +253,7 @@ public:
     }
 
     std::uint64_t host_ple_table_bytes() const override {
-        return ple_table_ != nullptr ? ple_table_->payload_bytes() : 0u;
+        return ple_table_ != nullptr ? ple_table_->host_bytes() : 0u;
     }
 
     std::size_t token_row_ffn_size() const override {

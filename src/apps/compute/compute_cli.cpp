@@ -124,6 +124,7 @@ void compute_usage(const char* prog) {
     printf("  --moe-cache-oracle 0|1  log cache oracle decisions (default 0)\n");
     printf("  --ple-artifact 0|1      write/read <model_dir>/quanted_ple.bin (default 1)\n");
     printf("  --ple-stream-io MODE    pread | mmap | direct (default mmap)\n");
+    printf("  --ple-hot-cache-gib N   pinned host block cache for PLE; 0 = full resident (default 0)\n");
     printf("  --lm-head-int8 0|1      quantize the BF16 lm head to INT8 W32 on load (default 1)\n");
     printf("  --pcie-frac F           share of PCIe the runtime may use (default 0.25)\n");
     printf("  --pcie-gbps F           assumed PCIe bandwidth in GB/s (default 25)\n");
@@ -528,6 +529,13 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
                 return kComputeParseError;
             }
             apply_env_string("SHELF_PLE_STREAM_IO", value);
+        } else if (std::strcmp(argv[i], "--ple-hot-cache-gib") == 0 && i + 1 < argc) {
+            unsigned long value = 0;
+            if (!parse_uint(argv[++i], value)) {
+                fprintf(stderr, "bad --ple-hot-cache-gib (expected a non-negative integer)\n");
+                return kComputeParseError;
+            }
+            apply_env_u32("SHELF_PLE_HOT_CACHE_GIB", value);
         } else if (std::strcmp(argv[i], "--lm-head-int8") == 0 && i + 1 < argc) {
             unsigned long value = 0;
             if (!parse_uint(argv[++i], value) || value > 1u) {

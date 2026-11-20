@@ -1343,6 +1343,26 @@ in-memory 量子化（1,048,576 行、入力 1 GiB）:
 - `--ple-artifact 0` で artifact を無効にできる。
 - full model load、GPU 実行、生成品質はこの計測に含まない。
 
+## 2026-11-20 PLE tiered cache
+
+- model: `models/Qwen3.8-Flash-Next-Quark-MXFP4` の PLE n-gram table
+- load command: `./build/tests/test_qwen4exp_load --skip-gpu --model-dir models/Qwen3.8-Flash-Next-Quark-MXFP4`
+- serve command: `./build/shelf-compute --model-dir models/Qwen3.8-Flash-Next-Quark-MXFP4 --input-ids-file <1024 ids> --max-new-tokens 1 --max-num-batched-tokens 4096 --prefill-chunk 512 --moe-host-experts 448 --max-concurrent-requests 2 --max-seq-len 262144 --kv-cache-dtype octave:c5v5`
+- CPU: Ryzen 7 7800X3D、16 thread。GPU: R9700（gfx1201）。page cache は warm。
+
+| 構成 | PLE host | load wall | peak RSS | prefill 1024 tokens |
+| --- | ---: | ---: | ---: | ---: |
+| full resident | 38.74 GiB | 13.91 s | 38.95 GiB | 4713.9 ms |
+| tiered 1 GiB | 1.00 GiB | **2.85 s** | **1.21 GiB** | 4790.6 ms |
+
+- Hot ブロックは 2048 行（260 KiB）。8192 行ごとに頻度で入れ替え、1 回の更新で
+  最大 64 ブロック（16 MiB）を O_DIRECT + pread で pinned host へ読み込む。
+  Cold 側は mmap のページキャッシュから読む。
+- 1024 token prefill の Hot ヒット率はキャッシュ比率（約 2.6%）に近く、
+  prefill 時間の差は 1.6% だった。load と RSS の改善が主な効果である。
+- 両構成で `GENERATED_IDS=24`（sha1 `4d134bc072212ace2df385dae143139da74ec0ef`）が一致した。
+- 各値は 1 回の測定。cold page cache と Hot キャッシュの学習途中は含めない。
+
 ## 記録規則
 
 - 新しい計測をしていない数値は更新しない。

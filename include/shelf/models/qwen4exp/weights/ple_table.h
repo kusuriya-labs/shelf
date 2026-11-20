@@ -7,17 +7,19 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace shelf {
 namespace qwen4exp {
 
-// Host-resident PLE n-gram table. Shards are read into anonymous RAM and shared by the
-// tensor-parallel rank threads, which live in the same process. The EXL3 file path reads
-// with pread; the HF shard path maps the checkpoint tensors and copies or converts them
-// into anonymous RAM.
+// Host-resident PLE n-gram table. Shards are shared by the tensor-parallel rank threads,
+// which live in the same process. The EXL3 file path reads with pread; the HF shard path
+// maps the checkpoint tensors and copies or converts them into host RAM. The artifact
+// loader can place shards in pinned host memory and read them with O_DIRECT.
 class PleTable {
 public:
     // Packaged row layout held in host RAM.
@@ -49,6 +51,10 @@ public:
     [[nodiscard]] std::uint32_t shard_count() const noexcept { return shard_count_; }
     [[nodiscard]] std::uint32_t shard_rows() const noexcept { return shard_rows_; }
     [[nodiscard]] std::uint64_t payload_bytes() const noexcept { return payload_bytes_; }
+    // Bytes actually held in host RAM. Smaller than payload_bytes in tiered mode.
+    [[nodiscard]] std::uint64_t host_bytes() const noexcept;
+    // Number of block slots currently filled in the pinned hot cache.
+    [[nodiscard]] std::size_t cached_blocks() const noexcept;
     [[nodiscard]] std::uint32_t head_count() const noexcept {
         return static_cast<std::uint32_t>(head_offsets_.size());
     }
@@ -111,11 +117,11 @@ private:
                                               bool fadvise_dontneed);
     static Result<bool> load_int6_artifact(
         const std::string& model_dir, const Qwen4ExpTextConfig& config,
-        const std::vector<ArtifactSource>& sources, PleTable& out);
+        const std::vector<ArtifactSource>& sources, PleTable& out,
+        std::uint64_t hot_cache_bytes);
     static Status write_int6_artifact(const std::string& model_dir,
                                       const std::vector<ArtifactSource>& sources,
                                       const PleTable& table);
-
     std::size_t head_for_row(std::uint64_t row) const noexcept;
 
     TableFormat format_ = TableFormat::Exl3Trellis;
@@ -129,6 +135,48 @@ private:
         std::size_t bytes = 0;
         std::uint64_t file_offset = 0;
     };
+
+    struct MappedDeleter {
+        std::size_t bytes = 0;
+        void operator()(const std::uint8_t* p) const noexcept;
+    };
+    struct PinnedDeleter {
+        void operator()(std::uint8_t* p) const noexcept;
+    };
+    struct FdDeleter {
+        void operator()(int* p) const noexcept;
+    };
+
+    struct TieredState {
+        std::shared_ptr<const std::uint8_t> mapped;
+        std::size_t mapped_bytes = 0;
+        std::shared_ptr<int> direct_fd;
+        std::shared_ptr<std::uint8_t> hot;
+        std::uint64_t hot_bytes = 0;
+        std::size_t hot_slots = 0;
+        std::uint64_t data_base = 0;
+        std::uint64_t payload_stride = 0;
+        std::uint32_t block_rows = 0;
+        std::uint64_t block_bytes = 0;
+        std::uint32_t blocks_per_shard = 0;
+        std::vector<std::int64_t> slot_block;
+        std::unordered_map<std::uint64_t, std::uint32_t> block_slot;
+        std::vector<std::uint32_t> freq;
+        std::uint64_t accesses = 0;
+        std::uint64_t hot_hits = 0;
+        std::uint64_t cold_reads = 0;
+        std::uint32_t log_interval = 0;
+        std::mutex mutex;
+    };
+    std::shared_ptr<TieredState> tiered_;
+
+    static Status setup_tiered(PleTable& table, int fd, std::uint64_t payload_stride,
+                               std::size_t hot_bytes);
+    static void rebalance_tiered(TieredState& state, std::uint32_t shard_rows);
+    static void fill_tiered_block(TieredState& state, std::size_t slot, std::uint64_t block);
+    static std::vector<std::uint64_t> tiered_candidates(const TieredState& state,
+                                                        std::size_t count,
+                                                        std::uint32_t shard_rows);
 
     std::string file_path_;
     std::uint64_t data_base_ = 0;

@@ -130,6 +130,8 @@ def build_compute_argv(opts) -> list[str]:
         argv += ["--pcie-gbps", str(opts.pcie_gbps)]
     if opts.ple_prefetch is not None:
         argv += ["--ple-prefetch", str(opts.ple_prefetch)]
+    if opts.ple_hot_cache_gib is not None:
+        argv += ["--ple-hot-cache-gib", str(opts.ple_hot_cache_gib)]
     if opts.tp_transport is not None:
         argv += ["--tp-transport", opts.tp_transport]
     if opts.verify_weights:
@@ -587,6 +589,8 @@ def parse_args(argv=None):
                         help="想定する PCIe 帯域 GB/s（default 25）")
     parser.add_argument("--ple-prefetch", type=int, default=None, choices=(0, 1),
                         help="prefill 中に次の PLE 行を先読みする（default 1）")
+    parser.add_argument("--ple-hot-cache-gib", type=int, default=None,
+                        help="PLE の pinned host ブロックキャッシュ容量 GiB（default 0 = 全量常駐）")
     parser.add_argument("--tp-transport", default=None,
                         help="tensor parallel transport の選択")
     parser.add_argument("--verify-weights", action="store_true",

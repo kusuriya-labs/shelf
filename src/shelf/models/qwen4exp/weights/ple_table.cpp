@@ -8,11 +8,16 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <fstream>
 #include <limits>
+#include <queue>
 #include <regex>
 #include <string>
+#include <utility>
 #include <vector>
+
+#include <hip/hip_runtime.h>
 
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -202,6 +207,20 @@ bool ple_artifact_enabled() noexcept {
     return value == nullptr || std::strcmp(value, "0") != 0;
 }
 
+std::uint64_t ple_hot_cache_bytes() noexcept {
+    const char* value = std::getenv("SHELF_PLE_HOT_CACHE_GIB");
+    if (value == nullptr || *value == '\0') return 0u;
+    const double gib = std::strtod(value, nullptr);
+    if (gib <= 0.0) return 0u;
+    return static_cast<std::uint64_t>(gib * 1024.0 * 1024.0 * 1024.0);
+}
+
+constexpr std::uint32_t kHotBlockRows = 2048u;
+constexpr std::uint64_t kHotRebalanceAccesses = 8192u;
+constexpr std::uint64_t kHotSwapBudget = 64u;
+constexpr std::uint32_t kHotMinGain = 150u;
+constexpr std::uint32_t kHotDecayAt = 4096u;
+
 std::string ple_artifact_path(const std::string& model_dir) {
     return model_dir + "/" + kPleArtifactName;
 }
@@ -271,6 +290,19 @@ Status pwrite_exact(int fd, const void* src, std::size_t bytes, std::uint64_t of
 
 void PleTable::FreeDeleter::operator()(void* p) const noexcept {
     std::free(p);
+}
+
+void PleTable::MappedDeleter::operator()(const std::uint8_t* p) const noexcept {
+    if (p != nullptr) (void)::munmap(const_cast<std::uint8_t*>(p), bytes);
+}
+
+void PleTable::PinnedDeleter::operator()(std::uint8_t* p) const noexcept {
+    if (p != nullptr) (void)::hipHostFree(p);
+}
+
+void PleTable::FdDeleter::operator()(int* p) const noexcept {
+    if (p != nullptr && *p >= 0) (void)::close(*p);
+    delete p;
 }
 
 
@@ -413,7 +445,8 @@ Result<PleTable> PleTable::load_index_shards(const std::string& model_dir,
     }
     if (source_dtype == shelf::io::SType::BF16 && !artifact_sources.empty()) {
         PleTable cached;
-        auto loaded = load_int6_artifact(model_dir, config, artifact_sources, cached);
+        auto loaded = load_int6_artifact(model_dir, config, artifact_sources, cached,
+                                         ple_hot_cache_bytes());
         if (loaded.ok() && loaded.value()) return cached;
     }
 
@@ -697,7 +730,8 @@ Result<PleTable> PleTable::load_index_shards(const std::string& model_dir,
 
 Result<bool> PleTable::load_int6_artifact(
     const std::string& model_dir, const Qwen4ExpTextConfig& config,
-    const std::vector<ArtifactSource>& sources, PleTable& out) {
+    const std::vector<ArtifactSource>& sources, PleTable& out,
+    std::uint64_t hot_cache_bytes) {
     if (sources.empty()) return false;
     const std::string path = ple_artifact_path(model_dir);
     const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
@@ -803,6 +837,19 @@ Result<bool> PleTable::load_int6_artifact(
     loaded.layer_multipliers_.assign(multipliers.value().begin(), multipliers.value().end());
     loaded.payload_bytes_ = static_cast<std::uint64_t>(shard_count) * payload_bytes;
     loaded.shards_.resize(shard_count);
+
+    if (hot_cache_bytes != 0u) {
+        Status tiered = setup_tiered(loaded, fd, payload_stride,
+                                     static_cast<std::size_t>(hot_cache_bytes));
+        ::close(fd);
+        if (!tiered.ok()) {
+            std::fprintf(stderr, "PLE tiered cache setup failed: %s\n",
+                         tiered.message().c_str());
+            return false;
+        }
+        out = std::move(loaded);
+        return true;
+    }
 
     const std::uint32_t worker_count = std::min<std::uint32_t>(16u, shard_count);
     std::vector<Status> errors(worker_count, Status::make_ok());
@@ -1320,13 +1367,237 @@ Result<PleTable> PleTable::load(const std::string& model_dir,
     return table;
 }
 
+std::uint64_t PleTable::host_bytes() const noexcept {
+    return tiered_ != nullptr ? tiered_->hot_bytes : payload_bytes_;
+}
+
+std::size_t PleTable::cached_blocks() const noexcept {
+    if (tiered_ == nullptr) return 0u;
+    TieredState& state = *tiered_;
+    std::lock_guard<std::mutex> lock(state.mutex);
+    return state.slot_block.size() - static_cast<std::size_t>(
+        std::count(state.slot_block.begin(), state.slot_block.end(), -1));
+}
+
+Status PleTable::setup_tiered(PleTable& table, int fd, std::uint64_t payload_stride,
+                              std::size_t hot_bytes) {
+    struct stat mapped_stat {};
+    if (::fstat(fd, &mapped_stat) != 0) {
+        return Status::invalid_state("PLE artifact stat failed", __FILE__, __LINE__);
+    }
+    auto state = std::make_shared<TieredState>();
+    state->mapped_bytes = static_cast<std::size_t>(mapped_stat.st_size);
+    void* base = ::mmap(nullptr, state->mapped_bytes, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (base == MAP_FAILED) {
+        return Status::invalid_state("PLE artifact mmap failed", __FILE__, __LINE__);
+    }
+    state->mapped = std::shared_ptr<const std::uint8_t>(
+        static_cast<const std::uint8_t*>(base), MappedDeleter{state->mapped_bytes});
+
+    const int direct = ::open(table.file_path_.c_str(), O_RDONLY | O_DIRECT | O_CLOEXEC);
+    const int fill = direct >= 0 ? direct : ::open(table.file_path_.c_str(),
+                                                   O_RDONLY | O_CLOEXEC);
+    if (fill < 0) {
+        return Status::invalid_state("PLE artifact reopen failed", __FILE__, __LINE__);
+    }
+    state->direct_fd = std::shared_ptr<int>(new int(fill), FdDeleter{});
+
+    const std::uint64_t block_bytes =
+        static_cast<std::uint64_t>(kHotBlockRows) * table.row_bytes_;
+    const std::size_t slots = hot_bytes / static_cast<std::size_t>(block_bytes);
+    if (slots == 0u) {
+        return Status::invalid_argument("PLE hot cache is smaller than one block", __FILE__,
+                                        __LINE__);
+    }
+    void* pinned = nullptr;
+    const hipError_t error =
+        ::hipHostMalloc(&pinned, slots * static_cast<std::size_t>(block_bytes),
+                        hipHostMallocMapped);
+    if (error != hipSuccess || pinned == nullptr) {
+        return Status::hip_error("hipHostMalloc PLE hot cache", hipGetErrorString(error),
+                                 __FILE__, __LINE__);
+    }
+    if ((reinterpret_cast<std::uintptr_t>(pinned) & 4095u) != 0u) {
+        (void)::hipHostFree(pinned);
+        return Status::invalid_state("PLE hot cache is not page aligned", __FILE__, __LINE__);
+    }
+    state->hot = std::shared_ptr<std::uint8_t>(static_cast<std::uint8_t*>(pinned),
+                                               PinnedDeleter{});
+    state->hot_bytes = static_cast<std::uint64_t>(slots) * block_bytes;
+    state->hot_slots = slots;
+    state->data_base = kPleArtifactHeaderBytes;
+    state->payload_stride = payload_stride;
+    state->block_rows = kHotBlockRows;
+    state->block_bytes = block_bytes;
+    state->blocks_per_shard = (table.shard_rows_ + kHotBlockRows - 1u) / kHotBlockRows;
+    state->slot_block.assign(slots, -1);
+    const std::uint64_t total_blocks =
+        static_cast<std::uint64_t>(table.shard_count_) * state->blocks_per_shard;
+    state->freq.assign(static_cast<std::size_t>(total_blocks), 0u);
+    if (const char* interval = std::getenv("SHELF_PLE_CACHE_LOG_INTERVAL")) {
+        state->log_interval = std::max<std::uint32_t>(
+            static_cast<std::uint32_t>(std::strtoul(interval, nullptr, 10)), 1u);
+    }
+    const std::uint64_t resident_bytes = state->hot_bytes;
+    const std::size_t hot_slots = state->hot_slots;
+    table.tiered_ = std::move(state);
+    std::fprintf(stderr, "PLE tiered cache: hot %.2f GiB (%zu blocks, %llu KiB each)\n",
+                 static_cast<double>(resident_bytes) / 1073741824.0, hot_slots,
+                 static_cast<unsigned long long>(block_bytes / 1024u));
+    return Status::make_ok();
+}
+
+std::vector<std::uint64_t> PleTable::tiered_candidates(const TieredState& state,
+                                                       std::size_t count,
+                                                       std::uint32_t shard_rows) {
+    std::vector<std::uint64_t> result;
+    if (count == 0u) return result;
+    using Entry = std::pair<std::uint32_t, std::uint64_t>;
+    std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> heap;
+    const std::uint32_t last = state.blocks_per_shard - 1u;
+    const bool partial = (shard_rows % state.block_rows) != 0u;
+    for (std::uint64_t block = 0; block < state.freq.size(); ++block) {
+        const std::uint32_t frequency = state.freq[static_cast<std::size_t>(block)];
+        if (frequency == 0u || state.block_slot.count(block) != 0u) continue;
+        if (partial &&
+            static_cast<std::uint32_t>(block % state.blocks_per_shard) == last) {
+            continue;
+        }
+        if (heap.size() < count) {
+            heap.push({frequency, block});
+        } else if (frequency > heap.top().first) {
+            heap.pop();
+            heap.push({frequency, block});
+        }
+    }
+    while (!heap.empty()) {
+        result.push_back(heap.top().second);
+        heap.pop();
+    }
+    return result;
+}
+
+void PleTable::fill_tiered_block(TieredState& state, std::size_t slot,
+                                 std::uint64_t block) {
+    const std::uint64_t shard = block / state.blocks_per_shard;
+    const std::uint64_t index = block % state.blocks_per_shard;
+    const std::uint64_t offset = state.data_base + shard * state.payload_stride +
+                                 index * state.block_bytes;
+    const std::int64_t old = state.slot_block[slot];
+    if (old >= 0) state.block_slot.erase(static_cast<std::uint64_t>(old));
+    state.slot_block[slot] = -1;
+    void* dst = state.hot.get() + slot * static_cast<std::size_t>(state.block_bytes);
+    const Status st = read_exact_at(*state.direct_fd, offset, dst,
+                                    static_cast<std::size_t>(state.block_bytes));
+    if (!st.ok()) return;
+    state.slot_block[slot] = static_cast<std::int64_t>(block);
+    state.block_slot[block] = static_cast<std::uint32_t>(slot);
+}
+
+void PleTable::rebalance_tiered(TieredState& state, std::uint32_t shard_rows) {
+    if (state.log_interval != 0u && state.accesses != 0u &&
+        (state.accesses / kHotRebalanceAccesses) % state.log_interval == 0u) {
+        const std::size_t occupied = state.slot_block.size() - static_cast<std::size_t>(
+            std::count(state.slot_block.begin(), state.slot_block.end(), -1));
+        std::fprintf(stderr,
+                     "PLE tiered cache: hot blocks %zu/%zu hits=%llu misses=%llu\n",
+                     occupied, state.hot_slots,
+                     static_cast<unsigned long long>(state.hot_hits),
+                     static_cast<unsigned long long>(state.cold_reads));
+    }
+    std::uint32_t peak = 0u;
+    for (std::uint32_t frequency : state.freq) peak = std::max(peak, frequency);
+    if (peak >= kHotDecayAt) {
+        for (std::uint32_t& frequency : state.freq) {
+            frequency = static_cast<std::uint32_t>(
+                static_cast<std::uint64_t>(frequency) * 7u / 10u);
+        }
+    }
+    struct Cached {
+        std::size_t slot = 0;
+        std::uint64_t block = 0;
+        std::uint32_t frequency = 0;
+    };
+    std::vector<Cached> cached;
+    cached.reserve(state.hot_slots);
+    for (std::size_t slot = 0; slot < state.slot_block.size(); ++slot) {
+        const std::int64_t block = state.slot_block[slot];
+        if (block >= 0) {
+            cached.push_back({slot, static_cast<std::uint64_t>(block),
+                              state.freq[static_cast<std::size_t>(block)]});
+        }
+    }
+    if (cached.size() < state.hot_slots) {
+        const std::size_t fill_count = std::min<std::size_t>(
+            static_cast<std::size_t>(kHotSwapBudget), state.hot_slots - cached.size());
+        const auto candidates = tiered_candidates(state, fill_count, shard_rows);
+        for (std::uint64_t block : candidates) {
+            const auto free_slot =
+                std::find(state.slot_block.begin(), state.slot_block.end(), -1);
+            if (free_slot == state.slot_block.end()) break;
+            fill_tiered_block(state,
+                              static_cast<std::size_t>(free_slot - state.slot_block.begin()),
+                              block);
+        }
+        return;
+    }
+    std::sort(cached.begin(), cached.end(),
+              [](const Cached& a, const Cached& b) { return a.frequency < b.frequency; });
+    const std::size_t swaps = std::min<std::size_t>(kHotSwapBudget, cached.size());
+    for (std::size_t index = 0; index < swaps; ++index) {
+        const auto candidates = tiered_candidates(state, 1u, shard_rows);
+        if (candidates.empty()) break;
+        const std::uint64_t block = candidates.front();
+        if (state.freq[static_cast<std::size_t>(block)] <=
+            cached[index].frequency + kHotMinGain) {
+            break;
+        }
+        fill_tiered_block(state, cached[index].slot, block);
+    }
+}
+
 const std::uint8_t* PleTable::row_ptr(std::uint64_t row) const noexcept {
     if (row >= rows_ || shard_rows_ == 0u) return nullptr;
     const std::uint64_t shard = row / shard_rows_;
-    if (shard >= shards_.size()) return nullptr;
     const std::uint64_t local = row % shard_rows_;
-    return shards_[static_cast<std::size_t>(shard)].data.get() +
-           static_cast<std::size_t>(local) * row_bytes_;
+    if (tiered_ == nullptr) {
+        if (shard >= shards_.size()) return nullptr;
+        return shards_[static_cast<std::size_t>(shard)].data.get() +
+               static_cast<std::size_t>(local) * row_bytes_;
+    }
+    if (row_bytes_ > 4096u) return nullptr;
+    TieredState& state = *tiered_;
+    std::lock_guard<std::mutex> lock(state.mutex);
+    const std::uint64_t block_in_shard = local / state.block_rows;
+    const std::uint64_t row_in_block = local % state.block_rows;
+    const std::uint64_t block = shard * state.blocks_per_shard + block_in_shard;
+    if (block >= state.freq.size()) return nullptr;
+    std::uint32_t& frequency = state.freq[static_cast<std::size_t>(block)];
+    if (frequency != UINT32_MAX) ++frequency;
+    ++state.accesses;
+    if (state.accesses % kHotRebalanceAccesses == 0u) {
+        rebalance_tiered(state, shard_rows_);
+    }
+    const std::uint8_t* source = nullptr;
+    const auto found = state.block_slot.find(block);
+    if (found != state.block_slot.end()) {
+        ++state.hot_hits;
+        source = state.hot.get() +
+                 static_cast<std::size_t>(found->second) *
+                     static_cast<std::size_t>(state.block_bytes) +
+                 static_cast<std::size_t>(row_in_block) * row_bytes_;
+    } else {
+        ++state.cold_reads;
+        const std::uint64_t offset =
+            state.data_base + shard * state.payload_stride +
+            block_in_shard * state.block_bytes +
+            static_cast<std::uint64_t>(row_in_block) * row_bytes_;
+        if (offset + row_bytes_ > state.mapped_bytes) return nullptr;
+        source = state.mapped.get() + static_cast<std::size_t>(offset);
+    }
+    static thread_local std::uint8_t staging[4096];
+    std::memcpy(staging, source, row_bytes_);
+    return staging;
 }
 
 std::size_t PleTable::head_for_row(std::uint64_t row) const noexcept {

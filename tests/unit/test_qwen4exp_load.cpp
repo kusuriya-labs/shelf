@@ -294,6 +294,9 @@ void verify_ple(const std::string& model_dir, const shelf::qwen4exp::PleTable& t
 }  // namespace
 
 int main(int argc, char** argv) {
+#ifdef SHELF_PLE_TIERED_TEST
+    ::setenv("SHELF_PLE_HOT_CACHE_GIB", "1", 1);
+#endif
     std::string model_dir = "/mnt/Qwen3.8-Flash-Next-exl3";
     if (const char* env = std::getenv("SHELF_QWEN4EXP_MODEL_DIR")) {
         model_dir = env;
@@ -303,7 +306,11 @@ int main(int argc, char** argv) {
         if (::access(candidate.c_str(), R_OK) == 0) model_dir = candidate;
     }
     bool skip_ple = false;
+#ifdef SHELF_PLE_TIERED_TEST
+    bool skip_gpu = true;
+#else
     bool skip_gpu = false;
+#endif
     int single_rank = -1;
     int single_device = -1;
     std::uint32_t arena_gib = 29;
@@ -345,6 +352,19 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "PLE resident: %.3f GiB\n",
                      static_cast<double>(ple.payload_bytes()) / 1073741824.0);
         verify_ple(model_dir, ple, config);
+#ifdef SHELF_PLE_TIERED_TEST
+        for (std::uint64_t index = 0; index < 20000u; ++index) {
+            const std::uint64_t row = (index * 12347u) % ple.rows();
+            auto decoded = ple.decode_row(row, false);
+            if (!decoded.ok()) {
+                std::fprintf(stderr, "tiered decode failed at row %llu\n",
+                             static_cast<unsigned long long>(row));
+                return 1;
+            }
+        }
+        check(ple.cached_blocks() != 0u, "PLE tiered hot cache holds blocks");
+        check(ple.host_bytes() < ple.payload_bytes(), "PLE tiered host bytes are bounded");
+#endif
     }
 
     if (skip_gpu) {

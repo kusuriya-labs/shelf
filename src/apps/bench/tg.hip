@@ -84,6 +84,7 @@ void print_usage(FILE* out) {
         "  --moe-cache-oracle 0|1     log cache oracle decisions (default 0)\n"
         "  --ple-artifact 0|1         write/read <model_dir>/quanted_ple.bin (default 1)\n"
         "  --ple-stream-io MODE       pread | mmap | direct (default mmap)\n"
+        "  --ple-hot-cache-gib N      pinned host block cache for PLE (default 0)\n"
         "  --lm-head-int8 0|1         quantize the BF16 lm head to INT8 W32 on load (default 1)\n"
         "  --pcie-frac F              share of PCIe the runtime may use (default 0.25)\n"
         "  --pcie-gbps F              assumed PCIe bandwidth in GB/s (default 25)\n"
@@ -321,6 +322,8 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
                 return false;
             }
             if (!apply_env_string(value, "SHELF_PLE_STREAM_IO")) return false;
+        } else if (key == "--ple-hot-cache-gib") {
+            if (!apply_env_u32(need_value(), "SHELF_PLE_HOT_CACHE_GIB")) return false;
         } else if (key == "--lm-head-int8") {
             if (!apply_env_u32(need_value(), "SHELF_LM_HEAD_INT8")) return false;
         } else if (key == "--pcie-frac") {
