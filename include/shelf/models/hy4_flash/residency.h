@@ -41,11 +41,13 @@ struct Residency {
     static constexpr size_t matrix_bytes = 41 * 512 * 3 * sizeof(Hy4ExpertProjection);
     void transfer(void *dst, int destination, const void *src, int source, size_t bytes);
     std::array<std::array<bool, 4>, 4> peer{}, owns_peer{};
+    bool push = false;
     void *staging = nullptr;
-    std::array<std::array<hipEvent_t, 4>, 4> ready{};
+    std::array<std::array<hipEvent_t, 4>, 4> ready{}, ack{};
     std::array<void *, 4> route_host{};
     void *route_buffer(int rank, size_t bytes);
     void shutdown();
     const void *device(const Weight &w) const;
 };
+void peer_copy(void *dst, const void *src, size_t bytes);
 }

@@ -141,4 +141,28 @@ GPU fault → 8 分のリトライ → デバイス喪失）を起動時とホ�
 既存の pinned host 経由に固定する（起動時の `transfer=a->b method=host` の行で確認できる）。
 R9700 同士の `hipMemcpyPeerAsync`（受信側 stream での PULL）が fault に関与するかの切り分け用で、
 他の条件（GPU の可視順、入力、chunk、WMMA）は変えずにこの 1 点だけを変えて比較する。
-未指定または `peer` 以外の値では従来どおり peer を自動選択する。
+`peer` を指定すると従来の受信側 stream による `hipMemcpyPeerAsync` を選ぶ。
+
+## R9700×4 での切り分けと push 既定化
+
+R9700×4、2Mi 配置（capacity 31 GiB × 4）、24 token 入力・32 生成・chunk 1024 で再現した。
+
+| 条件 | 結果 |
+| --- | --- |
+| peer（受信側 stream の `hipMemcpyPeerAsync`） | `rotate_output` の addr 0x0 で fault |
+| peer かつ chunk 8 | fault 前に `routing の行、expert または重みが不正です` |
+| `SHELF_HY4_PROFILE_EP=1` のみ（peer） | fault 継続 |
+| `SHELF_HY4_EP_TRANSPORT=host` | 完走 |
+| 送信側 stream の kernel による peer store（push） | 完走 |
+
+host と push は同一の生成列を返した。host では chunk 8 と chunk 1024 も一致した。
+このため、原因は受信側 stream の SDMA PULL にあり、送信側からの peer store は通ると判断した。
+
+既定を push に変更した。宛先 stream に ack event を記録してから送信側 stream の
+copy kernel を起動し、完了 event を宛先 stream に待たせることで、宛先バッファの
+再利用と転送完了を順序付ける。`SHELF_HY4_EP_TRANSPORT=peer` で従来 PULL、
+`host` で host 経由を選べる。
+
+実測（2048 token 入力、256 生成、温度 0、chunk 1024）では、host が prefill 877 tok/s・
+decode 16.6 tok/s、push が prefill 1016 tok/s・decode 21.4 tok/s、DFly2 併用の push が
+decode 98.4 tok/s だった。入力が反復的なため DFly の受理数は参考値である。
