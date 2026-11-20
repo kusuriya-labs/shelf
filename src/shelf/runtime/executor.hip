@@ -2072,6 +2072,8 @@ Result<Executor> create_executor(
         if (!status.ok()) return status;
     }
     const std::size_t H = tc.hidden_size;
+    const std::size_t H_pipeline =
+        config.pipeline_hidden_width != 0u ? config.pipeline_hidden_width : H;
     const std::size_t V = tc.vocab_size;
     const uint32_t N = config.max_batch_rows;
     const uint32_t R = config.max_scheduled_requests;
@@ -2109,11 +2111,13 @@ Result<Executor> create_executor(
     if (!st.ok()) return st;
 
     if (!first_stage) {
-        st = allocate_contiguous_tensor<bf16_t>(arena, {Npad, H}, ex.pipeline_input_hidden);
+        st = allocate_contiguous_tensor<bf16_t>(arena, {Npad, H_pipeline},
+                                                ex.pipeline_input_hidden);
         if (!st.ok()) return st;
     }
     if (!last_stage) {
-        st = allocate_contiguous_tensor<bf16_t>(arena, {Npad, H}, ex.pipeline_output_hidden);
+        st = allocate_contiguous_tensor<bf16_t>(arena, {Npad, H_pipeline},
+                                                ex.pipeline_output_hidden);
         if (!st.ok()) return st;
     }
 

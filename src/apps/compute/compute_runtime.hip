@@ -2,6 +2,7 @@
 #include "private_target_weights.h"
 
 #include <shelf/core/memory/size_format.h>
+#include <shelf/inference/execution/gemm_lt.h>
 #include <shelf/inference/state/ple_conv_state_pool.h>
 #include <shelf/inference/state/qsa_state_pool.h>
 #include <shelf/runtime/execution/row_bucket.h>
@@ -252,6 +253,10 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     auto memory_result = gpu::GpuMemoryManager::create(memory_devices, memory_capacity);
     if (!memory_result.ok()) return memory_result.status();
     memory_.emplace(memory_result.release());
+    for (int device : memory_devices) {
+        Status prepare_status = shelf::execution::prepare_gemm_lt(device);
+        if (!prepare_status.ok()) return prepare_status;
+    }
     auto arena0 = memory_->arena_for(config_.devices[0]);
     if (!arena0.ok()) return arena0.status();
     startup_available_bytes_ = arena0.value()->capacity();
@@ -680,6 +685,7 @@ Status Qwen35ComputeRuntime::initialize_pipeline_parallel() {
         for (std::uint32_t stage = 0; stage < config_.pipeline_parallel; ++stage) {
             qwen35::runtime::TpCoordinatorConfig tp;
             tp.model_dir = config_.model_dir;
+            tp.pipeline_hidden_width = pp_config.pipeline_hidden_width;
             tp.tensor_parallel = config_.tp;
             tp.expert_parallel = config_.expert_parallel;
             const std::vector<std::uint32_t> stage_ranks = topology_->stage_ranks(stage);

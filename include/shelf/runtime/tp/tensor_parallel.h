@@ -99,6 +99,7 @@ struct TpRankRuntimeConfig {
     std::uint32_t max_scheduled_output_rows = 0;
     std::uint32_t max_seq_len = 16;
     std::uint32_t page_tokens = 16;
+    std::uint32_t pipeline_hidden_width = 0;
     KVCacheDType kv_cache_dtype = KVCacheDType::BF16;
     ::shelf::kernel::OctaveKVCacheFormat octave_kv_format{};
     gpu::GpuArena* arena = nullptr;
@@ -214,6 +215,7 @@ struct TpCoordinatorConfig {
     std::uint32_t max_scheduled_output_rows = 0;
     std::uint32_t max_seq_len = 16;
     std::uint32_t page_tokens = 16;
+    std::uint32_t pipeline_hidden_width = 0;
     KVCacheDType kv_cache_dtype = KVCacheDType::BF16;
     ::shelf::kernel::OctaveKVCacheFormat octave_kv_format{};
     gpu::GpuMemoryManager* memory = nullptr;

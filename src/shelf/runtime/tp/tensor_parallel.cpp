@@ -314,6 +314,7 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
         if (width != 0u) exec_config.normed_token_hidden_width = width;
     }
     exec_config.max_context_tokens = config.max_seq_len + 1u;
+    exec_config.pipeline_hidden_width = config.pipeline_hidden_width;
     exec_config.rope_profile = config.rope_profile;
     exec_config.stage = config.pipeline_stage;
     exec_config.tp = &rank->context();
@@ -468,6 +469,7 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
         rank_config.max_scheduled_output_rows = config.max_scheduled_output_rows;
         rank_config.max_seq_len = config.max_seq_len;
         rank_config.page_tokens = config.page_tokens;
+        rank_config.pipeline_hidden_width = config.pipeline_hidden_width;
         rank_config.kv_cache_dtype = config.kv_cache_dtype;
         rank_config.octave_kv_format = config.octave_kv_format;
         rank_config.arena = arenas[r];
