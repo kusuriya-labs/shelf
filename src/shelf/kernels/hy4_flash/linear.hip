@@ -200,9 +200,9 @@ __global__ void rotate_output(const float *partial, const uint16_t *svh, uint16_
     }
 }
 
-__global__ void rotate_output_pair(const float *partial0, const float *partial1,
-                                   const Hy4ExpertProjection *matrices, int stride, uint16_t *y0, uint16_t *y1,
-                                   int width, int padded, const Hy4Route *routes) {
+__global__ void rotate_output_swiglu(const float *partial0, const float *partial1,
+                                     const Hy4ExpertProjection *matrices, int stride, uint16_t *out, int width,
+                                     int padded, const Hy4Route *routes) {
     const auto &mat = matrices[(routes ? routes[blockIdx.y].expert : blockIdx.y) * stride];
     const uint16_t *svh0 = mat.svh, *svh1 = (&mat)[1].svh;
     const int base = blockIdx.x * 128 + threadIdx.x * 4;
@@ -217,13 +217,15 @@ __global__ void rotate_output_pair(const float *partial0, const float *partial1,
     fwht128(v1[0], v1[1], v1[2], v1[3], threadIdx.x);
 #pragma unroll
     for (int i = 0; i < 4 && base + i < width; ++i) {
+        float g = round_bf16(v0[i] * kInvSqrt128 * f16_bits_to_f32(svh0[base + i]));
+        float u = round_bf16(v1[i] * kInvSqrt128 * f16_bits_to_f32(svh1[base + i]));
+        g = fminf(g, 10.f);
+        u = fminf(10.f, fmaxf(-10.f, u));
         size_t off = size_t(blockIdx.y) * width + base + i;
-        float s0 = v0[i] * kInvSqrt128 * f16_bits_to_f32(svh0[base + i]);
-        float s1 = v1[i] * kInvSqrt128 * f16_bits_to_f32(svh1[base + i]);
-        y0[off] = f32_to_bf16_rne_device(s0);
-        y1[off] = f32_to_bf16_rne_device(s1);
+        out[off] = f32_to_bf16_rne_device(round_bf16(g / (1.f + expf(-g))) * u);
     }
 }
+
 }
 
 extern "C" hipError_t shelf_hy4_linear(const uint16_t *input, const uint16_t *suh, const uint16_t *svh,
@@ -291,12 +293,12 @@ extern "C" hipError_t shelf_hy4_expert_linear(const uint16_t *x, const Hy4Expert
     return hipGetLastError();
 }
 
-extern "C" hipError_t shelf_hy4_expert_linear_pair(const uint16_t *x, const Hy4ExpertProjection *matrices,
-                                                   int stride, int8_t *codes, float *scales, float *partial0,
-                                                   float *partial1, uint16_t *y0, uint16_t *y1, int rows,
-                                                   const Hy4Route *routes, int mixed) {
-    if (!x || !matrices || !codes || !scales || !partial0 || !partial1 || !y0 || !y1 || rows < 1 ||
-        rows > 65535 || stride < 2 || !routes)
+extern "C" hipError_t shelf_hy4_expert_gate_up_swiglu(const uint16_t *x, const Hy4ExpertProjection *matrices,
+                                                      int stride, int8_t *codes, float *scales, float *partial0,
+                                                      float *partial1, uint16_t *out, int rows,
+                                                      const Hy4Route *routes, int mixed) {
+    if (!x || !matrices || !codes || !scales || !partial0 || !partial1 || !out || rows < 1 || rows > 65535 ||
+        stride < 2 || !routes)
         return hipErrorInvalidValue;
     rotate_input<<<dim3(12, rows), 32>>>(x, nullptr, codes, scales, 1536, 1536, matrices, stride, routes);
     auto status = hipGetLastError();
@@ -311,7 +313,7 @@ extern "C" hipError_t shelf_hy4_expert_linear_pair(const uint16_t *x, const Hy4E
     status = hipGetLastError();
     if (status != hipSuccess)
         return status;
-    rotate_output_pair<<<dim3(12, rows), 32>>>(partial0, partial1, matrices, stride, y0, y1, 1536, 1536, routes);
+    rotate_output_swiglu<<<dim3(12, rows), 32>>>(partial0, partial1, matrices, stride, out, 1536, 1536, routes);
     return hipGetLastError();
 }
 

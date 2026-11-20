@@ -167,24 +167,24 @@ Mat moe(Ops &op, int layer, Mat x) {
             checked(hipEventRecord(op.gpu.expert_begin[r]));
         gather_route<<<dim3(6, count), 256>>>(input, gpu_routes, a);
         checked(hipGetLastError());
-        Mat g, u;
+        Mat activation;
         if (!use_wmma && !batches) {
             size_t mark = rank.arena.cursor;
             auto codes = static_cast<int8_t *>(rank.arena.next(size_t(count) * 1536));
             auto scales = static_cast<float *>(rank.arena.next(size_t(count) * 12 * 4));
             auto partial0 = static_cast<float *>(rank.arena.next(size_t(count) * 1536 * 4));
             auto partial1 = static_cast<float *>(rank.arena.next(size_t(count) * 1536 * 4));
-            g = rank.mat(count, 1536);
-            u = rank.mat(count, 1536);
+            activation = rank.mat(count, 1536);
             auto desc = rank.gpu.matrices[rank.rank] + (layer - 1) * 1536;
-            checked(shelf_hy4_expert_linear_pair(a.p, desc, 3, codes, scales, partial0, partial1, g.p, u.p,
-                                                 count, gpu_routes, rank.gpu.model.mixed));
+            checked(shelf_hy4_expert_gate_up_swiglu(a.p, desc, 3, codes, scales, partial0, partial1,
+                                                    activation.p, count, gpu_routes, rank.gpu.model.mixed));
             rank.arena.cursor = mark;
         } else {
-            g = grouped(rank, a, gpu_routes, layer, 0, batches, num_batches, use_wmma);
-            u = grouped(rank, a, gpu_routes, layer, 1, batches, num_batches, use_wmma);
+            Mat g = grouped(rank, a, gpu_routes, layer, 0, batches, num_batches, use_wmma);
+            Mat u = grouped(rank, a, gpu_routes, layer, 1, batches, num_batches, use_wmma);
+            activation = rank.swiglu(g, u, true);
         }
-        Mat v = grouped(rank, rank.swiglu(g, u, true), gpu_routes, layer, 2, batches, num_batches, use_wmma);
+        Mat v = grouped(rank, activation, gpu_routes, layer, 2, batches, num_batches, use_wmma);
         result[r] = rank.mat(x.rows, 1536);
         weighted<<<dim3(6, x.rows), 256>>>(v, gpu_routes, offsets_gpu, inverse, result[r]);
         checked(hipGetLastError());

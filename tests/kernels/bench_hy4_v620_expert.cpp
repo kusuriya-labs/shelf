@@ -32,8 +32,6 @@ struct Args {
     int iters = 30;
     std::string save;
     std::string reference;
-    std::string save2;
-    std::string reference2;
     bool pair = false;
     bool twice = false;
 };
@@ -59,10 +57,6 @@ Args parse(int argc, char **argv) {
             a.save = argv[++i];
         else if (s == "--ref")
             a.reference = argv[++i];
-        else if (s == "--save2")
-            a.save2 = argv[++i];
-        else if (s == "--ref2")
-            a.reference2 = argv[++i];
         else if (s == "--pair")
             a.pair = true;
         else if (s == "--twice")
@@ -125,7 +119,7 @@ int main(int argc, char **argv) {
 
     uint32_t *trellis = nullptr;
     Hy4ExpertProjection *matrices = nullptr;
-    uint16_t *suha = nullptr, *x = nullptr, *y = nullptr, *y2 = nullptr;
+    uint16_t *suha = nullptr, *x = nullptr, *y = nullptr;
     int8_t *codes = nullptr;
     float *scales = nullptr, *partial = nullptr, *partial2 = nullptr;
     Hy4Route *routes = nullptr;
@@ -138,10 +132,8 @@ int main(int argc, char **argv) {
     check(hipMalloc(&codes, codes_host.size()), "codes alloc");
     check(hipMalloc(&scales, scales_host.size() * sizeof(float)), "scales alloc");
     check(hipMalloc(&partial, size_t(a.rows) * kCols * sizeof(float)), "partial alloc");
-    if (a.pair) {
+    if (a.pair)
         check(hipMalloc(&partial2, size_t(a.rows) * kCols * sizeof(float)), "partial2 alloc");
-        check(hipMalloc(&y2, size_t(a.rows) * kCols * sizeof(uint16_t)), "y2 alloc");
-    }
     check(hipMalloc(&routes, routes_host.size() * sizeof(Hy4Route)), "routes alloc");
     if (a.groups)
         check(hipMalloc(&batches, batches_host.size() * sizeof(Hy4ExpertBatch)), "batches alloc");
@@ -169,8 +161,8 @@ int main(int argc, char **argv) {
     auto launch = [&]() {
         hipError_t e;
         if (a.pair)
-            e = shelf_hy4_expert_linear_pair(x, matrices, 3, codes, scales, partial, partial2, y, y2, a.rows,
-                                             routes, 0);
+            e = shelf_hy4_expert_gate_up_swiglu(x, matrices, 3, codes, scales, partial, partial2, y, a.rows,
+                                               routes, 0);
         else
             e = shelf_hy4_expert_linear(x, matrices, 3, codes, scales, partial, y, a.rows, routes,
                                         a.groups ? batches : nullptr, a.groups, 0, 0);
@@ -236,17 +228,7 @@ int main(int argc, char **argv) {
         std::ofstream out(a.save, std::ios::binary);
         out.write(reinterpret_cast<const char *>(y_host.data()), y_host.size() * sizeof(uint16_t));
     }
-    bool ok = verify(y_host, a.reference);
-    if (a.pair) {
-        std::vector<uint16_t> y2_host(size_t(a.rows) * kCols);
-        check(hipMemcpy(y2_host.data(), y2, y2_host.size() * sizeof(uint16_t), hipMemcpyDeviceToHost), "y2 copy");
-        if (!a.save2.empty()) {
-            std::ofstream out(a.save2, std::ios::binary);
-            out.write(reinterpret_cast<const char *>(y2_host.data()), y2_host.size() * sizeof(uint16_t));
-        }
-        ok = verify(y2_host, a.reference2) && ok;
-    }
-    if (!ok)
+    if (!verify(y_host, a.reference))
         return 1;
     check(hipEventDestroy(begin), "event destroy begin");
     check(hipEventDestroy(end), "event destroy end");
