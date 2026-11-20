@@ -39,7 +39,6 @@ std::vector<shelf::bf16_t> random_bf16(std::size_t count, std::mt19937& rng) {
 }
 
 constexpr std::uint32_t kKvHeads = 4u;
-constexpr std::uint32_t kQHeads = 24u;
 constexpr std::uint32_t kHeadDim = 256u;
 constexpr std::uint32_t kPageTokens = 16u;
 constexpr std::uint32_t kNumPages = 8u;
@@ -84,12 +83,13 @@ std::uint32_t mask_bit(const std::vector<std::uint8_t>& mask, std::uint32_t row,
 std::vector<float> reference_attention(const std::vector<shelf::bf16_t>& q,
                                        const std::vector<shelf::bf16_t>& k_pool,
                                        const std::vector<shelf::bf16_t>& v_pool,
-                                       const std::vector<std::uint8_t>& mask) {
+                                       const std::vector<std::uint8_t>& mask,
+                                       std::uint32_t q_heads) {
     const std::uint32_t elems_per_token = kKvHeads * kHeadDim;
     const std::uint32_t elems_per_page = kPageTokens * elems_per_token;
     const std::uint32_t elems_per_layer = kNumPages * elems_per_page;
     const float scale = 1.0f / std::sqrt(static_cast<float>(kHeadDim));
-    std::vector<float> out(static_cast<std::size_t>(kRows) * kQHeads * kHeadDim, 0.0f);
+    std::vector<float> out(static_cast<std::size_t>(kRows) * q_heads * kHeadDim, 0.0f);
 
     for (std::uint32_t row = 0; row < kRows; ++row) {
         if (kSlots[row] >= kMaxSequences) continue;
@@ -97,8 +97,8 @@ std::vector<float> reference_attention(const std::vector<shelf::bf16_t>& q,
         for (std::uint32_t t = 0; t <= kPositions[row]; ++t) {
             if (mask_bit(mask, row, t >> kMaskShift)) keys.push_back(t);
         }
-        for (std::uint32_t head = 0; head < kQHeads; ++head) {
-            const std::uint32_t kv_head = head / (kQHeads / kKvHeads);
+        for (std::uint32_t head = 0; head < q_heads; ++head) {
+            const std::uint32_t kv_head = head / (q_heads / kKvHeads);
             std::vector<float> scores(keys.size());
             float max_score = -INFINITY;
             for (std::size_t i = 0; i < keys.size(); ++i) {
@@ -112,7 +112,7 @@ std::vector<float> reference_attention(const std::vector<shelf::bf16_t>& q,
                     static_cast<std::uint64_t>(kv_head) * kHeadDim;
                 float dot = 0.0f;
                 for (std::uint32_t d = 0; d < kHeadDim; ++d) {
-                    dot += bf16_to_float(q[(static_cast<std::size_t>(row) * kQHeads + head) *
+                    dot += bf16_to_float(q[(static_cast<std::size_t>(row) * q_heads + head) *
                                                kHeadDim + d].data) *
                            bf16_to_float(k_pool[base + d].data);
                 }
@@ -135,7 +135,7 @@ std::vector<float> reference_attention(const std::vector<shelf::bf16_t>& q,
                         static_cast<std::uint64_t>(kv_head) * kHeadDim;
                     acc += std::exp(scores[i] - max_score) * bf16_to_float(v_pool[base + d].data);
                 }
-                out[(static_cast<std::size_t>(row) * kQHeads + head) * kHeadDim + d] =
+                out[(static_cast<std::size_t>(row) * q_heads + head) * kHeadDim + d] =
                     sum > 0.0f ? acc / sum : 0.0f;
             }
         }
@@ -151,14 +151,14 @@ float max_abs_diff(const std::vector<float>& a, const std::vector<float>& b) {
 
 }  // namespace
 
-int main() {
+void run(std::uint32_t q_heads) {
     const std::uint32_t elems_per_token = kKvHeads * kHeadDim;
     const std::uint32_t elems_per_page = kPageTokens * elems_per_token;
     const std::uint32_t elems_per_layer = kNumPages * elems_per_page;
 
     std::mt19937 rng(20261116u);
     const std::vector<shelf::bf16_t> q = random_bf16(
-        static_cast<std::size_t>(kRows) * kQHeads * kHeadDim, rng);
+        static_cast<std::size_t>(kRows) * q_heads * kHeadDim, rng);
     const std::vector<shelf::bf16_t> k_pool =
         random_bf16(static_cast<std::size_t>(kLayers) * elems_per_layer, rng);
     const std::vector<shelf::bf16_t> v_pool =
@@ -169,7 +169,7 @@ int main() {
         for (std::uint32_t b = 0; b < kMaskStride; ++b)
             mask[static_cast<std::size_t>(row) * kMaskStride + b] = mask_byte(row, b);
 
-    const std::vector<float> want = reference_attention(q, k_pool, v_pool, mask);
+    const std::vector<float> want = reference_attention(q, k_pool, v_pool, mask, q_heads);
 
     shelf::bf16_t* d_q = nullptr;
     shelf::bf16_t* d_k = nullptr;
@@ -212,8 +212,8 @@ int main() {
     args.q = d_q;
     args.output = d_out;
     args.output_dtype = shelf::kernel::PagedAttentionOutputDType::F32;
-    args.q_row_stride = kQHeads * kHeadDim;
-    args.output_row_stride = kQHeads * kHeadDim;
+    args.q_row_stride = q_heads * kHeadDim;
+    args.output_row_stride = q_heads * kHeadDim;
     args.row_sequence_slots = d_slots;
     args.row_positions = d_positions;
     args.block_tables = d_tables;
@@ -224,7 +224,7 @@ int main() {
     args.page_tokens = kPageTokens;
     args.num_pages = kNumPages;
     args.num_attention_layers = kLayers;
-    args.q_heads = kQHeads;
+    args.q_heads = q_heads;
     args.kv_heads = kKvHeads;
     args.head_dim = kHeadDim;
     args.elems_per_token = elems_per_token;
@@ -241,7 +241,7 @@ int main() {
     {
         check(hipMemsetAsync(d_out, 0, got.size() * sizeof(float), stream) == hipSuccess,
               "clear out");
-        check(shelf::kernel::launch_qsa_sparse_attention(args, d_k, d_v, nullptr, 1u, stream) ==
+        check(shelf::kernel::launch_qsa_sparse_attention(args, d_k, d_v, nullptr, 1u, stream, q_heads / kKvHeads) ==
                   hipSuccess,
               "launch single");
         check(hipMemcpyAsync(got.data(), d_out, got.size() * sizeof(float),
@@ -250,13 +250,13 @@ int main() {
         const float diff = max_abs_diff(got, want);
         check(diff < 2.0e-2f, "single split matches the reference");
         std::fprintf(stderr, "single split max abs diff %.6f\n", diff);
-        check(got[(static_cast<std::size_t>(3u) * kQHeads) * kHeadDim] == 0.0f,
+        check(got[(static_cast<std::size_t>(3u) * q_heads) * kHeadDim] == 0.0f,
               "invalid slot row stays zero");
     }
 
     {
         const std::uint32_t splits = 8u;
-        check(shelf::kernel::qsa_sparse_partial_bytes(kRows, kKvHeads, splits) <=
+        check(shelf::kernel::qsa_sparse_partial_bytes(kRows, kKvHeads, splits, q_heads / kKvHeads) <=
                   4u * 1024u * 1024u,
               "partial workspace fits the test buffer");
         check(hipMemsetAsync(d_out, 0, got.size() * sizeof(float), stream) == hipSuccess,
@@ -264,9 +264,10 @@ int main() {
         check(hipMemsetAsync(d_partials, 0, 4u * 1024u * 1024u, stream) == hipSuccess,
               "clear partials");
         check(shelf::kernel::launch_qsa_sparse_attention(args, d_k, d_v, d_partials, splits,
-                                                         stream) == hipSuccess,
+                                                         stream, q_heads / kKvHeads) ==
+                  hipSuccess,
               "launch split");
-        check(shelf::kernel::launch_qsa_sparse_reduce(args, d_partials, splits, stream) ==
+        check(shelf::kernel::launch_qsa_sparse_reduce(args, d_partials, splits, stream, q_heads / kKvHeads) ==
                   hipSuccess,
               "launch reduce");
         check(hipMemcpyAsync(got.data(), d_out, got.size() * sizeof(float),
@@ -311,15 +312,16 @@ int main() {
         check(hipMemsetAsync(d_out, 0, got.size() * sizeof(float), stream) == hipSuccess,
               "clear out short");
         check(shelf::kernel::launch_qsa_sparse_attention(args, d_k, d_v, nullptr, 1u,
-                                                         stream) == hipSuccess,
+                                                         stream, q_heads / kKvHeads) ==
+                  hipSuccess,
               "launch short block");
         check(hipMemcpyAsync(got.data(), d_out, got.size() * sizeof(float),
                              hipMemcpyDeviceToHost, stream) == hipSuccess, "copy short out");
         check(hipStreamSynchronize(stream) == hipSuccess, "sync short");
         bool finite = true;
         for (std::uint32_t row = 0; row < 3u; ++row) {
-            for (std::uint32_t h = 0; h < kQHeads * kHeadDim; ++h) {
-                const float value = got[static_cast<std::size_t>(row) * kQHeads * kHeadDim + h];
+            for (std::uint32_t h = 0; h < q_heads * kHeadDim; ++h) {
+                const float value = got[static_cast<std::size_t>(row) * q_heads * kHeadDim + h];
                 if (!std::isfinite(value)) finite = false;
             }
         }
@@ -336,7 +338,7 @@ int main() {
     check(shelf::kernel::launch_qsa_sparse_attention_fp8(
               args, reinterpret_cast<const std::uint8_t*>(d_k),
               reinterpret_cast<const std::uint8_t*>(d_v), nullptr, nullptr,
-              nullptr, 1u, stream) == hipErrorInvalidValue,
+              nullptr, 1u, stream, q_heads / kKvHeads) == hipErrorInvalidValue,
           "fp8 sparse rejects null scales");
 
     check(shelf::kernel::qsa_sparse_splits(1u, kKvHeads, 4u * 1024u * 1024u) > 1u,
@@ -357,6 +359,12 @@ int main() {
     shelf::gpu::discard_cleanup_result(hipFree(d_out));
     shelf::gpu::discard_cleanup_result(hipFree(d_partials));
 
-    std::printf("qsa sparse attention: %d failures\n", failures);
+    std::printf("qsa sparse attention q_per_kv=%u: %d failures\n",
+                q_heads / kKvHeads, failures);
+}
+
+int main() {
+    run(24u);
+    run(48u);
     return failures == 0 ? 0 : 1;
 }

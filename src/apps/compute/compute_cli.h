@@ -26,6 +26,7 @@ struct ComputeOptions {
     bool prefill_chunk_set = false;
     std::vector<int> devices = {0};
     unsigned long tp = 1;
+    unsigned long expert_parallel = 1;
     unsigned long pipeline_parallel = 1;
     std::string kv_cache_dtype = "bf16";
     shelf::runtime::DecodeBackend decode_backend =

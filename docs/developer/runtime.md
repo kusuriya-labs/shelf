@@ -122,7 +122,7 @@ MEMORY_PLAN mode=auto
   required          target + draft + drafter runtime + workspace + KV + prefix
   available         起動時の空き VRAM（fixed では arena capacity）
   arena capacity    reserved virtual address
-  left              arena capacity - required
+  left              確保完了後の arena 未使用容量
 ```
 
 `draft weights` は arena からの予約であり、serve 時に drafter を load する
@@ -138,11 +138,11 @@ MEMORY_PLAN tp drafter: weights xx.xx GiB scratch xx.xx GiB session slot xx.xx G
 DFLASH2_WEIGHT_ARENA_BYTES=<bytes>
 ```
 
-`MEMORY_PLAN` の `left` は executor が workspace を確保する前の値である。
-plan 後に必要になる作業領域は `--working-set-reserve-gib` が受け持つため、
-drafter 分を織り込んでも reserve を 1 GiB まで下げると executor 確保で不足する。
-reserve は plan 時点の約束であり、実際の作業領域を超えた場合は plan ではなく
-後続の arena 確保で `insufficient memory` として現れる。
+`MEMORY_PLAN` の `left` は prefix cache の確保後に測定した arena の未使用容量である。
+`required` は表示した項目の合計であり、slot/GDN pool の arena 確保は行ごとに示さない。
+executor の workspace は KV の容量を決める前に確保済みなので、予約量を重複して差し引かない。
+prefix cache の capture slot に必要な GDN / QSA / PLE state は executor 生成後に確定するため、
+その時点で見積もりを更新してから KV の容量を決める。
 
 executor が arena から確保する量は起動時に 1 行で出す。
 

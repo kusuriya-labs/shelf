@@ -127,6 +127,8 @@ lm_head (final norm なし)
 - GDN は `output_gate_type: sigmoid` を使う。Qwen3.5 の silu とは切り替える。
 - QSA は indexer の block bitmap を `PagedAttentionNode` の 2 番目の入力にする。
   bitmap がある場合、fp8 KV と行数の少ない chunk は tiled prefill を選ばない。
+  `q_per_kv = 12` も QSA block-sparse kernel の対象で、1 CTA が 4 warp で
+  12 query head を処理し、decode は split + reduce で実行する。
 - MoE は router（global 512、top-10）、gate/up/down の 3 grouped linear、shared expert、
   combine で構成する。shared expert の gate は sigmoid。
 - expert の slot map がある場合、router 後の plan scan は元の group を VRAM hit と

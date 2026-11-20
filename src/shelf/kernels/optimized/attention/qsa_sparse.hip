@@ -20,11 +20,17 @@ namespace oct = ::shelf::kernel::detail::octave;
 constexpr uint32_t kD = kQsaSparseHeadDim;
 constexpr uint32_t kR = kQsaSparseBlockTokens;
 constexpr uint32_t kHeadsPerWarp = 3u;
-constexpr uint32_t kWarps = 2u;
-constexpr uint32_t kThreads = kWarps * 32u;
 constexpr uint32_t kDimsPerLane = kD / 32u;
 constexpr uint32_t kScorerLanes = kHeadsPerWarp * kR;
-constexpr uint32_t kPartialStride = kQsaSparseQPerKv * (2u + kD);
+
+template <uint32_t QPerKv>
+constexpr uint32_t kWarps = QPerKv / kHeadsPerWarp;
+
+template <uint32_t QPerKv>
+constexpr uint32_t kThreads = kWarps<QPerKv> * 32u;
+
+template <uint32_t QPerKv>
+constexpr uint32_t kPartialStride = QPerKv * (2u + kD);
 
 template <KVCacheDType DType>
 struct QsaKVReader;
@@ -219,8 +225,8 @@ __device__ __forceinline__ void load_q(const bf16* src, uint32_t lane,
         q[d] = __bfloat162float(values[d]) * scale;
 }
 
-template <KVCacheDType DType, bool kSplit>
-__global__ __launch_bounds__(kThreads) void qsa_sparse_attention_kernel(
+template <KVCacheDType DType, bool kSplit, uint32_t QPerKv>
+__global__ __launch_bounds__(kThreads<QPerKv>) void qsa_sparse_attention_kernel(
     const PagedAttentionCommonArgs a, const uint8_t* __restrict__ k_pool,
     const uint8_t* __restrict__ v_pool, const float* __restrict__ k_scales,
     const float* __restrict__ v_scales, const float* __restrict__ octave_levels,
@@ -233,9 +239,9 @@ __global__ __launch_bounds__(kThreads) void qsa_sparse_attention_kernel(
     const uint32_t split = kSplit ? blockIdx.x : 0u;
     const uint32_t h_kv = blockIdx.y;
     const uint32_t row = blockIdx.z;
-    const uint32_t h0 = h_kv * kQsaSparseQPerKv + warp * kHeadsPerWarp;
+    const uint32_t h0 = h_kv * QPerKv + warp * kHeadsPerWarp;
 
-    __shared__ float red[kWarps][32][kScorerLanes + 1u];
+    __shared__ float red[kWarps<QPerKv>][32][kScorerLanes + 1u];
 
     if (row >= a.rows) return;
     const uint32_t slot = a.row_sequence_slots[row];
@@ -459,12 +465,12 @@ __global__ __launch_bounds__(kThreads) void qsa_sparse_attention_kernel(
 
     float* base = partials +
                   (static_cast<std::size_t>(row) * a.kv_heads + h_kv) * splits *
-                      kPartialStride +
-                  static_cast<std::size_t>(split) * kPartialStride;
+                      kPartialStride<QPerKv> +
+                  static_cast<std::size_t>(split) * kPartialStride<QPerKv>;
 #pragma unroll
     for (uint32_t h = 0; h < kHeadsPerWarp; ++h) {
         const uint32_t local = warp * kHeadsPerWarp + h;
-        float* o = base + 2u * kQsaSparseQPerKv + local * kD + lane * kDimsPerLane;
+        float* o = base + 2u * QPerKv + local * kD + lane * kDimsPerLane;
 #pragma unroll
         for (uint32_t d = 0; d < kDimsPerLane; ++d) o[d] = acc[h][d];
     }
@@ -473,36 +479,37 @@ __global__ __launch_bounds__(kThreads) void qsa_sparse_attention_kernel(
         for (uint32_t h = 0; h < kHeadsPerWarp; ++h) {
             const uint32_t local = warp * kHeadsPerWarp + h;
             base[local] = mh[h];
-            base[kQsaSparseQPerKv + local] = lh[h];
+            base[QPerKv + local] = lh[h];
         }
     }
 }
 
+template <uint32_t QPerKv>
 __global__ __launch_bounds__(kD) void qsa_sparse_reduce_kernel(
     const PagedAttentionCommonArgs a, const float* __restrict__ partials, uint32_t splits) {
     const uint32_t task = blockIdx.x;
     const uint32_t row = task / a.q_heads;
     const uint32_t q_head = task % a.q_heads;
-    const uint32_t kv_head = q_head / kQsaSparseQPerKv;
-    const uint32_t local = q_head % kQsaSparseQPerKv;
+    const uint32_t kv_head = q_head / QPerKv;
+    const uint32_t local = q_head % QPerKv;
     const uint32_t d = threadIdx.x;
     if (row >= a.rows) return;
 
     const float* base = partials +
                        (static_cast<std::size_t>(row) * a.kv_heads + kv_head) * splits *
-                           kPartialStride;
+                           kPartialStride<QPerKv>;
     float m = -INFINITY;
     for (uint32_t s = 0; s < splits; ++s)
-        m = fmaxf(m, base[static_cast<std::size_t>(s) * kPartialStride + local]);
+        m = fmaxf(m, base[static_cast<std::size_t>(s) * kPartialStride<QPerKv> + local]);
 
     float l = 0.0f;
     float value = 0.0f;
     if (m != -INFINITY) {
         for (uint32_t s = 0; s < splits; ++s) {
-            const std::size_t offset = static_cast<std::size_t>(s) * kPartialStride;
+            const std::size_t offset = static_cast<std::size_t>(s) * kPartialStride<QPerKv>;
             const float w = __expf(base[offset + local] - m);
-            l += w * base[offset + kQsaSparseQPerKv + local];
-            value += w * base[offset + 2u * kQsaSparseQPerKv + local * kD + d];
+            l += w * base[offset + QPerKv + local];
+            value += w * base[offset + 2u * QPerKv + local * kD + d];
         }
     }
     float* out = static_cast<float*>(a.output) +
@@ -513,11 +520,21 @@ __global__ __launch_bounds__(kD) void qsa_sparse_reduce_kernel(
 
 }  // namespace
 
-uint64_t qsa_sparse_partial_bytes(uint32_t rows, uint32_t kv_heads, uint32_t splits) {
-    return static_cast<uint64_t>(rows) * kv_heads * splits * kPartialStride * sizeof(float);
+template <uint32_t QPerKv>
+uint64_t qsa_sparse_partial_bytes_for(uint32_t rows, uint32_t kv_heads, uint32_t splits) {
+    return static_cast<uint64_t>(rows) * kv_heads * splits * kPartialStride<QPerKv> *
+           sizeof(float);
 }
 
-uint32_t qsa_sparse_splits(uint32_t rows, uint32_t kv_heads, uint64_t workspace_bytes) {
+uint64_t qsa_sparse_partial_bytes(uint32_t rows, uint32_t kv_heads, uint32_t splits,
+                                  uint32_t q_per_kv) {
+    return q_per_kv == kQsaSparseQPerKvWide
+        ? qsa_sparse_partial_bytes_for<kQsaSparseQPerKvWide>(rows, kv_heads, splits)
+        : qsa_sparse_partial_bytes_for<kQsaSparseQPerKv>(rows, kv_heads, splits);
+}
+
+template <uint32_t QPerKv>
+uint32_t qsa_sparse_splits_for(uint32_t rows, uint32_t kv_heads, uint64_t workspace_bytes) {
     if (rows == 0u || kv_heads == 0u) return 1u;
     constexpr uint32_t kTargetCtas = 128u;
     constexpr uint32_t kMaxSplits = 32u;
@@ -525,12 +542,20 @@ uint32_t qsa_sparse_splits(uint32_t rows, uint32_t kv_heads, uint64_t workspace_
     while (splits < kMaxSplits &&
            static_cast<uint64_t>(rows) * kv_heads * (splits << 1u) <= kTargetCtas)
         splits <<= 1u;
-    while (splits > 1u && qsa_sparse_partial_bytes(rows, kv_heads, splits) > workspace_bytes)
+    while (splits > 1u &&
+           qsa_sparse_partial_bytes_for<QPerKv>(rows, kv_heads, splits) > workspace_bytes)
         splits >>= 1u;
     return splits;
 }
 
-template <KVCacheDType DType>
+uint32_t qsa_sparse_splits(uint32_t rows, uint32_t kv_heads, uint64_t workspace_bytes,
+                           uint32_t q_per_kv) {
+    return q_per_kv == kQsaSparseQPerKvWide
+        ? qsa_sparse_splits_for<kQsaSparseQPerKvWide>(rows, kv_heads, workspace_bytes)
+        : qsa_sparse_splits_for<kQsaSparseQPerKv>(rows, kv_heads, workspace_bytes);
+}
+
+template <KVCacheDType DType, uint32_t QPerKv>
 hipError_t launch_qsa_sparse_attention_typed(
     const PagedAttentionCommonArgs& common,
     const uint8_t* k_pool, const uint8_t* v_pool,
@@ -548,7 +573,7 @@ hipError_t launch_qsa_sparse_attention_typed(
         (octave_levels == nullptr || !octave_format_valid(octave_format)))
         return hipErrorInvalidValue;
     if (common.rows == 0u || common.kv_heads == 0u || splits == 0u) return hipErrorInvalidValue;
-    if (common.head_dim != kD || common.q_heads != common.kv_heads * kQsaSparseQPerKv ||
+    if (common.head_dim != kD || common.q_heads != common.kv_heads * QPerKv ||
         common.output_dtype != PagedAttentionOutputDType::F32 ||
         common.mask_block_shift != 2u || common.page_tokens == 0u ||
         (common.page_tokens % kR) != 0u ||
@@ -560,58 +585,79 @@ hipError_t launch_qsa_sparse_attention_typed(
     if (common.tree_anc_offsets != nullptr) return hipErrorInvalidValue;
 
     const dim3 grid(splits > 1u ? splits : 1u, common.kv_heads, common.rows);
-    const dim3 block(32u, kWarps);
+    const dim3 block(32u, kWarps<QPerKv>);
     if (splits > 1u) {
-        qsa_sparse_attention_kernel<DType, true><<<grid, block, 0, stream>>>(
+        qsa_sparse_attention_kernel<DType, true, QPerKv><<<grid, block, 0, stream>>>(
             common, k_pool, v_pool, k_scales, v_scales, octave_levels,
             octave_format, partials, splits);
     } else {
-        qsa_sparse_attention_kernel<DType, false><<<grid, block, 0, stream>>>(
+        qsa_sparse_attention_kernel<DType, false, QPerKv><<<grid, block, 0, stream>>>(
             common, k_pool, v_pool, k_scales, v_scales, octave_levels,
             octave_format, partials, splits);
     }
     return hipGetLastError();
 }
 
+template <KVCacheDType DType>
+hipError_t launch_qsa_sparse_attention_typed_q(
+    const PagedAttentionCommonArgs& common,
+    const uint8_t* k_pool, const uint8_t* v_pool,
+    const float* k_scales, const float* v_scales,
+    const float* octave_levels, OctaveKVCacheFormat octave_format,
+    float* partials, uint32_t splits, hipStream_t stream, uint32_t q_per_kv) {
+    if (q_per_kv == kQsaSparseQPerKvWide)
+        return launch_qsa_sparse_attention_typed<DType, kQsaSparseQPerKvWide>(
+            common, k_pool, v_pool, k_scales, v_scales, octave_levels, octave_format,
+            partials, splits, stream);
+    return launch_qsa_sparse_attention_typed<DType, kQsaSparseQPerKv>(
+        common, k_pool, v_pool, k_scales, v_scales, octave_levels, octave_format,
+        partials, splits, stream);
+}
+
 hipError_t launch_qsa_sparse_attention(const PagedAttentionCommonArgs& common,
                                        const bf16_t* k_pool, const bf16_t* v_pool,
                                        float* partials, uint32_t splits,
-                                       hipStream_t stream) {
-    return launch_qsa_sparse_attention_typed<KVCacheDType::BF16>(
+                                       hipStream_t stream, uint32_t q_per_kv) {
+    return launch_qsa_sparse_attention_typed_q<KVCacheDType::BF16>(
         common, reinterpret_cast<const uint8_t*>(k_pool),
         reinterpret_cast<const uint8_t*>(v_pool), nullptr, nullptr, nullptr,
-        OctaveKVCacheFormat{}, partials, splits, stream);
+        OctaveKVCacheFormat{}, partials, splits, stream, q_per_kv);
 }
 
 hipError_t launch_qsa_sparse_attention_fp8(
     const PagedAttentionCommonArgs& common,
     const uint8_t* k_pool, const uint8_t* v_pool,
     const float* k_scales, const float* v_scales,
-    float* partials, uint32_t splits, hipStream_t stream) {
-    return launch_qsa_sparse_attention_typed<KVCacheDType::FP8_E4M3>(
+    float* partials, uint32_t splits, hipStream_t stream, uint32_t q_per_kv) {
+    return launch_qsa_sparse_attention_typed_q<KVCacheDType::FP8_E4M3>(
         common, k_pool, v_pool, k_scales, v_scales, nullptr,
-        OctaveKVCacheFormat{}, partials, splits, stream);
+        OctaveKVCacheFormat{}, partials, splits, stream, q_per_kv);
 }
 
 hipError_t launch_qsa_sparse_attention_octave(
     const PagedAttentionCommonArgs& common,
     const uint8_t* k_pool, const uint8_t* v_pool,
     const float* levels, OctaveKVCacheFormat format,
-    float* partials, uint32_t splits, hipStream_t stream) {
-    return launch_qsa_sparse_attention_typed<KVCacheDType::OCTAVE>(
+    float* partials, uint32_t splits, hipStream_t stream, uint32_t q_per_kv) {
+    return launch_qsa_sparse_attention_typed_q<KVCacheDType::OCTAVE>(
         common, k_pool, v_pool, nullptr, nullptr, levels, format,
-        partials, splits, stream);
+        partials, splits, stream, q_per_kv);
 }
 
 hipError_t launch_qsa_sparse_reduce(const PagedAttentionCommonArgs& common,
                                     const float* partials, uint32_t splits,
-                                    hipStream_t stream) {
+                                    hipStream_t stream, uint32_t q_per_kv) {
     if (common.output == nullptr || partials == nullptr || common.rows == 0u ||
         common.q_heads == 0u || splits == 0u)
         return hipErrorInvalidValue;
     const uint32_t grid = common.rows * common.q_heads;
     if (grid == 0u) return hipErrorInvalidValue;
-    qsa_sparse_reduce_kernel<<<grid, kD, 0, stream>>>(common, partials, splits);
+    if (q_per_kv == kQsaSparseQPerKvWide)
+        qsa_sparse_reduce_kernel<kQsaSparseQPerKvWide><<<grid, kD, 0, stream>>>(
+            common, partials, splits);
+    else
+        qsa_sparse_reduce_kernel<kQsaSparseQPerKv><<<grid, kD, 0, stream>>>(
+            common, partials, splits);
     return hipGetLastError();
 }
 

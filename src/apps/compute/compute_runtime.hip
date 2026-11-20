@@ -2,6 +2,8 @@
 #include "private_target_weights.h"
 
 #include <shelf/core/memory/size_format.h>
+#include <shelf/inference/state/ple_conv_state_pool.h>
+#include <shelf/inference/state/qsa_state_pool.h>
 #include <shelf/runtime/execution/row_bucket.h>
 #include <shelf/models/common/qwen_hybrid/stage_range.h>
 #include <shelf/models/pipeline_stage_model.h>
@@ -29,6 +31,11 @@ uint32_t ceil_div(uint32_t a, uint32_t b) {
     return (a + b - 1) / b;
 }
 
+uint32_t parallel_rank(uint32_t pipeline_rank, uint32_t expert_rank, uint32_t tensor_rank,
+                       uint32_t expert_parallel, uint32_t tp) {
+    return (pipeline_rank * expert_parallel + expert_rank) * tp + tensor_rank;
+}
+
 uint32_t count_attention_layers(const qwen_hybrid::QwenHybridConfig& tc) {
     return static_cast<uint32_t>(qwen_hybrid::count_layer_topology(tc).attention_layers);
 }
@@ -45,14 +52,17 @@ struct MemoryPlan {
     std::size_t prefix = 0;
     uint32_t kv_tokens = 0;
     bool prefix_enabled = false;
+    bool measured_left = false;
+    std::size_t left_bytes = 0;
 };
 
 void print_memory_plan(const MemoryPlan& plan, const char* scope = "") {
     const std::size_t required = plan.target_weights + plan.draft_weights +
         plan.drafter_runtime + plan.workspace + plan.kv + plan.prefix;
-    const std::size_t left = plan.arena_capacity > required
+    const std::size_t derived_left = plan.arena_capacity > required
         ? plan.arena_capacity - required
         : 0;
+    const std::size_t left = plan.measured_left ? plan.left_bytes : derived_left;
     fprintf(stderr,
             "MEMORY_PLAN mode=%s%s\n"
             "  target weights    %s\n"
@@ -153,10 +163,6 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         return Status::invalid_argument(
             "pipeline_parallel must be positive", __FILE__, __LINE__);
     }
-    if (config_.pipeline_parallel > 1 && config_.tp != 1) {
-        return Status::unsupported(
-            "pipeline parallel requires tp 1", __FILE__, __LINE__);
-    }
     if (config_.mtp &&
         config_.kv_cache_dtype == kernel::KVCacheDType::OCTAVE)
         std::fprintf(stderr,
@@ -192,12 +198,14 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     if (hipGetDeviceCount(&dev_count) != hipSuccess || dev_count == 0) {
         return Status::invalid_state("no GPU available", __FILE__, __LINE__);
     }
-    const std::size_t parallel_width = config_.pipeline_parallel > 1
-        ? config_.pipeline_parallel
-        : config_.tp;
+    const std::size_t parallel_width =
+        static_cast<std::size_t>(config_.pipeline_parallel) *
+        static_cast<std::size_t>(config_.expert_parallel) *
+        static_cast<std::size_t>(config_.tp);
     if (config_.devices.size() != parallel_width) {
         return Status::invalid_argument(
-            "--device count must match --tensor-parallel or --pipeline-parallel", __FILE__, __LINE__);
+            "--device count must match pipeline_parallel * expert_parallel * tensor_parallel",
+            __FILE__, __LINE__);
     }
     for (int device : config_.devices) {
         if (device < 0 || device >= dev_count) {
@@ -340,14 +348,16 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         prefix_config.capture_slots = 0u;
     }
 
-    auto prefix_bytes_for = [&]() {
-        return qwen35::runtime::prefix_cache_bytes(prefix_config, gdn_layout);
-    };
+    auto prefix_bytes_for =
+        [&](const shelf::state::QsaKeyStatePoolLayout* qsa,
+            const shelf::state::PleConvStatePoolLayout* ple) {
+            return qwen35::runtime::prefix_cache_bytes(prefix_config, gdn_layout, qsa, ple);
+        };
 
     qwen35::runtime::PrefixCacheBytes prefix_bytes{};
     std::size_t prefix_capture_bytes = 0u;
     if (config_.prefix_cache) {
-        prefix_bytes = prefix_bytes_for();
+        prefix_bytes = prefix_bytes_for(nullptr, nullptr);
         prefix_capture_bytes = model_->prefix_capture_state_bytes(
             prefix_config.capture_slots, max_seq + 1u);
     }
@@ -445,7 +455,7 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         return Status::make_ok();
     };
 
-    Status probe_status = create_kv_pool(required_pages);
+    Status probe_status = create_kv_pool(1u);
     if (!probe_status.ok()) return probe_status;
     const std::size_t executor_before = arena_->used();
     probe_status = create_executor_now();
@@ -460,16 +470,24 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
             gpu::format_gib(config_.working_set_reserve_bytes).c_str());
     fflush(stderr);
 
+    if (config_.prefix_cache) {
+        prefix_bytes = prefix_bytes_for(
+            executor_.qsa_state_pool != nullptr ? &executor_.qsa_state_pool->layout() : nullptr,
+            executor_.ple_conv_state_pool != nullptr
+                ? &executor_.ple_conv_state_pool->layout()
+                : nullptr);
+    }
+
     const std::size_t reserved_bytes = prefix_bytes.total() + prefix_capture_bytes +
-        config_.working_set_reserve_bytes + drafter_total_bytes + kv_required_bytes;
+        drafter_total_bytes;
     const std::size_t arena_free = arena_->capacity() - arena_->used();
     if (arena_free <= reserved_bytes) {
         print_memory_plan(make_plan(kv_required_bytes, max_seq + 1u));
         return Status::insufficient_memory(
             "arena has " + gpu::format_gib(arena_free) + " free after weights but the runtime "
             "reserves " + gpu::format_gib(reserved_bytes)
-            + " for the prefix state, the working set and the drafter weights (raise "
-              "--arena-gib or lower --working-set-reserve-gib)",
+            + " for the prefix state and the drafter weights (raise "
+              "--arena-gib or lower --max-concurrent-requests)",
             __FILE__, __LINE__);
     }
     const uint32_t pages_fit =
@@ -499,8 +517,6 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     }
     const uint32_t physical_capacity_tokens = fit_pages * config_.page_tokens;
     const uint32_t kv_pool_pages = fit_pages + 1u;
-    print_memory_plan(make_plan(
-        static_cast<std::size_t>(kv_pool_pages) * kv_page_bytes, physical_capacity_tokens));
 
     Status kv_status = create_kv_pool(kv_pool_pages);
     if (!kv_status.ok()) return kv_status;
@@ -527,6 +543,12 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         prefix_cache_.emplace(prefix_result.release());
         batcher_->set_prefix_cache(&prefix_cache_.value());
     }
+
+    MemoryPlan final_plan = make_plan(
+        static_cast<std::size_t>(kv_pool_pages) * kv_page_bytes, physical_capacity_tokens);
+    final_plan.measured_left = true;
+    final_plan.left_bytes = arena_->capacity() - arena_->used();
+    print_memory_plan(final_plan);
 
     const shelf::models::HostMemoryBytes host_bytes = model_->host_memory_bytes();
     print_host_memory({static_cast<std::size_t>(host_bytes.embedding)},
@@ -649,7 +671,17 @@ Status Qwen35ComputeRuntime::initialize_pipeline_parallel() {
 
     qwen35::runtime::PipelineParallelConfig pp_config;
     pp_config.model_dir = config_.model_dir;
-    pp_config.devices = config_.devices;
+    if (config_.expert_parallel > 1u || config_.tp > 1u) {
+        std::vector<int> stage_devices;
+        stage_devices.reserve(config_.pipeline_parallel);
+        for (uint32_t stage = 0; stage < config_.pipeline_parallel; ++stage) {
+            stage_devices.push_back(config_.devices[parallel_rank(
+                stage, 0u, 0u, config_.expert_parallel, config_.tp)]);
+        }
+        pp_config.devices = std::move(stage_devices);
+    } else {
+        pp_config.devices = config_.devices;
+    }
     pp_config.stages = ranges;
     pp_config.max_batch_rows = exec_max_tokens_;
     pp_config.max_scheduled_requests = config_.max_concurrent_requests;

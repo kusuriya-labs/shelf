@@ -974,12 +974,12 @@ samples を別途 D2H する。
   選択候補の外にある確率の平均は `DFLASH2_TREE_RESIDUAL_MASS` に出力する。
   採用した経路の KV と target tap は連続位置に集め、GDN state は受理経路から確定する。
   浮動小数点の累算順序の差により非投機生成との完全一致は保証しない。
-  既定の `auto` は draft 数 7・TP=1 で、その round の生成中 request が
-  1 本だけで投機中なら 10 行、それ以外は chain の 8 行を使う。通常 decode 中や
-  policy により投機を停止中の request も数え、prefill 中と待機中は数えない。auto では
-  stochastic request を投機せず通常 decode する。単発の greedy
+  省略時は 0 で chain verify を使う。明示的な `auto` は draft 数 7・TP=1 で、
+  その round の生成中 request が 1 本だけで投機中なら 10 行、それ以外は chain の 8 行を使う。
+  通常 decode 中や policy により投機を停止中の request も数え、prefill 中と待機中は数えない。
+  auto では stochastic request を投機せず通常 decode する。単発の greedy
   生成でも 10 行を使う。明示的な整数指定は同時数に依存しない。
-  他の draft 数や TP では tree budget 省略時に chain を使う（server は警告する）。
+  他の draft 数や TP で `auto` を指定した場合は chain を使い、server は警告する。
 - `--dflash2-max-sessions N`: serve で同時に投機を行う request 数（default
   `min(--max-concurrent-requests, 8)`）。session pool の容量、batch verify の行数
   （`N × session ごとの verify 行数上限`）、drafter scratch の大きさがこの値で決まる。

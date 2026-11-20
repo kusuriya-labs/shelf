@@ -93,9 +93,11 @@ void compute_usage(const char* prog) {
            "                         bucket (default 512; serve caps max-num-batched-tokens\n"
            "                         when given)\n");
     printf("  --ple-prefetch 0|1      prefetch the next PLE rows during prefill (default 1)\n");
-    printf("  --device N|N,M         GPU device(s); count must match --tensor-parallel or --pipeline-parallel (default 0)\n");
+    printf("  --device N|N,M         GPU device(s); count must match pipeline_parallel *\n"
+           "                         expert_parallel * tensor_parallel (default 0)\n");
     printf("  --tensor-parallel N    tensor parallel degree 1 | 2 | 4 (default 1)\n");
-    printf("  --pipeline-parallel N  pipeline-parallel stage count (default 1; requires --tensor-parallel 1)\n");
+    printf("  --expert-parallel N    expert parallel degree 1 | 2 | 4 (default 1)\n");
+    printf("  --pipeline-parallel N  pipeline-parallel stage count (default 1)\n");
     printf("  --kv-cache-dtype TYPE  bf16 | fp8 | octave:cKvV | octave:bRnNvV (default bf16)\n");
     printf("  --rope-factor MODE     auto | 1 | 2 | 4; static YaRN rope factor\n");
     printf("                         (default auto = model config: native unless the\n");
@@ -229,6 +231,7 @@ int parse_compute_options(int argc, char** argv, ComputeOptions& opt) {
 auto& max_concurrent_requests = opt.max_concurrent_requests;
     auto& devices = opt.devices;
     auto& tp = opt.tp;
+    auto& expert_parallel = opt.expert_parallel;
     auto& pipeline_parallel = opt.pipeline_parallel;
     auto& kv_cache_dtype = opt.kv_cache_dtype;
     shelf::runtime::DecodeBackend& decode_backend = opt.decode_backend;
@@ -306,6 +309,12 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
         } else if (std::strcmp(argv[i], "--tensor-parallel") == 0 && i + 1 < argc) {
             if (!parse_uint(argv[++i], tp) || (tp != 1 && tp != 2 && tp != 4)) {
                 fprintf(stderr, "bad --tensor-parallel (expected 1, 2 or 4)\n");
+                return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--expert-parallel") == 0 && i + 1 < argc) {
+            if (!parse_uint(argv[++i], expert_parallel) ||
+                (expert_parallel != 1 && expert_parallel != 2 && expert_parallel != 4)) {
+                fprintf(stderr, "bad --expert-parallel (expected 1, 2 or 4)\n");
                 return kComputeParseError;
             }
         } else if (std::strcmp(argv[i], "--pipeline-parallel") == 0 && i + 1 < argc) {
@@ -587,13 +596,6 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
         }
     }
 
-    if (!dflash2_model_dir.empty() && !opt.dflash2_tree && opt.dflash2_tree_budget == 0 &&
-        !opt.dflash2_tree_budget_explicit && dflash2_drafts == 7 && tp == 1 &&
-        (serve_stdio || sampling.temperature == 0.0f)) {
-        opt.dflash2_tree_budget_auto = true;
-        opt.dflash2_tree_budget = 10;
-        opt.dflash2_tree = true;
-    }
     return kComputeParseOk;
 }
 
@@ -607,6 +609,7 @@ int validate_compute_options(const ComputeOptions& opt) {
     const auto& max_concurrent_requests = opt.max_concurrent_requests;
     const auto& devices = opt.devices;
     const auto& tp = opt.tp;
+    const auto& expert_parallel = opt.expert_parallel;
     const auto& pipeline_parallel = opt.pipeline_parallel;
     const auto& kv_cache_dtype = opt.kv_cache_dtype;
     const shelf::runtime::DecodeBackend& decode_backend = opt.decode_backend;
@@ -635,17 +638,18 @@ int validate_compute_options(const ComputeOptions& opt) {
         fprintf(stderr, "--tensor-parallel must be 1, 2 or 4\n");
         return kComputeParseError;
     }
+    const std::size_t parallel_width =
+        static_cast<std::size_t>(pipeline_parallel) *
+        static_cast<std::size_t>(expert_parallel) *
+        static_cast<std::size_t>(tp);
+    if (devices.size() != parallel_width) {
+        fprintf(stderr,
+                "--device expects %zu entries for pipeline_parallel %lu * expert_parallel %lu "
+                "* tensor_parallel %lu, got %zu\n",
+                parallel_width, pipeline_parallel, expert_parallel, tp, devices.size());
+        return kComputeParseError;
+    }
     if (pipeline_parallel > 1) {
-        if (tp != 1) {
-            fprintf(stderr, "--pipeline-parallel > 1 requires --tensor-parallel 1\n");
-            return kComputeParseError;
-        }
-        if (devices.size() != pipeline_parallel) {
-            fprintf(stderr,
-                    "--device expects %lu entries for --pipeline-parallel %lu, got %zu\n",
-                    pipeline_parallel, pipeline_parallel, devices.size());
-            return kComputeParseError;
-        }
         if (!dflash2_model_dir.empty()) {
             fprintf(stderr, "--pipeline-parallel does not support DFlash2 speculative decoding\n");
             return kComputeParseError;
@@ -658,10 +662,6 @@ int validate_compute_options(const ComputeOptions& opt) {
             fprintf(stderr, "--pipeline-parallel does not support --hidden-taps\n");
             return kComputeParseError;
         }
-    } else if (devices.size() != tp) {
-        fprintf(stderr, "--device expects %lu entries for --tensor-parallel %lu, got %zu\n",
-                tp, tp, devices.size());
-        return kComputeParseError;
     }
     {
         std::vector<int> unique_devices = devices;
@@ -681,10 +681,6 @@ int validate_compute_options(const ComputeOptions& opt) {
     shelf::kernel::OctaveKVCacheFormat octave_format{};
     const bool octave = shelf::kernel::parse_octave_kv_cache_format(
         kv_cache_dtype, octave_format);
-    if (octave && pipeline_parallel != 1) {
-        fprintf(stderr, "Octave KV cache currently requires PP=1\n");
-        return kComputeParseError;
-    }
     if (opt.dflash2_tree_budget != 0 && opt.dflash2_tree_budget < dflash2_drafts + 1) {
         fprintf(stderr, "tree budget must include anchor and all draft positions\n");
         return kComputeParseError;

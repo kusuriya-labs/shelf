@@ -120,6 +120,10 @@ def build_compute_argv(opts) -> list[str]:
         argv += ["--mtp", "--mtp-drafts", str(opts.mtp_drafts)]
     if opts.tensor_parallel > 1:
         argv += ["--tensor-parallel", str(opts.tensor_parallel)]
+    if opts.expert_parallel > 1:
+        argv += ["--expert-parallel", str(opts.expert_parallel)]
+    if opts.pipeline_parallel > 1:
+        argv += ["--pipeline-parallel", str(opts.pipeline_parallel)]
     if opts.moe_host_experts is not None:
         argv += ["--moe-host-experts", str(opts.moe_host_experts)]
     if opts.lm_head_int8 is not None:
@@ -535,6 +539,11 @@ def parse_args(argv=None):
                              "count must match --tensor-parallel (default 0)")
     parser.add_argument("--tensor-parallel", type=int, default=1, choices=(1, 2),
                         help="tensor parallel size forwarded to compute (default 1)")
+    parser.add_argument("--expert-parallel", type=int, default=1, choices=(1, 2, 4),
+                        help="expert parallel size forwarded to compute (default 1)")
+    parser.add_argument("--pipeline-parallel", type=int, default=1, choices=(1, 2, 4),
+                        help="pipeline parallel size forwarded to compute "
+                             "(mutually exclusive with --tensor-parallel; default 1)")
     parser.add_argument("--kv-cache-dtype", default="bf16",
                         type=kv_cache_dtype_value,
                         help="KV cache dtype (default bf16)")
@@ -563,7 +572,7 @@ def parse_args(argv=None):
     parser.add_argument("--dflash2-tree-budget", type=tree_budget_value, default=None,
                         metavar="N|auto",
                         help="tree verify rows: auto uses 10 for one decoding request if speculative, "
-                             "8 otherwise (default auto; 0 disables)")
+                             "8 otherwise (default 0; 0 disables)")
     parser.add_argument("--dflash2-adaptive", action="store_true",
                         help="batch と受理数に応じて投機を制御する")
     parser.add_argument("--dflash2-max-sessions", type=int, default=0,
@@ -600,13 +609,20 @@ def parse_args(argv=None):
     devices = [part.strip() for part in opts.device.split(",") if part.strip()]
     if not devices or any(not device.isdigit() for device in devices):
         parser.error(f"bad --device: {opts.device}")
-    if len(devices) != opts.tensor_parallel:
-        parser.error(f"--device expects {opts.tensor_parallel} entries for "
+    parallel_width = (opts.pipeline_parallel * opts.expert_parallel *
+                      opts.tensor_parallel)
+    if len(devices) != parallel_width:
+        parser.error(f"--device expects {parallel_width} entries for "
+                     f"--pipeline-parallel {opts.pipeline_parallel} * "
+                     f"--expert-parallel {opts.expert_parallel} * "
                      f"--tensor-parallel {opts.tensor_parallel}, "
                      f"got {len(devices)}")
     if len(set(devices)) != len(devices):
         parser.error(f"--device entries must be unique: {opts.device}")
     opts.device = ",".join(devices)
+
+    if opts.pipeline_parallel > 1 and opts.prefix_cache:
+        parser.error("--pipeline-parallel does not support prefix cache")
 
     if opts.max_seq_len is not None and opts.max_seq_len < 1:
         parser.error("--max-seq-len must be >= 1")
@@ -629,12 +645,7 @@ def parse_args(argv=None):
     if opts.dflash2_adaptive and not opts.dflash2_model_dir:
         parser.error("--dflash2-adaptive requires --dflash2-model-dir")
     if opts.dflash2_tree_budget is None:
-        if opts.dflash2_model_dir and (opts.dflash2_drafts != 7 or opts.tensor_parallel != 1):
-            print("warning: automatic tree budget requires TP=1 and 7 drafts; using chain",
-                  file=sys.stderr, flush=True)
-            opts.dflash2_tree_budget = 0
-        else:
-            opts.dflash2_tree_budget = "auto"
+        opts.dflash2_tree_budget = 0
     if opts.dflash2_tree_budget != "auto" and not 0 <= opts.dflash2_tree_budget <= 512:
         parser.error("--dflash2-tree-budget must be between 0 and 512")
     if opts.dflash2_tree_budget not in (0, "auto") and not opts.dflash2_model_dir:
@@ -774,6 +785,8 @@ async def _serve(opts) -> int:
         "arena_gib": opts.arena_gib,
         "device": opts.device,
         "tensor_parallel": opts.tensor_parallel,
+        "expert_parallel": opts.expert_parallel,
+        "pipeline_parallel": opts.pipeline_parallel,
         "kv_cache_dtype": opts.kv_cache_dtype,
         "working_set_reserve_gib": opts.working_set_reserve_gib,
         "prefix_cache_strategy": opts.prefix_cache_strategy,

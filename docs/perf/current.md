@@ -1374,6 +1374,31 @@ EXL3-INT8 3.05bpw モデル（`models/kusuriya-labs/Qwen3.8-Flash-Next-EXL3-INT8
 
 - 同一入力で full / tiered ともに `GENERATED_IDS=24` が一致した。
 
+## 2026-11-20 Qwen4Exp QSA block-sparse（q_per_kv=12）
+
+Qwen4Exp の QSA 層（`q_per_kv = 12`）を block-sparse kernel の対象にした前後比較。
+修正前は mask 付き paged attention にフォールバックしていた。
+
+- measurement revision: 作業ツリー（HEAD `2053b63` + QSA `q_per_kv = 12` 対応）
+- model: `models/kusuriya-labs/Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw`
+- GPU: Radeon AI PRO R9700 × 1（`--device 3`）
+- `octave:c5v5` KV、DFlash2 chain verify（`--dflash2-tree-budget 0`）、greedy、
+  `--moe-host-experts 448`、`--max-concurrent-requests 2`、
+  `--max-num-batched-tokens 2048`、`--ple-hot-cache-gib 1`、
+  `--prefix-cache-strategy radix`。prompt は `tests/data/mtp_perf/prose.txt` を
+  model の tokenizer で encode した先頭 N token。16 token 生成（計測区間 15 token）。
+
+| context | before decode | before tok/s | after decode | after tok/s |
+| ---: | ---: | ---: | ---: | ---: |
+| 8,192 | 333.6 ms | 44.97 | 316.8 ms | **47.35** |
+| 32,768 | 388.1 ms | 38.65 | 347.2 ms | **43.20** |
+
+8,192 → 32,768 の低下は before が 14.1 %、after が 8.8 % だった。
+生成結果は各 context で before / after が一致した
+（`GENERATED_IDS` の sha1: 8,192 = `2e293f3dc225966c6c7bb82b0bf00b2bb9cce82b`、
+32,768 = `8a12f56fc9e5f422a9339c6c37bc4bdf4c411d47`）。
+各値は 1 回の測定で、同一条件の連続起動で before → after の順に取った。
+
 ## 記録規則
 
 - 新しい計測をしていない数値は更新しない。

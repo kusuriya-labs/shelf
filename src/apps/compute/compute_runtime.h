@@ -71,6 +71,7 @@ struct Qwen35RuntimeConfig {
     uint32_t page_tokens = 16;
     std::vector<int> devices = {0};
     uint32_t tp = 1;
+    uint32_t expert_parallel = 1;
     uint32_t pipeline_parallel = 1;
     kernel::KVCacheDType kv_cache_dtype = kernel::KVCacheDType::BF16;
     kernel::OctaveKVCacheFormat octave_kv_format{};

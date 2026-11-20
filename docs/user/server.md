@@ -80,8 +80,10 @@ Ready.
 | `--large-context-tokens LARGE_CONTEXT_TOKENS` | prompt tokens above which the larger inference budget applies (default 262144) |
 | `--large-context-inference-budget-tokens LARGE_CONTEXT_INFERENCE_BUDGET_TOKENS` | max generated tokens for a request whose prompt is longer than --large-context-tokens (default 65536) |
 | `--arena-gib N\|auto\|-N` | GPU arena capacity in GiB; auto = free VRAM minus 0.5 GiB, -N = total VRAM minus N GiB (default auto) |
-| `--device DEVICE` | comma separated GPU devices, one per rank; count must match --tensor-parallel (default 0) |
+| `--device DEVICE` | comma separated GPU devices, one per rank; count must match pipeline_parallel * expert_parallel * tensor_parallel (default 0) |
 | `--tensor-parallel {1,2}` | tensor parallel size forwarded to compute (default 1) |
+| `--expert-parallel {1,2,4}` | expert parallel size forwarded to compute (default 1) |
+| `--pipeline-parallel {1,2,4}` | pipeline parallel size forwarded to compute; requires --prefix-cache 0 (default 1) |
 | `--kv-cache-dtype KV_CACHE_DTYPE` | KV cache dtype (default bf16) |
 | `--page-tokens PAGE_TOKENS` | paged KV page size in tokens (default 16) |
 | `--working-set-reserve-gib WORKING_SET_RESERVE_GIB` | arena headroom kept free for the working set (0 = size it from the row bucket, default 0) |
@@ -92,7 +94,7 @@ Ready.
 | `--prefix-cache-save-interval PREFIX_CACHE_SAVE_INTERVAL` | periodic prefix checkpoint spacing in tokens; 0 disables periodic checkpoints (default 16384) |
 | `--dflash2-model-dir DFLASH2_MODEL_DIR` | DFlash2 draft model directory (enables speculative decoding) |
 | `--dflash2-drafts DFLASH2_DRAFTS` | speculative draft tokens per round (default 7) |
-| `--dflash2-tree-budget N\|auto` | tree verify rows: auto uses 10 for one decoding request if speculative, 8 otherwise (default auto; 0 disables) |
+| `--dflash2-tree-budget N\|auto` | tree verify rows: auto uses 10 for one decoding request if speculative, 8 otherwise (default 0; 0 disables) |
 | `--dflash2-adaptive` | batch と受理数に応じて投機を制御する |
 | `--dflash2-max-sessions DFLASH2_MAX_SESSIONS` | requests that may speculate at once; the rest decode without speculation (0 = min(--max-concurrent- requests, 8)) |
 | `--dflash2-prefill-rows DFLASH2_PREFILL_ROWS` | drafter prefill rows（default は model 側） |
@@ -331,7 +333,7 @@ curl http://127.0.0.1:8000/v1/meta
 | `max_concurrent_requests` | `--max-concurrent-requests`。最大 in-flight 数 |
 | `inference_budget` | 推論予算。`tokens`（`--inference-budget-tokens`）、`large_context_tokens`、`large_context_inference_budget_tokens`、既定予算での `answer_reserve_tokens` / `thinking_budget_tokens` |
 | `arena_gib` | `--arena-gib`（`"auto"` または数値 GiB） |
-| `device` / `tensor_parallel` | `--device` / `--tensor-parallel` |
+| `device` / `tensor_parallel` / `expert_parallel` / `pipeline_parallel` | `--device` / `--tensor-parallel` / `--expert-parallel` / `--pipeline-parallel` |
 | `kv_cache_dtype` | KV cache の dtype |
 | `working_set_reserve_gib` | `--working-set-reserve-gib` |
 | `speculative` | 有効時の drafter（`{"method": "dflash2", "drafts": 7}` 等）。無効時は `null` |

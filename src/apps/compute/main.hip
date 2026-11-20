@@ -93,6 +93,7 @@ int main(int argc, char** argv) {
     config.page_tokens = static_cast<uint32_t>(opt.page_tokens);
     config.devices = opt.devices;
     config.tp = static_cast<uint32_t>(opt.tp);
+    config.expert_parallel = static_cast<uint32_t>(opt.expert_parallel);
     if (opt.mtp && opt.tp > 1) {
         config.private_target_weights = true;
         config.private_target_lm_head = opt.mtp;

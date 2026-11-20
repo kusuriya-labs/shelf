@@ -56,11 +56,14 @@ bool qsa_sparse_supported(const PagedAttentionResolvedArgs& args,
     const bool dtype_ok =
         args.kv_dtype == ::shelf::kernel::KVCacheDType::BF16 ||
         args.kv_dtype == ::shelf::kernel::KVCacheDType::FP8_E4M3 || octave_ok;
+    const bool q_per_kv_ok =
+        c.q_heads == c.kv_heads * ::shelf::kernel::kQsaSparseQPerKv ||
+        c.q_heads == c.kv_heads * ::shelf::kernel::kQsaSparseQPerKvWide;
     return dtype_ok &&
            args.output_dtype == ::shelf::runtime::ValueDType::F32 && c.block_mask != nullptr &&
            c.tree_anc_offsets == nullptr &&
            c.head_dim == ::shelf::kernel::kQsaSparseHeadDim &&
-           c.q_heads == c.kv_heads * ::shelf::kernel::kQsaSparseQPerKv &&
+           q_per_kv_ok &&
            c.mask_block_shift == 2u && c.page_tokens != 0u &&
            (c.page_tokens % ::shelf::kernel::kQsaSparseBlockTokens) == 0u &&
            ctx.decode_attn_partials != nullptr;
@@ -303,7 +306,8 @@ PagedAttentionPlan plan_paged_attention(
          ctx.spec.max_visible_tokens >= kQsaSparsePrefillMinTokens)) {
         plan.qsa_sparse = true;
         plan.splits = ::shelf::kernel::qsa_sparse_splits(
-            args.common.rows, args.common.kv_heads, ctx.decode_attn_partial_bytes);
+            args.common.rows, args.common.kv_heads, ctx.decode_attn_partial_bytes,
+            args.common.q_heads / args.common.kv_heads);
         return plan;
     }
     if (plan.use_prefill &&
@@ -891,7 +895,8 @@ hipError_t launch_paged_attention_physical(const PhysicalPagedAttentionPlan& pla
                 herr = ::shelf::kernel::launch_qsa_sparse_attention(
                     k.common, reinterpret_cast<const ::shelf::bf16_t*>(k.k_pool),
                     reinterpret_cast<const ::shelf::bf16_t*>(k.v_pool),
-                    reinterpret_cast<float*>(k.partials), k.splits, stream);
+                    reinterpret_cast<float*>(k.partials), k.splits, stream,
+                    k.common.q_heads / k.common.kv_heads);
                 break;
             case PhysicalPagedAttentionVariant::QsaSparseFp8:
                 herr = ::shelf::kernel::launch_qsa_sparse_attention_fp8(
@@ -899,7 +904,8 @@ hipError_t launch_paged_attention_physical(const PhysicalPagedAttentionPlan& pla
                     reinterpret_cast<const uint8_t*>(k.v_pool),
                     reinterpret_cast<const float*>(k.k_scale_pool),
                     reinterpret_cast<const float*>(k.v_scale_pool),
-                    reinterpret_cast<float*>(k.partials), k.splits, stream);
+                    reinterpret_cast<float*>(k.partials), k.splits, stream,
+                    k.common.q_heads / k.common.kv_heads);
                 break;
             case PhysicalPagedAttentionVariant::QsaSparseOctave:
                 herr = ::shelf::kernel::launch_attention_paged_octave_qsa_split(
@@ -912,7 +918,7 @@ hipError_t launch_paged_attention_physical(const PhysicalPagedAttentionPlan& pla
             case PhysicalPagedAttentionVariant::QsaReduce:
                 herr = ::shelf::kernel::launch_qsa_sparse_reduce(
                     k.common, reinterpret_cast<const float*>(k.partials), k.splits,
-                    stream);
+                    stream, k.common.q_heads / k.common.kv_heads);
                 break;
             default:
                 return hipErrorNotSupported;

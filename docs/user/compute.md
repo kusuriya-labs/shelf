@@ -28,9 +28,10 @@ TP、pipeline parallel、MTP、DFlash2、2048 token 超の長文は未対応。
 | `--max-num-batched-tokens N` | token budget per scheduled step; also sets the executor row bucket (default 2048) |
 | `--prefill-chunk N` | prompt tokens per prefill step; also caps the row bucket (default 512; serve caps max-num-batched-tokens when given) |
 | `--ple-prefetch 0\|1` | prefetch the next PLE rows during prefill (default 1) |
-| `--device N\|N,M` | GPU device(s); count must match --tensor-parallel or --pipeline-parallel (default 0) |
+| `--device N\|N,M` | GPU device(s); count must match pipeline_parallel * expert_parallel * tensor_parallel (default 0) |
 | `--tensor-parallel N` | tensor parallel degree 1 \| 2 \| 4 (default 1) |
-| `--pipeline-parallel N` | pipeline-parallel stage count (default 1; requires --tensor-parallel 1) |
+| `--expert-parallel N` | expert parallel degree 1 \| 2 \| 4 (default 1) |
+| `--pipeline-parallel N` | pipeline-parallel stage count (default 1) |
 | `--kv-cache-dtype TYPE` | bf16 \| fp8 \| octave:cKvV \| octave:bRnNvV (default bf16) |
 | `--rope-factor MODE` | auto \| 1 \| 2 \| 4; static YaRN rope factor (default auto = model config: native unless the checkpoint requests yarn) |
 | `--decode-backend TYPE` | hip (default) |
@@ -59,7 +60,7 @@ TP、pipeline parallel、MTP、DFlash2、2048 token 超の長文は未対応。
 | `--pcie-frac F` | share of PCIe the runtime may use (default 0.25) |
 | `--pcie-gbps F` | assumed PCIe bandwidth in GB/s (default 25) |
 | `--dflash2-model-dir PATH` | DFlash2 draft model directory; enables speculative decoding (greedy / stochastic) |
-| `--dflash2-tree-budget N\|auto` | tree verify rows (default auto; 0 disables) auto: 10 for one decoding request if speculative, else 8 |
+| `--dflash2-tree-budget N\|auto` | tree verify rows (default 0; 0 disables) auto: 10 for one decoding request if speculative, else 8 |
 | `--dflash2-tree-extra B` | enable experimental tree verification (B=0,1,2,4) |
 | `--dflash2-drafts N` | speculative draft tokens per round (default 7) |
 | `--dflash2-adaptive` | control speculation with a batch policy |
@@ -120,7 +121,7 @@ scratch と session pool の領域（DFlash2 は `--max-concurrent-requests` 分
 `--working-set-reserve-gib` の予約量である。`KV budget` は arena 残量から導出した
 physical KV capacity、`prefix cache` は capture slot の実サイズである
 （checkpoint 本体は pinned host memory に置くため arena を使わない）。
-`left` は arena の未使用容量であり、workspace はこの後に executor が実際に確保する。
+`left` は prefix cache の確保後に測定した arena の未使用容量である。
 テンソル並列では rank ごとに同じ表を `MEMORY_PLAN mode=auto tp=N rank=R` の見出しで
 出す。`target weights` はその rank が private weight（target の embed / lm_head など）を
 load した場合はそれを含むため、`KV budget` が rank 間で異なることがある。
@@ -281,9 +282,12 @@ DFlash2 経路でも prefix cache を使う。
 
 ### pipeline parallel
 
-`--pipeline-parallel K` で model の layer を K stage に分割し、stage ごとに GPU を
-割り当てる。`--device` は stage 数と同じ個数を指定する（例 `--device 0,1`）。
-`--tensor-parallel` は `1` でなければならない。
+`--pipeline-parallel K` で model の layer を K stage に分割する。`--device` は
+`pipeline_parallel * expert_parallel * tensor_parallel` 個を指定する。
+GPU の並びは PP → EP → TP の順で解釈し、8 GPU で PP=2 / EP=2 / TP=2 なら
+`0,1` が PP0/EP0、`2,3` が PP0/EP1、`4,5` が PP1/EP0、`6,7` が PP1/EP1 になる。
+K128 一括セットを要求する量子化方式では、各 TP グループの後ろの rank に
+重みを多く割り当てる設計だが、現状は未配線である。
 
 ```bash
 ./build/shelf-compute --model-dir /opt/zen/work/models/Qwen3.8-27B-FP8 \
@@ -297,8 +301,10 @@ DFlash2 経路でも prefix cache を使う。
 - stage 間の hidden は bf16 のまま pinned host 経由で直列に受け渡す。
 - `--pipeline-parallel` は prefix cache、DFlash2、MTP、hidden taps、
   `--dump-logits` と併用できない。grouped expert checkpoint（Qwen3.6-35B-A3B MoE）も受理する
-  （layer を stage で割り、担当外 layer の expert 平面は読まない）。`--tensor-parallel` と
-  `--pipeline-parallel` を同時に 2 にはできない。
+  （layer を stage で割り、担当外 layer の expert 平面は読まない）。
+- 3 軸の CLI 受付と device 割当は実装済みだが、pipeline stage 内で EP / TP を
+  展開する実行時経路は未配線である。PP > 1 で EP > 1 または TP > 1 の場合、
+  stage ごとに TP グループの先頭 GPU だけが使われる。
 - decode と prefill が同じ batch に混在する実行は未対応である。
   `--max-concurrent-requests 1` で運用するか、phase ごとに batch が分かれる条件で使う。
 - KV の page 数は stage 0 の auto-fit 結果を全 stage で共有する。
