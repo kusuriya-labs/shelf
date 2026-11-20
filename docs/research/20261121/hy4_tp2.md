@@ -62,6 +62,23 @@ DFly の数値は反復入力で全 draft が受理された条件であり、�
 - 1Mi 予約は 4 rank とも約 28.9 GB、2Mi 予約は workspace 1 GiB で約 32.3 GB。
 - 2Mi では残り約 1.8 GB、1Mi では約 5.2 GB。
 
+## EP=4 + DFly2 の内訳
+
+自然文 2048 token 入力、256 生成、chunk 1024、温度 0。
+
+| 条件 | prefill | decode | 受理 |
+| --- | --- | --- | --- |
+| EP=4 通常 | 2.30 s | 19.5 tok/s | - |
+| EP=4 + DFly2 | 2.31 s | 50.8 tok/s | 191 / 68 round |
+| EP=4 + DFly2、Engram populate | 2.08 s | 60.1 tok/s | 191 / 68 round |
+| EP=2 × TP=2 + DFly2 | 1.68 s | 42.7 tok/s | 190 / 68 round |
+
+DFly2 の decode 内訳（Engram populate 後）は attention 2.05 s、FFN 1.57 s、
+head 0.30 s、draft 0.58 s である。1 round の target 検証は 1 token 分の decode と
+ほぼ同じコストで 6 row を処理しており、速度は受理数で決まる。Engram を populate
+しない場合はページフォルトで attention に約 0.8 s が加わる。TP=2 は decode の
+all-reduce 同期が増えるため、DFly2 では EP=4 より遅い。
+
 ## 未検証
 
 - 2Mi での生成。`generate` の予約長上限が 1Mi のため、2Mi は reserve のみ確認。

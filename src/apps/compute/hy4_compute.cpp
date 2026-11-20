@@ -199,6 +199,11 @@ int compute(int argc, char **argv) {
                checkpoint.bytes[1], checkpoint.bytes[2], checkpoint.bytes[3]);
         if (mode == "inspect")
             return 0;
+        if (mode == "generate") {
+            auto populate = std::getenv("SHELF_HY4_ENGRAM_POPULATE");
+            if (populate && std::string_view(populate) == "1")
+                checkpoint.populate_engram(false);
+        }
         std::vector<int> ids;
         if (mode == "generate") {
             ids = io::read_input_ids(input.string());
