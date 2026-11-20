@@ -252,6 +252,8 @@ int *Ops::indices(const std::vector<int> &ids) {
     return p;
 }
 void Ops::copy(void *dst, const void *src, size_t bytes, hipMemcpyKind kind) {
+    if (kind == hipMemcpyDeviceToHost)
+        checked(hipStreamSynchronize(nullptr));
     checked(hipMemcpy(dst, src, bytes, kind));
 }
 Mat Ops::embed(const std::vector<int> &ids, bool expand) {

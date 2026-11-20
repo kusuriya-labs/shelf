@@ -47,7 +47,8 @@ struct Residency {
     std::array<std::array<bool, 4>, 4> peer{}, owns_peer{};
     bool push = false;
     void *staging = nullptr;
-    std::array<std::array<hipEvent_t, 4>, 4> ready{}, ack{};
+    std::array<std::array<std::array<hipEvent_t, 2>, 4>, 4> ready{}, ack{};
+    std::array<std::array<int, 4>, 4> parity{};
     std::array<void *, 4> route_host{};
     std::array<void *, 4> tp_recv{};
     std::array<void *, 4> ep_recv{};
