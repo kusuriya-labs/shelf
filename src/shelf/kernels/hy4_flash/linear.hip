@@ -96,6 +96,51 @@ __global__ void multiply(const int8_t *codes, const float *scales, const uint32_
 }
 
 template <bool Mixed>
+__global__ void multiply_pair(const int8_t *codes, const float *scales, const Hy4ExpertProjection *matrices,
+                              int stride, float *partial0, float *partial1, int k, int n,
+                              const Hy4Route *routes) {
+    const auto &mat0 = matrices[(routes ? routes[blockIdx.y].expert : blockIdx.y) * stride];
+    const auto &mat1 = (&mat0)[1];
+    const unsigned bits = Mixed ? mat0.bits : 4;
+    const unsigned col = threadIdx.x % 16;
+    const unsigned worker = threadIdx.x / 16;
+    const int row = blockIdx.y;
+    __shared__ float sums0[16][16], sums1[16][16];
+    float acc0 = 0, acc1 = 0;
+    const unsigned words = bits * 8;
+    for (unsigned kt = worker; kt < unsigned(k / 16); kt += 16) {
+        const uint32_t *tile0 = mat0.trellis + (size_t(kt) * (n / 16) + blockIdx.x) * words;
+        const uint32_t *tile1 = mat1.trellis + (size_t(kt) * (n / 16) + blockIdx.x) * words;
+        int dot0 = 0, dot1 = 0;
+#pragma unroll
+        for (unsigned g = 0; g < 4; ++g) {
+            uint32_t a;
+            __builtin_memcpy(&a, codes + size_t(row) * k + kt * 16 + g * 4, 4);
+            unsigned t = g / 2 * 128 + col * 8 + g % 2 * 4;
+            uint32_t b0 = bits == 3 ? unpack_four<3>(tile0, t) : unpack_four<4>(tile0, t);
+            uint32_t b1 = bits == 3 ? unpack_four<3>(tile1, t) : unpack_four<4>(tile1, t);
+            dot0 = dot4(a, b0, dot0);
+            dot1 = dot4(a, b1, dot1);
+        }
+        float scale = scales[size_t(row) * (k / 128) + kt / 8];
+        acc0 += dot0 * scale;
+        acc1 += dot1 * scale;
+    }
+    sums0[worker][col] = acc0;
+    sums1[worker][col] = acc1;
+    __syncthreads();
+    if (worker == 0) {
+        for (unsigned i = 1; i < 16; ++i) {
+            acc0 += sums0[i][col];
+            acc1 += sums1[i][col];
+        }
+        size_t off = size_t(row) * n + blockIdx.x * 16 + col;
+        partial0[off] = acc0 * shelf::quantization::exl3::kExl3Int8GridStep;
+        partial1[off] = acc1 * shelf::quantization::exl3::kExl3Int8GridStep;
+    }
+}
+
+template <bool Mixed>
 __global__ void expert_batch16(const int8_t *codes, const float *scales, const Hy4ExpertProjection *matrices,
                                const Hy4Route *routes, const Hy4ExpertBatch *batches, float *partial) {
     __shared__ uint32_t b[32][16], a[16][33];
@@ -152,6 +197,31 @@ __global__ void rotate_output(const float *partial, const uint16_t *svh, uint16_
             logits[offset] = value;
         else
             output[offset] = f32_to_bf16_rne_device(value);
+    }
+}
+
+__global__ void rotate_output_pair(const float *partial0, const float *partial1,
+                                   const Hy4ExpertProjection *matrices, int stride, uint16_t *y0, uint16_t *y1,
+                                   int width, int padded, const Hy4Route *routes) {
+    const auto &mat = matrices[(routes ? routes[blockIdx.y].expert : blockIdx.y) * stride];
+    const uint16_t *svh0 = mat.svh, *svh1 = (&mat)[1].svh;
+    const int base = blockIdx.x * 128 + threadIdx.x * 4;
+    float v0[4], v1[4];
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        size_t off = size_t(blockIdx.y) * padded + base + i;
+        v0[i] = partial0[off];
+        v1[i] = partial1[off];
+    }
+    fwht128(v0[0], v0[1], v0[2], v0[3], threadIdx.x);
+    fwht128(v1[0], v1[1], v1[2], v1[3], threadIdx.x);
+#pragma unroll
+    for (int i = 0; i < 4 && base + i < width; ++i) {
+        size_t off = size_t(blockIdx.y) * width + base + i;
+        float s0 = v0[i] * kInvSqrt128 * f16_bits_to_f32(svh0[base + i]);
+        float s1 = v1[i] * kInvSqrt128 * f16_bits_to_f32(svh1[base + i]);
+        y0[off] = f32_to_bf16_rne_device(s0);
+        y1[off] = f32_to_bf16_rne_device(s1);
     }
 }
 }
@@ -218,6 +288,30 @@ extern "C" hipError_t shelf_hy4_expert_linear(const uint16_t *x, const Hy4Expert
     if (status != hipSuccess)
         return status;
     rotate_output<<<dim3(12, rows), 32>>>(partial, nullptr, y, 1536, 1536, matrices, stride, nullptr, routes);
+    return hipGetLastError();
+}
+
+extern "C" hipError_t shelf_hy4_expert_linear_pair(const uint16_t *x, const Hy4ExpertProjection *matrices,
+                                                   int stride, int8_t *codes, float *scales, float *partial0,
+                                                   float *partial1, uint16_t *y0, uint16_t *y1, int rows,
+                                                   const Hy4Route *routes, int mixed) {
+    if (!x || !matrices || !codes || !scales || !partial0 || !partial1 || !y0 || !y1 || rows < 1 ||
+        rows > 65535 || stride < 2 || !routes)
+        return hipErrorInvalidValue;
+    rotate_input<<<dim3(12, rows), 32>>>(x, nullptr, codes, scales, 1536, 1536, matrices, stride, routes);
+    auto status = hipGetLastError();
+    if (status != hipSuccess)
+        return status;
+    if (mixed)
+        multiply_pair<true><<<dim3(96, rows), 256>>>(codes, scales, matrices, stride, partial0, partial1, 1536,
+                                                     1536, routes);
+    else
+        multiply_pair<false><<<dim3(96, rows), 256>>>(codes, scales, matrices, stride, partial0, partial1, 1536,
+                                                      1536, routes);
+    status = hipGetLastError();
+    if (status != hipSuccess)
+        return status;
+    rotate_output_pair<<<dim3(12, rows), 32>>>(partial0, partial1, matrices, stride, y0, y1, 1536, 1536, routes);
     return hipGetLastError();
 }
 

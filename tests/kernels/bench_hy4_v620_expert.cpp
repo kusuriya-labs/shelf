@@ -32,6 +32,10 @@ struct Args {
     int iters = 30;
     std::string save;
     std::string reference;
+    std::string save2;
+    std::string reference2;
+    bool pair = false;
+    bool twice = false;
 };
 
 Args parse(int argc, char **argv) {
@@ -55,6 +59,14 @@ Args parse(int argc, char **argv) {
             a.save = argv[++i];
         else if (s == "--ref")
             a.reference = argv[++i];
+        else if (s == "--save2")
+            a.save2 = argv[++i];
+        else if (s == "--ref2")
+            a.reference2 = argv[++i];
+        else if (s == "--pair")
+            a.pair = true;
+        else if (s == "--twice")
+            a.twice = true;
         else
             std::exit(2);
     }
@@ -113,9 +125,9 @@ int main(int argc, char **argv) {
 
     uint32_t *trellis = nullptr;
     Hy4ExpertProjection *matrices = nullptr;
-    uint16_t *suha = nullptr, *x = nullptr, *y = nullptr;
+    uint16_t *suha = nullptr, *x = nullptr, *y = nullptr, *y2 = nullptr;
     int8_t *codes = nullptr;
-    float *scales = nullptr, *partial = nullptr;
+    float *scales = nullptr, *partial = nullptr, *partial2 = nullptr;
     Hy4Route *routes = nullptr;
     Hy4ExpertBatch *batches = nullptr;
     check(hipMalloc(&trellis, kExperts * 3 * kWords * sizeof(uint32_t)), "trellis alloc");
@@ -126,6 +138,10 @@ int main(int argc, char **argv) {
     check(hipMalloc(&codes, codes_host.size()), "codes alloc");
     check(hipMalloc(&scales, scales_host.size() * sizeof(float)), "scales alloc");
     check(hipMalloc(&partial, size_t(a.rows) * kCols * sizeof(float)), "partial alloc");
+    if (a.pair) {
+        check(hipMalloc(&partial2, size_t(a.rows) * kCols * sizeof(float)), "partial2 alloc");
+        check(hipMalloc(&y2, size_t(a.rows) * kCols * sizeof(uint16_t)), "y2 alloc");
+    }
     check(hipMalloc(&routes, routes_host.size() * sizeof(Hy4Route)), "routes alloc");
     if (a.groups)
         check(hipMalloc(&batches, batches_host.size() * sizeof(Hy4ExpertBatch)), "batches alloc");
@@ -151,9 +167,19 @@ int main(int argc, char **argv) {
                         hipMemcpyHostToDevice), "batches copy");
 
     auto launch = [&]() {
-        hipError_t e = shelf_hy4_expert_linear(x, matrices, 3, codes, scales, partial, y, a.rows, routes,
-                                               a.groups ? batches : nullptr, a.groups, 0, 0);
-        check(e, "shelf_hy4_expert_linear");
+        hipError_t e;
+        if (a.pair)
+            e = shelf_hy4_expert_linear_pair(x, matrices, 3, codes, scales, partial, partial2, y, y2, a.rows,
+                                             routes, 0);
+        else
+            e = shelf_hy4_expert_linear(x, matrices, 3, codes, scales, partial, y, a.rows, routes,
+                                        a.groups ? batches : nullptr, a.groups, 0, 0);
+        check(e, "expert linear");
+        if (a.twice) {
+            e = shelf_hy4_expert_linear(x, matrices, 3, codes, scales, partial, y, a.rows, routes,
+                                        a.groups ? batches : nullptr, a.groups, 0, 0);
+            check(e, "expert linear second");
+        }
     };
     for (int i = 0; i < a.warmup; ++i)
         launch();
@@ -178,27 +204,23 @@ int main(int argc, char **argv) {
         sum += t;
     printf("rows=%d groups=%d median_ms=%.6f min_ms=%.6f max_ms=%.6f mean_ms=%.6f\n", a.rows, a.groups,
            ms[ms.size() / 2], ms.front(), ms.back(), sum / ms.size());
-    std::vector<uint16_t> y_host(size_t(a.rows) * kCols);
-    check(hipMemcpy(y_host.data(), y, y_host.size() * sizeof(uint16_t), hipMemcpyDeviceToHost), "y copy");
-    if (!a.save.empty()) {
-        std::ofstream out(a.save, std::ios::binary);
-        out.write(reinterpret_cast<const char *>(y_host.data()), y_host.size() * sizeof(uint16_t));
-    }
-    if (!a.reference.empty()) {
-        std::ifstream in(a.reference, std::ios::binary);
-        std::vector<uint16_t> ref(y_host.size());
+    auto verify = [](const std::vector<uint16_t> &actual, const std::string &path) {
+        if (path.empty())
+            return true;
+        std::ifstream in(path, std::ios::binary);
+        std::vector<uint16_t> ref(actual.size());
         in.read(reinterpret_cast<char *>(ref.data()), ref.size() * sizeof(uint16_t));
         if (!in || size_t(in.gcount()) != ref.size() * sizeof(uint16_t)) {
-            fprintf(stderr, "参照ファイルが不正です: %s\n", a.reference.c_str());
-            return 1;
+            fprintf(stderr, "参照ファイルが不正です: %s\n", path.c_str());
+            return false;
         }
         size_t diff = 0, nan = 0;
         double ss = 0, se = 0;
         for (size_t i = 0; i < ref.size(); ++i) {
-            if (y_host[i] != ref[i])
+            if (actual[i] != ref[i])
                 ++diff;
             float r = std::bit_cast<float>(uint32_t(ref[i]) << 16);
-            float v = std::bit_cast<float>(uint32_t(y_host[i]) << 16);
+            float v = std::bit_cast<float>(uint32_t(actual[i]) << 16);
             if (!std::isfinite(r) || !std::isfinite(v))
                 ++nan;
             ss += double(r) * r;
@@ -206,9 +228,26 @@ int main(int argc, char **argv) {
         }
         printf("verify elements=%zu diff=%zu nan=%zu bit_exact=%s relative_l2=%.9g\n", ref.size(), diff, nan,
                diff ? "no" : "yes", ss > 0 && std::isfinite(ss) ? std::sqrt(se / ss) : -1.0);
-        if (diff || nan)
-            return 1;
+        return diff == 0 && nan == 0;
+    };
+    std::vector<uint16_t> y_host(size_t(a.rows) * kCols);
+    check(hipMemcpy(y_host.data(), y, y_host.size() * sizeof(uint16_t), hipMemcpyDeviceToHost), "y copy");
+    if (!a.save.empty()) {
+        std::ofstream out(a.save, std::ios::binary);
+        out.write(reinterpret_cast<const char *>(y_host.data()), y_host.size() * sizeof(uint16_t));
     }
+    bool ok = verify(y_host, a.reference);
+    if (a.pair) {
+        std::vector<uint16_t> y2_host(size_t(a.rows) * kCols);
+        check(hipMemcpy(y2_host.data(), y2, y2_host.size() * sizeof(uint16_t), hipMemcpyDeviceToHost), "y2 copy");
+        if (!a.save2.empty()) {
+            std::ofstream out(a.save2, std::ios::binary);
+            out.write(reinterpret_cast<const char *>(y2_host.data()), y2_host.size() * sizeof(uint16_t));
+        }
+        ok = verify(y2_host, a.reference2) && ok;
+    }
+    if (!ok)
+        return 1;
     check(hipEventDestroy(begin), "event destroy begin");
     check(hipEventDestroy(end), "event destroy end");
     return 0;
