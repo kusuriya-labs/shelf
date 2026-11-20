@@ -44,7 +44,7 @@ build/shelf-compute hy4 generate --model-dir /path/to/model --engram-dir /path/t
   --input-ids-file prompt.ids --max-new-tokens 256 --chunk 1024 --temperature 0
 ```
 
-TP の all-reduce は bf16 で行うため、EP のみの構成と token 列が完全一致するとは限らない。数値の比較は logits の相対誤差で行う。複数台の R9700 による実機の長時間運用は未検証である。
+TP の all-reduce は bf16 で行うため、EP のみの構成と token 列が完全一致するとは限らない。数値の比較は logits の相対誤差で行う。`generate` で Engram を先に populate する場合は `SHELF_HY4_ENGRAM_POPULATE=1` を指定する。複数台の R9700 による実機の長時間運用は未検証である。
 
 ## Engram の起動時読み込み
 
