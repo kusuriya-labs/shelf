@@ -169,17 +169,51 @@ Result<RT::ValueId> emit_qwen4exp_moe(Emitter& em,
         em.emit(RT::PrimitiveNode{n}, {shared_logit}, {shared_weight});
     }
 
-    const RT::ValueId output = em.value(geometry.hidden);
-    {
+    RT::ValueId output = em.value(geometry.hidden);
+    if (!geometry.ep_enabled) {
         RT::MoeCombineNode n;
         n.shape = RT::RowwiseShapeKey{geometry.hidden};
         n.top_k = geometry.top_k;
         em.emit(RT::PrimitiveNode{n}, {expert_out, shared_out, shared_weight}, {output});
+        em.pg.nodes.back().debug_name = std::string(debug_prefix) + "moe_combine";
+        em.pg.nodes.back().tp_combine = 1;
+        return output;
     }
-    // The routed experts are an expert-axis partial sum; the shared expert is already
-    // complete on the contributing rank.
-    em.pg.nodes.back().debug_name = std::string(debug_prefix) + "moe_combine";
+    RT::ValueId routed = em.value(geometry.hidden);
+    {
+        RT::MoeCombineNode n;
+        n.shape = RT::RowwiseShapeKey{geometry.hidden};
+        n.top_k = geometry.top_k;
+        n.include_shared = false;
+        em.emit(RT::PrimitiveNode{n}, {expert_out, shared_out, shared_weight}, {routed});
+        em.pg.nodes.back().debug_name = std::string(debug_prefix) + "moe_routed_combine";
+    }
+    if (geometry.tp_size > 1u) {
+        RT::ValueId scaled = em.value(geometry.hidden);
+        em.emit(RT::PrimitiveNode{RT::ScaleNode{RT::RowwiseShapeKey{geometry.hidden},
+                                                1.0f / geometry.tp_size}},
+                {routed}, {scaled});
+        em.pg.nodes.back().debug_name = std::string(debug_prefix) + "moe_routed_tp_scale";
+        routed = scaled;
+    }
     em.pg.nodes.back().tp_combine = 1;
+    em.pg.nodes.back().ep_combine = 1;
+    RT::ValueId shared_contribution = em.value(geometry.hidden);
+    {
+        RT::MoeCombineNode n;
+        n.shape = RT::RowwiseShapeKey{geometry.hidden};
+        n.top_k = geometry.top_k;
+        n.include_experts = false;
+        em.emit(RT::PrimitiveNode{n}, {expert_out, shared_out, shared_weight},
+                {shared_contribution});
+        em.pg.nodes.back().debug_name = std::string(debug_prefix) + "moe_shared_combine";
+        em.pg.nodes.back().tp_combine = 1;
+    }
+    {
+        RT::ResidualAddNode add{RT::RowwiseShapeKey{geometry.hidden}};
+        em.emit(RT::PrimitiveNode{add}, {routed, shared_contribution}, {output});
+        em.pg.nodes.back().debug_name = std::string(debug_prefix) + "moe_combine";
+    }
     return output;
 }
 

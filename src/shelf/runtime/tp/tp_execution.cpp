@@ -66,7 +66,10 @@ void try_fuse_combine_consumer(const PrimitiveGraph& graph, const Program& progr
 
 Result<TpExecutionSchedule> build_tp_execution_schedule(
     const PrimitiveGraph& graph,
-    const Program& program) {
+    const Program& program,
+    std::uint32_t tp_size,
+    std::uint32_t ep_size,
+    bool ep_enabled) {
     if (program.dispatch_source_node.size() != program.dispatches.size()) {
         return Status::invalid_argument(
             "dispatch source node map does not match dispatches", __FILE__, __LINE__);
@@ -107,9 +110,40 @@ Result<TpExecutionSchedule> build_tp_execution_schedule(
             current.combine_local_cols = node.tp_combine_local_cols;
             try_fuse_combine_consumer(graph, program, group_end, combine, current);
             const uint32_t next_begin = current.dispatch_end;
-            schedule.segments.push_back(current);
-            current = TpProgramSegment{};
-            current.dispatch_begin = next_begin;
+            const bool ep_reduce = ep_enabled && node.ep_combine != 0u && ep_size > 1u;
+            const bool tp_reduce = tp_size > 1u;
+            bool pushed = false;
+            if (ep_reduce && !tp_reduce) {
+                current.ep_scope = true;
+                schedule.segments.push_back(current);
+                pushed = true;
+            } else {
+                if (tp_reduce) {
+                    schedule.segments.push_back(current);
+                    pushed = true;
+                }
+                if (ep_reduce) {
+                    TpProgramSegment ep_segment;
+                    ep_segment.dispatch_begin = next_begin;
+                    ep_segment.dispatch_end = next_begin;
+                    ep_segment.producer_end = next_begin;
+                    ep_segment.barrier_after = TpBarrierKind::SumHidden;
+                    ep_segment.ep_scope = true;
+                    ep_segment.combine_value = combine;
+                    schedule.segments.push_back(ep_segment);
+                    pushed = true;
+                }
+            }
+            if (pushed) {
+                current = TpProgramSegment{};
+                current.dispatch_begin = next_begin;
+            } else {
+                current.barrier_after = TpBarrierKind::None;
+                current.combine_value = ValueId{};
+                current.combine_local_cols = 0;
+                current.fusion = TpCombineFusion::None;
+                current.ep_scope = false;
+            }
         }
         i = group_end;
     }

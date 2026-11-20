@@ -29,7 +29,8 @@ __global__ void __launch_bounds__(kCombineThreads) moe_combine_kernel(
     uint32_t features,
     uint32_t expert_row_stride,
     uint32_t shared_row_stride,
-    uint32_t shared_gate_row_stride) {
+    uint32_t shared_gate_row_stride,
+    bool include_experts) {
     const uint32_t t = blockIdx.x;
     if (t >= rows)
         return;
@@ -70,13 +71,15 @@ __global__ void __launch_bounds__(kCombineThreads) moe_combine_kernel(
     if (f >= features)
         return;
     float acc = 0.0f;
-    for (uint32_t j = 0; j < top_k; ++j) {
-        const int32_t row = s_row[j];
-        if (row < 0)
-            continue;
-        const float value =
-            bf16_f32(expert_output[static_cast<size_t>(row) * expert_row_stride + f]);
-        acc = __fmaf_rn(s_weight[j], value, acc);
+    if (include_experts) {
+        for (uint32_t j = 0; j < top_k; ++j) {
+            const int32_t row = s_row[j];
+            if (row < 0)
+                continue;
+            const float value =
+                bf16_f32(expert_output[static_cast<size_t>(row) * expert_row_stride + f]);
+            acc = __fmaf_rn(s_weight[j], value, acc);
+        }
     }
     if (shared_output != nullptr) {
         const float shared_value = bf16_f32(shared_output[shared_base + f]);
@@ -100,10 +103,11 @@ hipError_t launch_moe_combine(
     uint32_t expert_row_stride,
     uint32_t shared_row_stride,
     uint32_t shared_gate_row_stride,
+    bool include_experts,
     hipStream_t stream) {
-    if (output == nullptr || expert_output == nullptr || sel_weight == nullptr ||
-        slot_row_of == nullptr)
+    if (output == nullptr || sel_weight == nullptr || slot_row_of == nullptr)
         return hipErrorInvalidValue;
+    if (include_experts && expert_output == nullptr) return hipErrorInvalidValue;
     if ((shared_output == nullptr) != (shared_gate_weight == nullptr))
         return hipErrorInvalidValue;
     if (rows == 0u || features == 0u)
@@ -119,7 +123,8 @@ hipError_t launch_moe_combine(
     const dim3 grid(rows, (features + kCombineThreads - 1u) / kCombineThreads);
     moe_combine_kernel<<<grid, kCombineThreads, 0, stream>>>(
         output, expert_output, sel_weight, slot_row_of, shared_output, shared_gate_weight, rows, top_k,
-        features, expert_row_stride, shared_row_stride, shared_gate_row_stride);
+        features, expert_row_stride, shared_row_stride, shared_gate_row_stride,
+        include_experts);
     return hipGetLastError();
 }
 

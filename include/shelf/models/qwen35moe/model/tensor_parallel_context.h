@@ -18,4 +18,14 @@ Result<shelf::qwen_hybrid::TensorParallelContext> make_qwen35moe_tensor_parallel
     std::uint32_t tp_rank,
     bool vocab_parallel_lm_head = false);
 
+// The routed experts follow (ep_rank, ep_size). The shared expert and the backbone still
+// follow (tp_rank, tp_size). The collective is over the whole EP x TP rank group.
+Result<shelf::qwen_hybrid::TensorParallelContext> make_qwen35moe_tensor_parallel_context(
+    const Qwen35MoeTextConfig& config,
+    std::uint32_t tp_size,
+    std::uint32_t tp_rank,
+    std::uint32_t ep_size,
+    std::uint32_t ep_rank,
+    bool vocab_parallel_lm_head = false);
+
 }  // namespace shelf::qwen35moe

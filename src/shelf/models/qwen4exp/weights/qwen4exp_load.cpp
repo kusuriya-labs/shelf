@@ -191,7 +191,8 @@ bool quantized_lm_head_shardable(const QuantizedLmHeadSummary& head,
 Result<TensorPartitionPlan> build_tp_plan(const Qwen4ExpTextConfig& config,
                                           std::uint32_t tp_size,
                                           std::uint32_t tp_rank,
-                                          bool shard_lm_head) {
+                                          bool shard_lm_head,
+                                          std::uint32_t ep_size) {
     TensorPartitionPlan plan;
     plan.tp_size = tp_size;
     plan.tp_rank = tp_rank;
@@ -200,8 +201,9 @@ Result<TensorPartitionPlan> build_tp_plan(const Qwen4ExpTextConfig& config,
         return Status::unsupported("Qwen4Exp load path supports TP=2 or TP=4",
                                    __FILE__, __LINE__);
     }
-    if (config.ffn.num_experts == 0u || (config.ffn.num_experts % tp_size) != 0u) {
-        return Status::unsupported("Qwen4Exp num_experts must divide by tp_size", __FILE__,
+    if (ep_size == 0u) ep_size = tp_size;
+    if (config.ffn.num_experts == 0u || (config.ffn.num_experts % ep_size) != 0u) {
+        return Status::unsupported("Qwen4Exp num_experts must divide by ep_size", __FILE__,
                                    __LINE__);
     }
     auto body_result = qhy::build_hybrid_partition(config, tp_size, tp_rank);
@@ -877,7 +879,8 @@ Status load_moe(const qqb::QuantizedModelReader& reader, const std::string& pref
                 std::uint32_t tp_rank, std::uint32_t host_experts,
                 shelf::weights::PinnedHostArena& host_arena, GpuArena& arena,
                 hipStream_t stream, const WeightLoadOptions& options,
-                Qwen4ExpMoeWeights& out) {
+                Qwen4ExpMoeWeights& out, std::uint32_t ep_size = 0u,
+                std::uint32_t ep_rank = 0u) {
     Status st = load_matrix(reader, prefix + "mlp.gate.weight", arena, stream, options,
                             out.router);
     if (!st.ok()) return st;
@@ -895,8 +898,9 @@ Status load_moe(const qqb::QuantizedModelReader& reader, const std::string& pref
     if (!st.ok()) return st;
 
     const std::uint32_t global_experts = static_cast<std::uint32_t>(config.ffn.num_experts);
-    const std::uint32_t local_experts = global_experts / tp_size;
-    const std::uint32_t expert_begin = tp_rank * local_experts;
+    if (ep_size == 0u) ep_size = tp_size;
+    const std::uint32_t local_experts = global_experts / ep_size;
+    const std::uint32_t expert_begin = ep_rank * local_experts;
     const std::uint32_t hidden = static_cast<std::uint32_t>(config.hidden_size);
     const std::uint32_t intermediate =
         static_cast<std::uint32_t>(config.ffn.moe_intermediate_size);
@@ -1068,7 +1072,8 @@ std::uint64_t Qwen4ExpRankWeights::host_expert_bytes() const noexcept {
 
 std::vector<std::string> qwen4exp_rank_logical_names(
     const Qwen4ExpTextConfig& config, std::uint32_t tp_size, std::uint32_t tp_rank,
-    bool load_mtp, bool mtp_only, const qhy::PipelineStage& stage) {
+    bool load_mtp, bool mtp_only, const qhy::PipelineStage& stage,
+    std::uint32_t ep_size, std::uint32_t ep_rank) {
     const bool stage_load = stage.enabled;
     const bool load_embed = !stage_load || stage.first();
     const bool load_final = !stage_load || stage.last(config.num_hidden_layers);
@@ -1089,9 +1094,10 @@ std::vector<std::string> qwen4exp_rank_logical_names(
         }
         return names;
     }
+    if (ep_size == 0u) ep_size = tp_size;
     const std::uint32_t local_experts =
-        static_cast<std::uint32_t>(config.ffn.num_experts) / tp_size;
-    const std::uint32_t expert_begin = tp_rank * local_experts;
+        static_cast<std::uint32_t>(config.ffn.num_experts) / ep_size;
+    const std::uint32_t expert_begin = ep_rank * local_experts;
     const std::size_t layer_lo = stage_load ? stage.layer_lo() : 0u;
     const std::size_t layer_hi = stage_load ? stage.layer_hi() : config.num_hidden_layers;
     for (std::size_t layer = layer_lo; layer < layer_hi; ++layer) {
@@ -1131,6 +1137,10 @@ Result<Qwen4ExpRankWeights> load_qwen4exp_rank(const std::string& model_dir,
     auto config_result = read_qwen4exp_text_config(model_dir);
     if (!config_result.ok()) return config_result.status();
     const Qwen4ExpTextConfig& config = config_result.value();
+    const std::uint32_t ep_size =
+        options.ep_size == 0u ? options.tp_size : options.ep_size;
+    const std::uint32_t ep_rank =
+        options.ep_size == 0u ? options.tp_rank : options.ep_rank;
     if (options.stage.enabled && options.tp_size > 1u) {
         return Status::unsupported(
             "a pipeline stage of a Qwen4Exp expert-axis rank is not wired", __FILE__, __LINE__);
@@ -1149,14 +1159,14 @@ Result<Qwen4ExpRankWeights> load_qwen4exp_rank(const std::string& model_dir,
     const bool shard_lm_head =
         read_quantized_lm_head_summary(model_dir, lm_head_summary) &&
         quantized_lm_head_shardable(lm_head_summary, options.tp_size);
-    auto plan_result =
-        build_tp_plan(config, options.tp_size, options.tp_rank, shard_lm_head);
+    auto plan_result = build_tp_plan(config, options.tp_size, options.tp_rank,
+                                     shard_lm_head, ep_size);
     if (!plan_result.ok()) return plan_result.status();
     const TensorPartitionPlan& plan = plan_result.value();
 
     const std::vector<std::string> names = qwen4exp_rank_logical_names(
         config, options.tp_size, options.tp_rank, options.load_mtp, options.mtp_only,
-        options.stage);
+        options.stage, ep_size, ep_rank);
     auto reader_result = qhy::open_quantized_model_reader(
         model_dir, names, options.verify_quantized_payload_crc);
     if (!reader_result.ok()) return reader_result.status();
@@ -1207,7 +1217,7 @@ Result<Qwen4ExpRankWeights> load_qwen4exp_rank(const std::string& model_dir,
             if (!st.ok()) return st;
             st = load_moe(reader, prefix, config, options.tp_size, options.tp_rank,
                           options.moe_host_experts, out.expert_host, arena, stream,
-                          weight_options, weights.mlp);
+                          weight_options, weights.mlp, ep_size, ep_rank);
             if (!st.ok()) return st;
             if (config.layer_has_ple(layer)) {
                 st = load_ple(reader, prefix, arena, stream, weight_options, weights.ple);
@@ -1289,7 +1299,8 @@ Result<Qwen4ExpRankWeights> load_qwen4exp_rank(const std::string& model_dir,
 
     Status valid = options.stage.enabled
         ? validate_qwen4exp_stage(out, config, options.stage)
-        : validate_qwen4exp_rank(out, config, options.tp_size, options.tp_rank);
+        : validate_qwen4exp_rank(out, config, options.tp_size, options.tp_rank,
+                                 ep_size, ep_rank);
     if (!valid.ok()) return valid;
     return out;
 }
@@ -1461,7 +1472,21 @@ Status expect_experts(const MatrixWeight& w, const MatrixWeight& host,
 Status validate_qwen4exp_rank(const Qwen4ExpRankWeights& weights,
                               const Qwen4ExpTextConfig& config,
                               std::uint32_t tp_size,
-                              std::uint32_t tp_rank) {
+                              std::uint32_t tp_rank,
+                              std::uint32_t ep_size,
+                              std::uint32_t ep_rank) {
+    if (ep_size == 0u) {
+        ep_size = tp_size;
+        ep_rank = tp_rank;
+    }
+    if (ep_size != 0u && (ep_size > 4u || (512u % ep_size) != 0u)) {
+        return Status::unsupported("Qwen4Exp validation supports ep_size 1, 2 or 4", __FILE__,
+                                   __LINE__);
+    }
+    if (ep_size != 0u && ep_rank >= ep_size) {
+        return Status::invalid_argument("Qwen4Exp validation ep_rank out of range", __FILE__,
+                                        __LINE__);
+    }
     if (tp_size == 0u || tp_size > 4u || (512u % tp_size) != 0u) {
         return Status::unsupported("Qwen4Exp validation supports tp_size 1, 2 or 4", __FILE__,
                                    __LINE__);
@@ -1480,8 +1505,9 @@ Status validate_qwen4exp_rank(const Qwen4ExpRankWeights& weights,
     const std::uint32_t stream_width = hc_count * hidden;
     const std::uint32_t vocab = static_cast<std::uint32_t>(config.vocab_size);
     const std::uint32_t global_experts = static_cast<std::uint32_t>(config.ffn.num_experts);
-    const std::uint32_t local_experts = global_experts / tp_size;
-    const std::uint32_t expert_begin = tp_rank * local_experts;
+    if (ep_size == 0u) ep_size = tp_size;
+    const std::uint32_t local_experts = global_experts / ep_size;
+    const std::uint32_t expert_begin = ep_rank * local_experts;
     const std::uint32_t intermediate =
         static_cast<std::uint32_t>(config.ffn.moe_intermediate_size);
     const std::uint32_t shared_intermediate =

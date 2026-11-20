@@ -390,6 +390,8 @@ struct Executor {
     std::vector<::shelf::runtime::TpExecutionSchedule> tp_schedules;
     ::shelf::runtime::TpBarrierHook* tp_barrier = nullptr;
     int tp_rank = 0;
+    ::shelf::runtime::TpBarrierHook* ep_barrier = nullptr;
+    int ep_rank = 0;
     gpu::Tensor execution_status;
     gpu::Tensor execution_workspace;
     ::shelf::runtime::WeightSlot* host_weight_table = nullptr;

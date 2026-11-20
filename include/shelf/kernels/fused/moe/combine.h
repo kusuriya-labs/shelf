@@ -35,6 +35,27 @@ hipError_t launch_moe_combine(
     uint32_t expert_row_stride,
     uint32_t shared_row_stride,
     uint32_t shared_gate_row_stride,
+    bool include_experts,
     hipStream_t stream);
+
+inline hipError_t launch_moe_combine(
+    shelf::bf16_t* output,
+    const shelf::bf16_t* expert_output,
+    const float* sel_weight,
+    const int32_t* slot_row_of,
+    const shelf::bf16_t* shared_output,
+    const float* shared_gate_weight,
+    uint32_t rows,
+    uint32_t top_k,
+    uint32_t features,
+    uint32_t expert_row_stride,
+    uint32_t shared_row_stride,
+    uint32_t shared_gate_row_stride,
+    hipStream_t stream) {
+    return launch_moe_combine(output, expert_output, sel_weight, slot_row_of,
+                              shared_output, shared_gate_weight, rows, top_k, features,
+                              expert_row_stride, shared_row_stride, shared_gate_row_stride,
+                              true, stream);
+}
 
 }  // namespace shelf::kernel

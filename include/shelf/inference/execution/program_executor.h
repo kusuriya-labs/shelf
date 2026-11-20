@@ -153,7 +153,9 @@ Status execute_program_tp_ranges(
     hipStream_t stream,
     const ::shelf::runtime::TpExecutionSchedule& schedule,
     ::shelf::runtime::TpBarrierHook* barrier,
-    int rank);
+    int rank,
+    ::shelf::runtime::TpBarrierHook* ep_barrier = nullptr,
+    int ep_rank = 0);
 
 Result<HostResolvedValue> resolve_host_value(
     const ::shelf::runtime::Program& program,

@@ -274,7 +274,7 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     if (config_.pipeline_parallel > 1) {
         return initialize_pipeline_parallel();
     }
-    if (config_.tp > 1) {
+    if (config_.tp > 1 || config_.expert_parallel > 1u) {
         return initialize_tensor_parallel();
     }
 
@@ -685,10 +685,14 @@ Status Qwen35ComputeRuntime::initialize_pipeline_parallel() {
         for (std::uint32_t stage = 0; stage < config_.pipeline_parallel; ++stage) {
             qwen35::runtime::TpCoordinatorConfig tp;
             tp.model_dir = config_.model_dir;
-            tp.devices.reserve(config_.tp);
-            for (std::uint32_t t = 0; t < config_.tp; ++t) {
-                tp.devices.push_back(config_.devices[parallel_rank(
-                    stage, 0u, t, config_.expert_parallel, config_.tp)]);
+            tp.tensor_parallel = config_.tp;
+            tp.expert_parallel = config_.expert_parallel;
+            tp.devices.reserve(static_cast<std::size_t>(config_.expert_parallel) * config_.tp);
+            for (std::uint32_t e = 0; e < config_.expert_parallel; ++e) {
+                for (std::uint32_t t = 0; t < config_.tp; ++t) {
+                    tp.devices.push_back(config_.devices[parallel_rank(
+                        stage, e, t, config_.expert_parallel, config_.tp)]);
+                }
             }
             tp.max_batch_rows = exec_max_tokens_;
             tp.max_scheduled_requests = config_.max_concurrent_requests;
@@ -795,6 +799,8 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
     qwen35::runtime::TpCoordinatorConfig tp_config;
     tp_config.model_dir = config_.model_dir;
     tp_config.devices = config_.devices;
+    tp_config.tensor_parallel = config_.tp;
+    tp_config.expert_parallel = config_.expert_parallel;
     tp_config.max_batch_rows = exec_max_tokens_;
     tp_config.max_scheduled_requests = config_.max_concurrent_requests;
     tp_config.max_scheduled_output_rows = config_.max_scheduled_output_rows;

@@ -470,14 +470,15 @@ Status launch_program_run(
     if (!executor.tp_schedules.empty()) {
         if (program_index >= executor.tp_schedules.size() ||
             !executor.tp_schedules[program_index].active() ||
-            executor.tp_barrier == nullptr) {
+            (executor.tp_barrier == nullptr && executor.ep_barrier == nullptr)) {
             return Status::invalid_state(
                 "tp execution schedule is active but cannot be launched",
                 __FILE__, __LINE__);
         }
         run = runtime::execute_program_tp_ranges(
             program, ctx, stream, executor.tp_schedules[program_index],
-            executor.tp_barrier, executor.tp_rank);
+            executor.tp_barrier, executor.tp_rank,
+            executor.ep_barrier, executor.ep_rank);
     } else {
         run = runtime::execute_program_range(program, ctx, stream, 0u, dispatch_count);
     }
@@ -1381,6 +1382,8 @@ Executor::Executor(Executor&& other) noexcept
       tp_schedules(std::move(other.tp_schedules)),
       tp_barrier(other.tp_barrier),
       tp_rank(other.tp_rank),
+      ep_barrier(other.ep_barrier),
+      ep_rank(other.ep_rank),
       execution_status(std::move(other.execution_status)),
       execution_workspace(std::move(other.execution_workspace)),
       host_weight_table(other.host_weight_table),
@@ -1533,6 +1536,10 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         other.tp_barrier = nullptr;
         tp_rank = other.tp_rank;
         other.tp_rank = 0;
+        ep_barrier = other.ep_barrier;
+        other.ep_barrier = nullptr;
+        ep_rank = other.ep_rank;
+        other.ep_rank = 0;
         host_weight_table = other.host_weight_table;
         other.host_weight_table = nullptr;
         host_parameter_table = other.host_parameter_table;
@@ -2381,11 +2388,16 @@ Result<Executor> create_executor(
                     "PLE conv state layer count does not match the lowered program",
                     __FILE__, __LINE__);
 
-            if (config.tp != nullptr && config.tp->tp_size > 1) {
+            if (config.tp != nullptr &&
+                (config.tp->tp_size > 1 || config.tp->ep_enabled)) {
                 ex.tp_schedules.reserve(::shelf::runtime::ProgramSet::kRowBucketCount);
                 for (const auto& prog : built_set.programs) {
                     auto schedule_res =
-                        ::shelf::runtime::build_tp_execution_schedule(lowered_graph, prog);
+                        ::shelf::runtime::build_tp_execution_schedule(
+                            lowered_graph, prog,
+                            config.tp != nullptr ? config.tp->tp_size : 1u,
+                            config.tp != nullptr ? config.tp->ep_size : 1u,
+                            config.tp != nullptr && config.tp->ep_enabled);
                     if (!schedule_res.ok()) {
                         shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
                         return schedule_res.status();

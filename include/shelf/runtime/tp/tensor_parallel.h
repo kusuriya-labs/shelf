@@ -88,6 +88,9 @@ struct TpRankRuntimeConfig {
     MtpBatchReserveFn mtp_reserve;
     std::uint32_t tp_size = 1;
     std::uint32_t tp_rank = 0;
+    std::uint32_t ep_size = 1;
+    std::uint32_t ep_rank = 0;
+    bool ep_enabled = false;
     int device_id = 0;
     std::uint32_t max_batch_rows = 0;
     std::uint32_t max_scheduled_requests = 0;
@@ -199,6 +202,11 @@ struct TpCoordinatorConfig {
     TpRankModelPrefetch prefetch_rank_model = nullptr;
     TpRankModelRelease release_rank_model = nullptr;
     std::vector<int> devices;
+    // The mesh inside one pipeline stage: expert_parallel groups of tensor_parallel ranks.
+    // tensor_parallel == 0 uses the whole device list as one TP group (EP=1).
+    std::uint32_t pipeline_rank = 0;
+    std::uint32_t tensor_parallel = 0;
+    std::uint32_t expert_parallel = 1;
     std::uint32_t max_batch_rows = 0;
     std::uint32_t max_scheduled_requests = 0;
     std::uint32_t max_scheduled_output_rows = 0;
@@ -230,6 +238,15 @@ struct TpCoordinatorConfig {
     bool load_mtp_layers = false;
     ::shelf::qwen_hybrid::PipelineStage pipeline_stage;
     MtpBatchReserveConfig mtp_batch;
+};
+
+// The logical coordinate of one rank in the PP x EP x TP mesh. Device order inside a
+// pipeline stage is (expert * tensor_parallel + tensor), i.e. PP > EP > TP.
+struct TpMeshRank {
+    std::uint32_t pipeline = 0;
+    std::uint32_t expert = 0;
+    std::uint32_t tensor = 0;
+    int device = -1;
 };
 
 class TpCoordinator final : public TpBatchHook {
@@ -293,8 +310,17 @@ private:
 
     std::vector<int> devices_;
     std::vector<std::unique_ptr<TpRankRuntime>> ranks_;
-    std::unique_ptr<::shelf::runtime::TpTransport> transport_;
-    std::unique_ptr<::shelf::runtime::TpBarrierGroup> barrier_group_;
+
+    struct ReduceGroup {
+        std::vector<int> devices;
+        std::unique_ptr<::shelf::runtime::TpTransport> transport;
+        std::unique_ptr<::shelf::runtime::TpBarrierGroup> barrier;
+    };
+
+    std::vector<TpMeshRank> coordinates_;
+    std::vector<ReduceGroup> tp_groups_;
+    ReduceGroup ep_group_;
+    bool explicit_ep_ = false;
     std::vector<std::unique_ptr<Worker>> workers_;
     std::unordered_map<std::uint64_t, MirrorSequences> mirrors_;
 };

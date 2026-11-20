@@ -382,7 +382,9 @@ std::uint64_t TpRankRuntime::gdn_state_bytes() const {
 }
 
 const char* TpCoordinator::transport_name() const noexcept {
-    return transport_ != nullptr ? transport_->name() : "none";
+    return !tp_groups_.empty() && tp_groups_.front().transport != nullptr
+        ? tp_groups_.front().transport->name()
+        : "none";
 }
 
 Result<std::unique_ptr<TpCoordinator>> TpCoordinator::create(
@@ -400,6 +402,22 @@ Result<std::unique_ptr<TpCoordinator>> TpCoordinator::create(
 
 Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
     devices_ = config.devices;
+    const std::uint32_t tp_size = config.tensor_parallel == 0u
+        ? static_cast<std::uint32_t>(devices_.size())
+        : config.tensor_parallel;
+    // Without an explicit EP group the routed experts follow the TP ranks (legacy layout):
+    // the expert group overlaps the tensor group instead of adding a device axis.
+    const bool explicit_ep = config.expert_parallel > 1u;
+    const std::uint32_t ep_size = explicit_ep ? config.expert_parallel : tp_size;
+    const std::size_t expected_devices = explicit_ep
+        ? static_cast<std::size_t>(ep_size) * tp_size
+        : tp_size;
+    if (devices_.empty() || tp_size == 0u || ep_size == 0u ||
+        devices_.size() != expected_devices) {
+        return Status::invalid_argument(
+            "tp coordinator device count does not match tensor_parallel / expert_parallel",
+            __FILE__, __LINE__);
+    }
     if (config.memory == nullptr) {
         return Status::invalid_argument(
             "tp coordinator requires a GpuMemoryManager", __FILE__, __LINE__);
@@ -423,10 +441,6 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
             });
     }
 
-    auto transport_result = ::shelf::runtime::create_tp_transport(devices_);
-    if (!transport_result.ok()) return transport_result.status();
-    transport_ = std::move(transport_result.value().transport);
-
     struct RankSlot {
         std::unique_ptr<TpRankRuntime> runtime;
         Status status = Status::make_ok();
@@ -437,8 +451,11 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
     for (std::size_t r = 0; r < devices_.size(); ++r) {
         TpRankRuntimeConfig rank_config;
         rank_config.model_dir = config.model_dir;
-        rank_config.tp_size = static_cast<std::uint32_t>(devices_.size());
-        rank_config.tp_rank = static_cast<std::uint32_t>(r);
+        rank_config.tp_size = tp_size;
+        rank_config.tp_rank = static_cast<std::uint32_t>(r % tp_size);
+        rank_config.ep_size = ep_size;
+        rank_config.ep_rank = static_cast<std::uint32_t>(r / tp_size);
+        rank_config.ep_enabled = explicit_ep;
         rank_config.device_id = devices_[r];
         rank_config.max_batch_rows = config.max_batch_rows;
         rank_config.max_scheduled_requests = config.max_scheduled_requests;
@@ -492,23 +509,80 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
         ranks_.push_back(std::move(slot.runtime));
     }
 
-    Status verify_status = transport_->verify();
-    if (!verify_status.ok()) {
-        std::fprintf(stderr,
-                     "[tp] transport %s failed verification (%s); falling back to "
-                     "host-mediated reference transport\n",
-                     transport_->name(), verify_status.message().c_str());
-        transport_ = std::make_unique<::shelf::runtime::HostMediatedTpTransport>(devices_);
+    explicit_ep_ = explicit_ep;
+    coordinates_.reserve(devices_.size());
+    for (std::uint32_t e = 0; e < ep_size; ++e) {
+        for (std::uint32_t t = 0; t < tp_size; ++t) {
+            const std::size_t index = static_cast<std::size_t>(e) * tp_size + t;
+            coordinates_.push_back(TpMeshRank{
+                .pipeline = config.pipeline_rank,
+                .expert = e,
+                .tensor = t,
+                .device = devices_[index],
+            });
+        }
     }
 
-    barrier_group_ = std::make_unique<::shelf::runtime::TpBarrierGroup>(
-        static_cast<int>(devices_.size()), devices_, transport_.get());
-    Status barrier_status = barrier_group_->initialize();
-    if (!barrier_status.ok()) return barrier_status;
+    auto make_group = [&](const std::vector<std::size_t>& members)
+        -> Result<ReduceGroup> {
+        ReduceGroup group;
+        for (std::size_t r : members) group.devices.push_back(coordinates_[r].device);
+        if (group.devices.size() < 2u) return group;
+        auto transport_result = ::shelf::runtime::create_tp_transport(group.devices);
+        if (!transport_result.ok()) return transport_result.status();
+        group.transport = std::move(transport_result.value().transport);
+        auto verify_status = group.transport->verify();
+        if (!verify_status.ok()) {
+            std::fprintf(stderr,
+                         "[tp] transport %s failed verification (%s); falling back to "
+                         "host-mediated reference transport\n",
+                         group.transport->name(), verify_status.message().c_str());
+            group.transport =
+                std::make_unique<::shelf::runtime::HostMediatedTpTransport>(group.devices);
+        }
+        group.barrier = std::make_unique<::shelf::runtime::TpBarrierGroup>(
+            static_cast<int>(group.devices.size()), group.devices, group.transport.get());
+        Status barrier_status = group.barrier->initialize();
+        if (!barrier_status.ok()) return barrier_status;
+        return group;
+    };
+
+    for (std::uint32_t e = 0; e < (explicit_ep ? ep_size : 1u); ++e) {
+        std::vector<std::size_t> members;
+        for (std::size_t r = 0; r < coordinates_.size(); ++r) {
+            if (coordinates_[r].expert == e) members.push_back(r);
+        }
+        auto group = make_group(members);
+        if (!group.ok()) return group.status();
+        tp_groups_.push_back(group.release());
+    }
+    if (explicit_ep) {
+        std::vector<std::size_t> members;
+        for (std::size_t r = 0; r < coordinates_.size(); ++r) {
+            if (coordinates_[r].tensor == 0u) members.push_back(r);
+        }
+        auto group = make_group(members);
+        if (!group.ok()) return group.status();
+        ep_group_ = group.release();
+    }
 
     for (std::size_t r = 0; r < ranks_.size(); ++r) {
-        ranks_[r]->executor().tp_barrier = barrier_group_.get();
-        ranks_[r]->executor().tp_rank = static_cast<int>(r);
+        const TpMeshRank& coord = coordinates_[r];
+        auto& executor = ranks_[r]->executor();
+        if (explicit_ep) {
+            const std::size_t group_index = coord.expert;
+            executor.tp_barrier = tp_groups_[group_index].barrier.get();
+            executor.tp_rank = static_cast<int>(coord.tensor);
+            executor.ep_barrier = ep_group_.barrier.get();
+            executor.ep_rank = static_cast<int>(coord.expert);
+            std::fprintf(stderr, "TPMESH rank=%zu pp=%u ep=%u tp=%u tp_bar=%p ep_bar=%p\n",
+                         r, coord.pipeline, coord.expert, coord.tensor,
+                         static_cast<void*>(executor.tp_barrier),
+                         static_cast<void*>(executor.ep_barrier));
+        } else {
+            executor.tp_barrier = tp_groups_.front().barrier.get();
+            executor.tp_rank = static_cast<int>(r);
+        }
     }
 
     workers_.reserve(ranks_.size());
@@ -534,15 +608,17 @@ TpCoordinator::~TpCoordinator() noexcept {
     }
     workers_.clear();
     mirrors_.clear();
-    if (barrier_group_) barrier_group_->shutdown();
-    barrier_group_.reset();
-    transport_.reset();
+    tp_groups_.clear();
+    ep_group_ = ReduceGroup{};
     for (auto& rank : ranks_) rank.reset();
     ranks_.clear();
 }
 
 void TpCoordinator::abort(const Status& reason) noexcept {
-    if (barrier_group_) barrier_group_->abort(reason);
+    for (auto& group : tp_groups_) {
+        if (group.barrier) group.barrier->abort(reason);
+    }
+    if (ep_group_.barrier) ep_group_.barrier->abort(reason);
 }
 
 Status TpCoordinator::on_sequence_created(const PagedSequenceState& source) {
@@ -679,8 +755,10 @@ Result<BatchExecutionOutput> TpCoordinator::on_execute(
         return Status::unsupported(
             "tp speculative verify requires per-rank options", __FILE__, __LINE__);
     }
-    if (barrier_group_->aborted()) {
-        const Status reason = barrier_group_->abort_status();
+    const auto* aborted_barrier = explicit_ep_ ? ep_group_.barrier.get()
+                                               : tp_groups_.front().barrier.get();
+    if (aborted_barrier != nullptr && aborted_barrier->aborted()) {
+        const Status reason = aborted_barrier->abort_status();
         if (!reason.ok()) return reason;
         return Status::invalid_state("tp barrier group is aborted", __FILE__, __LINE__);
     }
@@ -747,10 +825,15 @@ Result<BatchExecutionOutput> TpCoordinator::on_execute(
 
 Status TpCoordinator::draft_sum(const shelf::runtime::TpSumTarget& target,
                                 hipStream_t stream, int rank) {
-    if (barrier_group_ == nullptr) {
+    const std::size_t group_index = explicit_ep_ ? coordinates_[rank].expert : 0u;
+    const int local_rank = explicit_ep_
+        ? static_cast<int>(coordinates_[rank].tensor)
+        : static_cast<int>(rank);
+    auto* barrier = tp_groups_[group_index].barrier.get();
+    if (barrier == nullptr) {
         return Status::invalid_state("tp barrier group missing", __FILE__, __LINE__);
     }
-    return barrier_group_->arrive(rank, target, stream, false);
+    return barrier->arrive(local_rank, target, stream, false);
 }
 
 void TpCoordinator::worker_loop(std::size_t rank) {
@@ -808,7 +891,7 @@ Status TpCoordinator::run_rank_step(std::size_t rank, const ScheduledBatch& batc
 std::string TpCoordinator::debug_report() const {
     std::ostringstream out;
     out << "tp_size=" << ranks_.size() << " transport="
-        << (transport_ != nullptr ? transport_->name() : "none") << "\n";
+        << transport_name() << "\n";
     for (std::size_t r = 0; r < ranks_.size(); ++r) {
         const TpRankRuntime& runtime = *ranks_[r];
         out << "  rank" << r << " device=" << runtime.device_id()

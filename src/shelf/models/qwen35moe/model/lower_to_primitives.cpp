@@ -91,6 +91,9 @@ Status emit_moe_ffn(
     uint32_t global_experts,
     uint32_t top_k,
     const std::string& layer_prefix,
+    uint32_t tp_size,
+    uint32_t ep_size,
+    bool ep_enabled,
     MoeFfnOutput& out) {
 
     auto& pg = em.pg;
@@ -140,7 +143,7 @@ Status emit_moe_ffn(
         name_last("expert_swiglu");
     }
 
-    const RT::ValueId expert_out = pg.alloc_value(plan.w2_rows, RT::ValueDType::BF16,
+    RT::ValueId expert_out = pg.alloc_value(plan.w2_rows, RT::ValueDType::BF16,
                                                   RT::ValueRowDomain::GROUPED_ROWS);
     {
         RT::MoeGroupedLinearNode n;
@@ -174,18 +177,46 @@ Status emit_moe_ffn(
     name_last("shared_gate_act");
 
     RT::ValueId ffn_out = em.value(static_cast<uint32_t>(hidden_key.features));
-    {
+    if (!ep_enabled) {
         RT::MoeCombineNode n;
         n.shape = hidden_key;
         n.top_k = top_k;
         em.emit(RT::PrimitiveNode{n}, {expert_out, shared_out, shared_weight}, {ffn_out});
         name_last("combine");
-        // With a split, what this rank computed is a partial sum: the experts it does not own
-        // are absent from the group rows, and the shared expert is only part of its width.
-        // The rank partials add to the unsplit result, so the combine output is the
-        // collection point. Like o_proj and gdn_out, this is unconditional: a single-device
-        // program never builds an execution schedule, so the annotation is inert there.
         pg.nodes.back().tp_combine = 1;
+    } else {
+        RT::ValueId routed = em.value(static_cast<uint32_t>(hidden_key.features));
+        {
+            RT::MoeCombineNode n;
+            n.shape = hidden_key;
+            n.top_k = top_k;
+            n.include_shared = false;
+            em.emit(RT::PrimitiveNode{n}, {expert_out, shared_out, shared_weight}, {routed});
+            name_last("routed_combine");
+        }
+        if (tp_size > 1u) {
+            RT::ValueId scaled = em.value(static_cast<uint32_t>(hidden_key.features));
+            em.emit(RT::PrimitiveNode{RT::ScaleNode{hidden_key, 1.0f / tp_size}},
+                    {routed}, {scaled});
+            name_last("routed_tp_scale");
+            routed = scaled;
+        }
+        pg.nodes.back().tp_combine = 1;
+        pg.nodes.back().ep_combine = 1;
+        RT::ValueId shared_contribution = em.value(static_cast<uint32_t>(hidden_key.features));
+        {
+            RT::MoeCombineNode n;
+            n.shape = hidden_key;
+            n.top_k = top_k;
+            n.include_experts = false;
+            em.emit(RT::PrimitiveNode{n}, {expert_out, shared_out, shared_weight},
+                    {shared_contribution});
+            name_last("shared_combine");
+            pg.nodes.back().tp_combine = 1;
+        }
+        RT::ResidualAddNode ra{hidden_key};
+        em.emit(RT::PrimitiveNode{ra}, {routed, shared_contribution}, {ffn_out});
+        name_last("combine");
     }
 
     RT::ValueId layer_output = em.value(static_cast<uint32_t>(hidden_key.features));
@@ -210,8 +241,14 @@ Result<QH::HybridLoweredPrimitives> lower_qwen35_moe_to_primitives(
         return Status::invalid_argument("MoE lowering: tp_size / tp_rank out of range",
                                         __FILE__, __LINE__);
     }
-    Status status = validate_qwen35moe_weights(weights, config, options.tp_size,
-                                               options.tp_rank, options.stage);
+    const std::uint32_t ep_size =
+        options.ep_size == 0u ? options.tp_size : options.ep_size;
+    const std::uint32_t ep_rank =
+        options.ep_size == 0u ? options.tp_rank : options.ep_rank;
+    const bool ep_enabled = options.ep_enabled;
+    Status status = validate_qwen35moe_weights(weights, config, ep_size, ep_rank,
+                                               options.tp_size, options.tp_rank,
+                                               options.stage);
     if (!status.ok()) return status;
 
     const bool stage_load = options.stage.enabled;
@@ -262,8 +299,8 @@ Result<QH::HybridLoweredPrimitives> lower_qwen35_moe_to_primitives(
     // The rank's own widths. The routed experts keep their per-expert geometry and divide
     // along the expert axis; the shared expert and the backbone's heads divide in width.
     const uint32_t tp_size = options.tp_size;
-    if ((experts % tp_size) != 0u) {
-        return Status::unsupported("MoE lowering: num_experts must divide by tp_size",
+    if ((experts % ep_size) != 0u) {
+        return Status::unsupported("MoE lowering: num_experts must divide by ep_size",
                                    __FILE__, __LINE__);
     }
     if ((shared_intermediate % tp_size) != 0u) {
@@ -271,7 +308,7 @@ Result<QH::HybridLoweredPrimitives> lower_qwen35_moe_to_primitives(
             "MoE lowering: shared_expert_intermediate_size must divide by tp_size", __FILE__,
             __LINE__);
     }
-    const uint32_t local_experts = experts / tp_size;
+    const uint32_t local_experts = experts / ep_size;
     const uint32_t local_shared_intermediate = shared_intermediate / tp_size;
     auto divide_heads = [&](std::size_t heads, const char* what) -> Result<uint32_t> {
         if (heads == 0u || (heads % tp_size) != 0u) {
@@ -309,7 +346,8 @@ Result<QH::HybridLoweredPrimitives> lower_qwen35_moe_to_primitives(
     const bool embed_loaded = first_stage || (last_stage && weights.lm_head_tied);
     const uint32_t embed_index = embed_loaded ? add_weight(weights.embed_tokens) : UINT32_MAX;
     for (std::size_t li = layer_lo; li < layer_hi; ++li) {
-        auto plan_result = build_moe_expert_group_plan(config, li, tp_size, options.tp_rank);
+        auto plan_result = build_moe_expert_group_plan(config, li, ep_size, ep_rank, tp_size,
+                                                        options.tp_rank);
         if (!plan_result.ok()) return plan_result.status();
         plans[li] = plan_result.release();
 
@@ -474,7 +512,7 @@ Result<QH::HybridLoweredPrimitives> lower_qwen35_moe_to_primitives(
         status = emit_moe_ffn(em, plans[li], lw_idx, lw.ffn, blk.post_norm,
                               blk.attention_residual, hidden_key, moe_intermediate,
                               local_shared_intermediate, local_experts, experts, top_k,
-                              layer_prefix, ffn_out);
+                              layer_prefix, tp_size, ep_size, ep_enabled, ffn_out);
         if (!status.ok()) return status;
         layer_input = ffn_out.layer_output;
 
@@ -742,7 +780,7 @@ Result<QH::HybridLoweredPrimitives> lower_qwen35_moe_mtp_to_primitives(
     MoeFfnOutput ffn_out;
     status = emit_moe_ffn(em, plan, idx, lw.ffn, blk.post_norm, blk.attention_residual,
                           hidden_key, moe_intermediate, shared_intermediate, experts, experts,
-                          top_k, "mtp.ffn.", ffn_out);
+                          top_k, "mtp.ffn.", 1u, 1u, false, ffn_out);
     if (!status.ok()) return status;
 
     const MW* lmw = lm_tied ? &weights.embed_tokens : &weights.lm_head;

@@ -39,8 +39,10 @@ struct MoeExpertGroupPlan {
     // The expert count the router selects over. It is the whole config count whatever the
     // split is, and it is what the checkpoint's own plane depth is.
     uint32_t global_experts = 0;
-    // The split this plan was built for. The shared expert divides the way a dense FFN
-    // does, so the plan carries the width to check it against.
+    // The routed experts follow ep_size / ep_rank. The shared expert follows tp_size /
+    // tp_rank, the way a dense FFN does.
+    uint32_t ep_size = 1;
+    uint32_t ep_rank = 0;
     uint32_t tp_size = 1;
     uint32_t tp_rank = 0;
     uint32_t scale_block_k = 0;
@@ -117,6 +119,15 @@ Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig
 // num_experts must divide by tp_size.
 Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig& config,
                                                         std::size_t layer,
+                                                        uint32_t tp_size,
+                                                        uint32_t tp_rank);
+
+// The routed experts follow (ep_rank, ep_size) and the shared expert follows
+// (tp_rank, tp_size).
+Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig& config,
+                                                        std::size_t layer,
+                                                        uint32_t ep_size,
+                                                        uint32_t ep_rank,
                                                         uint32_t tp_size,
                                                         uint32_t tp_rank);
 

@@ -92,7 +92,7 @@ public:
 
     std::size_t ffn_workspace_reserve_bytes(std::size_t max_batch_rows) const override {
         return qmoe::moe_executor_grouped_bytes(model_.text_config(), max_batch_rows,
-                                                context_.tp_size);
+                                                context_.tp_size, context_.ep_size);
     }
 
     bool uses_exl3_linear() const override { return qmoe::uses_exl3_linear(model_.weights()); }
@@ -424,6 +424,9 @@ Result<q35::Executor> create_qwen4exp_model_executor(
         config.max_context_tokens != 0u ? config.max_context_tokens : 512u;
     options.tp_size = config.tp != nullptr ? config.tp->tp_size : 1u;
     options.tp_rank = config.tp != nullptr ? config.tp->tp_rank : 0u;
+    options.ep_size = config.tp != nullptr ? config.tp->ep_size : 1u;
+    options.ep_rank = config.tp != nullptr ? config.tp->ep_rank : 0u;
+    options.ep_enabled = config.tp != nullptr && config.tp->ep_enabled;
     options.rope_attention_factor = static_cast<float>(config.rope_profile.attention_factor);
     options.hidden_taps = std::span<const std::uint32_t>(
         config.target_hidden_taps.data(), config.target_hidden_tap_count);
@@ -489,11 +492,18 @@ Result<q35::Executor> create_moe_model_executor(
     const q35::ExecutorConfig& config) {
     std::uint32_t tp_size = 1u;
     std::uint32_t tp_rank = 0u;
+    std::uint32_t ep_size = 1u;
+    std::uint32_t ep_rank = 0u;
+    bool ep_enabled = false;
     if (config.tp != nullptr) {
         tp_size = config.tp->tp_size;
         tp_rank = config.tp->tp_rank;
+        ep_size = config.tp->ep_size;
+        ep_rank = config.tp->ep_rank;
+        ep_enabled = config.tp->ep_enabled;
     }
-    if (tp_size > 1u && config.tp->global_num_experts == 0u) {
+    if ((tp_size > 1u || ep_size > 1u) && config.tp != nullptr &&
+        config.tp->global_num_experts == 0u) {
         return Status::unsupported(
             "a model with grouped experts needs a tensor parallel context that states its "
             "expert range: the expert planes are not part of the matrix partition contract",
@@ -515,6 +525,9 @@ Result<q35::Executor> create_moe_model_executor(
     lower_options.emit_normed_token_hidden = config.emit_normed_token_hidden;
     lower_options.tp_size = tp_size;
     lower_options.tp_rank = tp_rank;
+    lower_options.ep_size = ep_size;
+    lower_options.ep_rank = ep_rank;
+    lower_options.ep_enabled = ep_enabled;
     lower_options.stage = config.stage;
 
     auto lowered = qmoe::lower_qwen35_moe_to_primitives(model.text_config(), model.weights(),
@@ -537,6 +550,9 @@ Result<std::unique_ptr<TpRankModel>> build_qwen4exp_tp_rank_model(
     const auto& cfg = text_config.value();
     qwen4exp::Qwen4ExpLoadOptions load_options;
     load_options.load_mtp = config.load_mtp_layers;
+    load_options.ep_size = config.ep_size;
+    load_options.ep_rank = config.ep_rank;
+    load_options.ep_enabled = config.ep_enabled;
     if (const char* host_experts = std::getenv("SHELF_MOE_HOST_EXPERTS")) {
         load_options.moe_host_experts =
             static_cast<std::uint32_t>(std::strtoul(host_experts, nullptr, 10));
@@ -547,7 +563,7 @@ Result<std::unique_ptr<TpRankModel>> build_qwen4exp_tp_rank_model(
     }
     auto model = qwen4exp::Qwen4ExpModel::load_from_safetensors(
         config.model_dir, config.tp_size, config.tp_rank, arena, stream,
-        load_options);
+        load_options, config.ep_size, config.ep_rank);
     if (!model.ok()) return model.status();
 
     qhy::TensorParallelContext context;
@@ -563,15 +579,18 @@ Result<std::unique_ptr<TpRankModel>> build_qwen4exp_tp_rank_model(
         static_cast<std::uint32_t>(cfg.linear_num_value_heads / config.tp_size);
     context.local_vocab_size = static_cast<std::uint32_t>(cfg.vocab_size);
     context.vocab_parallel_lm_head = false;
+    context.ep_size = config.ep_size;
+    context.ep_rank = config.ep_rank;
+    context.ep_enabled = config.ep_enabled;
     context.global_num_experts = static_cast<std::uint32_t>(cfg.ffn.num_experts);
-    if (config.tp_size == 0u ||
-        (cfg.ffn.num_experts % config.tp_size) != 0u) {
-        return Status::unsupported("Qwen4Exp experts must divide by tp_size", __FILE__,
+    if (config.ep_size == 0u || config.ep_rank >= config.ep_size ||
+        (cfg.ffn.num_experts % config.ep_size) != 0u) {
+        return Status::unsupported("Qwen4Exp experts must divide by ep_size", __FILE__,
                                    __LINE__);
     }
     context.local_num_experts =
-        static_cast<std::uint32_t>(cfg.ffn.num_experts / config.tp_size);
-    context.expert_begin = config.tp_rank * context.local_num_experts;
+        static_cast<std::uint32_t>(cfg.ffn.num_experts / config.ep_size);
+    context.expert_begin = config.ep_rank * context.local_num_experts;
     context.local_shared_expert_intermediate_size =
         static_cast<std::uint32_t>(cfg.ffn.shared_expert_intermediate_size);
 
@@ -607,6 +626,9 @@ Result<std::unique_ptr<TpRankModel>> build_moe_tp_rank_model(
     static_cast<qhy::HybridLoadOptions&>(load_options) =
         static_cast<const qhy::HybridLoadOptions&>(config.load_options);
     load_options.load_mtp_layers = config.load_mtp_layers;
+    load_options.ep_size = config.ep_size;
+    load_options.ep_rank = config.ep_rank;
+    load_options.ep_enabled = config.ep_enabled;
     // The plan outlives the load: the loader keeps a pointer to it, so it cannot be a
     // temporary inside the branch.
     std::optional<weights::TensorPartitionPlan> plan;
@@ -622,9 +644,8 @@ Result<std::unique_ptr<TpRankModel>> build_moe_tp_rank_model(
                                                                     stream, load_options);
     if (!model_result.ok()) return model_result.status();
 
-    auto context_result = qmoe::make_qwen35moe_tensor_parallel_context(text_config,
-                                                                       config.tp_size,
-                                                                       config.tp_rank, false);
+    auto context_result = qmoe::make_qwen35moe_tensor_parallel_context(
+        text_config, config.tp_size, config.tp_rank, config.ep_size, config.ep_rank, false);
     if (!context_result.ok()) return context_result.status();
 
     return std::unique_ptr<TpRankModel>(

@@ -27,6 +27,8 @@ Result<TensorParallelContext> make_qwen_hybrid_tensor_parallel_context(
     TensorParallelContext ctx;
     ctx.tp_size = tp_size;
     ctx.tp_rank = tp_rank;
+    ctx.ep_size = 1u;
+    ctx.ep_rank = 0u;
 
     if (tp_size > 1) {
         Status st = require_divisible(

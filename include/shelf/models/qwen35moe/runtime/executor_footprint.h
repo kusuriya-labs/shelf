@@ -15,7 +15,8 @@ namespace shelf::qwen35moe {
 // has no estimate and reports 0.
 std::size_t moe_executor_grouped_bytes(const Qwen35MoeTextConfig& config,
                                        std::size_t max_batch_rows,
-                                       std::uint32_t tp_size = 1) noexcept;
+                                       std::uint32_t tp_size = 1,
+                                       std::uint32_t ep_size = 0u) noexcept;
 
 // The row count the executor actually uses for `max_batch_rows` (the bucket limit), which is
 // what the plan capacity and the group-row planes are sized by.
