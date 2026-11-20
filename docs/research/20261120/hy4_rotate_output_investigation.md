@@ -134,3 +134,11 @@ GPU fault → 8 分のリトライ → デバイス喪失）を起動時とホ�
   1・8・24・1024 行、16384 経路の 1 rank 集中、不正入力の拒否、
   表の一貫性検査（所有 expert の svh 欠落・他 rank のエントリ・長さ違反）を含む。
   AddressSanitizer / UBSan でも異常なし。
+
+## 診断オプション: EP 転送の host 固定
+
+`SHELF_HY4_EP_TRANSPORT=host` を指定すると、rank 間の転送（rank 0 ↔ worker）を peer 転送にせず、
+既存の pinned host 経由に固定する（起動時の `transfer=a->b method=host` の行で確認できる）。
+R9700 同士の `hipMemcpyPeerAsync`（受信側 stream での PULL）が fault に関与するかの切り分け用で、
+他の条件（GPU の可視順、入力、chunk、WMMA）は変えずにこの 1 点だけを変えて比較する。
+未指定または `peer` 以外の値では従来どおり peer を自動選択する。
