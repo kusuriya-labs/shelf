@@ -1,0 +1,97 @@
+{
+  "configuration": "A-fused",
+  "definition": "KL(softmax(reference)||softmax(candidate)), temperature=1, FP64, nats",
+  "reference": "/home/homelab1/datapool/qwen38-kld-20260918/results/llama-bf16-fp16",
+  "reference_kv": "FP16",
+  "candidate_kv": "BF16",
+  "corpus_sha256": "03f46dfd346b596814b6f4a247a1a51939d88058a7ac6057ae30e2135fd2baa9",
+  "vocab_sha256": "b0776f4ee98950e8f3b13cbb4f9174ff66abcbad87a0aa6b398965bfc9cce884",
+  "executable_sha256": "182661901f67130c214c2703c4c43f1fd8663064e05608ae20128e1264163501",
+  "model": "/home/homelab1/datapool/rocm-exl3-rdna2/models/qwen38-27b-exl3-4bpw-mul24",
+  "git_revision": "1f7697b4bab26296d3f12bbfb0d9b5fc21648b2c",
+  "environment": {
+    "HIP_VISIBLE_DEVICES": "0",
+    "LD_LIBRARY_PATH": "/opt/rocm/core-10.2/lib:/home/homelab1/coding-local/sLLM/.local-artifacts/phaseshift-draft-vocab/toolchain/root/usr/lib/llvm-23/lib",
+    "ROCR_VISIBLE_DEVICES": "GPU-a8e9ddefa2d60f55",
+    "SHELF_EXL3_MUL24_FUSED_DECODE": "1",
+    "SHELF_EXL3_MUL24_PREFILL_AB": "A"
+  },
+  "cases": [
+    {
+      "id": "en_prose_129",
+      "positions": 129,
+      "prefill_positions": 128,
+      "mean_kld": 0.07903390689178906,
+      "top1_agreement": 0.8604651162790697,
+      "candidate_dump_sha256": "55859730df18f6a9a798b645644f1e4004b78b94cda30045eaa741e6c8399f90",
+      "reference_logits_sha256": "8d93ce140edaa236940b5086160e12c5852737bef8e81b7af72c56f8796009c5"
+    },
+    {
+      "id": "ja_prose_129",
+      "positions": 129,
+      "prefill_positions": 128,
+      "mean_kld": 0.023062533618706343,
+      "top1_agreement": 0.937984496124031,
+      "candidate_dump_sha256": "1ad787cada2f318de89addd68d6e63d9366c861305c4c246324b01200fa21fea",
+      "reference_logits_sha256": "9cc75d527992202610514775e26b1837eeac8dcc24a2df736c255dec175f430c"
+    },
+    {
+      "id": "zh_tech_257",
+      "positions": 257,
+      "prefill_positions": 256,
+      "mean_kld": 0.01723621816221417,
+      "top1_agreement": 0.9260700389105059,
+      "candidate_dump_sha256": "c222cc8d136e68e6fdcfe2e9f45b9010d433dc96891975c5e09d5158c8d8a792",
+      "reference_logits_sha256": "2f6df3aee6114d8a7e686aa9555f2b7b8e5f2fcbab67c6daf1da7f4f2d6db2c8"
+    },
+    {
+      "id": "rust_code_257",
+      "positions": 257,
+      "prefill_positions": 256,
+      "mean_kld": 0.02379621315596194,
+      "top1_agreement": 0.9416342412451362,
+      "candidate_dump_sha256": "bedbf325ceee4b7771396fcb9e391beae8e13604e0c31a62cc3c2c088b8fdcca",
+      "reference_logits_sha256": "d383acf5df613f4b9f7281728f8f3a49a04bebcea17e3beb893d7eee1d17fff5"
+    },
+    {
+      "id": "python_code_513",
+      "positions": 513,
+      "prefill_positions": 256,
+      "mean_kld": 0.017385641608053778,
+      "top1_agreement": 0.9454191033138402,
+      "candidate_dump_sha256": "9515dac6f6ebce4fdfcd594db3cb5bf04048b932a38ba67c728c710bb9a089b3",
+      "reference_logits_sha256": "45c4b0b7be8cd2b6eb90055cc0c6d310f62a71ed4223242e99eb75d2be3347a1"
+    },
+    {
+      "id": "sql_code_1025",
+      "positions": 1025,
+      "prefill_positions": 256,
+      "mean_kld": 0.01204633355798395,
+      "top1_agreement": 0.9648780487804878,
+      "candidate_dump_sha256": "e5ec3a192f0327e084729cee53e79a32ce8a30ea6fbd0f44c7c59cc2a4600838",
+      "reference_logits_sha256": "ded8b39785c35610255718f97aff2c0c07dd8e1dad45c53855f53f773905be08"
+    },
+    {
+      "id": "arithmetic_65",
+      "positions": 65,
+      "prefill_positions": 64,
+      "mean_kld": 0.10072601537058673,
+      "top1_agreement": 0.8769230769230769,
+      "candidate_dump_sha256": "1cb8abe3e3e82e8106dc06da3579501ed3d764cb2cd858b798c0d81abd3da0ae",
+      "reference_logits_sha256": "8a7da432c10c7628603b08aa46037a6576d1154b67faa9e5c390ede80ec1312c"
+    },
+    {
+      "id": "structured_257",
+      "positions": 257,
+      "prefill_positions": 256,
+      "mean_kld": 0.016366396277378185,
+      "top1_agreement": 0.9766536964980544,
+      "candidate_dump_sha256": "b49384044d92e5dd3a17f14a03cdcfb2d5d6a6f694e3ca00228fa9f6b89cb039",
+      "reference_logits_sha256": "a97db2d49531751c446e8199fa08f832b18191771011b2297ac0010074128add"
+    }
+  ],
+  "positions": 2632,
+  "mean_kld": 0.021176085318717567,
+  "top1_agreement": 0.9475683890577508,
+  "elapsed_seconds": 196.54317810898647
+}

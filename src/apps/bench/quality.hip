@@ -39,6 +39,7 @@ struct QualityOptions {
     bool arena_auto = true;
     shelf::kernel::KVCacheDType kv_dtype = shelf::kernel::KVCacheDType::BF16;
     shelf::kernel::OctaveKVCacheFormat octave_format{};
+    bool dump_prefill = false;
     std::string dump_path;
     std::string compare_path;
 };
@@ -60,6 +61,7 @@ void print_usage(FILE* out) {
         "  --device LIST                comma separated GPUs, one per --tensor-parallel rank\n"
         "                                (default 0; e.g. --device 0,2)\n"
         "  --tensor-parallel N          1 | 2 | 4 (default 1)\n"
+        "  --dump-prefill               prefill の各行も dump（batch 1、TP 1）\n"
         "  --dump PATH                  write teacher-forced logits rows\n"
         "  --compare PATH               compare against a baseline dump\n");
 }
@@ -120,7 +122,9 @@ bool parse_args(int argc, char** argv, QualityOptions& opts) {
             }
             return std::string(argv[++i]);
         };
-        if (key == "--model-dir") {
+        if (key == "--dump-prefill") {
+            opts.dump_prefill = true;
+        } else if (key == "--model-dir") {
             opts.model_dir = need_value();
         } else if (key == "--tokens-file") {
             opts.tokens_file = need_value();
@@ -280,6 +284,10 @@ int run_quality(int argc, char** argv) {
         return 2;
     }
 
+    if (opts.dump_prefill && (opts.batch_size != 1 || opts.tp != 1 || opts.dump_path.empty() || !opts.compare_path.empty())) {
+        fprintf(stderr, "--dump-prefill requires batch 1, TP 1, --dump and no --compare\n");
+        return 2;
+    }
     hipError_t hip_err = hipSetDevice(opts.devices[0]);
     if (hip_err != hipSuccess) {
         fprintf(stderr, "hipSetDevice failed: %s\n", hipGetErrorString(hip_err));
@@ -322,6 +330,10 @@ int run_quality(int argc, char** argv) {
     const uint32_t context = static_cast<uint32_t>(opts.context);
     const uint32_t score_start =
         opts.score_start == 0 ? context + 1u : static_cast<uint32_t>(opts.score_start);
+    if (opts.dump_prefill && score_start != context + 1u) {
+        fprintf(stderr, "--dump-prefill requires score start context+1\n");
+        return 1;
+    }
     if (score_start <= context) {
         fprintf(stderr, "score start %u must be greater than context %u\n", score_start, context);
         return 1;
@@ -354,7 +366,7 @@ int run_quality(int argc, char** argv) {
     exec_config.max_batch_rows = static_cast<uint32_t>(
         std::max(opts.prefill_chunk, std::max(2, static_cast<int>(batch_size))));
     exec_config.max_scheduled_requests = batch_size;
-    exec_config.max_scheduled_output_rows = batch_size;
+    exec_config.max_scheduled_output_rows = opts.dump_prefill ? exec_config.max_batch_rows : batch_size;
 
     std::unique_ptr<shelf::gpu::GpuMemoryManager> tp_memory;
     std::unique_ptr<shelf::qwen35::runtime::TpCoordinator> tp_coord;
@@ -510,6 +522,11 @@ int run_quality(int argc, char** argv) {
         }
     }
 
+    shelf::bench::quality::DumpWriter writer;
+    if (opts.dump_prefill && !writer.open(opts.dump_path, vocab, to_quality_dtype(opts.kv_dtype), 1u)) {
+        fprintf(stderr, "cannot open dump\n");
+        return 1;
+    }
     const uint32_t chunk = std::min<uint32_t>(
         static_cast<uint32_t>(opts.prefill_chunk), exec_config.max_batch_rows / batch_size);
     uint32_t processed = 0u;
@@ -526,7 +543,8 @@ int run_quality(int argc, char** argv) {
             req.token_begin = i * chunk_len;
             req.num_tokens = chunk_len;
             req.prefix_tokens = sequences[i].position;
-            req.compute_logits = tp_coord != nullptr;
+            req.compute_logits = opts.dump_prefill || tp_coord != nullptr;
+            if (opts.dump_prefill) req.num_output_rows = chunk_len;
             req.sample = false;
             token_ids.insert(token_ids.end(), corpus.begin() + processed, corpus.begin() + processed + chunk_len);
         }
@@ -550,7 +568,25 @@ int run_quality(int argc, char** argv) {
                     exec_out.status().message().c_str());
             return 1;
         }
-        (void)exec_out.release();
+        auto prefill_out = exec_out.release();
+        if (opts.dump_prefill) {
+            if (prefill_out.num_outputs != chunk_len || prefill_out.logits.ndim() != 2u ||
+                prefill_out.logits.dim(1) != vocab || prefill_out.logits.element_size() != sizeof(float)) {
+                fprintf(stderr, "unexpected prefill logits shape\n");
+                return 1;
+            }
+            std::vector<float> rows(static_cast<size_t>(chunk_len) * vocab);
+            hip_err = hipStreamSynchronize(stream);
+            if (hip_err != hipSuccess || hipMemcpy(rows.data(), prefill_out.logits.data<float>(),
+                rows.size() * sizeof(float), hipMemcpyDeviceToHost) != hipSuccess) {
+                fprintf(stderr, "prefill logits copy failed\n");
+                return 1;
+            }
+            for (uint32_t row = 0; row < chunk_len; ++row) {
+                const uint32_t pos = processed + row;
+                if (!writer.write(corpus[pos + 1u], pos + 1u, rows.data() + static_cast<size_t>(row) * vocab)) return 1;
+            }
+        }
         processed += chunk_len;
     }
     hip_err = hipStreamSynchronize(stream);
@@ -566,10 +602,9 @@ int run_quality(int argc, char** argv) {
         }
     }
 
-    shelf::bench::quality::DumpWriter writer;
     shelf::bench::quality::DumpReader reader;
     shelf::bench::quality::Metrics metrics;
-    if (!opts.dump_path.empty()) {
+    if (!opts.dump_path.empty() && !opts.dump_prefill) {
         if (!writer.open(opts.dump_path, vocab, to_quality_dtype(opts.kv_dtype), score_start)) {
             fprintf(stderr, "cannot open --dump path: %s\n", opts.dump_path.c_str());
             return 1;

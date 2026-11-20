@@ -65,6 +65,48 @@ static bool test_row_masks() {
     return ok;
 }
 
+static bool test_large_output_rows() {
+    using namespace shelf::runtime;
+    constexpr uint32_t rows = 256;
+    uint32_t *output = nullptr, *slots = nullptr, *positions = nullptr;
+    DeviceRequestDescriptor* request = nullptr;
+    DeviceSamplingParams* sampling = nullptr;
+    DeviceBatchContext* context = nullptr;
+    bool ok = hipMalloc(&output, rows * sizeof(uint32_t)) == hipSuccess &&
+        hipMalloc(&slots, rows * sizeof(uint32_t)) == hipSuccess &&
+        hipMalloc(&positions, rows * sizeof(uint32_t)) == hipSuccess &&
+        hipMalloc(&request, sizeof(*request)) == hipSuccess &&
+        hipMalloc(&sampling, rows * sizeof(*sampling)) == hipSuccess &&
+        hipMalloc(&context, sizeof(*context)) == hipSuccess;
+    DeviceRequestDescriptor req{};
+    req.row_count = rows;
+    req.compute_logits = 1;
+    req.output_index = 0;
+    req.output_count = rows;
+    DeviceBatchContext ctx{};
+    ctx.num_requests = 1;
+    ctx.actual_rows = rows;
+    ctx.requests = request;
+    ctx.row_sequence_slots = slots;
+    ctx.row_positions = positions;
+    ctx.output_rows = output;
+    ctx.output_sampling_params = sampling;
+    std::vector<uint32_t> actual(rows, UINT32_MAX);
+    if (ok) ok = hipMemcpy(request, &req, sizeof(req), hipMemcpyHostToDevice) == hipSuccess &&
+        hipMemcpy(context, &ctx, sizeof(ctx), hipMemcpyHostToDevice) == hipSuccess &&
+        launch_prepare_batch_descriptor(context, 1, nullptr).ok() &&
+        hipDeviceSynchronize() == hipSuccess &&
+        hipMemcpy(actual.data(), output, rows * sizeof(uint32_t), hipMemcpyDeviceToHost) == hipSuccess;
+    for (uint32_t i = 0; ok && i < rows; ++i) ok = actual[i] == i;
+    if (context) shelf::gpu::discard_cleanup_result(hipFree(context));
+    if (sampling) shelf::gpu::discard_cleanup_result(hipFree(sampling));
+    if (request) shelf::gpu::discard_cleanup_result(hipFree(request));
+    if (positions) shelf::gpu::discard_cleanup_result(hipFree(positions));
+    if (slots) shelf::gpu::discard_cleanup_result(hipFree(slots));
+    if (output) shelf::gpu::discard_cleanup_result(hipFree(output));
+    return ok;
+}
+
 int main() {
     constexpr uint32_t vocab = 67, rows = 2, stride = 70;
     std::vector<float> input(rows * stride);
@@ -96,6 +138,7 @@ int main() {
     if (device_logits && hipFree(device_logits) != hipSuccess) ok = false;
     if (device_mask && hipFree(device_mask) != hipSuccess) ok = false;
     ok = test_row_masks() && ok;
+    ok = test_large_output_rows() && ok;
     std::printf("token bitmask CPU reference: %s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }

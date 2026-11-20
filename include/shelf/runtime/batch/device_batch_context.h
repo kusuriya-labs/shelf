@@ -42,7 +42,7 @@ struct DeviceRequestDescriptor {
     ExecutionClass execution_class = ExecutionClass::DECODE;
 
     uint8_t compute_logits = 0;
-    uint8_t output_count = 1;
+    uint16_t output_count = 1;
 
     DeviceSamplingParams sampling{};
 };

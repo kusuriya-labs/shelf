@@ -738,7 +738,8 @@ Result<PendingBatch> submit_co_batch(
             staging[i].sampling.sample_index = sampling.sample_index;
             staging[i].sampling.reserved[0] = 0u;
             uint32_t oc = req.num_output_rows ? req.num_output_rows : 1u;
-            staging[i].output_count = static_cast<uint8_t>(oc < 255u ? oc : 255u);
+            if (oc > 65535u) return Status::invalid_argument("too many output rows", __FILE__, __LINE__);
+            staging[i].output_count = static_cast<uint16_t>(oc);
             staging[i].output_index = output_count;
             output_count += oc;
             if (sampling.mode != runtime::SamplingMode::None) sampled_count += oc;
