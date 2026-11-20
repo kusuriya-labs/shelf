@@ -813,7 +813,7 @@ async def _serve(opts) -> int:
                  f"checkpoints={opts.prefix_cache_checkpoints}, "
                  f"save_interval={opts.prefix_cache_save_interval}, "
                  f"capabilities.prefix_cache="
-                 f"{str(compute.capabilities.prefix_cache).lower()}"))
+                 f"{str(compute.capabilities.prefix_cache).lower()})"))
     if opts.dflash2_model_dir:
         _log(_banner("Speculative:", f"DFlash2 ({opts.dflash2_drafts} drafts)"))
         _log(_banner("Draft model:", Path(opts.dflash2_model_dir).name))
