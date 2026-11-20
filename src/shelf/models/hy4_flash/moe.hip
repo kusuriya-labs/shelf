@@ -168,7 +168,7 @@ Mat moe(Ops &op, int layer, Mat x) {
         gather_route<<<dim3(6, count), 256>>>(input, gpu_routes, a);
         checked(hipGetLastError());
         Mat activation;
-        if (!use_wmma && !batches) {
+        if (!use_wmma) {
             size_t mark = rank.arena.cursor;
             auto codes = static_cast<int8_t *>(rank.arena.next(size_t(count) * 1536));
             auto scales = static_cast<float *>(rank.arena.next(size_t(count) * 12 * 4));
@@ -176,8 +176,13 @@ Mat moe(Ops &op, int layer, Mat x) {
             auto partial1 = static_cast<float *>(rank.arena.next(size_t(count) * 1536 * 4));
             activation = rank.mat(count, 1536);
             auto desc = rank.gpu.matrices[rank.rank] + (layer - 1) * 1536;
-            checked(shelf_hy4_expert_gate_up_swiglu(a.p, desc, 3, codes, scales, partial0, partial1,
-                                                    activation.p, count, gpu_routes, rank.gpu.model.mixed));
+            if (batches)
+                checked(shelf_hy4_expert_batch_gate_up_swiglu(a.p, desc, gpu_routes, batches, codes, scales,
+                                                              partial0, partial1, activation.p, count,
+                                                              num_batches, rank.gpu.model.mixed));
+            else
+                checked(shelf_hy4_expert_gate_up_swiglu(a.p, desc, 3, codes, scales, partial0, partial1,
+                                                        activation.p, count, gpu_routes, rank.gpu.model.mixed));
             rank.arena.cursor = mark;
         } else {
             Mat g = grouped(rank, a, gpu_routes, layer, 0, batches, num_batches, use_wmma);

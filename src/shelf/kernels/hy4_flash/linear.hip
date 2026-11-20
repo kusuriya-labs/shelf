@@ -200,6 +200,53 @@ __global__ void rotate_output(const float *partial, const uint16_t *svh, uint16_
     }
 }
 
+template <bool Mixed>
+__global__ void expert_batch16_pair(const int8_t *codes, const float *scales, const Hy4ExpertProjection *matrices,
+                                    const Hy4Route *routes, const Hy4ExpertBatch *batches, float *partial0,
+                                    float *partial1) {
+    __shared__ uint32_t b0[32][16], b1[32][16], a[16][33];
+    const auto batch = batches[blockIdx.y];
+    unsigned tid = threadIdx.x, col = tid % 16, row = tid / 16;
+    const auto &mat = matrices[3 * routes[batch.first].expert];
+    const uint32_t *w0 = mat.trellis, *w1 = (&mat)[1].trellis;
+    const unsigned bits = Mixed ? mat.bits : 4;
+    float acc0 = 0, acc1 = 0;
+    for (int g = 0; g < 12; ++g) {
+        if (tid < 128) {
+            int seg = tid / 16;
+            auto tile0 = w0 + ((g * 8 + seg) * 96 + blockIdx.x) * (bits * 8);
+            auto tile1 = w1 + ((g * 8 + seg) * 96 + blockIdx.x) * (bits * 8);
+#pragma unroll
+            for (unsigned j = 0; j < 4; ++j) {
+                unsigned t = j / 2 * 128 + col * 8 + j % 2 * 4;
+                b0[seg * 4 + j][col] = bits == 3 ? unpack_four<3>(tile0, t) : unpack_four<4>(tile0, t);
+                b1[seg * 4 + j][col] = bits == 3 ? unpack_four<3>(tile1, t) : unpack_four<4>(tile1, t);
+            }
+        }
+        for (unsigned j = tid; j < unsigned(batch.count * 32); j += 256)
+            __builtin_memcpy(&a[j / 32][j % 32],
+                             codes + size_t(batch.first + j / 32) * 1536 + g * 128 + (j % 32) * 4, 4);
+        __syncthreads();
+        if (row < unsigned(batch.count)) {
+            int sum0 = 0, sum1 = 0;
+#pragma unroll
+            for (int j = 0; j < 32; ++j) {
+                sum0 = dot4(a[row][j], b0[j][col], sum0);
+                sum1 = dot4(a[row][j], b1[j][col], sum1);
+            }
+            float scale = scales[(batch.first + row) * 12 + g];
+            acc0 += sum0 * scale;
+            acc1 += sum1 * scale;
+        }
+        __syncthreads();
+    }
+    if (row < unsigned(batch.count)) {
+        size_t off = (batch.first + row) * 1536 + blockIdx.x * 16 + col;
+        partial0[off] = acc0 * shelf::quantization::exl3::kExl3Int8GridStep;
+        partial1[off] = acc1 * shelf::quantization::exl3::kExl3Int8GridStep;
+    }
+}
+
 __global__ void rotate_output_swiglu(const float *partial0, const float *partial1,
                                      const Hy4ExpertProjection *matrices, int stride, uint16_t *out, int width,
                                      int padded, const Hy4Route *routes) {
@@ -314,6 +361,31 @@ extern "C" hipError_t shelf_hy4_expert_gate_up_swiglu(const uint16_t *x, const H
     if (status != hipSuccess)
         return status;
     rotate_output_swiglu<<<dim3(12, rows), 32>>>(partial0, partial1, matrices, stride, out, 1536, 1536, routes);
+    return hipGetLastError();
+}
+
+extern "C" hipError_t shelf_hy4_expert_batch_gate_up_swiglu(const uint16_t *x, const Hy4ExpertProjection *matrices,
+                                                            const Hy4Route *routes, const Hy4ExpertBatch *batches,
+                                                            int8_t *codes, float *scales, float *partial0,
+                                                            float *partial1, uint16_t *out, int rows,
+                                                            int num_batches, int mixed) {
+    if (!x || !matrices || !routes || !batches || !codes || !scales || !partial0 || !partial1 || !out ||
+        rows < 1 || rows > 65535 || num_batches < 1 || num_batches > rows)
+        return hipErrorInvalidValue;
+    rotate_input<<<dim3(12, rows), 32>>>(x, nullptr, codes, scales, 1536, 1536, matrices, 3, routes);
+    auto status = hipGetLastError();
+    if (status != hipSuccess)
+        return status;
+    if (mixed)
+        expert_batch16_pair<true><<<dim3(96, num_batches), 256>>>(codes, scales, matrices, routes, batches,
+                                                                  partial0, partial1);
+    else
+        expert_batch16_pair<false><<<dim3(96, num_batches), 256>>>(codes, scales, matrices, routes, batches,
+                                                                   partial0, partial1);
+    status = hipGetLastError();
+    if (status != hipSuccess)
+        return status;
+    rotate_output_swiglu<<<dim3(12, rows), 32>>>(partial0, partial1, matrices, 3, out, 1536, 1536, routes);
     return hipGetLastError();
 }
 

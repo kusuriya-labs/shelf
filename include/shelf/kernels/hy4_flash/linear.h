@@ -32,6 +32,12 @@ extern "C" hipError_t shelf_hy4_expert_gate_up_swiglu(const uint16_t *x, const H
                                                       int stride, int8_t *codes, float *scales, float *partial0,
                                                       float *partial1, uint16_t *out, int rows,
                                                       const Hy4Route *routes, int mixed);
+extern "C" hipError_t shelf_hy4_expert_batch_gate_up_swiglu(const uint16_t *x,
+                                                            const Hy4ExpertProjection *matrices,
+                                                            const Hy4Route *routes,
+                                                            const Hy4ExpertBatch *batches, int8_t *codes,
+                                                            float *scales, float *partial0, float *partial1,
+                                                            uint16_t *out, int rows, int num_batches, int mixed);
 
 hipError_t shelf_hy4_head(const uint16_t *x, const uint16_t *suh, const uint16_t *svh, const uint32_t *trellis,
                           int8_t *codes, float *scales, float *partial, float *logits, int rows);

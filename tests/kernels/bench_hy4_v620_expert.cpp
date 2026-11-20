@@ -160,7 +160,10 @@ int main(int argc, char **argv) {
 
     auto launch = [&]() {
         hipError_t e;
-        if (a.pair)
+        if (a.pair && a.groups)
+            e = shelf_hy4_expert_batch_gate_up_swiglu(x, matrices, routes, batches, codes, scales, partial,
+                                                      partial2, y, a.rows, a.groups, 0);
+        else if (a.pair)
             e = shelf_hy4_expert_gate_up_swiglu(x, matrices, 3, codes, scales, partial, partial2, y, a.rows,
                                                routes, 0);
         else
