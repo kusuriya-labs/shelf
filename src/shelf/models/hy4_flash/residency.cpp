@@ -81,6 +81,8 @@ void Residency::reserve() {
         check(hipSetDevice(physical[r]));
         size_t total = 0;
         check(hipMemGetInfo(&available[r], &total));
+        // 空きを使い切ると arena 確保や hipBLASLt の追加確保が失敗するため、余裕を残す。
+        available[r] -= std::min(available[r], size_t(256) << 20);
         overhead[r] = (r ? size_t(512) << 20 : size_t(2) << 30) + matrix_bytes;
         if (!r)
             for (int i = 0; i < 42; ++i) {
