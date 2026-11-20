@@ -13,6 +13,12 @@ TP、pipeline parallel、MTP、DFlash2、2048 token 超の長文は未対応。
 2B の teacher-forced 比較では CPU BF16 参照との top-1 に不一致がある。
 入力 ID の作り方と測定結果は [PLaMo 3 開発メモ](../developer/plamo3.md) を参照。
 
+## EXL3-INT8 prefill
+
+gfx1201 の EXL3-INT8 mul24 は、既定で 256 行以上の prefill に hipBLASLt の INT8 経路を使用する。従来の経路に戻すには、プロセス起動時に `SHELF_EXL3_MUL24_PREFILL_AB=B` を指定する。INT8 algorithm が使えない場合は従来の経路へ切り替わる。decode と verify は融合経路を使う。PLaMo の既定経路は変わらない。
+
+prefill の chunk 境界や prefix cache の有無によって、同じ入力の出力が bit 単位で変わる場合がある。通常生成と DFlash2 の出力不一致は従来経路でも観測されている。BF16 比の精度と測定条件は [EXL3-INT8 prefill の品質](../perf/exl3-int8-prefill-quality.md) を参照。
+
 ## options
 
 <!-- cli:compute -->

@@ -261,6 +261,7 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits, uint32_t see
             std::printf("  dense int8 GEMM: no hipBLASLt algorithm for this shape, skipped\n");
         } else {
             HIP_OK(ge);
+            HIP_OK(shelf::execution::exl3_dense_gemm_int8(rows, n, k, d_dense.p, d_codes.p, d_acc.p, nullptr));
             HIP_OK(shelf::kernel::launch_exl3_mul24_gemm(d_codes_f.p, d_scales_f.p, code_stride, scale_stride_bytes,
                                                        d_trellis.p, bits, d_y2.p, cap, n, k, 1u, nullptr, d_count.p));
             HIP_OK(shelf::kernel::launch_exl3_mul24_rotate_out_i32(

@@ -20,6 +20,7 @@ struct AlgoKey {
     uint32_t k = 0;
     bool int8 = false;
     hipblasLtMatmulAlgo_t algo{};
+    size_t workspace_size = 0u;
     bool valid = false;
 };
 
@@ -41,21 +42,21 @@ LtState& state() {
     return value;
 }
 
-const hipblasLtMatmulAlgo_t* find_algo(LtState& lt, bool int8, uint32_t rows, uint32_t n, uint32_t k) {
+const AlgoKey* find_algo(LtState& lt, bool int8, uint32_t rows, uint32_t n, uint32_t k) {
     for (uint32_t i = 0u; i < kCacheCapacity; ++i) {
         const AlgoKey& entry = lt.cache[i];
         if (entry.valid && entry.int8 == int8 && entry.rows == rows && entry.out_features == n && entry.k == k) {
-            return &entry.algo;
+            return &entry;
         }
     }
     return nullptr;
 }
 
 void store_algo(LtState& lt, bool int8, uint32_t rows, uint32_t n, uint32_t k,
-                const hipblasLtMatmulAlgo_t& algo) {
+                const hipblasLtMatmulAlgo_t& algo, size_t workspace_size) {
     for (uint32_t i = 0u; i < kCacheCapacity; ++i) {
         if (!lt.cache[i].valid) {
-            lt.cache[i] = AlgoKey{rows, n, k, int8, algo, true};
+            lt.cache[i] = AlgoKey{rows, n, k, int8, algo, workspace_size, true};
             return;
         }
     }
@@ -80,6 +81,7 @@ hipError_t run_dense_gemm(bool int8, uint32_t rows, uint32_t out_features, uint3
     if (lt.handle != nullptr && lt.device != cur_device) {
         (void) hipblasLtDestroy(lt.handle);
         lt.handle = nullptr;
+        for (auto& entry : lt.cache) entry = {};
     }
     if (lt.handle == nullptr) {
         if (!hipblaslt_abi_compatible()) return hipErrorInitializationError;
@@ -119,7 +121,7 @@ hipError_t run_dense_gemm(bool int8, uint32_t rows, uint32_t out_features, uint3
         (void) hipblasLtMatrixLayoutCreate(&lc, HIP_R_32F, n, m, n);
     }
     (void) hipblasLtMatmulPreferenceCreate(&pref);
-    const size_t workspace_limit = 0u;
+    const size_t workspace_limit = int8 ? 256ull * 1024ull * 1024ull : 0u;
     (void) hipblasLtMatmulPreferenceSetAttribute(
         pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspace_limit,
         sizeof(workspace_limit));
@@ -142,13 +144,13 @@ hipError_t run_dense_gemm(bool int8, uint32_t rows, uint32_t out_features, uint3
     struct PrefillCache {
         int device = -1;
         hipblasLtMatmulAlgo_t algo{};
+        size_t workspace_size = 0u;
         bool valid = false;
     };
     static thread_local PrefillCache prefill_cache[3];
-    const hipblasLtMatmulAlgo_t* cached = use_prefill_choice
-        ? (prefill_cache[prefill_slot].valid && prefill_cache[prefill_slot].device == cur_device
-               ? &prefill_cache[prefill_slot].algo : nullptr)
-        : find_algo(lt, int8, rows, out_features, kdim);
+    const PrefillCache* special = use_prefill_choice && prefill_cache[prefill_slot].valid &&
+        prefill_cache[prefill_slot].device == cur_device ? &prefill_cache[prefill_slot] : nullptr;
+    const AlgoKey* cached = use_prefill_choice ? nullptr : find_algo(lt, int8, rows, out_features, kdim);
     hipblasLtMatmulAlgo_t algo{};
     size_t workspace_size = 0u;
     const float alpha = 1.0f;
@@ -157,8 +159,12 @@ hipError_t run_dense_gemm(bool int8, uint32_t rows, uint32_t out_features, uint3
     const int32_t beta_i = 0;
     const void* alpha_p = int8 ? static_cast<const void*>(&alpha_i) : static_cast<const void*>(&alpha);
     const void* beta_p = int8 ? static_cast<const void*>(&beta_i) : static_cast<const void*>(&beta);
-    if (cached != nullptr) {
-        algo = *cached;
+    if (special != nullptr) {
+        algo = special->algo;
+        workspace_size = special->workspace_size;
+    } else if (cached != nullptr) {
+        algo = cached->algo;
+        workspace_size = cached->workspace_size;
     } else {
         constexpr int kCandidates = 16;
         hipblasLtMatmulHeuristicResult_t results[kCandidates]{};
@@ -206,6 +212,7 @@ hipError_t run_dense_gemm(bool int8, uint32_t rows, uint32_t out_features, uint3
             double best_ms = 1.0e30;
             int best = -1;
             for (int i = 0; i < found; ++i) {
+                if (results[i].workspaceSize != 0u) continue;
                 hipEvent_t start = nullptr;
                 hipEvent_t stop = nullptr;
                 if (hipEventCreate(&start) != hipSuccess ||
@@ -249,12 +256,13 @@ hipError_t run_dense_gemm(bool int8, uint32_t rows, uint32_t out_features, uint3
         if (use_prefill_choice) {
             prefill_cache[prefill_slot].device = cur_device;
             prefill_cache[prefill_slot].algo = algo;
+            prefill_cache[prefill_slot].workspace_size = workspace_size;
             prefill_cache[prefill_slot].valid = true;
             if (std::getenv("SHELF_EXL3_INT8_PREFILL_ALGO_LOG") != nullptr)
-                std::fprintf(stderr, "EXL3 prefill algo device=%d rows=%u n=%u k=%u index=%d workspace=0\n",
-                             cur_device, rows, out_features, kdim, hipblaslt_ext::getIndexFromAlgo(algo));
+                std::fprintf(stderr, "EXL3 prefill algo device=%d rows=%u n=%u k=%u index=%d workspace=%zu\n",
+                             cur_device, rows, out_features, kdim, hipblaslt_ext::getIndexFromAlgo(algo), workspace_size);
         } else {
-            store_algo(lt, int8, rows, out_features, kdim, algo);
+            store_algo(lt, int8, rows, out_features, kdim, algo, workspace_size);
         }
     }
 
