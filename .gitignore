@@ -17,6 +17,7 @@
 /models*
 
 # AGENTS
+.hy4-agent/
 opencode.json
 opencode.jsonc
 AGENTS.local.md
