@@ -61,6 +61,11 @@ struct MtpPrefillProgress {
     void* stop_context = nullptr;
 };
 
+struct MtpPrefillBoundary {
+    void* context = nullptr;
+    Status (*save)(void* context, uint32_t position, hipStream_t stream) = nullptr;
+};
+
 struct MtpIterationOutput {
     std::array<int32_t, kMtpMaxDrafts + 1u> emitted{};
     uint32_t emitted_count = 0;
@@ -280,7 +285,9 @@ Result<MtpPrefillOutput> mtp_spec_prefill(
     const int32_t* prompt_tokens,
     uint32_t prompt_count,
     const SamplingConfig& sampling,
-    const MtpPrefillProgress* progress = nullptr);
+    const MtpPrefillProgress* progress = nullptr,
+    const MtpPrefillBoundary* boundary = nullptr,
+    uint32_t start_position = 0u);
 
 Result<MtpIterationOutput> mtp_spec_step(
     MtpDrafter& drafter,
@@ -330,6 +337,28 @@ struct MtpSpecBatchOutput {
 // per-request drafters, and the per-rank GDN history / compact log sized for the whole
 // batch. The draft and accept phases stay per-request; only the target verify is fused
 // into one forward.
+struct MtpDraftSnapshot {
+    uint64_t key = 0;
+    uint32_t prefix_position = 0;
+    uint32_t mtp_position = 0;
+    uint32_t last_position = 0;
+    uint64_t sample_index = 0;
+    std::vector<int32_t> last_tokens;
+    std::vector<uint8_t> hidden;
+    std::vector<std::vector<uint8_t>> ring_k;
+    std::vector<std::vector<uint8_t>> ring_v;
+};
+
+uint64_t mtp_prefix_key(const std::vector<uint32_t>& tokens, uint32_t position);
+
+Result<MtpDraftSnapshot> mtp_save_draft_snapshot(const MtpDrafter& drafter,
+                                                 uint32_t prefix_position,
+                                                 hipStream_t stream);
+
+Status mtp_restore_draft_snapshot(MtpDrafter& drafter,
+                                  const MtpDraftSnapshot& snapshot,
+                                  hipStream_t stream);
+
 struct MtpSpecBatchContext {
     Executor* target = nullptr;
     std::vector<std::unique_ptr<MtpDrafter>> drafters;

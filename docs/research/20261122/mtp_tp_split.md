@@ -78,6 +78,38 @@ arena が 0.05 GiB 不足した。
 2 request）は 10/10 PASS した。ただし near-tie 分岐の許容契約を含むため、
 target-only との bit 一致を要求する用途では追加検証が必要である。
 
+## prefix cache
+
+MTP の admit は prefix cache を lookup していなかったため、`restored_tokens` は常に 0
+だった。target の prefix state に加えて drafter の KV ring / hidden / last token /
+position を同じ checkpoint に保存する `MtpDraftSnapshot` を追加した。
+
+- target は通常の `PrefixCache::restore` と TP mirror restore を使う。
+- drafter の ring は leader と peer の rank ごとに保存・復元する。
+- snapshot の MTP position が prefix - 1 のときは、suffix の先頭 token を 1 回
+  MTP forward して position を揃えてから suffix を prefill する。
+- suffix が空の prompt は pending token を作れないため restore しない。
+
+検証: 4096 token の prefix を持つ request を流した後、同じ prefix + 100 token の
+request を流した。2 本目は `restored_tokens=4096`、`prefill_tokens=100` で完了した。
+
+```text
+PFXDBG mtp lookup hit=1 state=4096 in=4196 snapshots=2
+PFXDBG mtp restored prefix=4096 target=4096 mtp=4095 last=4095
+[req 2] prompt=4196 restored=4096 prefill=100
+```
+
+3162 token の request の後、同じ prefix + 3 token の request でも確認した。
+2 本目は `restored_tokens=2048`、`prefill_tokens=1117` で、復元後も MTP decode が
+継続した。
+
+```text
+[req 1] prompt=3162 restored=0 prefill=3162 decode_tok_s=59.5
+[req 2] prompt=3165 restored=2048 prefill=1117 decode_tok_s=45.5
+```
+
+`tests/server/test_compute_mtp_prefix.py` を追加し、5/5 PASS を確認した。
+
 ## slot 再利用時の不具合
 
 `MTP_SLOTS` の slot 順と `mtp.active` の並びが一致しない状態（短い request が先に

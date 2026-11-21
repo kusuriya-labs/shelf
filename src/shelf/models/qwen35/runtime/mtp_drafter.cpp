@@ -121,6 +121,11 @@ state::PagedKVPool& draft_kv_pool(MtpDrafter& drafter) {
                                            : *drafter.kv_pool;
 }
 
+const state::PagedKVPool& draft_kv_pool(const MtpDrafter& drafter) {
+    return drafter.shared_draft != nullptr ? *drafter.shared_draft->kv_pool
+                                           : *drafter.kv_pool;
+}
+
 const gpu::Tensor& drafter_hidden_output(const MtpDrafter& drafter) {
     const Executor& executor = draft_executor(drafter);
     return drafter.wide_hidden ? executor.normed_token_hidden : executor.token_hidden;
@@ -313,6 +318,213 @@ Status rewind_sequences(MtpDrafter& drafter, uint32_t position,
     }
     return Status::make_ok();
 }
+
+}  // namespace
+
+uint64_t mtp_prefix_key(const std::vector<uint32_t>& tokens, uint32_t position) {
+    uint64_t hash = 1469598103934665603ull;
+    const uint32_t count = std::min<uint32_t>(position,
+                                              static_cast<uint32_t>(tokens.size()));
+    for (uint32_t i = 0u; i < count; ++i) {
+        hash ^= static_cast<uint64_t>(tokens[i]);
+        hash *= 1099511628211ull;
+    }
+    hash ^= static_cast<uint64_t>(position);
+    hash *= 1099511628211ull;
+    return hash;
+}
+
+namespace {
+
+std::size_t mtp_ring_kv_bytes(const state::PagedKVPool& pool) {
+    return static_cast<std::size_t>(pool.page_tokens()) * pool.kv_heads() *
+           pool.head_dim() * sizeof(bf16_t);
+}
+
+Status save_mtp_ring(const MtpDrafter& drafter, std::vector<uint8_t>& k,
+                     std::vector<uint8_t>& v, hipStream_t stream) {
+    if (drafter.ring_pages == 0u || drafter.sequence == nullptr) {
+        return Status::unsupported("mtp prefix snapshot needs a ring sequence",
+                                   __FILE__, __LINE__);
+    }
+    const state::PagedKVPool& pool = draft_kv_pool(drafter);
+    if (drafter.sequence->block_table.size() < drafter.ring_pages) {
+        return Status::invalid_state("mtp ring block table is too short", __FILE__,
+                                     __LINE__);
+    }
+    const std::size_t bytes = mtp_ring_kv_bytes(pool);
+    k.resize(bytes * drafter.ring_pages);
+    v.resize(bytes * drafter.ring_pages);
+    const hipError_t sync = hipStreamSynchronize(stream);
+    if (sync != hipSuccess) {
+        return Status::hip_error("mtp prefix ring sync", hipGetErrorString(sync),
+                                 __FILE__, __LINE__);
+    }
+    for (uint32_t i = 0u; i < drafter.ring_pages; ++i) {
+        const state::PageId page = drafter.sequence->block_table[i];
+        const auto kv = pool.k_view(0u, page);
+        const auto vv = pool.v_view(0u, page);
+        const hipError_t kerr = hipMemcpy(k.data() + static_cast<std::size_t>(i) * bytes,
+                                          kv.data<void>(), bytes,
+                                          hipMemcpyDeviceToHost);
+        if (kerr != hipSuccess) {
+            return Status::hip_error("mtp prefix ring K", hipGetErrorString(kerr),
+                                     __FILE__, __LINE__);
+        }
+        const hipError_t verr = hipMemcpy(v.data() + static_cast<std::size_t>(i) * bytes,
+                                          vv.data<void>(), bytes,
+                                          hipMemcpyDeviceToHost);
+        if (verr != hipSuccess) {
+            return Status::hip_error("mtp prefix ring V", hipGetErrorString(verr),
+                                     __FILE__, __LINE__);
+        }
+    }
+    return Status::make_ok();
+}
+
+Status load_mtp_ring(const MtpDrafter& drafter, const std::vector<uint8_t>& k,
+                     const std::vector<uint8_t>& v, hipStream_t stream) {
+    if (drafter.ring_pages == 0u || drafter.sequence == nullptr) {
+        return Status::unsupported("mtp prefix snapshot needs a ring sequence",
+                                   __FILE__, __LINE__);
+    }
+    const state::PagedKVPool& pool = draft_kv_pool(drafter);
+    const std::size_t bytes = mtp_ring_kv_bytes(pool);
+    if (k.size() != bytes * drafter.ring_pages ||
+        v.size() != bytes * drafter.ring_pages) {
+        return Status::invalid_argument("mtp prefix ring size mismatch", __FILE__,
+                                        __LINE__);
+    }
+    for (uint32_t i = 0u; i < drafter.ring_pages; ++i) {
+        const state::PageId page = drafter.sequence->block_table[i];
+        const auto kv = pool.k_view(0u, page);
+        const auto vv = pool.v_view(0u, page);
+        const hipError_t kerr = hipMemcpy(kv.data<void>(),
+                                          k.data() + static_cast<std::size_t>(i) * bytes,
+                                          bytes, hipMemcpyHostToDevice);
+        if (kerr != hipSuccess) {
+            return Status::hip_error("mtp prefix restore K", hipGetErrorString(kerr),
+                                     __FILE__, __LINE__);
+        }
+        const hipError_t verr = hipMemcpy(vv.data<void>(),
+                                          v.data() + static_cast<std::size_t>(i) * bytes,
+                                          bytes, hipMemcpyHostToDevice);
+        if (verr != hipSuccess) {
+            return Status::hip_error("mtp prefix restore V", hipGetErrorString(verr),
+                                     __FILE__, __LINE__);
+        }
+    }
+    const hipError_t sync = hipStreamSynchronize(stream);
+    if (sync != hipSuccess) {
+        return Status::hip_error("mtp prefix restore sync", hipGetErrorString(sync),
+                                 __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+}  // namespace
+
+Result<MtpDraftSnapshot> mtp_save_draft_snapshot(const MtpDrafter& drafter,
+                                                 uint32_t prefix_position,
+                                                 hipStream_t stream) {
+    if (!drafter.initialized || drafter.sequence == nullptr) {
+        return Status::invalid_state("mtp snapshot: drafter is not initialized",
+                                     __FILE__, __LINE__);
+    }
+    MtpDraftSnapshot snapshot;
+    snapshot.prefix_position = prefix_position;
+    snapshot.mtp_position = drafter.sequence->position;
+    snapshot.last_position = drafter.last_position;
+    snapshot.last_tokens = drafter.last_tokens;
+    snapshot.sample_index = drafter.sample_index;
+    if (drafter.hidden_cache.ndim() != 0u) {
+        const std::size_t bytes =
+            static_cast<std::size_t>(drafter.hidden_width) * sizeof(bf16_t);
+        snapshot.hidden.resize(bytes);
+        auto scope = shelf::gpu::ScopedDevice::create(drafter.target_device);
+        if (!scope.ok()) return scope.status();
+        const hipError_t copy = hipMemcpy(snapshot.hidden.data(),
+                                          drafter.hidden_cache.data<void>(), bytes,
+                                          hipMemcpyDeviceToHost);
+        if (copy != hipSuccess) {
+            return Status::hip_error("mtp snapshot hidden", hipGetErrorString(copy),
+                                     __FILE__, __LINE__);
+        }
+    }
+    snapshot.ring_k.resize(1u + drafter.peers.size());
+    snapshot.ring_v.resize(1u + drafter.peers.size());
+    Status st = save_mtp_ring(drafter, snapshot.ring_k[0], snapshot.ring_v[0], stream);
+    if (!st.ok()) return st;
+    for (std::size_t r = 0u; r < drafter.peers.size(); ++r) {
+        const MtpDraftPeer& peer = drafter.peers[r];
+        if (peer.owner == nullptr) {
+            return Status::invalid_state("mtp snapshot peer is incomplete", __FILE__,
+                                         __LINE__);
+        }
+        auto scope = shelf::gpu::ScopedDevice::create(peer.device);
+        if (!scope.ok()) return scope.status();
+        st = save_mtp_ring(*peer.owner, snapshot.ring_k[r + 1u],
+                           snapshot.ring_v[r + 1u], peer.stream);
+        if (!st.ok()) return st;
+    }
+    return snapshot;
+}
+
+Status mtp_restore_draft_snapshot(MtpDrafter& drafter,
+                                  const MtpDraftSnapshot& snapshot,
+                                  hipStream_t stream) {
+    if (!drafter.initialized || drafter.sequence == nullptr) {
+        return Status::invalid_state("mtp restore: drafter is not initialized",
+                                     __FILE__, __LINE__);
+    }
+    if (snapshot.ring_k.size() != 1u + drafter.peers.size() ||
+        snapshot.ring_v.size() != snapshot.ring_k.size()) {
+        return Status::invalid_argument("mtp restore rank count mismatch", __FILE__,
+                                        __LINE__);
+    }
+    drafter.sequence->position = snapshot.mtp_position;
+    drafter.last_position = snapshot.last_position;
+    drafter.last_tokens = snapshot.last_tokens;
+    drafter.sample_index = snapshot.sample_index;
+    if (!snapshot.hidden.empty()) {
+        const std::size_t bytes =
+            static_cast<std::size_t>(drafter.hidden_width) * sizeof(bf16_t);
+        if (snapshot.hidden.size() != bytes || drafter.hidden_cache.ndim() == 0u) {
+            return Status::invalid_argument("mtp restore hidden size mismatch", __FILE__,
+                                            __LINE__);
+        }
+        auto scope = shelf::gpu::ScopedDevice::create(drafter.target_device);
+        if (!scope.ok()) return scope.status();
+        const hipError_t copy = hipMemcpy(drafter.hidden_cache.data<void>(),
+                                          snapshot.hidden.data(), bytes,
+                                          hipMemcpyHostToDevice);
+        if (copy != hipSuccess) {
+            return Status::hip_error("mtp restore hidden", hipGetErrorString(copy),
+                                     __FILE__, __LINE__);
+        }
+    }
+    Status st = load_mtp_ring(drafter, snapshot.ring_k[0], snapshot.ring_v[0], stream);
+    if (!st.ok()) return st;
+    for (std::size_t r = 0u; r < drafter.peers.size(); ++r) {
+        const MtpDraftPeer& peer = drafter.peers[r];
+        if (peer.owner == nullptr) {
+            return Status::invalid_state("mtp restore peer is incomplete", __FILE__,
+                                         __LINE__);
+        }
+        auto scope = shelf::gpu::ScopedDevice::create(peer.device);
+        if (!scope.ok()) return scope.status();
+        st = load_mtp_ring(*peer.owner, snapshot.ring_k[r + 1u],
+                           snapshot.ring_v[r + 1u], peer.stream);
+        if (!st.ok()) return st;
+        peer.owner->sequence->position = snapshot.mtp_position;
+        peer.owner->last_position = snapshot.last_position;
+        peer.owner->last_tokens = snapshot.last_tokens;
+        peer.owner->sample_index = snapshot.sample_index;
+    }
+    return Status::make_ok();
+}
+
+namespace {
 
 constexpr uint32_t kDraftWindowBlockTokens = 4u;
 
@@ -1147,7 +1359,9 @@ Result<MtpPrefillOutput> mtp_spec_prefill(
     const int32_t* prompt_tokens,
     uint32_t prompt_count,
     const SamplingConfig& sampling,
-    const MtpPrefillProgress* progress) {
+    const MtpPrefillProgress* progress,
+    const MtpPrefillBoundary* boundary,
+    uint32_t start_position) {
 
     if (!drafter.initialized) {
         return Status::invalid_state("mtp_spec_prefill: drafter is not initialized",
@@ -1161,12 +1375,36 @@ Result<MtpPrefillOutput> mtp_spec_prefill(
         return Status::out_of_range("mtp_spec_prefill: prompt leaves no room", __FILE__,
                                     __LINE__);
     }
-    if (target_sequence.position != 0u || drafter.sequence->position != 0u) {
-        return Status::invalid_state("mtp_spec_prefill: sequence is not empty", __FILE__,
-                                     __LINE__);
+    if (start_position >= prompt_count) {
+        return Status::invalid_argument("mtp_spec_prefill: empty suffix", __FILE__,
+                                        __LINE__);
+    }
+    if (target_sequence.position != start_position) {
+        return Status::invalid_state("mtp_spec_prefill: target position is not the start",
+                                     __FILE__, __LINE__);
+    }
+    if (start_position == 0u && drafter.sequence->position != 0u) {
+        return Status::invalid_state("mtp_spec_prefill: drafter sequence is not empty",
+                                     __FILE__, __LINE__);
     }
 
     const hipStream_t stream = drafter.target_stream;
+    if (start_position > 0u && drafter.sequence->position + 1u == start_position) {
+        std::vector<int32_t> seed_token{prompt_tokens[start_position]};
+        Status copy = copy_hidden_to_all(drafter, drafter.hidden_cache, 0u, 1u, stream);
+        if (!copy.ok()) return copy;
+        auto seeded = run_mtp_forward(drafter, seed_token, start_position - 1u, false,
+                                      stream);
+        if (!seeded.ok()) return seeded.status();
+    }
+    if (drafter.sequence->position != start_position) {
+        return Status::invalid_state(
+            ("mtp_spec_prefill: drafter position is not the start (" +
+             std::to_string(drafter.sequence->position) + " != " +
+             std::to_string(start_position) + ")")
+                .c_str(),
+            __FILE__, __LINE__);
+    }
     const uint32_t chunk_limit =
         target.config.max_batch_rows != 0u ? target.config.max_batch_rows : prompt_count;
     const uint32_t mtp_limit = draft_executor(drafter).config.max_batch_rows;
@@ -1182,8 +1420,12 @@ Result<MtpPrefillOutput> mtp_spec_prefill(
                                       .count();
         progress->report(progress->context, processed_tokens, elapsed_ms);
     };
+    auto save_boundary = [&](uint32_t position) -> Status {
+        if (boundary == nullptr || boundary->save == nullptr) return Status::make_ok();
+        return boundary->save(boundary->context, position, stream);
+    };
 
-    for (uint32_t begin = 0; begin < prompt_count; begin += chunk_limit) {
+    for (uint32_t begin = start_position; begin < prompt_count; begin += chunk_limit) {
         if (progress != nullptr && progress->should_stop != nullptr &&
             progress->should_stop(progress->stop_context)) {
             return Status::invalid_state("mtp prefill cancelled", __FILE__, __LINE__);
@@ -1225,6 +1467,8 @@ Result<MtpPrefillOutput> mtp_spec_prefill(
             drafter.last_tokens.assign(1u, prompt_tokens[last_row]);
             drafter.last_position = last_row;
             drafter.last_hidden_offset = 0u;
+            Status saved = save_boundary(end);
+            if (!saved.ok()) return saved;
             report_progress(end);
             continue;
         }
@@ -1244,6 +1488,8 @@ Result<MtpPrefillOutput> mtp_spec_prefill(
                                               stream);
             if (!mtp_output.ok()) return mtp_output.status();
         }
+        Status saved = save_boundary(end);
+        if (!saved.ok()) return saved;
         report_progress(end);
     }
 

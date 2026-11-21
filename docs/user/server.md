@@ -208,6 +208,9 @@ Qwen3.8-27B-DFlash2、同時 request 1 件では追加 scratch は 16.953 MiB。
 - qwen4exp で `--tensor-parallel` を使うときは、MTP block を全 rank に分割し、
   drafter は target の語彙分割 lm_head を共用する。単発生成の TP は rank0 が
   MTP block 全体を持つ。
+- MTP も prefix cache を使う。target に加えて MTP drafter の KV ring と hidden /
+  position を保存・復元する。`restored_tokens` に復元数が出る。checkpoint 間隔は
+  `--prefix-cache-save-interval` で調整できる。
 - tool calling / sampling / cancel は MTP 経路でも利用できる。cancel は prefill 中なら
   次の chunk 境界、生成中なら次の spec round で反映される。
 - 思考 budget（`reasoning_budget_tokens`）は MTP では無視し、通常の生成を行う。

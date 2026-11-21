@@ -97,6 +97,24 @@ fused verify は target-only と一致するが、4 request / 20 行では near-
   GDN / QSA / PLE history と snapshot で rollback する。qwen4exp の Wavefront 検証は
   通常の TP decode 経路を使う。
 
+## prefix cache
+
+MTP の admit は通常の `PrefixCache` を lookup し、target の KV / GDN / QSA / PLE と
+TP mirror を restore する。同じ checkpoint には `MtpDraftSnapshot` も保存する。
+
+- snapshot は leader と全 peer の MTP KV ring、leader の hidden cache、last token /
+  position、sample index を持つ。
+- key は prefix token 列と target position の hash である。
+- prefill の page-aligned chunk 境界で保存する。最初の境界は必ず保存し、以後は
+  `prefix_cache_save_interval` の倍数で保存する。
+- restore では target を復元した後、drafter の ring / position / hidden を戻す。
+  snapshot の MTP position が prefix - 1 のときは、suffix の先頭 token を 1 回だけ
+  MTP forward してから suffix の prefill を始める。
+- suffix が空になる prefix は restore しない。target の最後の logits を保存していない
+  ため、pending token を作れないからである。
+- suffix prefill は `mtp_spec_prefill` の `start_position` から実行し、prefix 部分の
+  target forward を繰り返さない。
+
 ## verify の行数不変性
 
 speculative verify の行数は、その round に active な request 数で変わる。EXL3 の split-K は
@@ -310,7 +328,9 @@ draft が depth 単位で batch 化されるため、`draft_forwards` は round 
 - MTP block を持たない checkpoint では使えない。dense / MoE のどちらの family でも
   block があれば load される。
 - `--pipeline-parallel 2` / `--dump-logits` は未対応である。
-- prefix cache は MTP の単一 request compute 経路では使わない。
+- prefix cache は MTP 経路でも使う。target state に加えて、drafter の KV ring、
+  hidden cache、last token / position を同じ checkpoint に保存し、復元後は suffix の
+  prefill だけを実行する。
 - partial accept は GDN snapshot + compact log replay で復元する。target rerun は行わない。
 - MTP の prefill first pass は 512 行以下へ分割する。target の prefill chunk は
   target-only と同じ値を使う。

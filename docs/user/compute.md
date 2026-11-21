@@ -220,7 +220,11 @@ dense checkpoint を TP=2 で動かす場合:
   1 行 DECODE を使う。`SHELF_MTP_WAVEFRONT=1` で最大 4 request の Wavefront batch を
   選べる。`--max-concurrent-requests` で request 数を制限する。
 - partial accept は GDN の compact log replay で復元する。target の再 forward は行わない。
-- prefix cache は MTP 経路では使わない。
+- prefix cache は MTP 経路でも使う。target の state に加えて MTP drafter の KV ring と
+  hidden / position を保存・復元する。`done` の `restored_tokens` が復元した token 数である。
+  checkpoint は prefill chunk の境界に保存し、最初の境界の後は
+  `--prefix-cache-save-interval` の倍数で保存する。短い共通 prefix を拾うには
+  `--prefix-cache-save-interval` を chunk 以下にする。
 - `--mtp --serve-stdio` でも、prefill / decode 中は 3 秒ごとに `prefill_tok_s` /
   `decode_tok_s` を出し、done 時に prefill / TTFT / decode の総括を stderr に出す。
   serve の終了時には `MTP_BATCH ... chunks=... max_active=...` を出す。
