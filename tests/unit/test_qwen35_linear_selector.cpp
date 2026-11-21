@@ -123,6 +123,17 @@ void test_bf16() {
                            true, true, true),
                   Bf16GemmConfigId::Wmma, 0u),
           "bf16 rows past the exact kernel max -> Wmma");
+    check(is_bf16(sel_bf16(20u, 320, 10240, 10240, true, true, true),
+                  Bf16GemmConfigId::ExactRows, 20u),
+          "bf16 narrow out rows past the exact kernel max -> chunked ExactRows");
+    check(is_bf16(sel_bf16(shelf::kernel::kBf16GemmExactRowsMax, 320, 10240, 10240,
+                           true, true, true),
+                  Bf16GemmConfigId::ExactRows,
+                  static_cast<uint8_t>(shelf::kernel::kBf16GemmExactRowsMax)),
+          "bf16 narrow out at the exact rows max -> ExactRows(max)");
+    check(is_bf16(sel_bf16(20u, 1024, 2560, 2560, true, true, true),
+                  Bf16GemmConfigId::Wmma, 0u),
+          "bf16 wide out rows past the exact kernel max -> Wmma");
     check(is_bf16(sel_bf16(8, 1024, 2560, 2560, false, true, true),
                   Bf16GemmConfigId::Wmma, 0u),
           "bf16 weight unaligned -> Wmma");

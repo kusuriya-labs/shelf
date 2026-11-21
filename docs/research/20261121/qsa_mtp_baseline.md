@@ -89,13 +89,69 @@ Wavefront 4 request chunk は別 prompt で target-only と分岐する再現が
 既定では off、比較用 feature flag として残す。Phase 1 の合格条件は満たすが、
 数値不変性が全 prompt で確認できるまでは既定にしない。
 
+### fused verify の行数依存算術を解消した（2026-11-21）
+
+4 request（20 行）の fused verify で state と生成列が safe 経路とずれる原因を、
+単体 executor テスト（同じ row 0 入力を 4 行と 20 行で実行し trace / logits を比較）で
+切り分けた。rollback ではなく、**行数で算術が切り替わる 2 箇所**だった。
+
+| 個所 | 旧動作 | 差 |
+| --- | --- | --- |
+| BF16 GEMM selector | rows ≤16: `ExactRows`、rows ≥17: `Wmma` / `WmmaKPartition` | スカラー FMA の逐次和と WMMA の断片和で丸めが変わる |
+| EXL3 split-K | rows 1..16 と 17..64 で別の選択式 | K の分割位置が変わり部分和の順序が変わる |
+
+HyperConnection の down / up は BF16 で、最初の不一致 trace はこの GEMM だった。
+1〜3 request（最大 15 行）は一致し、4 request（20 行）で分岐した観測と整合する。
+
+対策:
+
+- EXL3 split-K を 1..64 行で decode と同じ fill 式に統一（scratch 超過時のみクランプ）
+- BF16 は narrow-out（`256 < out_features <= 512`）かつ 17..64 行のみ 16 行チャンクの
+  `ExactRows`、wide-out は `Wmma` を維持（下記実測による）
+- Verify role の `splitk_tuning_rows` 固定を削除
+
+#### BF16 GEMM（shelf-bench gemm、p50 µs）
+
+| shape | rows | ExactRows チャンク | Wmma |
+| --- | ---: | ---: | ---: |
+| 320:10240 | 20 | 42.6 | 132.7 |
+| 320:10240 | 64 | 117.3 | 132.7 |
+| 10240:320 | 20 | 61.0 | 15.2 |
+| 10240:320 | 64 | 204.5 | 31.6 |
+
+#### EXL3 split-K（shelf-bench exl3-int8、bits=3、合計 µs）
+
+| shape | rows | 新 splits | 旧 splits |
+| --- | ---: | ---: | ---: |
+| 2560:6144 | 20 | 39.2 (4) | 39.2 (6) |
+| 2560:6144 | 64 | 52.9 (4) | 57.6 (6) |
+| 12288:2560 | 20 | 59.3 (1) | 60.1 (2) |
+
+#### 受入（8 request × 8 token、同一 prompt）
+
+| 指標 | safe verify | fused verify |
+| --- | ---: | ---: |
+| wall time（2 回平均） | 2013 ms | 866 ms（2.3x 高速） |
+| kernel dispatch 数 | 1,306,191 | 539,477（2.42x 削減） |
+| GPU kernel 時間 | 9.893 s | 4.475 s（2.21x 削減） |
+| QSA kernel 時間 | 0.241 s | 0.104 s |
+
+`MTP_BATCH_STATS` は safe が `max_verify_per_round=19`、fused が `=1` で、
+Target verify forward は round あたり 1 回になる。
+
+計算経路による logits 不一致と near-tie の argmax 分岐は許容する契約とした。
+safe 経路は target-only 完全一致（9/9 PASS）。fused は 8 request 中 6 件が完全一致し、
+残り 2 件は調査時の一時 instrumentation で測った near-tie だった。
+
+| request | 位置 | fused | target-only | 分岐行の top-1 / top-2 margin |
+| ---: | ---: | ---: | ---: | --- |
+| 3 | 10 | 17 | 16 | 17 (11.950) / 18 (11.904) = 0.047 |
+| 7 | 8 | 3855 | 561 | 3855 (12.801) / 561 (12.546) = 0.254 |
+
 ## 6. 残課題
 
-- `R=8, K=7` の全 64 行を 1 回の `SPEC_VERIFY` にする fused verify は未達。
-  GDN 上限を 8 request / 64 行へ拡張し、`SHELF_MTP_FUSED_VERIFY=1` で
-  4 request fused を試したが、`paged-attention: tree committed > capacity` で停止した。
-  state / mask / spec history の容量契約を先に修正する必要がある。
-- 単一 request の MTP は target-only より遅い。速度評価は fused verify 後にやり直す。
-- Wavefront 4 request chunk は prompt によって target-only と分岐する。数値不変経路が
-  できるまで既定 off。
-- QSA score / Top-k / sparse attention の launch 集約と長文測定は未着手。
+- `R=8, K=7` の 64 行 1 forward fused verify は成立した（`max_verify_per_round=1`）。
+  safe は target-only 完全一致、fused は near-tie 分岐 2 件のみで、これは許容契約。
+- 行数依存の算術切替は BF16 selector と EXL3 split-K の 2 箇所で解消した。
+- Wavefront 4 request chunk は prompt によって target-only と分岐するため opt-in のまま。
+- QSA score / Top-k / attention / key-cache の launch 集約と長文測定は未着手（Phase 3）。

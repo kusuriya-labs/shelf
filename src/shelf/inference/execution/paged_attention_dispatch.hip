@@ -301,8 +301,10 @@ PagedAttentionPlan plan_paged_attention(
     // The tiled prefill implementation is specialized for head_dim 256.
     // Use the optimized per-row decode kernel for shorter heads as well.
     plan.use_prefill = use_prefill && args.common.head_dim == 256u;
-    const uint32_t split_rows =
-        ctx.splitk_tuning_rows != 0u ? ctx.splitk_tuning_rows : args.common.rows;
+    const uint32_t split_rows = ctx.attention_tuning_rows != 0u
+        ? ctx.attention_tuning_rows
+        : (ctx.splitk_tuning_rows != 0u ? ctx.splitk_tuning_rows
+                                        : args.common.rows);
     if (qsa_sparse_supported(args, ctx) &&
         (!plan.use_prefill ||
          ctx.spec.max_visible_tokens >= kQsaSparsePrefillMinTokens)) {

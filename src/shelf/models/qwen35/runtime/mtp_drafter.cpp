@@ -1530,7 +1530,7 @@ Result<MtpSpecBatchContext> create_mtp_spec_batch_context(
         return Status::hip_error("hipGetDevice", hipGetErrorString(rank0_device_err),
                                  __FILE__, __LINE__);
     }
-    if (context.shared_draft != nullptr) {
+    if (context.shared_draft != nullptr && !mtp_fused_verify_enabled()) {
         MtpGdnRankState rank0;
         rank0.pool = &target_gdn_pool;
         rank0.stream = stream;
@@ -1818,6 +1818,22 @@ Status mtp_draft_batch(
             if (!copy.ok()) return copy;
         }
     }
+    if (!slots.front().drafter->serial_verify) {
+        for (std::size_t i = 0u; i < count; ++i) {
+            if (plans[i].decode_only) continue;
+            std::vector<MtpGdnRankState> rank_states =
+                all_rank_states(*slots[i].drafter);
+            for (const MtpGdnRankState& state : rank_states) {
+                auto scope = shelf::gpu::ScopedDevice::create(state.device);
+                if (!scope.ok()) return scope.status();
+                Status snapshot = spec_gdn_snapshot(
+                    *state.pool, slots[i].sequence->slot, state.conv_snapshot,
+                    state.recurrent_snapshot, state.conv_bytes, state.recurrent_bytes,
+                    state.stream);
+                if (!snapshot.ok()) return snapshot;
+            }
+        }
+    }
     return Status::make_ok();
 }
 
@@ -2013,28 +2029,43 @@ Result<MtpSpecBatchOutput> mtp_spec_step_batch(
     std::vector<uint32_t> row_begin(slots.size(), 0u);
     std::vector<char> stopped_slot(slots.size(), 0);
     uint32_t total_rows = 0u;
-    for (std::size_t i = 0u; i < slots.size(); ++i) {
-        const MtpSpecBatchSlot& slot = slots[i];
-        if (slot.drafter == nullptr || slot.sequence == nullptr) {
-            return Status::invalid_argument("mtp batch: slot is incomplete", __FILE__,
-                                            __LINE__);
+    uint32_t draft_forwards = 0u;
+    std::vector<char> batch_stopped(slots.size(), 0);
+    if (context.shared_draft != nullptr) {
+        Status drafted = mtp_draft_batch(context, slots, drafts, batch_stopped,
+                                         draft_forwards);
+        if (!drafted.ok()) return drafted;
+        for (std::size_t i = 0u; i < slots.size(); ++i) {
+            row_begin[i] = total_rows;
+            if (batch_stopped[i] != 0) {
+                stopped_slot[i] = 1;
+                out.slots[i].pending_token = slots[i].pending_token;
+                out.slots[i].finished = true;
+                continue;
+            }
+            if (!drafts[i].decode_only) total_rows += drafts[i].drafts + 1u;
         }
-        row_begin[i] = total_rows;
-        if (qwen_hybrid::is_stop_token(context.target->model.config->stop_tokens,
-                                       slot.pending_token)) {
-            // The stop token was already emitted by the caller; this slot runs nothing.
-            stopped_slot[i] = 1;
-            drafts[i].decode_only = true;
-            out.slots[i].pending_token = slot.pending_token;
-            out.slots[i].finished = true;
-            continue;
-        }
-        auto draft = mtp_draft(*slot.drafter, *context.target, *slot.sequence,
-                               slot.pending_token, slot.remaining_tokens);
-        if (!draft.ok()) return draft.status();
-        drafts[i] = draft.value();
-        if (!drafts[i].decode_only) {
-            total_rows += drafts[i].drafts + 1u;
+    } else {
+        for (std::size_t i = 0u; i < slots.size(); ++i) {
+            const MtpSpecBatchSlot& slot = slots[i];
+            if (slot.drafter == nullptr || slot.sequence == nullptr) {
+                return Status::invalid_argument("mtp batch: slot is incomplete",
+                                                __FILE__, __LINE__);
+            }
+            row_begin[i] = total_rows;
+            if (qwen_hybrid::is_stop_token(context.target->model.config->stop_tokens,
+                                           slot.pending_token)) {
+                stopped_slot[i] = 1;
+                drafts[i].decode_only = true;
+                out.slots[i].pending_token = slot.pending_token;
+                out.slots[i].finished = true;
+                continue;
+            }
+            auto draft = mtp_draft(*slot.drafter, *context.target, *slot.sequence,
+                                   slot.pending_token, slot.remaining_tokens);
+            if (!draft.ok()) return draft.status();
+            drafts[i] = draft.value();
+            if (!drafts[i].decode_only) total_rows += drafts[i].drafts + 1u;
         }
     }
     if (total_rows > context.max_rows) {
@@ -2205,6 +2236,7 @@ Result<MtpSpecBatchOutput> mtp_spec_step_batch(
         out.slots[i] = output.value();
     }
     out.total_rows = total_rows;
+    out.draft_forwards = draft_forwards;
     out.rounds = 1u;
     out.round_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - started).count();

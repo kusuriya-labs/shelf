@@ -69,8 +69,9 @@ target-only と分岐する prompt が残るため既定 off である。dense �
 持たない target は従来どおり K+1 行の融合 verify を使う。
 
 `SHELF_MTP_FUSED_VERIFY=1` は qwen4exp でも K+1 行の融合 verify を選ぶ比較用の
-フラグである。GDN verify の上限は 8 request / 64 行へ拡張したが、4 request の
-fused verify は `paged-attention: tree committed > capacity` で未達である。
+フラグである。GDN verify の上限は 8 request / 64 行へ拡張した。1〜2 request の
+fused verify は target-only と一致するが、4 request / 20 行では near-tie 分岐が
+残るため既定 off である。
 
 ## serve-stdio
 
