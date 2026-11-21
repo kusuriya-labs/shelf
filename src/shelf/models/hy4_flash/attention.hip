@@ -226,7 +226,7 @@ Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidd
     Mat rot = op.rope(op.slice(ka, 512, 64), 1, start, theta);
     Mat gate = op.linear(p + "linear_gate", hidden);
     Param sinks = op.param(p + "learnable_sink_param");
-    if (op.gpu.tp_size > 1) {
+    if (op.gpu.tp_size > 1 && !draft) {
         const int first = (op.rank % op.gpu.tp_size) * heads;
         sinks.p = sinks.type == io::SType::F32
                       ? static_cast<const void *>(static_cast<const float *>(sinks.p) + first)
