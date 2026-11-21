@@ -412,15 +412,19 @@ visibility）。QSA の prefill を sparse と tiled masked で切り替えて�
 | ---: | ---: | ---: | ---: |
 | 4,096 | 1,386 ms | 1,382 ms | -0.3% |
 | 8,192 | 2,894 ms | 2,817 ms | **-2.7%** |
-| 16,384 | 5,891 ms | 5,868 ms | -0.4% |
+| 16,384 | 5,869 ms | 5,837 ms | -0.5% |
+| 20,480 | 7,423 ms | 7,443 ms | +0.3% |
+| 24,576 | 8,951 ms | 9,036 ms | +0.9% |
+| 28,672 | 10,555 ms | 10,687 ms | +1.3% |
 | 32,768 | 12,084 ms | 12,352 ms | +2.2% |
 | 65,536 | 24,941 ms | 26,319 ms | **+5.5%** |
 
 65K の attention kernel は sparse 12.9 s に対し tiled 21.7 s（1.68x 遅い）。固定
 512 block 予算では context が伸びるほど選択密度が下がり、散在する 4 token block で
 WMMA の 16 token lane が遊ぶ。page bitmap は tile 内 16 row の和集合なので訪問 token も
-約 1.6 倍になる。したがって **WMMA prefill は密度の高い領域（visible < 8,192）で有効**とし、
-それ以上は sparse を使う。`SHELF_QSA_WMMA_PREFILL=0`（sparse 固定）/ `=1`（tiled 固定）で
+約 1.6 倍になる。したがって crossover は 16K と 20K の間（16,384 で -0.5%、20,480 で +0.3%）であり、
+**WMMA prefill は visible < 16,384 token の密度の高い領域で有効**、それ以上は sparse を
+使う（`kQsaSparsePrefillMinTokens = 16384`）。`SHELF_QSA_WMMA_PREFILL=0`（sparse 固定）/ `=1`（tiled 固定）で
 A/B できる。masked prefill が tiled kernel の行数下限（256）未満の場合は、mask を無視する
 dense decode 経路に落ちないよう sparse を選ぶ。
 

@@ -44,10 +44,12 @@ const ::shelf::runtime::StateBinding* find_state_binding_for_descriptor(
 
 constexpr uint32_t kPrefillKernelMinRows = kPagedAttentionPrefillMinRows;
 constexpr uint32_t kMaskedPrefillMinRows = 256u;
-// Sparse beats the tiled prefill from about 7-8K visible tokens with the model's fixed
-// 512-block budget (measured rows 64/128/512, bf16 and fp8; fp8 crosses earlier). Keep a
-// conservative 8K margin; the dense prefill path stays available.
-constexpr uint32_t kQsaSparsePrefillMinTokens = 8192u;
+// Crossover of the tiled masked prefill (WMMA, dense selection) and the sparse kernel with
+// the model's fixed 512-block budget. Measured pp (TP=2) at 4K/8K/16K/20K/24K/28K/32K/65K:
+// tiled is -0.3%/-2.7%/-0.5% at 4K/8K/16K and +0.3%/+0.9%/+1.3%/+2.2%/+5.5% from 20K on, so
+// the crossover sits between 16K and 20K visible tokens. Use the tiled path below 16K and
+// the sparse kernel at or above it.
+constexpr uint32_t kQsaSparsePrefillMinTokens = 16384u;
 
 bool qsa_sparse_supported(const PagedAttentionResolvedArgs& args,
                           const HostExecutionContext& ctx) {
