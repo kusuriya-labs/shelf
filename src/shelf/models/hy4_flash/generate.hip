@@ -391,7 +391,11 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
     };
     std::array<Lane, 4> lane;
     std::exception_ptr failure;
+    bool failure_is_abort = false;
     std::mutex failure_mutex;
+    std::vector<int> shared_tokens;
+    int shared_keep = 0;
+    gpu.reset_collectives();
     auto run = [&](int rank) {
         try {
             checked(hipSetDevice(gpu.physical[rank]));
@@ -417,20 +421,35 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
                 lane[0].pp_routes_all = gpu.routed_rows;
                 lane[0].pp_expert_all = gpu.expert_ms;
             }
-            std::vector<int> generated{next};
+            auto broadcast = [&](std::vector<int> &tokens, int &keep) {
+                if (gpu.tp_size == 1) return;
+                if (rank == 0) {
+                    shared_tokens = tokens;
+                    shared_keep = keep;
+                }
+                gpu.all_barrier->arrive_and_wait();
+                tokens = shared_tokens;
+                keep = shared_keep;
+                gpu.all_barrier->arrive_and_wait();
+            };
+            std::vector<int> initial{next};
+            int shared_value = 0;
+            if (rank == 0 && emit) emit(next);
+            broadcast(initial, shared_value);
+            std::vector<int> generated{initial[0]};
             auto append = [&](int id) {
                 generated.push_back(id);
-                if (rank == 0 && emit)
-                    emit(id);
+                if (rank == 0 && emit) emit(id);
             };
-            if (rank == 0 && emit)
-                emit(next);
             auto &stats = lane[rank];
             while (int(generated.size()) < count && generated.back() != 120025) {
                 int anchor = generated.back();
                 if (!gpu.model.has_draft || target.history.size() + 6 > gpu.tokens ||
                     int(generated.size()) + 1 == count) {
-                    append(target.forward({anchor}, false)[0]);
+                    auto output = target.forward({anchor}, false);
+                    if (rank == 0 && emit) emit(output[0]);
+                    broadcast(output, shared_value);
+                    generated.push_back(output[0]);
                     continue;
                 }
                 std::chrono::steady_clock::time_point draft_begin;
@@ -439,11 +458,13 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
                 auto draft = target.propose(anchor);
                 if (gpu.tp_size == 1 && target.op.rank == 0 && gpu.expert_begin[0])
                     stats.draft += std::chrono::duration<double, std::milli>(now() - draft_begin).count();
+                broadcast(draft, shared_value);
                 std::vector<int> block{anchor};
                 block.insert(block.end(), draft.begin(), draft.end());
                 auto actual = target.forward(block, true);
                 int keep = verify_speculation(target.op, target.target_probs, target.draft_probs,
                                               target.history.size() - 5, seed, draft, actual);
+                broadcast(actual, keep);
                 ++stats.rounds;
                 stats.accepted += keep - 1;
                 ++stats.histogram[keep - 1];
@@ -459,9 +480,17 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
             stats.prefill = std::chrono::duration<double>(prefill - begin).count();
             stats.decode = std::chrono::duration<double>(now() - prefill).count();
         } catch (...) {
+            auto error = std::current_exception();
+            bool aborted = false;
+            try { std::rethrow_exception(error); }
+            catch (const CollectiveAborted &) { aborted = true; }
+            catch (...) {}
+            gpu.abort_collectives();
             std::lock_guard<std::mutex> lock(failure_mutex);
-            if (!failure)
-                failure = std::current_exception();
+            if (!failure || (failure_is_abort && !aborted)) {
+                failure = error;
+                failure_is_abort = aborted;
+            }
         }
     };
     if (gpu.tp_size == 1) {
@@ -469,8 +498,15 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
     } else {
         std::vector<std::thread> threads;
         threads.reserve(gpu.ranks);
-        for (int r = 0; r < gpu.ranks; ++r)
-            threads.emplace_back(run, r);
+        try {
+            for (int r = 0; r < gpu.ranks; ++r)
+                threads.emplace_back(run, r);
+        } catch (...) {
+            gpu.abort_collectives();
+            for (auto &thread : threads)
+                thread.join();
+            throw;
+        }
         for (auto &thread : threads)
             thread.join();
     }

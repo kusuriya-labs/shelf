@@ -238,14 +238,13 @@ Mat moe(Ops &op, int layer, Mat x) {
         Mat v = grouped(op, op.swiglu(g, u, true), gpu_routes, layer, 2, batches, num_batches);
         weighted<<<dim3(6, x.rows), 256>>>(v, gpu_routes, offsets_gpu, inverse, result);
         checked(hipGetLastError());
-        if (op.gpu.tp_size > 1)
-            op.gpu.tp_sum(result.p, op.rank, result.bytes());
-        if (op.gpu.expert_end[op.rank])
-            checked(hipEventRecord(op.gpu.expert_end[op.rank]));
     }
+    op.gpu.tp_sum(result.p, op.rank, result.bytes());
+    if (!routes[group].empty() && op.gpu.expert_end[op.rank])
+        checked(hipEventRecord(op.gpu.expert_end[op.rank]));
     if (op.gpu.ep_size > 1)
         op.gpu.ep_reduce(result.p, op.rank, result.bytes());
-    if (op.rank == 0 && op.gpu.expert_begin[0]) {
+    if (op.rank == 0 && op.gpu.expert_begin[0] && !routes[group].empty()) {
         checked(hipEventSynchronize(op.gpu.expert_end[0]));
         float ms;
         checked(hipEventElapsedTime(&ms, op.gpu.expert_begin[0], op.gpu.expert_end[0]));
