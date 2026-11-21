@@ -418,6 +418,10 @@ std::size_t LoadedModel::mtp_spec_batch_reserve_bytes(
     shelf::weights::Exl3LinearShape shape;
     if (qwen4exp_ != nullptr) {
         shape = shelf::qwen4exp::mtp_exl3_linear_shape(qwen4exp_->weights());
+        return shelf::qwen35::runtime::mtp_shared_draft_reserve_bytes(
+            hybrid_config(), per_request, terms.token_row_intermediate,
+            terms.grouped_executor_bytes, terms.exl3_linear_workspace, shape,
+            static_cast<std::uint32_t>(max_requests));
     }
     const std::size_t drafter = shelf::qwen35::runtime::mtp_drafter_reserve_bytes(
         hybrid_config(), per_request, terms.token_row_intermediate,

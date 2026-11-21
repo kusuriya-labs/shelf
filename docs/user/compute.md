@@ -209,18 +209,17 @@ dense checkpoint を TP=2 で動かす場合:
 - `--pipeline-parallel 2`、`--dump-logits` は未対応。
 - `--serve-stdio` は複数 request を同時に保持する。dense など QSA / PLE を持たない
   target は 1 round の verify を 4 request / 32 行ずつの chunk に分けて融合実行する。
-  qwen4exp は target の 1 行 decode を使う安全経路で request ごとに検証する。
+  qwen4exp は 深さごとに最大 4 request の Wavefront DECODE batch で検証する。
   `--max-concurrent-requests` で request 数を制限する。
 - partial accept は GDN の compact log replay で復元する。target の再 forward は行わない。
 - prefix cache は MTP 経路では使わない。
 - `--mtp --serve-stdio` でも、prefill / decode 中は 3 秒ごとに `prefill_tok_s` /
   `decode_tok_s` を出し、done 時に prefill / TTFT / decode の総括を stderr に出す。
   serve の終了時には `MTP_BATCH ... chunks=... max_active=...` を出す。
-- grouped expert（MoE）checkpoint でも MTP block は load / 実行される。qwen4exp は
-  QSA / PLE を持つため target の 1 行 decode を使う安全経路で検証し、生成列は
-  target-only と一致する。融合 verify を使う family では near-tie により target-only と
-  一致しないことがある。実測値は [../perf/current.md](../perf/current.md)、経緯は
-  [../research/20261105/moe_mtp.md](../research/20261105/moe_mtp.md) と
+- grouped expert（MoE）checkpoint でも MTP block は load / 実行される。qwen4exp は QSA / PLE を持つため、MTP draft を深さ単位で batch 化し、verify を
+  最大 4 request の Wavefront DECODE batch で実行する。生成列は target-only と一致する。融合 verify を使う family では near-tie により
+  target-only と一致しないことがある。実測値は [../perf/current.md](../perf/current.md)、
+  経緯は [../research/20261105/moe_mtp.md](../research/20261105/moe_mtp.md) と
   [../research/20261121/mtp_multi_request_verify.md](../research/20261121/mtp_multi_request_verify.md)。
 
 詳細な round 契約は [../developer/mtp.md](../developer/mtp.md) を参照。
@@ -258,7 +257,7 @@ stdio serving の prefill 行数、環境変数、追加メモリは
 - `auto` はチェックポイントの `text_config.rope_parameters.rope_type` に従う。`default` なら Native、`yarn` ならその `factor` を使う。
 - `1` は Native を強制する。`2` / `4` は静的 YaRN を強制する。
 - YaRN の元の長さは `rope_parameters.original_max_position_embeddings`、無ければ `text_config.max_position_embeddings`（Qwen3.8 は 262,144）。
-- `--max-seq-len` の上限は Native 262,144 / 2x 524,288 / 4x 1,000,000（Qwen 公式の案内値）。超える指定は起動時に拒否する。
+- `--max-seq-len` の上限は `min(元の長さ * factor, 1,048,576)`。Qwen3.8 は Native 262,144 / 2x 524,288 / 4x 1,048,576。超える指定は起動時に拒否する。
 - 起動時に `ROPE profile:` 行を stderr へ出し、type / factor / theta / rotary_dim / 元の長さ / attention factor / 決定元（cli か config）を表示する。
 - KV 容量計画は factor と独立である。必要な最小ページ数は `--max-seq-len` だけで決まり、残りのページ数は arena の余りで決まる。
 - 静的 YaRN は入力長に関係なく係数が一定であり、短文の品質にも影響しうる（Qwen 公式の注意）。長文を扱うときだけ有効化する。
