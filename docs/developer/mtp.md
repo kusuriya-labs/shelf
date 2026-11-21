@@ -23,7 +23,8 @@ MoE の MTP decode は verify の multi-row forward を使うが、greedy 列は
 
 dense model の TP=2 では、MTP block の重みは partition しない（TP partition plan に
 `mtp.*` の entry は無い）。各 rank が MTP block を複製して load し、drafter executor は
-rank0 だけで動かす。
+rank0 だけで動かす。qwen4exp の `--serve-stdio --mtp` は `mtp_split` で MTP block を
+全 rank に分割する。
 
 target の prefill / verify は `TpCoordinator::on_execute` で全 rank に同じ batch を流す。
 speculative verify は rank ごとの `ExecuteBatchOptions` を渡し、各 rank の
@@ -38,8 +39,8 @@ target sequence と対応付ける。MTP+TP のときは TP executor に
 MTP+TP では drafter と各 rank の GDN snapshot / compact 領域が KV pool の後ろに必要になる。
 `TpRankRuntime` は `MtpBatchReserveConfig` を受け取り、次の 2 項を working set reserve に加える。
 各 rank は verify 行分の共有 GDN history / compact log と、drafter 数分の target GDN
-snapshot を `mtp_batch_rank_state_reserve_bytes` で計上する。drafter を持つ rank 0 は
-それに加えて request 数分の `mtp_drafter_reserve_bytes` を計上する。verify 行は
+snapshot を `mtp_batch_rank_state_reserve_bytes` で計上する。`--serve-stdio` の TP 分割
+では全 rank が request 数分の `mtp_drafter_reserve_bytes` を計上する。verify 行は
 `mtp_spec_rows(max_requests, num_drafts)` = `max_requests * (num_drafts + 1)` であり、
 drafter の prefill 行数（`max_batch_rows`）とは独立である。drafter の executor は
 MTP block 自身の `mtp_exl3_linear_shape` で staging plane を見積もる。target GDN snapshot は
@@ -47,13 +48,16 @@ MTP block 自身の `mtp_exl3_linear_shape` で staging plane を見積もる。
 `max_requests` 面を計上する。
 
 grouped expert（MoE）の TP load は MTP block を分割しないため、MTP との併用を
-`build_moe_tp_rank_model` が拒否する。TP=2 を qualified とし、TP=4 は未計測である。
+`build_moe_tp_rank_model` が拒否する。qwen4exp は TP=2 を qualified とし、TP=4 は未計測である。
 
-qwen4exp の MTP は TP / EP でも rank0 が block を持ち、`TpRankRuntimeConfig` の
-`load_mtp_layers` で全 rank の loader に伝播する。target の lm_head が TP で語彙分割
-されるときは、rank0 だけが drafter 用の全語彙 head を `mtp_lm_head` として追加 load し、
-target の head は分割されたまま使う。drafter executor の staging plane は MTP block と
-この head の両方の shape から見積もる。
+qwen4exp の `--serve-stdio --mtp` は、TP > 1 のとき MTP block を全 rank に load して
+TP 軸で分割する。`TpRankRuntimeConfig::mtp_split` が立つと MTP attention の Q/K/V/O は
+local head 数へ、routed experts は local expert 範囲へ分割される。drafter は target の
+語彙分割 lm_head をそのまま使い、draft の greedy は logits の TP combine で全語彙を
+得てから行う。MTP 用の full-vocabulary head は複製しない。
+
+単発生成（`--serve-stdio` なし）の TP は従来どおり rank0 が MTP block 全体を持つ。
+この経路では `mtp_split` を立てず、rank1 は MTP block を load しない。
 
 qwen4exp のように QSA / PLE の per-row state を持つ target は、MTP block を 1 つの
 共有 executor で動かす。request ごとの MTP KV / hidden / position は独立させたまま、
@@ -175,15 +179,27 @@ MTP 層は target とは独立した KV pool を持つ。
 - pool は 1 attention layer、`num_key_value_heads`、`attention_head_dim` で作る。target が
   BF16 / FP8 のときは target と同じ KV dtype、target が Octave のときは BF16 を使う。
   Octave target pool と MTP pool は所有権も page table も共有しない。
-- page 数は `ceil((max_seq_len + 1) / page_tokens) + 1` である。target pool の page 数
-  ではない。
+- `--mtp-window` が 0 でないときは ring を使う。ring page 数は
+  `ceil((sink + window + num_drafts + 1) / page_tokens) + 1` を
+  `ceil((max_seq_len + 1) / page_tokens) + 1` で頭打ちにした値である。
+  block table は論理長 `max_seq_len` のまま確保し、entry `i` は ring page
+  `i % ring_pages` を alias する。`--mtp-window 0` のときだけ全論理 page を確保する。
 - MTP 用の `SequenceSlotPool` / `GdnStatePool` / `PagedSequenceState` を別に持つ。
   単一 request では `GdnStatePool` は `create_executor` の geometry 検証を通すための
-  1 state だけを持つ。batch の qwen4exp は request 数分の slot / GDN state / MTP page を
-  1 つの共有 executor に持つ。
+  1 state だけを持つ。batch の qwen4exp は request 数分の slot / GDN state /
+  MTP page を 1 つの共有 executor に持つ。ring の page 数は request ごとの ring に
+  reset 用の 1 ring を加えた `ring_pages * (max_requests + 1)` である。
 - `mtp_spec_step` の各 round は MTP sequence を round 開始位置まで rewind してから
-  first pass を実行する。rewind は必要な page 数を残して余剰 page を release し、
-  `position` を戻す。
+  first pass を実行する。ring では block table が固定の alias なので、rewind は
+  physical page を release も truncate もせず `position` だけを戻す。ring を使わない
+  ときは必要な page 数を残して余剰 page を release する。
+- sequence の release は block table の alias を dedupe し、ring page を 1 回ずつ返す。
+- `mtp_split` では rank ごとに local KV head 数の MTP pool と sequence を持つ。
+  leader の `MtpDrafter` は peer の executor と sequence を保持し、draft の各 forward を
+  `TpCoordinator::on_execute_aux` で全 rank に同じ batch として流す。peer の position は
+  leader と同じ値へ進め、rewind も同時に適用する。peer sequence は `mtp.active` の
+  並びではなく drafter slot に対応させる。hidden 入力は leader の hidden を host 経由で
+  peer の `input_hidden` へ配る。
 
 ## Round
 
@@ -299,15 +315,15 @@ draft が depth 単位で batch 化されるため、`draft_forwards` は round 
   target-only と同じ値を使う。
 - MTP KV は target KV とは別 pool である。容量計画は
   `mtp_batch_rank_state_reserve_bytes`（verify 行分の共有 history / compact log）と
-  `mtp_drafter_reserve_bytes`（drafter を持つ rank のみ、request 数分）で行う。
+  `mtp_drafter_reserve_bytes`（split 時は全 rank、非 split 時は rank0 のみ）で行う。
 - Octave target と併用した MTP KV は BF16 であり、target の descriptor を MTP block へ
   伝播しない。
-- qwen4exp の MTP block は rank0 だけが load し、drafter の入力は final norm ではなく
-  pre-mixer の wide residual（`hc * hidden`）である。QSA / PLE を持つ target は
-  `PleConvStatePool` / `QsaKeyStatePool` の per-row state を戻さずに済むよう、
-  深さごとの Wavefront `DECODE` batch で検証する。この経路の生成列は target-only と
-  一致する。TP で target の lm_head が語彙分割されるときは rank0 が全語彙 head を
-  追加で持つ。
+- qwen4exp の MTP block は serve の TP 分割では全 rank が持ち、単発生成では rank0 だけが
+  持つ。drafter の入力は final norm ではなく pre-mixer の wide residual（`hc * hidden`）
+  である。QSA / PLE を持つ target は `PleConvStatePool` / `QsaKeyStatePool` の
+  per-row state を戻さずに済むよう、深さごとの Wavefront `DECODE` batch で検証する。
+  この経路の生成列は target-only と一致する。起源の logits は target の語彙分割
+  lm_head を TP combine して得る。
 - verify の split-K は行容量で固定する。mul1 / mul24 の両方と QSA sparse attention が
   この値に従う。融合 verify を使う family では、これがないと同居する request 数で
   argmax が変わる。
@@ -327,8 +343,9 @@ draft が depth 単位で batch 化されるため、`draft_forwards` は round 
 - `src/shelf/models/qwen35/model/lower_to_primitives.cpp`
 - `include/shelf/models/qwen35moe/model/lower_to_primitives.h`（`lower_qwen35_moe_mtp_to_primitives`）
 - `include/shelf/models/loaded_model.h`（`has_mtp_block` / `mtp_drafter_input` / `mtp_drafter_reserve_bytes`）
-- `include/shelf/models/qwen4exp/weights/qwen4exp_weights.h`（`mtp_lm_head` / `mtp_exl3_linear_shape`）
-- `src/shelf/runtime/tp/tensor_parallel.cpp`（`load_mtp_layers` の rank 伝播）
+- `include/shelf/models/qwen4exp/weights/qwen4exp_weights.h`（`mtp_exl3_linear_shape`）
+- `src/shelf/runtime/tp/tensor_parallel.cpp`（`load_mtp_layers` / `mtp_split` の rank 伝播、`on_execute_aux`）
+- `include/shelf/runtime/tp/tp_batch_hook.h`（`TpAuxRank` / `on_execute_aux` / `attach_aux_executor`）
 - `src/shelf/models/qwen35/runtime/executor.hip`（hidden external input / normed output）
 - `src/apps/compute/single_request.hip`（`run_mtp_shot`）
 - `src/apps/compute/stdio_server.hip`（`serve_mtp_admit` / `serve_mtp_step`）

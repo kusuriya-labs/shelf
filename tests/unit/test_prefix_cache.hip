@@ -6,6 +6,7 @@
 #include <shelf/kernels/kv_types.h>
 #include <hip/hip_runtime.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -28,6 +29,7 @@ using shelf::state::commit_sequence_append;
 using shelf::state::create_paged_sequence_state;
 using shelf::state::release_paged_sequence_state;
 using shelf::state::reserve_sequence_append;
+using shelf::state::rollback_sequence_append;
 using shelf::runtime::kInvalidReuseSlot;
 using shelf::runtime::PrefixCache;
 using shelf::runtime::PrefixStateBindings;
@@ -1196,6 +1198,39 @@ void test_slot(Env& env) {
     free_seq(seq_a, env.stream);
 }
 
+void test_sequence_ring_rewind(Env& env) {
+    constexpr uint32_t kRingBlocks = 5;
+    auto created = create_paged_sequence_state(
+        *env.slots, *env.gdn, *env.kv_bf16, kMaxSeqLen, env.stream, kRingBlocks);
+    check(created.ok(), "seq ring create");
+    if (!created.ok()) return;
+    PagedSequenceState seq = created.release();
+
+    const uint32_t logical_blocks = env.slots->max_blocks_per_sequence();
+    check(seq.is_ring(), "seq ring flag");
+    check(seq.block_table.size() == logical_blocks, "seq ring logical table");
+
+    std::vector<PageId> unique = seq.block_table;
+    std::sort(unique.begin(), unique.end());
+    unique.erase(std::unique(unique.begin(), unique.end()), unique.end());
+    check(unique.size() == kRingBlocks, "seq ring physical pages");
+
+    const uint32_t free_before = env.kv_bf16->num_free_pages();
+    check(commit_sequence_append(seq, seq.request_handle(), 8).ok(),
+          "seq ring commit");
+    check(rollback_sequence_append(seq, 2, env.stream).ok(),
+          "seq ring rollback");
+    check(seq.block_table.size() == logical_blocks,
+          "seq ring rollback keeps table");
+    check(env.kv_bf16->num_free_pages() == free_before,
+          "seq ring rollback keeps pages");
+
+    check(release_paged_sequence_state(seq, env.stream).ok(),
+          "seq ring release");
+    check(env.kv_bf16->num_free_pages() == free_before + kRingBlocks,
+          "seq ring release returns pages");
+}
+
 void test_spec_ring(Env& env) {
     constexpr uint32_t kRingBytes = 64;
     PrefixCacheConfig config;
@@ -1397,6 +1432,7 @@ int main() {
     run("pin", test_pin);
     run("qsa-ple", test_qsa_ple);
     run("slot", test_slot);
+    run("seq-ring", test_sequence_ring_rewind);
     run("ring", test_spec_ring);
 
     const shelf::Status arena_release = arena.shutdown();

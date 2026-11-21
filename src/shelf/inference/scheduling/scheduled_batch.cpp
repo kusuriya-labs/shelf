@@ -1,6 +1,8 @@
 #include <shelf/inference/scheduling/scheduled_batch.h>
 #include <shelf/inference/state/paged_sequence_state.h>
 
+#include <string>
+
 namespace shelf {
 namespace scheduling {
 
@@ -90,8 +92,12 @@ Status validate_scheduled_batch(
         }
 
         if (req.prefix_tokens != req.sequence->position) {
-            return Status::invalid_argument(
-                "prefix_tokens != sequence.position", __FILE__, __LINE__);
+            const std::string message =
+                "prefix_tokens != sequence.position (request " + std::to_string(i) +
+                ", slot " + std::to_string(req.handle.slot) + ": " +
+                std::to_string(req.prefix_tokens) + " != " +
+                std::to_string(req.sequence->position) + ")";
+            return Status::invalid_argument(message.c_str(), __FILE__, __LINE__);
         }
         if (req.prefix_tokens + req.num_tokens > req.sequence->max_seq_len) {
             return Status::invalid_argument(

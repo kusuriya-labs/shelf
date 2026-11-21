@@ -498,6 +498,7 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
         rank_config.build_rank_model = config.build_rank_model;
         rank_config.load_options = config.load_options;
         rank_config.load_mtp_layers = config.load_mtp_layers;
+        rank_config.mtp_split = config.mtp_split;
         rank_config.pipeline_stage = config.pipeline_stage;
         rank_config.mtp_batch = config.mtp_batch;
         loaders.emplace_back(
@@ -730,6 +731,24 @@ Status TpCoordinator::sync_mirror_state(const ScheduledBatch& batch) {
     return Status::make_ok();
 }
 
+Status TpCoordinator::attach_aux_executor(Executor& executor, std::uint32_t rank) {
+    if (!topology_.has_value() || rank >= ranks_.size()) {
+        return Status::invalid_argument("tp aux executor rank out of range", __FILE__,
+                                        __LINE__);
+    }
+    const ParallelCoord coord = topology_->coord(rank);
+    if (explicit_ep_) {
+        executor.tp_barrier = tp_groups_[coord.ep].barrier.get();
+        executor.tp_rank = static_cast<int>(coord.tp);
+        executor.ep_barrier = ep_groups_[coord.tp].barrier.get();
+        executor.ep_rank = static_cast<int>(coord.ep);
+    } else {
+        executor.tp_barrier = tp_groups_.front().barrier.get();
+        executor.tp_rank = static_cast<int>(coord.tp);
+    }
+    return Status::make_ok();
+}
+
 Result<BatchExecutionOutput> TpCoordinator::on_execute(const ScheduledBatch& batch) {
     return on_execute(batch, nullptr);
 }
@@ -794,6 +813,95 @@ Result<BatchExecutionOutput> TpCoordinator::on_execute(
         {
             std::lock_guard<std::mutex> lock(worker->mutex);
             worker->job = &rank_batches[r];
+            worker->executor = nullptr;
+            worker->options = per_rank != nullptr ? &per_rank[r] : nullptr;
+            worker->job_pending = true;
+            worker->done = false;
+            worker->status = Status::make_ok();
+        }
+        worker->cv.notify_all();
+    }
+
+    Status first_error = Status::make_ok();
+    BatchExecutionOutput rank0_output;
+    for (std::size_t r = 0; r < workers_.size(); ++r) {
+        Worker* worker = workers_[r].get();
+        std::unique_lock<std::mutex> lock(worker->mutex);
+        worker->cv.wait(lock, [&] { return worker->done; });
+        if (!worker->status.ok() && first_error.ok()) {
+            first_error = worker->status;
+        }
+        if (r == 0) rank0_output = std::move(worker->output);
+    }
+    if (!first_error.ok()) {
+        abort(first_error);
+        return first_error;
+    }
+    return rank0_output;
+}
+
+Result<BatchExecutionOutput> TpCoordinator::on_execute_aux(
+    const ScheduledBatch& batch, std::span<const TpAuxRank> aux,
+    const ExecuteBatchOptions* per_rank) {
+    if (aux.size() != ranks_.size()) {
+        return Status::invalid_argument("tp aux executor count does not match ranks",
+                                        __FILE__, __LINE__);
+    }
+    for (const TpAuxRank& rank : aux) {
+        if (rank.executor == nullptr ||
+            rank.sequences.size() != batch.requests.size()) {
+            return Status::invalid_argument("tp aux executor entry is incomplete",
+                                            __FILE__, __LINE__);
+        }
+        for (PagedSequenceState* sequence : rank.sequences) {
+            if (sequence == nullptr) {
+                return Status::invalid_argument("tp aux sequence entry is empty",
+                                                __FILE__, __LINE__);
+            }
+        }
+    }
+    for (const auto& request : batch.requests) {
+        if (request.token_bitmask != nullptr) {
+            return Status::unsupported("token bitmask requires single-device execution",
+                                       __FILE__, __LINE__);
+        }
+    }
+    if (ranks_.size() < 2) {
+        return Status::invalid_state("tp coordinator has no ranks", __FILE__, __LINE__);
+    }
+    if (batch.token_ids_location != TokenIdsLocation::Host) {
+        return Status::unsupported("tp execution requires host token ids", __FILE__,
+                                   __LINE__);
+    }
+    const auto* aborted_barrier = explicit_ep_ ? ep_groups_.front().barrier.get()
+                                               : tp_groups_.front().barrier.get();
+    if (aborted_barrier != nullptr && aborted_barrier->aborted()) {
+        const Status reason = aborted_barrier->abort_status();
+        if (!reason.ok()) return reason;
+        return Status::invalid_state("tp barrier group is aborted", __FILE__, __LINE__);
+    }
+
+    const std::size_t rank_count = ranks_.size();
+    std::vector<std::vector<ScheduledRequest>> request_storage(rank_count);
+    std::vector<ScheduledBatch> rank_batches(rank_count);
+    for (std::size_t r = 0; r < rank_count; ++r) {
+        rank_batches[r] = batch;
+        request_storage[r].assign(batch.requests.begin(), batch.requests.end());
+        for (std::size_t i = 0; i < request_storage[r].size(); ++i) {
+            ScheduledRequest& request = request_storage[r][i];
+            request.sequence = aux[r].sequences[i];
+            request.handle = aux[r].sequences[i]->request_handle();
+        }
+        rank_batches[r].requests =
+            std::span<const ScheduledRequest>(request_storage[r]);
+    }
+
+    for (std::size_t r = 0; r < workers_.size(); ++r) {
+        Worker* worker = workers_[r].get();
+        {
+            std::lock_guard<std::mutex> lock(worker->mutex);
+            worker->job = &rank_batches[r];
+            worker->executor = aux[r].executor;
             worker->options = per_rank != nullptr ? &per_rank[r] : nullptr;
             worker->job_pending = true;
             worker->done = false;
@@ -844,6 +952,7 @@ void TpCoordinator::worker_loop(std::size_t rank) {
     }
     while (true) {
         const ScheduledBatch* job = nullptr;
+        Executor* job_executor = nullptr;
         const ExecuteBatchOptions* options = nullptr;
         {
             std::unique_lock<std::mutex> lock(worker->mutex);
@@ -851,12 +960,13 @@ void TpCoordinator::worker_loop(std::size_t rank) {
             if (worker->stop) break;
             worker->job_pending = false;
             job = worker->job;
+            job_executor = worker->executor;
             options = worker->options;
         }
         BatchExecutionOutput output;
         Status st = Status::make_ok();
         if (job != nullptr) {
-            st = run_rank_step(rank, *job, output, options);
+            st = run_rank_step(rank, *job, output, job_executor, options);
         }
         if (!st.ok()) abort(st);
         {
@@ -870,15 +980,15 @@ void TpCoordinator::worker_loop(std::size_t rank) {
 }
 
 Status TpCoordinator::run_rank_step(std::size_t rank, const ScheduledBatch& batch,
-                                    BatchExecutionOutput& output,
+                                    BatchExecutionOutput& output, Executor* executor,
                                     const ExecuteBatchOptions* options) {
     TpRankRuntime& runtime = *ranks_[rank];
+    Executor& target = executor != nullptr ? *executor : runtime.executor();
     auto pending = options != nullptr
-                       ? submit_batch(runtime.executor(), batch, runtime.stream(), *options)
-                       : submit_batch(runtime.executor(), batch, runtime.stream());
+                       ? submit_batch(target, batch, runtime.stream(), *options)
+                       : submit_batch(target, batch, runtime.stream());
     if (!pending.ok()) return pending.status();
-    auto completed =
-        complete_batch(runtime.executor(), pending.release(), runtime.stream());
+    auto completed = complete_batch(target, pending.release(), runtime.stream());
     if (!completed.ok()) return completed.status();
     output = completed.release();
     return Status::make_ok();

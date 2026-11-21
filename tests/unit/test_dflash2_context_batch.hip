@@ -15,7 +15,8 @@
 #include <cstring>
 #include <vector>
 
-namespace df = shelf::qwen35::dflash2;
+namespace df = shelf::runtime::dflash2;
+using shelf::runtime::read_dflash2_config;
 
 static float as_float(shelf::bf16_t value) {
     const uint32_t bits = static_cast<uint32_t>(value.data) << 16;
@@ -31,7 +32,7 @@ int main() {
         return 77;
     }
     if (hipSetDevice(0) != hipSuccess) return 77;
-    auto config_result = df::read_dflash2_config(model);
+    auto config_result = read_dflash2_config(model);
     if (!config_result.ok()) return 1;
     const auto config = config_result.value();
     auto arena_result = shelf::gpu::GpuArena::create(0, 12ull << 30);

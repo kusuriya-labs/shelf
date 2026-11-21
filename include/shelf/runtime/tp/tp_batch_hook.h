@@ -5,9 +5,15 @@
 
 #include <cstdint>
 #include <span>
+#include <vector>
 
 namespace shelf {
 namespace runtime {
+
+struct TpAuxRank {
+    Executor* executor = nullptr;
+    std::vector<PagedSequenceState*> sequences;
+};
 
 class TpBatchHook {
 public:
@@ -42,6 +48,23 @@ public:
 
     virtual Result<BatchExecutionOutput> on_execute(
         const ScheduledBatch& batch, const ExecuteBatchOptions* per_rank) = 0;
+
+    virtual Status attach_aux_executor(Executor& executor, std::uint32_t rank) {
+        (void)executor;
+        (void)rank;
+        return Status::unsupported("tp coordinator has no auxiliary executor",
+                                   __FILE__, __LINE__);
+    }
+
+    virtual Result<BatchExecutionOutput> on_execute_aux(
+        const ScheduledBatch& batch, std::span<const TpAuxRank> ranks,
+        const ExecuteBatchOptions* per_rank) {
+        (void)batch;
+        (void)ranks;
+        (void)per_rank;
+        return Status::unsupported("tp coordinator has no auxiliary execution",
+                                   __FILE__, __LINE__);
+    }
 };
 
 }  // namespace runtime

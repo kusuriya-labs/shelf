@@ -205,6 +205,9 @@ Qwen3.8-27B-DFlash2、同時 request 1 件では追加 scratch は 16.953 MiB。
   実行する。qwen4exp は MTP draft を深さ単位で batch 化し、verify は既定で request ごとの
   1 行 DECODE を使う。`SHELF_MTP_WAVEFRONT=1` で最大 4 request の Wavefront batch を選べる。
   `--max-concurrent-requests` が同時に保持する request 数の上限である。
+- qwen4exp で `--tensor-parallel` を使うときは、MTP block を全 rank に分割し、
+  drafter は target の語彙分割 lm_head を共用する。単発生成の TP は rank0 が
+  MTP block 全体を持つ。
 - tool calling / sampling / cancel は MTP 経路でも利用できる。cancel は prefill 中なら
   次の chunk 境界、生成中なら次の spec round で反映される。
 - 思考 budget（`reasoning_budget_tokens`）は MTP では無視し、通常の生成を行う。

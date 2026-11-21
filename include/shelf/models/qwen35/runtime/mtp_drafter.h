@@ -39,6 +39,8 @@ struct MtpDrafterConfig {
     uint32_t window_tokens = 0;
     uint32_t sink_tokens = 0;
     kernel::KVCacheDType kv_dtype = kernel::KVCacheDType::BF16;
+    // Local KV heads for the draft ring. 0 keeps the target's global count.
+    uint32_t local_kv_heads = 0;
     EffectiveRopeProfile rope_profile;
     // A batched context shares one history / compact log per rank, so its per-request
     // drafters leave those planes to the context.
@@ -83,12 +85,17 @@ struct MtpTiming {
 };
 
 
+struct MtpDrafterInput;
+
 struct MtpGdnRankBinding {
     const state::GdnStatePool* pool = nullptr;
     gpu::GpuArena* arena = nullptr;
     hipStream_t stream = nullptr;
     int device = -1;
     Executor* executor = nullptr;
+    const MtpDrafterInput* mtp_input = nullptr;
+    uint32_t local_kv_heads = 0;
+    uint32_t tp_rank = 0;
 };
 
 struct MtpGdnRankState {
@@ -129,6 +136,16 @@ struct MtpDraftShared {
     bool initialized = false;
 };
 
+struct MtpDrafter;
+
+struct MtpDraftPeer {
+    Executor* executor = nullptr;
+    state::PagedSequenceState* sequence = nullptr;
+    hipStream_t stream = nullptr;
+    int device = -1;
+    MtpDrafter* owner = nullptr;
+};
+
 struct MtpDrafter {
     uint32_t window_tokens = 0u;
     uint32_t sink_tokens = 0u;
@@ -162,6 +179,7 @@ struct MtpDrafter {
     hipStream_t target_stream = nullptr;
     int target_device = -1;
     std::vector<MtpGdnRankState> extra_ranks;
+    std::vector<MtpDraftPeer> peers;
     ::shelf::runtime::TpBatchHook* tp_hook = nullptr;
 
     // The target hidden of the tokens the drafter has committed, copied out of the target
@@ -316,6 +334,10 @@ struct MtpSpecBatchContext {
     Executor* target = nullptr;
     std::vector<std::unique_ptr<MtpDrafter>> drafters;
     std::unique_ptr<MtpDraftShared> shared_draft;
+    // Rank-local draft executors and their per-slot sequences when the MTP block is
+    // tensor-parallel. Only the leader's drafters appear in `drafters`.
+    std::vector<std::unique_ptr<MtpDraftShared>> peer_shared_drafts;
+    std::vector<std::vector<std::unique_ptr<MtpDrafter>>> peer_drafters;
     // One entry per rank: pool / stream / device, the shared history and compact log, and
     // the commit descriptor this rank's accept path uploads.
     std::vector<MtpGdnRankState> ranks;

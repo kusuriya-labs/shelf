@@ -38,6 +38,7 @@ struct PagedSequenceState {
           seq_pool_(std::exchange(other.seq_pool_, nullptr)),
           recurrent_pool_(std::exchange(other.recurrent_pool_, nullptr)),
           max_blocks_(std::exchange(other.max_blocks_, 0)),
+          ring_blocks_(std::exchange(other.ring_blocks_, 0)),
           poisoned_(std::exchange(other.poisoned_, false)) {}
 
     SequenceSlotId slot;
@@ -59,6 +60,7 @@ struct PagedSequenceState {
         return is_allocated() && generation != 0u && !poisoned_;
     }
     bool is_poisoned() const noexcept { return poisoned_; }
+    bool is_ring() const noexcept { return ring_blocks_ != 0u; }
 
     void mark_poisoned() noexcept {
         poisoned_ = true;
@@ -75,6 +77,7 @@ struct PagedSequenceState {
     SequenceSlotPool* seq_pool_ = nullptr;
     GdnStatePool* recurrent_pool_ = nullptr;
     uint32_t max_blocks_ = 0;
+    uint32_t ring_blocks_ = 0;
     bool poisoned_ = false;
 
     friend Result<PagedSequenceState> create_paged_sequence_state(

@@ -26,8 +26,11 @@ std::size_t padded_rows(std::size_t rows) noexcept {
 
 std::size_t mtp_grouped_executor_bytes(const Qwen4ExpTextConfig& config,
                                        std::size_t max_batch_rows,
-                                       std::uint32_t max_context_tokens) noexcept {
-    const std::uint32_t experts = static_cast<std::uint32_t>(config.ffn.num_experts);
+                                       std::uint32_t max_context_tokens,
+                                       std::uint32_t local_experts) noexcept {
+    const std::uint32_t experts = local_experts != 0u
+        ? local_experts
+        : static_cast<std::uint32_t>(config.ffn.num_experts);
     const std::uint32_t top_k =
         static_cast<std::uint32_t>(config.ffn.num_experts_per_tok);
     const std::uint32_t inter =

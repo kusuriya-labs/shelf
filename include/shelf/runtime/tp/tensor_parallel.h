@@ -26,6 +26,7 @@
 #include <mutex>
 #include <optional>
 #include <condition_variable>
+#include <span>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -125,6 +126,7 @@ struct TpRankRuntimeConfig {
     ::shelf::runtime::EffectiveRopeProfile rope_profile;
     ::shelf::qwen_hybrid::HybridLoadOptions load_options;
     bool load_mtp_layers = false;
+    bool mtp_split = false;
     ::shelf::qwen_hybrid::PipelineStage pipeline_stage;
     MtpBatchReserveConfig mtp_batch;
 };
@@ -240,6 +242,7 @@ struct TpCoordinatorConfig {
     ::shelf::runtime::EffectiveRopeProfile rope_profile;
     ::shelf::qwen_hybrid::HybridLoadOptions load_options;
     bool load_mtp_layers = false;
+    bool mtp_split = false;
     ::shelf::qwen_hybrid::PipelineStage pipeline_stage;
     MtpBatchReserveConfig mtp_batch;
 };
@@ -268,6 +271,10 @@ public:
     Result<BatchExecutionOutput> on_execute(const ScheduledBatch& batch) override;
     Result<BatchExecutionOutput> on_execute(const ScheduledBatch& batch,
                                             const ExecuteBatchOptions* per_rank) override;
+    Status attach_aux_executor(Executor& executor, std::uint32_t rank) override;
+    Result<BatchExecutionOutput> on_execute_aux(
+        const ScheduledBatch& batch, std::span<const TpAuxRank> ranks,
+        const ExecuteBatchOptions* per_rank) override;
 
     Status draft_sum(const shelf::runtime::TpSumTarget& target, hipStream_t stream, int rank);
 
@@ -279,6 +286,7 @@ private:
         std::mutex mutex;
         std::condition_variable cv;
         const ScheduledBatch* job = nullptr;
+        Executor* executor = nullptr;
         const ExecuteBatchOptions* options = nullptr;
         bool job_pending = false;
         bool stop = false;
@@ -300,7 +308,7 @@ private:
     void worker_loop(std::size_t rank);
     Status sync_mirror_state(const ScheduledBatch& batch);
     Status run_rank_step(std::size_t rank, const ScheduledBatch& batch,
-                         BatchExecutionOutput& output,
+                         BatchExecutionOutput& output, Executor* executor,
                          const ExecuteBatchOptions* options);
 
     std::vector<int> devices_;

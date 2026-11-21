@@ -210,6 +210,45 @@ def near_tie_divergences(first: dict[int, dict], baseline: dict[int, list[int]],
     return accepted, rejected
 
 
+def run_slot_reuse(harness: ComputeHarness) -> dict[int, dict]:
+    if len(prompts()) < 2:
+        return {}
+    long_id, short_id, replacement_id = 300, 301, 302
+    harness.send({
+        "op": "generate",
+        "request_id": long_id,
+        "input_ids": prompts()[0],
+        "max_new_tokens": 24,
+        "temperature": 0.0,
+    })
+    harness.send({
+        "op": "generate",
+        "request_id": short_id,
+        "input_ids": prompts()[1],
+        "max_new_tokens": 2,
+        "temperature": 0.0,
+    })
+    done: dict[int, dict] = {}
+    replacement_sent = False
+    while len(done) < 3:
+        event = harness.recv(timeout=900.0)
+        if event.get("event") == "error":
+            raise AssertionError(event)
+        if event.get("event") != "done":
+            continue
+        done[event["request_id"]] = event
+        if event["request_id"] == short_id and not replacement_sent:
+            harness.send({
+                "op": "generate",
+                "request_id": replacement_id,
+                "input_ids": prompts()[1],
+                "max_new_tokens": 24,
+                "temperature": 0.0,
+            })
+            replacement_sent = True
+    return done
+
+
 def main() -> int:
     checker = Checker("compute-mtp-batch")
     devices = os.environ.get("SHELF_MTP_DEVICES", "0,1,2,3")
@@ -238,6 +277,14 @@ def main() -> int:
 
         first = run_batch(harness, 100)
         second = run_batch(harness, 200)
+        if len(prompts()) >= 2:
+            try:
+                reused = run_slot_reuse(harness)
+                checker.check("slot-reuse-completed", all(
+                    item.get("finish_reason") in ("length", "stop")
+                    for item in reused.values()), repr(reused))
+            except AssertionError as exc:
+                checker.check("slot-reuse-completed", False, repr(exc))
         checker.check("completed", all(
             item.get("finish_reason") in ("length", "stop") for item in first.values()),
             repr(first))

@@ -51,9 +51,10 @@ prefill で non-finite になる既知の問題があり、PP 単体と短いプ
   vocab-parallel head は `Int8W32`、DFlash2 の sharded proposal も `Int8W32` 経路で
   動く。無効にすると BF16 のままになり、DFlash2 の sharded proposal は
   BF16 用の exact-rows GEMM 経路を使う。
-- `--mtp` で TP を使うとき、rank0 は target の語彙分割 lm_head とは別に、drafter 用の
-  全語彙 lm_head を `mtp_lm_head` として追加 load する。target の forward は分割 head の
-  ままである。
+- `--serve-stdio --mtp` で TP を使うときは、MTP block を全 rank に load し、attention と
+  routed experts を TP 軸で分割する。drafter は target の語彙分割 lm_head を共用し、
+  draft の greedy は logits の TP combine で全語彙を得る。単発生成の TP は rank0 が
+  MTP block 全体を持つ。
 - routed expert は既定で全 local expert を VRAM に置く。`--moe-host-experts N`
   （layer あたり）を設定すると、各 layer の N expert を pinned host の plane に置き、
   残りを VRAM の slot に置く。host plane は `hipHostMallocMapped` で、GPU の grouped

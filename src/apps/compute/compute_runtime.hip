@@ -851,6 +851,7 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
     }
     tp_config.load_options.verify_quantized_payload_crc = config_.verify_weights;
     tp_config.load_mtp_layers = config_.mtp;
+    tp_config.mtp_split = config_.mtp && config_.mtp_serve && config_.tp > 1u;
     if (config_.mtp) {
         qwen35::runtime::MtpDrafterConfig mtp_options;
         mtp_options.num_drafts = config_.mtp_drafts == 0u ? 7u : config_.mtp_drafts;
@@ -884,36 +885,42 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
             options.page_tokens = cfg.page_tokens;
             options.max_batch_rows = cfg.max_batch_rows;
             options.kv_dtype = cfg.kv_dtype;
+            if (model.qwen4exp_model() != nullptr &&
+                !model.qwen4exp_model()->weights().mtp.present) {
+                return std::size_t{0};
+            }
             std::size_t drafter_bytes = 0u;
             std::size_t state_bytes = 0u;
-            if (tp_rank == 0u) {
-                if (model.uses_qsa_state()) {
-                    const uint32_t batch_rows = std::max(
-                        options.max_batch_rows,
-                        cfg.max_requests * (options.num_drafts + 1u));
-                    drafter_bytes =
-                        qwen35::runtime::mtp_shared_draft_reserve_bytes(
-                            tc, options, model.token_row_ffn_size(),
-                            model.mtp_grouped_reserve_bytes(batch_rows,
-                                                           options.max_seq_len + 1u),
-                            model.uses_exl3_linear(),
-                            model.mtp_exl3_linear_shape(), cfg.max_requests);
-                } else {
-                    drafter_bytes = qwen35::runtime::mtp_drafter_reserve_bytes(
+            if (model.context().tp_size > 1u) {
+                options.local_kv_heads =
+                    static_cast<uint32_t>(model.context().local_key_value_heads);
+            }
+            if (model.uses_qsa_state()) {
+                const uint32_t batch_rows = std::max(
+                    options.max_batch_rows,
+                    cfg.max_requests * (options.num_drafts + 1u));
+                drafter_bytes =
+                    qwen35::runtime::mtp_shared_draft_reserve_bytes(
                         tc, options, model.token_row_ffn_size(),
-                        model.mtp_grouped_reserve_bytes(
-                            qwen35::runtime::mtp_drafter_rows(options),
-                            options.max_seq_len + 1u),
+                        model.mtp_grouped_reserve_bytes(batch_rows,
+                                                       options.max_seq_len + 1u),
                         model.uses_exl3_linear(),
-                        model.mtp_exl3_linear_shape(),
-                        &layout) * cfg.max_requests;
-                    state_bytes =
-                        qwen35::runtime::mtp_batch_rank_state_reserve_bytes(
-                            layout,
-                            qwen35::runtime::mtp_spec_rows(cfg.max_requests,
-                                                           options.num_drafts),
-                            cfg.max_requests);
-                }
+                        model.mtp_exl3_linear_shape(), cfg.max_requests);
+            } else if (tp_rank == 0u) {
+                drafter_bytes = qwen35::runtime::mtp_drafter_reserve_bytes(
+                    tc, options, model.token_row_ffn_size(),
+                    model.mtp_grouped_reserve_bytes(
+                        qwen35::runtime::mtp_drafter_rows(options),
+                        options.max_seq_len + 1u),
+                    model.uses_exl3_linear(),
+                    model.mtp_exl3_linear_shape(),
+                    &layout) * cfg.max_requests;
+                state_bytes =
+                    qwen35::runtime::mtp_batch_rank_state_reserve_bytes(
+                        layout,
+                        qwen35::runtime::mtp_spec_rows(cfg.max_requests,
+                                                       options.num_drafts),
+                        cfg.max_requests);
             }
             return drafter_bytes + state_bytes;
         };

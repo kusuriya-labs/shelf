@@ -5,6 +5,7 @@
 #include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35/model/tensor_parallel_context.h>
 #include <shelf/models/qwen35/runtime/executor.h>
+#include <shelf/models/qwen35/runtime/mtp_drafter.h>
 #include <shelf/models/qwen35/runtime/tensor_parallel.h>
 #include <shelf/runtime/state_types.h>
 #include <shelf/models/qwen35moe/model/qwen35moe_model.h>
@@ -67,6 +68,13 @@ public:
     virtual shelf::weights::Exl3LinearShape exl3_linear_shape() const { return {}; }
     // The same geometry for the MTP draft block, which runs in its own executor.
     virtual shelf::weights::Exl3LinearShape mtp_exl3_linear_shape() const { return {}; }
+    // Lowers this rank's MTP block into the drafter graph. A rank without the block
+    // returns unsupported.
+    virtual shelf::Result<shelf::qwen35::runtime::MtpDrafterInput> mtp_drafter_input(
+        const shelf::qwen35::runtime::MtpDrafterConfig& options) const {
+        (void)options;
+        return Status::unsupported("this rank has no MTP block", __FILE__, __LINE__);
+    }
     // State pools the executor owns and allocates after the memory plan has sized the KV
     // pool: the QSA pooled-key pool and the PLE conv pool. Zero for a family whose pools
     // the rank runtime already holds.

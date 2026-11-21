@@ -145,8 +145,8 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "mtp lower: %s\n", lowered.status().message().c_str());
         return 1;
     }
-    check(lowered.value().graph.external_inputs.size() == 2u,
-          "MTP graph takes tokens and the wide hidden");
+    check(lowered.value().graph.external_inputs.size() == 3u,
+          "MTP graph takes tokens, the wide hidden and the window mask");
     check(lowered.value().graph.external_outputs.size() == 5u,
           "MTP graph returns logits and the wide residual");
 
@@ -197,6 +197,10 @@ int main(int argc, char** argv) {
     exec_config.max_context_tokens = kMaxSeq;
     exec_config.external_hidden_input = true;
     exec_config.external_hidden_width = wide;
+    constexpr std::uint32_t kMaskBlockTokens = 4u;
+    const std::uint32_t mask_blocks =
+        (kMaxSeq + 1u + kMaskBlockTokens - 1u) / kMaskBlockTokens;
+    exec_config.external_mask_bytes = ((mask_blocks + 7u) / 8u + 3u) & ~3u;
     exec_config.emit_normed_token_hidden = true;
     exec_config.normed_token_hidden_width = wide;
     auto executor = q35::create_executor(std::move(input), slots.value(), gdn.value(),
@@ -206,6 +210,15 @@ int main(int argc, char** argv) {
         return 1;
     }
     q35::Executor ex = executor.release();
+    if (ex.input_mask.data() != nullptr) {
+        std::size_t mask_bytes = 0u;
+        if (ex.input_mask.required_span_bytes(mask_bytes).ok() && mask_bytes != 0u) {
+            if (hipMemset(ex.input_mask.data<void>(), 0xFF, mask_bytes) != hipSuccess) {
+                std::fprintf(stderr, "mask upload failed\n");
+                return 1;
+            }
+        }
+    }
 
     std::vector<uint16_t> hidden_host(static_cast<std::size_t>(wide) * 4u);
     for (std::size_t i = 0; i < hidden_host.size(); ++i) {

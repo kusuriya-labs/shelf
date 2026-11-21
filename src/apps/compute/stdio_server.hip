@@ -1643,15 +1643,37 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
         if (private_lm_head != nullptr && private_lm_head->rows != 0u) {
             lm_head_override = private_lm_head;
         }
-        auto drafter_input =
-            runtime.model().mtp_drafter_input(mtp_config, lm_head_override);
-        if (!drafter_input.ok()) {
-            fprintf(stderr, "mtp drafter input failed: %s\n",
-                    drafter_input.status().message().c_str());
-            return 1;
-        }
-        std::vector<shelf::qwen35::runtime::MtpGdnRankBinding> extra_ranks;
         auto* tp = runtime.tp_coordinator();
+        std::vector<shelf::qwen35::runtime::MtpDrafterInput> rank_inputs;
+        shelf::qwen35::runtime::MtpDrafterInput leader_input;
+        if (tp != nullptr && runtime.model().qwen4exp_model() != nullptr) {
+            const int rank_count = tp->tp_size();
+            rank_inputs.reserve(static_cast<std::size_t>(rank_count));
+            for (int r = 0; r < rank_count; ++r) {
+                auto& rank = tp->rank(static_cast<std::size_t>(r));
+                auto per_rank = mtp_config;
+                per_rank.local_kv_heads = rank.context().local_key_value_heads;
+                auto input = rank.rank_model()->mtp_drafter_input(per_rank);
+                if (!input.ok()) {
+                    fprintf(stderr, "mtp rank %d drafter input failed: %s\n", r,
+                            input.status().message().c_str());
+                    return 1;
+                }
+                rank_inputs.push_back(std::move(input.value()));
+            }
+            mtp_config.local_kv_heads = tp->rank(0).context().local_key_value_heads;
+        } else {
+            auto input = runtime.model().mtp_drafter_input(mtp_config, lm_head_override);
+            if (!input.ok()) {
+                fprintf(stderr, "mtp drafter input failed: %s\n",
+                        input.status().message().c_str());
+                return 1;
+            }
+            leader_input = std::move(input.value());
+        }
+        const shelf::qwen35::runtime::MtpDrafterInput& drafter_input =
+            rank_inputs.empty() ? leader_input : rank_inputs.front();
+        std::vector<shelf::qwen35::runtime::MtpGdnRankBinding> extra_ranks;
         if (tp != nullptr) {
             for (int r = 1; r < tp->tp_size(); ++r) {
                 auto& rank = tp->rank(static_cast<std::size_t>(r));
@@ -1661,6 +1683,10 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
                 binding.stream = rank.stream();
                 binding.device = rank.device_id();
                 binding.executor = &rank.executor();
+                binding.local_kv_heads = rank.context().local_key_value_heads;
+                binding.tp_rank = static_cast<uint32_t>(r);
+                if (r < static_cast<int>(rank_inputs.size()))
+                    binding.mtp_input = &rank_inputs[static_cast<std::size_t>(r)];
                 extra_ranks.push_back(binding);
             }
         }
@@ -1672,7 +1698,7 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
             if (max_slots == 0u) max_slots = 1u;
         }
         auto batch = shelf::qwen35::runtime::create_mtp_spec_batch_context(
-            runtime.executor(), drafter_input.value(), runtime.gdn_pool(),
+            runtime.executor(), drafter_input, runtime.gdn_pool(),
             runtime.arena(), runtime.stream(), mtp_config, max_slots,
             extra_ranks.empty() ? nullptr : &extra_ranks, tp);
         if (!batch.ok()) {

@@ -668,10 +668,6 @@ def parse_args(argv=None):
         parser.error("--mtp-drafts must be >= 1")
     if opts.mtp and opts.dflash2_model_dir:
         parser.error("--mtp and --dflash2-model-dir are mutually exclusive")
-    if opts.mtp and opts.max_concurrent_requests > 1:
-        print("warning: --mtp serializes compute requests; "
-              "--max-concurrent-requests is limited to 1 in practice",
-              file=sys.stderr, flush=True)
     return opts
 
 

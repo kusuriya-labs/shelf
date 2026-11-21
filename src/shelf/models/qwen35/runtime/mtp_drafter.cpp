@@ -205,6 +205,63 @@ Status copy_hidden_to_input(MtpDrafter& drafter, const gpu::Tensor& source,
     return Status::make_ok();
 }
 
+Status copy_hidden_to_peer_inputs(MtpDrafter& drafter, const gpu::Tensor& source,
+                                  uint32_t source_row_offset, uint32_t rows,
+                                  hipStream_t stream, uint32_t dst_row) {
+    if (rows == 0u || drafter.peers.empty()) return Status::make_ok();
+    if (source.ndim() == 0) {
+        return Status::invalid_state("mtp peer hidden source is empty", __FILE__, __LINE__);
+    }
+    const std::size_t hidden = drafter.hidden_width;
+    const std::size_t offset =
+        static_cast<std::size_t>(source_row_offset) * hidden * sizeof(bf16_t);
+    const std::size_t bytes = static_cast<std::size_t>(rows) * hidden * sizeof(bf16_t);
+    std::vector<bf16_t> host(bytes / sizeof(bf16_t));
+    auto source_scope = shelf::gpu::ScopedDevice::create(drafter.target_device);
+    if (!source_scope.ok()) return source_scope.status();
+    const hipError_t sync_err = hipStreamSynchronize(stream);
+    if (sync_err != hipSuccess) {
+        return Status::hip_error("mtp peer hidden sync", hipGetErrorString(sync_err),
+                                 __FILE__, __LINE__);
+    }
+    const hipError_t read_err = hipMemcpy(
+        host.data(), static_cast<const std::uint8_t*>(source.data<void>()) + offset,
+        bytes, hipMemcpyDeviceToHost);
+    if (read_err != hipSuccess) {
+        return Status::hip_error("mtp peer hidden read", hipGetErrorString(read_err),
+                                 __FILE__, __LINE__);
+    }
+    for (const MtpDraftPeer& peer : drafter.peers) {
+        auto scope = shelf::gpu::ScopedDevice::create(peer.device);
+        if (!scope.ok()) return scope.status();
+        void* dst = peer.executor->input_hidden.data<void>();
+        if (dst == nullptr) {
+            return Status::invalid_state("mtp peer has no hidden input buffer", __FILE__,
+                                         __LINE__);
+        }
+        void* dst_ptr = static_cast<std::uint8_t*>(dst) +
+                        static_cast<std::size_t>(dst_row) * hidden * sizeof(bf16_t);
+        const hipError_t err =
+            hipMemcpy(dst_ptr, host.data(), bytes, hipMemcpyHostToDevice);
+        if (err != hipSuccess) {
+            return Status::hip_error("mtp peer hidden input copy", hipGetErrorString(err),
+                                     __FILE__, __LINE__);
+        }
+    }
+    (void)stream;
+    return Status::make_ok();
+}
+
+Status copy_hidden_to_all(MtpDrafter& drafter, const gpu::Tensor& source,
+                          uint32_t source_row_offset, uint32_t rows,
+                          hipStream_t stream, uint32_t dst_row = 0u) {
+    Status st = copy_hidden_to_input(drafter, source, source_row_offset, rows, stream,
+                                     dst_row);
+    if (!st.ok()) return st;
+    return copy_hidden_to_peer_inputs(drafter, source, source_row_offset, rows, stream,
+                                      dst_row);
+}
+
 Status cache_target_hidden(MtpDrafter& drafter, const Executor& target,
                            uint32_t row_base, uint32_t rows, uint32_t dst_row,
                            hipStream_t stream) {
@@ -234,13 +291,26 @@ Status cache_target_hidden(MtpDrafter& drafter, const Executor& target,
     return Status::make_ok();
 }
 
-Status rewind_sequence(state::PagedSequenceState& sequence, uint32_t position,
-                       uint32_t required_blocks, hipStream_t stream) {
+Status rewind_one_sequence(state::PagedSequenceState& sequence, uint32_t position,
+                           uint32_t required_blocks, hipStream_t stream) {
     if (required_blocks < sequence.block_table.size()) {
         Status st = rollback_sequence_append(sequence, required_blocks, stream);
         if (!st.ok()) return st;
     }
     sequence.position = position;
+    return Status::make_ok();
+}
+
+Status rewind_sequences(MtpDrafter& drafter, uint32_t position,
+                        uint32_t required_blocks, hipStream_t stream) {
+    Status st = rewind_one_sequence(*drafter.sequence, position, required_blocks, stream);
+    if (!st.ok()) return st;
+    for (const MtpDraftPeer& peer : drafter.peers) {
+        auto scope = shelf::gpu::ScopedDevice::create(peer.device);
+        if (!scope.ok()) return scope.status();
+        st = rewind_one_sequence(*peer.sequence, position, required_blocks, peer.stream);
+        if (!st.ok()) return st;
+    }
     return Status::make_ok();
 }
 
@@ -269,10 +339,10 @@ uint32_t draft_mask_bytes(uint32_t max_seq_len) noexcept {
     return ((blocks + 7u) / 8u + 3u) & ~3u;
 }
 
-Status fill_draft_window_mask(MtpDrafter& drafter, Executor& executor, uint32_t prefix,
+Status fill_draft_window_mask(MtpDrafter& drafter, uint32_t prefix,
                               uint32_t rows, hipStream_t stream) {
     if (drafter.mask_bytes == 0u) return Status::make_ok();
-    void* dst = executor.input_mask.data<void>();
+    void* dst = draft_executor(drafter).input_mask.data<void>();
     if (dst == nullptr || rows == 0u) return Status::make_ok();
     const uint32_t bytes = drafter.mask_bytes;
     if (drafter.window_tokens == 0u) {
@@ -281,6 +351,18 @@ Status fill_draft_window_mask(MtpDrafter& drafter, Executor& executor, uint32_t 
         if (err != hipSuccess) {
             return Status::hip_error("mtp window mask clear", hipGetErrorString(err),
                                      __FILE__, __LINE__);
+        }
+        for (const MtpDraftPeer& peer : drafter.peers) {
+            auto scope = shelf::gpu::ScopedDevice::create(peer.device);
+            if (!scope.ok()) return scope.status();
+            void* peer_dst = peer.executor->input_mask.data<void>();
+            if (peer_dst == nullptr) continue;
+            const hipError_t peer_err = hipMemsetAsync(
+                peer_dst, 0xFF, static_cast<std::size_t>(rows) * bytes, peer.stream);
+            if (peer_err != hipSuccess) {
+                return Status::hip_error("mtp peer window mask clear",
+                                         hipGetErrorString(peer_err), __FILE__, __LINE__);
+            }
         }
         return Status::make_ok();
     }
@@ -304,11 +386,23 @@ Status fill_draft_window_mask(MtpDrafter& drafter, Executor& executor, uint32_t 
             if (byte < bytes) row[byte] |= static_cast<std::uint8_t>(1u << (b & 7u));
         }
     }
-    const hipError_t err = hipMemcpyAsync(dst, host.data(), host.size(),
-                                          hipMemcpyHostToDevice, stream);
+    const hipError_t err =
+        hipMemcpy(dst, host.data(), host.size(), hipMemcpyHostToDevice);
     if (err != hipSuccess) {
         return Status::hip_error("mtp window mask upload", hipGetErrorString(err),
                                  __FILE__, __LINE__);
+    }
+    for (const MtpDraftPeer& peer : drafter.peers) {
+        auto scope = shelf::gpu::ScopedDevice::create(peer.device);
+        if (!scope.ok()) return scope.status();
+        void* peer_dst = peer.executor->input_mask.data<void>();
+        if (peer_dst == nullptr) continue;
+        const hipError_t peer_err =
+            hipMemcpy(peer_dst, host.data(), host.size(), hipMemcpyHostToDevice);
+        if (peer_err != hipSuccess) {
+            return Status::hip_error("mtp peer window mask upload",
+                                     hipGetErrorString(peer_err), __FILE__, __LINE__);
+        }
     }
     return Status::make_ok();
 }
@@ -330,6 +424,7 @@ Result<BatchExecutionOutput> run_mtp_forward(MtpDrafter& drafter,
                                          __FILE__, __LINE__);
         }
         drafter.sequence->position = prefix;
+        for (const MtpDraftPeer& peer : drafter.peers) peer.sequence->position = prefix;
     }
     const uint32_t rows = static_cast<uint32_t>(tokens.size());
     const ::shelf::runtime::ExecutionClass execution_class =
@@ -339,10 +434,23 @@ Result<BatchExecutionOutput> run_mtp_forward(MtpDrafter& drafter,
     ScheduledBatch batch = make_batch(
         *drafter.sequence, requests, tokens.data(), rows, prefix, 1u, compute_logits,
         true, execution_class, false, nullptr, 0u);
-    Status mask = fill_draft_window_mask(drafter, draft_executor(drafter), prefix, rows,
-                                         stream);
+    Status mask = fill_draft_window_mask(drafter, prefix, rows, stream);
     if (!mask.ok()) return mask;
-    return execute_batch(draft_executor(drafter), batch, stream);
+    if (drafter.peers.empty()) {
+        return execute_batch(draft_executor(drafter), batch, stream);
+    }
+    if (drafter.tp_hook == nullptr) {
+        return Status::invalid_state("mtp peers need a tp coordinator", __FILE__,
+                                     __LINE__);
+    }
+    std::vector<::shelf::runtime::TpAuxRank> aux;
+    aux.reserve(1u + drafter.peers.size());
+    aux.push_back(::shelf::runtime::TpAuxRank{
+        &draft_executor(drafter), {drafter.sequence.get()}});
+    for (const MtpDraftPeer& peer : drafter.peers) {
+        aux.push_back(::shelf::runtime::TpAuxRank{peer.executor, {peer.sequence}});
+    }
+    return drafter.tp_hook->on_execute_aux(batch, aux, nullptr);
 }
 
 MtpGdnRankState rank0_state_view(const MtpDrafter& drafter) {
@@ -544,6 +652,7 @@ std::size_t mtp_drafter_reserve_bytes(const shelf::qwen_hybrid::QwenHybridConfig
         return 0u;
     }
     shelf::qwen_hybrid::QwenHybridConfig mtp = mtp_executor_config(config);
+    if (options.local_kv_heads != 0u) mtp.num_key_value_heads = options.local_kv_heads;
     const uint32_t full_pages =
         ceil_div_u32(options.max_seq_len + 1u, options.page_tokens) + 1u;
     const uint32_t ring = draft_ring_pages(options);
@@ -597,6 +706,7 @@ std::size_t mtp_shared_draft_reserve_bytes(
         return 0u;
     }
     shelf::qwen_hybrid::QwenHybridConfig mtp = mtp_executor_config(config);
+    if (options.local_kv_heads != 0u) mtp.num_key_value_heads = options.local_kv_heads;
     const uint32_t full_pages =
         ceil_div_u32(options.max_seq_len + 1u, options.page_tokens) + 1u;
     const uint32_t ring = draft_ring_pages(options);
@@ -665,6 +775,8 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
     std::unique_ptr<MtpDrafter> drafter(new MtpDrafter());
     drafter->target_executor = target;
     drafter->config = mtp_executor_config(*input.config);
+    if (options.local_kv_heads != 0u)
+        drafter->config.num_key_value_heads = options.local_kv_heads;
     drafter->max_seq_len = options.max_seq_len;
     drafter->num_drafts = options.num_drafts;
     drafter->hidden_width = input.hidden_width != 0u
@@ -985,29 +1097,36 @@ Status mtp_drafter_reset_sequence(MtpDrafter& drafter, hipStream_t stream) noexc
         return Status::invalid_state("mtp reset: drafter is not initialized", __FILE__,
                                      __LINE__);
     }
-    if (std::getenv("SHELF_MTP_RING_DEBUG") != nullptr)
-        std::fprintf(stderr, "MTP_RING reset free_before=%u ring_pages=%u table=%zu\n",
-                     draft_kv_pool(drafter).num_free_pages(), drafter.ring_pages,
-                     drafter.sequence->block_table.size());
-    Status st = state::release_paged_sequence_state(*drafter.sequence, stream);
+    auto reset_one = [](MtpDrafter& target, hipStream_t target_stream) -> Status {
+        Status st =
+            state::release_paged_sequence_state(*target.sequence, target_stream);
+        if (!st.ok()) return st;
+        auto sequence = state::create_paged_sequence_state(
+            draft_slot_pool(target), draft_gdn_pool(target), draft_kv_pool(target),
+            target.max_seq_len, target_stream, target.ring_pages);
+        if (!sequence.ok()) {
+            target.sequence.reset();
+            return sequence.status();
+        }
+        target.sequence =
+            std::make_unique<state::PagedSequenceState>(sequence.release());
+        target.last_tokens.clear();
+        target.last_position = 0u;
+        target.last_hidden_offset = 0u;
+        target.sample_index = 0u;
+        target.timing = MtpTiming{};
+        return Status::make_ok();
+    };
+    Status st = reset_one(drafter, stream);
     if (!st.ok()) return st;
-    if (std::getenv("SHELF_MTP_RING_DEBUG") != nullptr)
-        std::fprintf(stderr, "MTP_RING reset free_after_release=%u\n",
-                     draft_kv_pool(drafter).num_free_pages());
-    auto sequence = state::create_paged_sequence_state(
-        draft_slot_pool(drafter), draft_gdn_pool(drafter), draft_kv_pool(drafter),
-        drafter.max_seq_len, stream, drafter.ring_pages);
-    if (!sequence.ok()) {
-        drafter.sequence.reset();
-        return sequence.status();
+    for (MtpDraftPeer& peer : drafter.peers) {
+        if (peer.owner == nullptr) continue;
+        auto scope = shelf::gpu::ScopedDevice::create(peer.device);
+        if (!scope.ok()) return scope.status();
+        st = reset_one(*peer.owner, peer.stream);
+        if (!st.ok()) return st;
+        peer.sequence = peer.owner->sequence.get();
     }
-    drafter.sequence =
-        std::make_unique<state::PagedSequenceState>(sequence.release());
-    drafter.last_tokens.clear();
-    drafter.last_position = 0u;
-    drafter.last_hidden_offset = 0u;
-    drafter.sample_index = 0u;
-    drafter.timing = MtpTiming{};
     return Status::make_ok();
 }
 
@@ -1093,7 +1212,7 @@ Result<MtpPrefillOutput> mtp_spec_prefill(
                 for (uint32_t i = 0u; i < mtp_rows; ++i) {
                     mtp_tokens[i] = prompt_tokens[mtp_begin + i + 1u];
                 }
-                Status copy = copy_hidden_to_input(
+                Status copy = copy_hidden_to_all(
                     drafter, target.normed_token_hidden, mtp_begin - begin, mtp_rows, stream);
                 if (!copy.ok()) return copy;
                 auto mtp_output = run_mtp_forward(drafter, mtp_tokens, mtp_begin, false,
@@ -1118,7 +1237,7 @@ Result<MtpPrefillOutput> mtp_spec_prefill(
             for (uint32_t i = 0u; i < mtp_rows; ++i) {
                 mtp_tokens[i] = prompt_tokens[mtp_begin + i + 1u];
             }
-            Status copy = copy_hidden_to_input(
+            Status copy = copy_hidden_to_all(
                 drafter, target.normed_token_hidden, mtp_begin - begin, mtp_rows, stream);
             if (!copy.ok()) return copy;
             auto mtp_output = run_mtp_forward(drafter, mtp_tokens, mtp_begin, false,
@@ -1409,8 +1528,8 @@ Result<MtpDraftResult> mtp_draft(
     }
     const uint32_t required_rewind = ceil_div_u32(drafter.last_position,
                                                   drafter.sequence->kv_pool()->page_tokens());
-    Status rewind = rewind_sequence(*drafter.sequence, drafter.last_position,
-                                    required_rewind, stream);
+    Status rewind = rewind_sequences(drafter, drafter.last_position,
+                                     required_rewind, stream);
     if (!rewind.ok()) return rewind;
 
     std::vector<int32_t> first_pass(prefix_rows);
@@ -1418,7 +1537,7 @@ Result<MtpDraftResult> mtp_draft(
         first_pass[i] = drafter.last_tokens[i + 1u];
     }
     first_pass[prefix_rows - 1u] = pending_token;
-    Status copy = copy_hidden_to_input(drafter, drafter.hidden_cache, 0u, prefix_rows,
+    Status copy = copy_hidden_to_all(drafter, drafter.hidden_cache, 0u, prefix_rows,
                                        stream);
     if (!copy.ok()) return copy;
     auto first = run_mtp_forward(drafter, first_pass, drafter.last_position, true,
@@ -1428,7 +1547,7 @@ Result<MtpDraftResult> mtp_draft(
     if (!first_sampled.ok()) return first_sampled.status();
 
     result.proposals[0] = first_sampled.value();
-    copy = copy_hidden_to_input(drafter, drafter_hidden_output(drafter), 0u, 1u, stream);
+    copy = copy_hidden_to_all(drafter, drafter_hidden_output(drafter), 0u, 1u, stream);
     if (!copy.ok()) return copy;
     for (uint32_t i = 1u; i < drafts; ++i) {
         std::vector<int32_t> step_tokens{result.proposals[i - 1u]};
@@ -1438,7 +1557,7 @@ Result<MtpDraftResult> mtp_draft(
         auto sampled = copy_sampled_token(step.value().sampled_tokens, stream);
         if (!sampled.ok()) return sampled.status();
         result.proposals[i] = sampled.value();
-        copy = copy_hidden_to_input(drafter, drafter_hidden_output(drafter), 0u, 1u,
+        copy = copy_hidden_to_all(drafter, drafter_hidden_output(drafter), 0u, 1u,
                                     stream);
         if (!copy.ok()) return copy;
     }
@@ -1612,37 +1731,40 @@ Result<MtpSpecBatchContext> create_mtp_spec_batch_context(
     per_request.allocate_spec_buffers = false;
     const bool share_draft =
         target.qsa_state_pool != nullptr || target.ple_conv_state_pool != nullptr;
-    if (share_draft) {
-        context.shared_draft = std::make_unique<MtpDraftShared>();
-        MtpDraftShared& shared = *context.shared_draft;
-        shared.config = mtp_executor_config(*input.config);
+
+    auto make_shared = [&](const MtpDrafterInput& rank_input, gpu::GpuArena& rank_arena,
+                           uint32_t local_kv_heads,
+                           uint32_t tp_rank) -> Result<std::unique_ptr<MtpDraftShared>> {
+        auto shared = std::make_unique<MtpDraftShared>();
+        shared->config = mtp_executor_config(*rank_input.config);
+        if (local_kv_heads != 0u)
+            shared->config.num_key_value_heads = local_kv_heads;
         const uint32_t pages =
             ceil_div_u32(options.max_seq_len + 1u, options.page_tokens) + 1u;
         const uint32_t ring_pages = draft_ring_pages(options);
         auto slot_pool =
-            state::SequenceSlotPool::create(arena, max_requests, pages);
+            state::SequenceSlotPool::create(rank_arena, max_requests, pages);
         if (!slot_pool.ok()) return slot_pool.status();
-        shared.slot_pool =
+        shared->slot_pool =
             std::make_unique<state::SequenceSlotPool>(slot_pool.release());
         const state::GdnStatePoolLayout gdn_layout =
-            make_qwen35_gdn_state_layout(shared.config);
-        auto gdn_pool = state::GdnStatePool::create(arena, max_requests, gdn_layout);
+            make_qwen35_gdn_state_layout(shared->config);
+        auto gdn_pool = state::GdnStatePool::create(rank_arena, max_requests, gdn_layout);
         if (!gdn_pool.ok()) return gdn_pool.status();
-        shared.gdn_pool = std::make_unique<state::GdnStatePool>(gdn_pool.release());
-        // One reset can hold the outgoing and incoming sequence at once.
+        shared->gdn_pool = std::make_unique<state::GdnStatePool>(gdn_pool.release());
         const uint32_t ring_scale = ring_pages != 0u ? max_requests + 1u : max_requests;
         auto kv_pool = state::PagedKVPool::create(
-            arena, (ring_pages != 0u ? ring_pages : pages) * ring_scale,
+            rank_arena, (ring_pages != 0u ? ring_pages : pages) * ring_scale,
             options.page_tokens, kMtpKvLayers,
-            static_cast<uint32_t>(shared.config.num_key_value_heads),
-            static_cast<uint32_t>(shared.config.attention_head_dim), options.kv_dtype);
+            static_cast<uint32_t>(shared->config.num_key_value_heads),
+            static_cast<uint32_t>(shared->config.attention_head_dim), options.kv_dtype);
         if (!kv_pool.ok()) return kv_pool.status();
-        shared.kv_pool = std::make_unique<state::PagedKVPool>(kv_pool.release());
+        shared->kv_pool = std::make_unique<state::PagedKVPool>(kv_pool.release());
 
         ExecutorModelInput model_input;
-        model_input.model.config = &shared.config;
-        model_input.model.embed_tokens = input.embed_tokens;
-        model_input.lowered = input.lowered;
+        model_input.model.config = &shared->config;
+        model_input.model.embed_tokens = rank_input.embed_tokens;
+        model_input.lowered = rank_input.lowered;
         ExecutorConfig executor_config;
         const uint32_t batch_rows = max_requests * (options.num_drafts + 1u);
         executor_config.max_batch_rows =
@@ -1651,20 +1773,65 @@ Result<MtpSpecBatchContext> create_mtp_spec_batch_context(
         executor_config.max_scheduled_output_rows = max_requests;
         executor_config.external_hidden_input = true;
         executor_config.external_hidden_width =
-            input.hidden_width != 0u ? input.hidden_width
-                                     : static_cast<std::uint32_t>(input.config->hidden_size);
+            rank_input.hidden_width != 0u
+                ? rank_input.hidden_width
+                : static_cast<std::uint32_t>(rank_input.config->hidden_size);
         executor_config.external_mask_bytes = draft_mask_bytes(options.max_seq_len);
-        executor_config.exl3_linear_shape = input.exl3_linear_shape;
-        executor_config.emit_normed_token_hidden = input.wide_hidden;
+        executor_config.exl3_linear_shape = rank_input.exl3_linear_shape;
+        executor_config.emit_normed_token_hidden = rank_input.wide_hidden;
         executor_config.normed_token_hidden_width = executor_config.external_hidden_width;
         executor_config.rope_profile = options.rope_profile;
         executor_config.backend = ::shelf::runtime::DecodeBackend::Hip;
-        auto executor = create_executor(std::move(model_input), *shared.slot_pool,
-                                        *shared.gdn_pool, *shared.kv_pool, arena,
+        auto executor = create_executor(std::move(model_input), *shared->slot_pool,
+                                        *shared->gdn_pool, *shared->kv_pool, rank_arena,
                                         executor_config);
         if (!executor.ok()) return executor.status();
-        shared.executor = executor.release();
-        shared.initialized = true;
+        shared->executor = executor.release();
+        if (tp_hook != nullptr) {
+            Status attached = tp_hook->attach_aux_executor(shared->executor, tp_rank);
+            if (!attached.ok()) return attached;
+        }
+        shared->initialized = true;
+        return shared;
+    };
+
+    if (share_draft) {
+        auto shared = make_shared(input, arena, options.local_kv_heads, 0u);
+        if (!shared.ok()) return shared.status();
+        context.shared_draft = shared.release();
+    }
+    if (extra_ranks != nullptr) {
+        for (const MtpGdnRankBinding& binding : *extra_ranks) {
+            if (binding.mtp_input == nullptr) continue;
+            auto peer_scope = shelf::gpu::ScopedDevice::create(binding.device);
+            if (!peer_scope.ok()) {
+                (void)shutdown_mtp_spec_batch_context(context);
+                return peer_scope.status();
+            }
+            auto peer_shared = make_shared(*binding.mtp_input, *binding.arena,
+                                           binding.local_kv_heads, binding.tp_rank);
+            if (!peer_shared.ok()) {
+                (void)shutdown_mtp_spec_batch_context(context);
+                return peer_shared.status();
+            }
+            context.peer_shared_drafts.push_back(peer_shared.release());
+            std::vector<std::unique_ptr<MtpDrafter>> peer_slots;
+            MtpDrafterConfig peer_options = per_request;
+            peer_options.local_kv_heads = binding.local_kv_heads;
+            peer_slots.reserve(max_requests);
+            for (uint32_t i = 0u; i < max_requests; ++i) {
+                auto peer = create_mtp_drafter(
+                    *binding.mtp_input, binding.executor, *binding.pool, *binding.arena,
+                    binding.stream, peer_options, nullptr, tp_hook,
+                    context.peer_shared_drafts.back().get());
+                if (!peer.ok()) {
+                    (void)shutdown_mtp_spec_batch_context(context);
+                    return peer.status();
+                }
+                peer_slots.push_back(peer.release());
+            }
+            context.peer_drafters.push_back(std::move(peer_slots));
+        }
     }
     context.drafters.reserve(max_requests);
     for (uint32_t i = 0u; i < max_requests; ++i) {
@@ -1674,6 +1841,12 @@ Result<MtpSpecBatchContext> create_mtp_spec_batch_context(
         if (!drafter.ok()) {
             (void)shutdown_mtp_spec_batch_context(context);
             return drafter.status();
+        }
+        for (const auto& peer_slots : context.peer_drafters) {
+            MtpDrafter& peer = *peer_slots[i];
+            drafter.value()->peers.push_back(MtpDraftPeer{
+                &draft_executor(peer), peer.sequence.get(), peer.target_stream,
+                peer.target_device, &peer});
         }
         context.drafters.push_back(std::move(drafter.value()));
     }
@@ -1783,6 +1956,25 @@ Status shutdown_mtp_spec_batch_context(MtpSpecBatchContext& context) noexcept {
         if (first_error.ok() && !st.ok()) first_error = st;
         context.drafters[i].reset();
     }
+    for (auto& slots : context.peer_drafters) {
+        for (std::size_t i = slots.size(); i-- > 0u;) {
+            if (slots[i] == nullptr) continue;
+            Status st = mtp_drafter_shutdown(*slots[i], slots[i]->target_stream);
+            if (first_error.ok() && !st.ok()) first_error = st;
+            slots[i].reset();
+        }
+    }
+    context.peer_drafters.clear();
+    for (auto& shared : context.peer_shared_drafts) {
+        if (shared == nullptr) continue;
+        Status st = executor_shutdown(shared->executor);
+        if (first_error.ok() && !st.ok()) first_error = st;
+        shared->kv_pool.reset();
+        shared->gdn_pool.reset();
+        shared->slot_pool.reset();
+        shared.reset();
+    }
+    context.peer_shared_drafts.clear();
     context.shared_draft.reset();
     context.initialized = false;
     return first_error;
@@ -1844,8 +2036,8 @@ Status mtp_draft_batch(
         }
         const uint32_t required_rewind = ceil_div_u32(
             drafter.last_position, drafter.sequence->kv_pool()->page_tokens());
-        Status rewind = rewind_sequence(*drafter.sequence, drafter.last_position,
-                                        required_rewind, stream);
+        Status rewind = rewind_sequences(drafter, drafter.last_position,
+                                         required_rewind, stream);
         if (!rewind.ok()) return rewind;
         prefix_rows[i] = rows;
         first_prefix[i] = drafter.last_position;
@@ -1855,7 +2047,7 @@ Status mtp_draft_batch(
         for (uint32_t r = 0u; r + 1u < rows; ++r)
             first_tokens[i][r] = drafter.last_tokens[r + 1u];
         first_tokens[i][rows - 1u] = slot.pending_token;
-        Status copy = copy_hidden_to_input(drafter, drafter.hidden_cache, 0u, rows,
+        Status copy = copy_hidden_to_all(drafter, drafter.hidden_cache, 0u, rows,
                                            stream, row_begin[i]);
         if (!copy.ok()) return copy;
         if (drafts > max_drafts) max_drafts = drafts;
@@ -1902,7 +2094,37 @@ Status mtp_draft_batch(
                 ++batch.num_prefill_requests;
         }
         batch.num_verify_requests = 0u;
-        auto output = execute_batch(executor, batch, stream);
+        Result<BatchExecutionOutput> output = Status::make_ok();
+        if (context.peer_shared_drafts.empty()) {
+            output = execute_batch(executor, batch, stream);
+        } else {
+            auto* hook = context.drafters.empty()
+                ? nullptr
+                : context.drafters.front()->tp_hook;
+            if (hook == nullptr) {
+                return Status::invalid_state("mtp batch peers need a tp coordinator",
+                                             __FILE__, __LINE__);
+            }
+            std::vector<::shelf::runtime::TpAuxRank> aux;
+            aux.reserve(1u + context.peer_shared_drafts.size());
+            ::shelf::runtime::TpAuxRank leader;
+            leader.executor = &executor;
+            leader.sequences.reserve(active.size());
+            for (std::size_t i : active)
+                leader.sequences.push_back(slots[i].drafter->sequence.get());
+            aux.push_back(std::move(leader));
+            for (std::size_t r = 0u; r < context.peer_shared_drafts.size(); ++r) {
+                ::shelf::runtime::TpAuxRank peer;
+                peer.executor = &context.peer_shared_drafts[r]->executor;
+                peer.sequences.reserve(active.size());
+                for (std::size_t i : active) {
+                    const MtpDrafter& leader = *slots[i].drafter;
+                    peer.sequences.push_back(leader.peers[r].sequence);
+                }
+                aux.push_back(std::move(peer));
+            }
+            output = hook->on_execute_aux(batch, aux, nullptr);
+        }
         if (!output.ok()) return output.status();
         std::vector<int32_t> sampled(active.size(), -1);
         const hipError_t copy = hipMemcpy(
@@ -1934,7 +2156,7 @@ Status mtp_draft_batch(
         const std::size_t i = active[b];
         plans[i].proposals[0] = first.value()[b];
         const uint32_t source_row = row_begin[i] + prefix_rows[i] - 1u;
-        Status copy = copy_hidden_to_input(
+        Status copy = copy_hidden_to_all(
             *slots[i].drafter, executor.normed_token_hidden, source_row, 1u, stream,
             static_cast<uint32_t>(i));
         if (!copy.ok()) return copy;
@@ -1955,7 +2177,7 @@ Status mtp_draft_batch(
         for (std::size_t b = 0u; b < active.size(); ++b) {
             const std::size_t i = active[b];
             if (i == b) continue;
-            Status compact = copy_hidden_to_input(
+            Status compact = copy_hidden_to_all(
                 *slots[i].drafter, executor.input_hidden, static_cast<uint32_t>(i), 1u,
                 stream, static_cast<uint32_t>(b));
             if (!compact.ok()) return compact;
@@ -1966,7 +2188,7 @@ Status mtp_draft_batch(
         for (std::size_t b = 0u; b < active.size(); ++b) {
             const std::size_t i = active[b];
             plans[i].proposals[depth] = sampled.value()[b];
-            Status copy = copy_hidden_to_input(
+            Status copy = copy_hidden_to_all(
                 *slots[i].drafter, executor.normed_token_hidden, static_cast<uint32_t>(b),
                 1u, stream, static_cast<uint32_t>(i));
             if (!copy.ok()) return copy;

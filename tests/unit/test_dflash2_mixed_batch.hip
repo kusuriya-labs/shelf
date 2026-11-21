@@ -24,7 +24,7 @@ using ::shelf::runtime::dflash2::DFlash2ContextState;
 using ::shelf::runtime::dflash2::DFlash2Executor;
 using ::shelf::runtime::dflash2::DFlash2ExecutorConfig;
 using ::shelf::runtime::dflash2::DFlash2Weights;
-using shelf::qwen35::SchedulePlan;
+using shelf::qwen35::runtime::SchedulePlan;
 using ::shelf::runtime::ScheduledBatch;
 using shelf::runtime::DFlash2SpecBatchContext;
 
@@ -86,7 +86,7 @@ static bool make_bundle(
 
 struct Prefilled {
     int32_t anchor = -1;
-    std::array<int32_t, ::shelf::runtime::dflash2::kMaxBlockSize - 1u> drafts{};
+    std::array<int32_t, ::shelf::runtime::kMaxBlockSize - 1u> drafts{};
     uint32_t draft_count = 0;
 };
 
@@ -119,7 +119,8 @@ static bool run_plan(shelf::qwen35::Executor& ex, SchedulePlan& plan,
                      hipStream_t stream, std::vector<int32_t>& sampled,
                      uint32_t& num_outputs) {
     plan.finalize();
-    const shelf::Status valid = shelf::qwen35::validate_scheduled_batch(plan.batch, 0u, 0u);
+    const shelf::Status valid =
+        shelf::qwen35::runtime::validate_scheduled_batch(plan.batch, 0u, 0u);
     if (!valid.ok()) {
         std::printf("FAIL validate: %s\n", valid.message().c_str());
         return false;

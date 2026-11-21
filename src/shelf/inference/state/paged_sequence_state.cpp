@@ -61,6 +61,7 @@ Result<PagedSequenceState> create_paged_sequence_state(
     if (ring_blocks != 0u) {
         // A ring wider than the logical table would acquire pages no table entry aliases.
         if (ring_blocks > max_blocks_per_seq) ring_blocks = max_blocks_per_seq;
+        state.ring_blocks_ = ring_blocks;
         if (ring_blocks > kv_pool.num_pages()) {
             (void)seq_pool.release_handle(handle);
             return Status::invalid_argument("ring_blocks exceeds the KV pool", __FILE__,
@@ -152,6 +153,7 @@ Status release_paged_sequence_state(PagedSequenceState& seq, hipStream_t stream)
     seq.seq_pool_ = nullptr;
     seq.recurrent_pool_ = nullptr;
     seq.max_blocks_ = 0;
+    seq.ring_blocks_ = 0;
 
     return Status::make_ok();
 }
@@ -248,6 +250,10 @@ Status rollback_sequence_append(
 
     if (old_block_count > seq.block_table.size()) {
         return Status::out_of_range("old_block_count exceeds block_table", __FILE__, __LINE__);
+    }
+
+    if (seq.is_ring()) {
+        return Status::make_ok();
     }
 
     if (old_block_count == seq.block_table.size()) {
@@ -447,6 +453,7 @@ void runtime_install_sequence_state(
     dst.seq_pool_ = std::exchange(src.seq_pool_, nullptr);
     dst.recurrent_pool_ = std::exchange(src.recurrent_pool_, nullptr);
     dst.max_blocks_ = std::exchange(src.max_blocks_, 0);
+    dst.ring_blocks_ = std::exchange(src.ring_blocks_, 0);
     dst.poisoned_ = std::exchange(src.poisoned_, false);
 }
 

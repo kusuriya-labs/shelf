@@ -222,7 +222,6 @@ public:
         std::uint64_t total = 0;
         add_matrix(total, w.embed_tokens);
         add_matrix(total, w.lm_head);
-        add_matrix(total, w.mtp_lm_head);
         add_hyper(total, w.mixer);
         for (const auto& layer : w.layers) {
             add_hyper(total, layer.attn_hyper_connection);
@@ -320,8 +319,8 @@ public:
 
     std::size_t mtp_grouped_reserve_bytes(std::size_t rows,
                                           std::uint32_t max_context_tokens) const override {
-        return qwen4exp::mtp_grouped_executor_bytes(model_.text_config(), rows,
-                                                    max_context_tokens);
+        return qwen4exp::mtp_grouped_executor_bytes(
+            model_.text_config(), rows, max_context_tokens, context_.local_num_experts);
     }
 
     shelf::weights::Exl3LinearShape exl3_linear_shape() const override {
@@ -330,6 +329,35 @@ public:
 
     shelf::weights::Exl3LinearShape mtp_exl3_linear_shape() const override {
         return qwen4exp::mtp_exl3_linear_shape(model_.weights());
+    }
+
+    shelf::Result<q35r::MtpDrafterInput> mtp_drafter_input(
+        const q35r::MtpDrafterConfig& options) const override {
+        const auto& cfg = model_.text_config();
+        qwen4exp::Qwen4ExpLowerOptions lower_options;
+        lower_options.max_context_tokens = options.max_seq_len + 1u;
+        lower_options.tp_size = context_.tp_size;
+        lower_options.tp_rank = context_.tp_rank;
+        lower_options.ep_size = context_.ep_size;
+        lower_options.ep_rank = context_.ep_rank;
+        lower_options.ep_enabled = context_.ep_enabled;
+        lower_options.rope_attention_factor = options.rope_profile.attention_factor;
+        auto lowered = qwen4exp::lower_qwen4exp_mtp_to_primitives(
+            cfg, model_.weights(), lower_options);
+        if (!lowered.ok()) return lowered.status();
+        q35r::MtpDrafterInput input;
+        input.config = &hybrid_config();
+        input.embed_tokens = &model_.weights().embed_tokens;
+        input.lowered = lowered.release();
+        input.token_row_intermediate =
+            static_cast<std::size_t>(cfg.ffn.shared_expert_intermediate_size);
+        input.grouped_executor_bytes = qwen4exp::mtp_grouped_executor_bytes(
+            cfg, q35r::mtp_drafter_rows(options), 0u, context_.local_num_experts);
+        input.exl3_linear_shape = mtp_exl3_linear_shape();
+        input.hidden_width =
+            static_cast<std::uint32_t>(cfg.hc_count * cfg.hidden_size);
+        input.wide_hidden = true;
+        return input;
     }
 
     std::uint32_t normed_token_hidden_width() const override {
@@ -551,6 +579,7 @@ Result<std::unique_ptr<TpRankModel>> build_qwen4exp_tp_rank_model(
     const auto& cfg = text_config.value();
     qwen4exp::Qwen4ExpLoadOptions load_options;
     load_options.load_mtp = config.load_mtp_layers;
+    load_options.mtp_split = config.mtp_split;
     load_options.ep_size = config.ep_size;
     load_options.ep_rank = config.ep_rank;
     load_options.ep_enabled = config.ep_enabled;

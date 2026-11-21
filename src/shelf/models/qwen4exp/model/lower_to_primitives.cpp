@@ -589,10 +589,25 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_mtp_to_primitives(
         return Status::invalid_argument("Qwen4Exp MTP lowering geometry is empty", __FILE__,
                                         __LINE__);
     }
-    if (local_experts != global_experts || expert_begin != 0u) {
-        return Status::unsupported(
-            "Qwen4Exp MTP lowering needs the unsharded expert range", __FILE__, __LINE__);
+    const std::uint32_t tp_size = options.tp_size == 0u ? 1u : options.tp_size;
+    if (local_experts == 0u ||
+        expert_begin + local_experts > global_experts) {
+        return Status::invalid_argument("Qwen4Exp MTP expert range is invalid", __FILE__,
+                                        __LINE__);
     }
+    auto divide_heads = [&](std::size_t heads, const char* what) -> Result<std::uint32_t> {
+        if (heads == 0u || (heads % tp_size) != 0u) {
+            return Status::unsupported(what, __FILE__, __LINE__);
+        }
+        return static_cast<std::uint32_t>(heads / tp_size);
+    };
+    auto local_query_heads = divide_heads(
+        config.num_attention_heads, "Qwen4Exp MTP num_attention_heads must divide by tp_size");
+    if (!local_query_heads.ok()) return local_query_heads.status();
+    auto local_kv_heads = divide_heads(
+        config.num_key_value_heads,
+        "Qwen4Exp MTP num_key_value_heads must divide by tp_size");
+    if (!local_kv_heads.ok()) return local_kv_heads.status();
 
     float eps = config.rms_norm_eps;
     float rope_theta = config.rope_theta;
@@ -625,9 +640,7 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_mtp_to_primitives(
     };
 
     const std::uint32_t embed_index = add_weight(weights.embed_tokens);
-    const shelf::weights::MatrixWeight& head_weights =
-        weights.mtp_lm_head.rows != 0u ? weights.mtp_lm_head : weights.lm_head;
-    const std::uint32_t lm_index = add_weight(head_weights);
+    const std::uint32_t lm_index = add_weight(weights.lm_head);
     const std::uint32_t fc_hidden_index = add_weight(mtp.fc_hidden);
     const std::uint32_t fc_embedding_index = add_weight(mtp.fc_embedding);
 
@@ -759,16 +772,14 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_mtp_to_primitives(
     layer.mlp_hyper_weights.inject = &lw.mlp_hyper_connection.block_inject;
     layer.mlp_hyper_indices = {mlp_hyper_down, mlp_hyper_up, mlp_hyper_inject};
 
-    layer.qsa_geometry.attention.query_heads =
-        static_cast<std::uint32_t>(config.num_attention_heads);
-    layer.qsa_geometry.attention.kv_heads =
-        static_cast<std::uint32_t>(config.num_key_value_heads);
+    layer.qsa_geometry.attention.query_heads = local_query_heads.value();
+    layer.qsa_geometry.attention.kv_heads = local_kv_heads.value();
     layer.qsa_geometry.attention.head_dim = head_dim;
     layer.qsa_geometry.attention.rotary_dim = rotary_dim;
     layer.qsa_geometry.attention.rope_theta = rope_theta;
     layer.qsa_geometry.attention.rope_attention_factor = options.rope_attention_factor;
     layer.qsa_geometry.attention.eps = eps;
-    layer.qsa_geometry.attention.tp_combine = false;
+    layer.qsa_geometry.attention.tp_combine = tp_size > 1u;
     layer.qsa_weights.attention.q = &lw.attention.q_proj;
     layer.qsa_weights.attention.k = &lw.attention.k_proj;
     layer.qsa_weights.attention.v = &lw.attention.v_proj;
@@ -781,8 +792,19 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_mtp_to_primitives(
     layer.qsa_indices.attention.p_k_norm = p_k_norm;
     layer.qsa_indices.attention.state_index = 0u;
 
-    layer.moe_geometry = {global_experts, local_experts, expert_begin, top_k, hidden,
-                          intermediate, shared_intermediate, 1.0f};
+    layer.moe_geometry = {
+        global_experts,
+        local_experts,
+        expert_begin,
+        top_k,
+        hidden,
+        intermediate,
+        shared_intermediate,
+        options.tp_rank == 0u ? 1.0f : 0.0f,
+        1.0f,
+        options.ep_enabled,
+        tp_size,
+    };
     layer.moe_weights = lw.mlp;
     layer.moe_indices = {router, shared_gate, shared_gate_proj, shared_up_proj,
                          shared_down_proj, gate_experts, up_experts, down_experts};
@@ -818,15 +840,24 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_mtp_to_primitives(
                                            "mtp.mixer.");
     if (!mixed.ok()) return mixed.status();
 
+    const VocabParallelHead lm_parallel =
+        vocab_parallel_head(weights.lm_head, tp_size, options.tp_rank, vocab);
     QH::HybridHeadLowering head;
     head.hidden_features = hidden;
     head.eps = eps;
     head.final_norm_param = UINT32_MAX;
     head.apply_final_norm = false;
-    head.lm_shape = RT::MatrixwiseShapeKey{head_weights.rows, head_weights.cols};
+    head.lm_shape = RT::MatrixwiseShapeKey{weights.lm_head.rows, weights.lm_head.cols};
     head.lm_weight_index = lm_index;
     head.out_vocab = vocab;
-    QH::emit_hybrid_head(em, head, mixed.value().mixed, "mtp.head.");
+    const QH::HybridHeadOutput head_out =
+        QH::emit_hybrid_head(em, head, mixed.value().mixed, "mtp.head.");
+    if (lm_parallel.sharded) {
+        pg.nodes[head_out.logits_node_index].tp_combine = 1;
+        pg.nodes[head_out.logits_node_index].tp_combine_local_cols = weights.lm_head.rows;
+        lowered.weights[lm_index].output_col_offset = lm_parallel.col_offset;
+        lowered.weights[lm_index].output_col_total = vocab;
+    }
 
     pg.external_outputs.push_back(block_output.value());
 

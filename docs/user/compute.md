@@ -210,9 +210,9 @@ dense checkpoint を TP=2 で動かす場合:
 制約:
 
 - checkpoint に MTP block（`mtp.*`）が必要。無い checkpoint で `--mtp` を指定すると起動時に失敗する。
-- dense checkpoint は `--tensor-parallel 2` に対応する。qwen4exp は TP / EP に対応し、
-  MTP block は rank0 が持つ。TP で target の lm_head が語彙分割されるときは、rank0 が
-  drafter 用の全語彙 head を追加で持つ。
+- dense checkpoint は `--tensor-parallel 2` に対応する。qwen4exp は TP / EP に対応する。
+  `--serve-stdio` の TP では MTP block を全 rank に分割し、drafter は target の語彙分割
+  lm_head を共用する。単発生成の TP は rank0 が MTP block 全体を持つ。
 - `--pipeline-parallel 2`、`--dump-logits` は未対応。
 - `--serve-stdio` は複数 request を同時に保持する。dense など QSA / PLE を持たない
   target は 1 round の verify を 4 request / 32 行ずつの chunk に分けて融合実行する。
