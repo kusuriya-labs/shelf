@@ -72,6 +72,7 @@ class ChatRequest:
     forced_tool_name: str | None = None
     response_schema: dict | None = None
     template_kwargs: dict[str, Any] | None = None
+    effort_given: bool = False
 
 
 def error_body(message: str, *, param: str | None = None,
@@ -483,6 +484,7 @@ def parse_chat_request(body: Any,
         include_usage=include_usage,
         enable_thinking=enable_thinking,
         reasoning_effort=reasoning_effort,
+        effort_given=effort_given,
         preserve_thinking=preserve_thinking,
         response_schema=response_schema,
         template_kwargs=template_kwargs,
