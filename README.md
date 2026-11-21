@@ -1,5 +1,7 @@
 # Shelf
 
+**日本語** | [English](README.en.md)
+
 AMD RDNA4 GPU（R9700）向けの軽量推論エンジン
 
 特徴
