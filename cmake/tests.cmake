@@ -814,3 +814,4 @@ endif()
 shelf_add_test(NAME test_token_mask_scheduler SOURCE unit/test_token_mask_scheduler.cpp LABELS "cpu;required" LIBRARIES shelf_qwen35_runtime shelf_qwen35)
 
 shelf_add_test(NAME test_ngram_quantization SOURCE unit/test_ngram_quantization.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES shelf_quant_ngram)
+shelf_add_test(NAME test_qwen4exp_ngram SOURCE unit/test_qwen4exp_ngram.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES shelf_qwen4exp shelf_quant_ngram)

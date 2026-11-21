@@ -2,6 +2,7 @@
 
 #include <shelf/core/memory/types.h>
 #include <shelf/core/status.h>
+#include <shelf/io/safetensors_reader.h>
 #include <shelf/models/qwen4exp/model/qwen4exp_config.h>
 
 #include <cstddef>
@@ -27,6 +28,7 @@ public:
         Exl3Trellis = 0,
         Fp8E4M3 = 1,
         Int6W32Fp16 = 2,
+        Ngram = 3,
     };
 
     static Result<PleTable> load(const std::string& model_dir,
@@ -112,6 +114,30 @@ private:
         std::int64_t mtime_nsec = 0;
     };
 
+    struct NgramHead {
+        std::unique_ptr<io::SafetensorsReader> reader;
+        const std::uint8_t* codes = nullptr;
+        const std::uint8_t* scales = nullptr;
+        std::vector<std::uint16_t> codebook;
+        std::size_t rows = 0;
+        std::size_t width = 0;
+        unsigned bits = 0;
+    };
+    struct NgramBlock {
+        std::uint64_t key = 0;
+        std::vector<std::uint8_t> data;
+    };
+    struct NgramState {
+        std::vector<NgramHead> heads;
+        std::vector<NgramBlock> blocks;
+        std::unordered_map<std::uint64_t, std::size_t> index;
+        std::size_t capacity = 0;
+        std::size_t next = 0;
+        std::mutex mutex;
+    };
+    std::shared_ptr<NgramState> ngram_;
+    static Result<PleTable> load_ngram(const std::string& root,
+                                       const Qwen4ExpTextConfig& config);
     static Result<PleTable> load_index_shards(const std::string& model_dir,
                                               const Qwen4ExpTextConfig& config,
                                               bool fadvise_dontneed);

@@ -2,7 +2,7 @@
 
 N-gram / Engram / PLE 埋め込み table のモデル非依存の保存形式を定義する。
 Qwen3.8-Flash-Next、Hy4-Flash、DeepSeek-V4.1-Flash などの同等の table 構造を対象とする。
-これは形式と変換器の契約であり、現行 Shelf runtime による読込の対応を意味しない。
+Qwen3.8-Flash-Next の PLE は本形式を直接読み込み、head ごとの行を復号する。
 既存の線形重み用 `shelf_quantization.json` とは別の形式である。
 評価の経緯は [offline 評価](../research/20261121/ngram_q_offline_eval.md)、
 [Hy4 評価](../research/20261121/ngram_q_step2_hy4.md)、

@@ -2,6 +2,7 @@
 
 #include <shelf/quantization/exl3/exl3.h>
 #include <shelf/quantization/int6/int6_w32.h>
+#include <shelf/quantization/ngram/ngram.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -305,6 +306,69 @@ void PleTable::FdDeleter::operator()(int* p) const noexcept {
     delete p;
 }
 
+
+Result<PleTable> PleTable::load_ngram(const std::string& root,
+                                      const Qwen4ExpTextConfig& config) {
+    namespace nq = shelf::quantization::ngram;
+    std::ifstream input(root + "/ngram_manifest.json");
+    if (!input) return Status::invalid_argument("cannot open ngram manifest", __FILE__, __LINE__);
+    std::string json((std::istreambuf_iterator<char>(input)), {});
+    auto manifest = nq::parse_manifest(json);
+    if (!manifest.ok()) return manifest.status();
+    auto valid = nq::validate_bundle(root, manifest.value());
+    if (!valid.ok()) return valid;
+    auto sizes = qwen4exp_ple_head_vocab_sizes(config, 0u);
+    auto offsets = qwen4exp_ple_head_offsets(config, 0u);
+    auto multipliers = qwen4exp_ple_layer_multipliers(config, 0u);
+    const auto layers = config.ple_layers();
+    if (!sizes.ok() || !offsets.ok() || !multipliers.ok() || layers.size() != 1u ||
+        sizes.value().size() != 16u || config.ple.ngram_size != 3u ||
+        config.ple.heads_per_ngram != 8u || config.ple.embed_dim != 2560u ||
+        manifest.value().tables.size() != 16u) {
+        return Status::invalid_argument("ngram PLE geometry differs from config", __FILE__, __LINE__);
+    }
+    PleTable result;
+    result.format_ = TableFormat::Ngram;
+    result.row_width_ = kExpectedRowWidth;
+    result.ngram_size_ = static_cast<std::uint32_t>(config.ple.ngram_size);
+    result.heads_per_ngram_ = static_cast<std::uint32_t>(config.ple.heads_per_ngram);
+    result.eos_token_id_ = config.ple.eos_token_id;
+    result.head_offsets_.assign(offsets.value().begin(), offsets.value().end());
+    result.head_vocab_sizes_.assign(sizes.value().begin(), sizes.value().end());
+    result.layer_multipliers_ = multipliers.value();
+    result.rows_ = offsets.value().back() + sizes.value().back();
+    result.shard_count_ = 16u;
+    result.ngram_ = std::make_shared<NgramState>();
+    result.ngram_->heads.resize(16u);
+    result.ngram_->capacity = static_cast<std::size_t>(ple_hot_cache_bytes() / (kHotBlockRows * 102u));
+    for (const auto& t : manifest.value().tables) {
+        if (t.head >= 16u || t.layer != layers[0] || t.ngram_order != 2u + t.head / 8u ||
+            t.dim != kExpectedRowWidth || t.rows != sizes.value()[t.head] ||
+            result.ngram_->heads[t.head].reader) {
+            return Status::invalid_argument("ngram PLE table differs from config", __FILE__, __LINE__);
+        }
+        auto opened = io::SafetensorsReader::open((std::filesystem::path(root) / t.shard).string());
+        if (!opened.ok()) return opened.status();
+        auto& head = result.ngram_->heads[t.head];
+        head.reader = std::make_unique<io::SafetensorsReader>(opened.release());
+        std::size_t bytes = 0;
+        auto codes = head.reader->tensor_data(t.codes_tensor, bytes);
+        if (!codes.ok()) return codes.status();
+        head.codes = static_cast<const std::uint8_t*>(codes.value());
+        auto scales = head.reader->tensor_data(t.scale_tensor, bytes);
+        if (!scales.ok()) return scales.status();
+        head.scales = static_cast<const std::uint8_t*>(scales.value());
+        auto book = head.reader->tensor_data(t.codebook_tensor, bytes);
+        if (!book.ok()) return book.status();
+        head.codebook.resize(1u << t.bits);
+        std::memcpy(head.codebook.data(), book.value(), bytes);
+        head.rows = t.rows;
+        head.bits = t.bits;
+        head.width = nq::row_bytes(t.dim, t.bits).value();
+        result.payload_bytes_ += t.rows * (head.width + 2u) + bytes;
+    }
+    return result;
+}
 
 Result<PleTable> PleTable::load_index_shards(const std::string& model_dir,
                                              const Qwen4ExpTextConfig& config,
@@ -1023,6 +1087,13 @@ Status PleTable::write_int6_artifact(const std::string& model_dir,
 Result<PleTable> PleTable::load(const std::string& model_dir,
                                 const Qwen4ExpTextConfig& config,
                                 bool fadvise_dontneed) {
+    std::error_code manifest_error;
+    const auto manifest_status = std::filesystem::symlink_status(
+        std::filesystem::path(model_dir) / "ngram_manifest.json", manifest_error);
+    if (manifest_error && manifest_error != std::errc::no_such_file_or_directory)
+        return Status::invalid_argument("cannot inspect ngram manifest", __FILE__, __LINE__);
+    if (manifest_status.type() != std::filesystem::file_type::not_found)
+        return load_ngram(model_dir, config);
     const std::uint64_t hot_cache_bytes = ple_hot_cache_bytes();
     const std::string path = model_dir + "/ngram_embedding.safetensors";
     const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
@@ -1385,10 +1456,21 @@ Result<PleTable> PleTable::load(const std::string& model_dir,
 }
 
 std::uint64_t PleTable::host_bytes() const noexcept {
+    if (ngram_) {
+        std::lock_guard<std::mutex> lock(ngram_->mutex);
+        std::uint64_t bytes = 0;
+        for (const auto& head : ngram_->heads) bytes += head.codebook.size() * 2u;
+        for (const auto& block : ngram_->blocks) bytes += block.data.capacity();
+        return bytes;
+    }
     return tiered_ != nullptr ? tiered_->hot_bytes : payload_bytes_;
 }
 
 std::size_t PleTable::cached_blocks() const noexcept {
+    if (ngram_) {
+        std::lock_guard<std::mutex> lock(ngram_->mutex);
+        return ngram_->blocks.size();
+    }
     if (tiered_ == nullptr) return 0u;
     TieredState& state = *tiered_;
     std::lock_guard<std::mutex> lock(state.mutex);
@@ -1663,6 +1745,53 @@ std::size_t PleTable::head_for_row(std::uint64_t row) const noexcept {
 
 Result<std::vector<float>> PleTable::decode_row(std::uint64_t row,
                                                 bool include_head_bias) const {
+    if (ngram_) {
+        if (row >= rows_) return Status::out_of_range("PLE row is out of range", __FILE__, __LINE__);
+        auto& state = *ngram_;
+        std::lock_guard<std::mutex> lock(state.mutex);
+        const std::size_t h = head_for_row(row);
+        const auto& head = state.heads[h];
+        const std::size_t local = static_cast<std::size_t>(row - head_offsets_[h]);
+        const std::size_t block = local / kHotBlockRows;
+        const std::uint64_t key = (static_cast<std::uint64_t>(h) << 48u) | block;
+        const std::uint8_t* codes = head.codes + local * head.width;
+        const std::uint8_t* scale = head.scales + local * 2u;
+        if (state.capacity != 0u) {
+            auto found = state.index.find(key);
+            if (found == state.index.end()) {
+                std::size_t slot;
+                if (state.blocks.size() < state.capacity) {
+                    slot = state.blocks.size();
+                    state.blocks.emplace_back();
+                } else {
+                    slot = state.next++ % state.capacity;
+                    state.index.erase(state.blocks[slot].key);
+                }
+                auto& entry = state.blocks[slot];
+                entry.key = key;
+                const std::size_t first = block * kHotBlockRows;
+                const std::size_t count = std::min<std::size_t>(kHotBlockRows, head.rows - first);
+                entry.data.resize(count * (head.width + 2u));
+                std::memcpy(entry.data.data(), head.codes + first * head.width, count * head.width);
+                std::memcpy(entry.data.data() + count * head.width, head.scales + first * 2u, count * 2u);
+                state.index[key] = slot;
+                found = state.index.find(key);
+            }
+            const auto& entry = state.blocks[found->second];
+            const std::size_t first = block * kHotBlockRows;
+            const std::size_t count = std::min<std::size_t>(kHotBlockRows, head.rows - first);
+            const std::size_t within = local - first;
+            codes = entry.data.data() + within * head.width;
+            scale = entry.data.data() + count * head.width + within * 2u;
+        }
+        std::uint16_t scale_bits;
+        std::memcpy(&scale_bits, scale, sizeof(scale_bits));
+        std::vector<float> output(row_width_);
+        auto status = shelf::quantization::ngram::decode(
+            {codes, head.width}, scale_bits, head.codebook, head.bits, output);
+        if (!status.ok()) return status;
+        return output;
+    }
     const std::uint8_t* packed = row_ptr(row);
     if (packed == nullptr) {
         return Status::out_of_range("PLE row is out of range", __FILE__, __LINE__);

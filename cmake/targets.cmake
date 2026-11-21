@@ -439,7 +439,7 @@ target_compile_features(shelf_qwen4exp PRIVATE cxx_std_20)
 target_include_directories(shelf_qwen4exp PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(shelf_qwen4exp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_include_directories(shelf_qwen4exp SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
-target_link_libraries(shelf_qwen4exp PUBLIC shelf_qwen_hybrid shelf_weights shelf_io shelf_quant_bundle shelf_gpu)
+target_link_libraries(shelf_qwen4exp PUBLIC shelf_qwen_hybrid shelf_weights shelf_io shelf_quant_bundle shelf_gpu shelf_quant_ngram)
 target_compile_options(shelf_qwen4exp PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
 # Model weight loading entry for the qwen35 family: the one place that links both the
