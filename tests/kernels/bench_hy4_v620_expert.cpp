@@ -32,6 +32,9 @@ struct Args {
     int iters = 30;
     std::string save;
     std::string reference;
+    std::string save_partial;
+    std::string real;
+    int projection = 0;
     bool pair = false;
     bool twice = false;
 };
@@ -55,8 +58,14 @@ Args parse(int argc, char **argv) {
             a.iters = value();
         else if (s == "--save")
             a.save = argv[++i];
+        else if (s == "--save-partial")
+            a.save_partial = argv[++i];
         else if (s == "--ref")
             a.reference = argv[++i];
+        else if (s == "--real")
+            a.real = argv[++i];
+        else if (s == "--projection")
+            a.projection = value();
         else if (s == "--pair")
             a.pair = true;
         else if (s == "--twice")
@@ -64,7 +73,7 @@ Args parse(int argc, char **argv) {
         else
             std::exit(2);
     }
-    if (a.rows < 1 || a.rows > 64 || a.groups < 0 || a.groups > 4 || a.iters < 1)
+    if (a.rows < 1 || a.rows > 64 || a.groups < 0 || a.groups > 4 || a.iters < 1 || a.projection < 0 || a.projection > 1)
         std::exit(2);
     return a;
 }
@@ -84,13 +93,24 @@ int main(int argc, char **argv) {
     std::vector<uint32_t> trellis_host(kWords);
     for (auto &w : trellis_host)
         w = next_rand(seed);
-    std::vector<uint16_t> ones_all(kExperts * 3 * 2 * 1536, 0x3c00);
+    std::vector<uint16_t> ones_all(kExperts * 3 * 2 * 1536);
+    for (auto &v : ones_all) {
+        unsigned r = next_rand(seed);
+        v = uint16_t((r & 0x8000) | (0x3400 + ((r >> 16) % 0x700)));
+    }
     std::vector<Hy4ExpertProjection> matrices_host(kExperts * 3);
     std::vector<uint32_t> *trellis_dev = new std::vector<uint32_t>[kExperts * 3];
     for (int e = 0; e < kExperts; ++e) {
         for (int k = 0; k < 3; ++k) {
             int id = e * 3 + k;
             auto &td = trellis_dev[id] = trellis_host;
+            if (!a.real.empty()) {
+                std::ifstream in(a.real + "/" + std::to_string(k) + ".bin", std::ios::binary);
+                auto off = size_t(id) * 2 * 1536;
+                in.read(reinterpret_cast<char *>(ones_all.data() + off), 2 * 1536 * sizeof(uint16_t));
+                in.read(reinterpret_cast<char *>(td.data()), kWords * sizeof(uint32_t));
+                if (!in) { fprintf(stderr, "real fixture read failed\n"); return 1; }
+            }
             matrices_host[id] = {nullptr, nullptr, td.data(), 4};
         }
     }
@@ -108,7 +128,7 @@ int main(int argc, char **argv) {
         v = 0.01f * float(int(next_rand(seed) & 1023)) / 1023.f;
     std::vector<Hy4Route> routes_host(a.rows);
     for (int r = 0; r < a.rows; ++r)
-        routes_host[r] = {r, r % kExperts, 1.f};
+        routes_host[r] = {r, a.groups ? 0 : r % kExperts, 1.f};
     std::vector<Hy4ExpertBatch> batches_host;
     if (a.groups)
         for (int g = 0; g < a.groups; ++g) {
@@ -120,8 +140,8 @@ int main(int argc, char **argv) {
     uint32_t *trellis = nullptr;
     Hy4ExpertProjection *matrices = nullptr;
     uint16_t *suha = nullptr, *x = nullptr, *y = nullptr;
-    int8_t *codes = nullptr;
-    float *scales = nullptr, *partial = nullptr, *partial2 = nullptr;
+    int8_t *codes = nullptr, *codes1 = nullptr;
+    float *scales = nullptr, *scales1 = nullptr, *partial = nullptr, *partial2 = nullptr;
     Hy4Route *routes = nullptr;
     Hy4ExpertBatch *batches = nullptr;
     check(hipMalloc(&trellis, kExperts * 3 * kWords * sizeof(uint32_t)), "trellis alloc");
@@ -131,6 +151,8 @@ int main(int argc, char **argv) {
     check(hipMalloc(&y, size_t(a.rows) * kCols * sizeof(uint16_t)), "y alloc");
     check(hipMalloc(&codes, codes_host.size()), "codes alloc");
     check(hipMalloc(&scales, scales_host.size() * sizeof(float)), "scales alloc");
+    check(hipMalloc(&codes1, codes_host.size()), "codes1 alloc");
+    check(hipMalloc(&scales1, scales_host.size() * sizeof(float)), "scales1 alloc");
     check(hipMalloc(&partial, size_t(a.rows) * kCols * sizeof(float)), "partial alloc");
     if (a.pair)
         check(hipMalloc(&partial2, size_t(a.rows) * kCols * sizeof(float)), "partial2 alloc");
@@ -161,17 +183,17 @@ int main(int argc, char **argv) {
     auto launch = [&]() {
         hipError_t e;
         if (a.pair && a.groups)
-            e = shelf_hy4_expert_batch_gate_up_swiglu(x, matrices, routes, batches, codes, scales, partial,
+            e = shelf_hy4_expert_batch_gate_up_swiglu(x, matrices, routes, batches, codes, scales, codes1, scales1, partial,
                                                       partial2, y, a.rows, a.groups, 0);
         else if (a.pair)
-            e = shelf_hy4_expert_gate_up_swiglu(x, matrices, 3, codes, scales, partial, partial2, y, a.rows,
+            e = shelf_hy4_expert_gate_up_swiglu(x, matrices, 3, codes, scales, codes1, scales1, partial, partial2, y, a.rows,
                                                routes, 0);
         else
-            e = shelf_hy4_expert_linear(x, matrices, 3, codes, scales, partial, y, a.rows, routes,
+            e = shelf_hy4_expert_linear(x, matrices + a.projection, 3, codes, scales, partial, y, a.rows, routes,
                                         a.groups ? batches : nullptr, a.groups, 0, 0);
         check(e, "expert linear");
         if (a.twice) {
-            e = shelf_hy4_expert_linear(x, matrices, 3, codes, scales, partial, y, a.rows, routes,
+            e = shelf_hy4_expert_linear(x, matrices + a.projection, 3, codes, scales, partial, y, a.rows, routes,
                                         a.groups ? batches : nullptr, a.groups, 0, 0);
             check(e, "expert linear second");
         }
@@ -230,6 +252,13 @@ int main(int argc, char **argv) {
     if (!a.save.empty()) {
         std::ofstream out(a.save, std::ios::binary);
         out.write(reinterpret_cast<const char *>(y_host.data()), y_host.size() * sizeof(uint16_t));
+    }
+    if (!a.save_partial.empty()) {
+        std::vector<float> values(size_t(a.rows) * kCols);
+        check(hipMemcpy(values.data(), partial, values.size() * sizeof(float), hipMemcpyDeviceToHost), "partial copy");
+        std::ofstream out(a.save_partial, std::ios::binary);
+        out.write(reinterpret_cast<const char *>(values.data()), values.size() * sizeof(float));
+        if (!out) return 1;
     }
     if (!verify(y_host, a.reference))
         return 1;
