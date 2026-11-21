@@ -250,6 +250,8 @@ struct MtpServeContext {
     uint64_t verify_chunks = 0u;
     uint64_t draft_forwards = 0u;
     uint32_t max_active_requests = 0u;
+    uint32_t max_draft_forwards_per_round = 0u;
+    uint32_t max_verify_chunks_per_round = 0u;
     double round_ms = 0.0;
 };
 
@@ -1090,6 +1092,10 @@ void serve_mtp_step(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state
     mtp.round_ms += result.round_ms;
     mtp.verify_chunks += result.verify_chunks;
     mtp.draft_forwards += result.draft_forwards;
+    if (result.draft_forwards > mtp.max_draft_forwards_per_round)
+        mtp.max_draft_forwards_per_round = result.draft_forwards;
+    if (result.verify_chunks > mtp.max_verify_chunks_per_round)
+        mtp.max_verify_chunks_per_round = result.verify_chunks;
     if (static_cast<uint32_t>(slots.size()) > mtp.max_active_requests)
         mtp.max_active_requests = static_cast<uint32_t>(slots.size());
     std::vector<bool> finished(slots.size(), false);
@@ -1121,12 +1127,15 @@ void serve_mtp_step(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state
     if (mtp.active.empty() && !state.exit_requested) {
         fprintf(stderr,
                 "MTP_BATCH rounds=%llu accepted=%llu emitted=%llu chunks=%llu "
-                "draft_forwards=%llu max_active=%u round_ms=%.3f\n",
+                "draft_forwards=%llu max_draft_per_round=%u max_verify_per_round=%u "
+                "max_active=%u round_ms=%.3f\n",
                 static_cast<unsigned long long>(mtp.rounds),
                 static_cast<unsigned long long>(mtp.accepted_drafts),
                 static_cast<unsigned long long>(mtp.emitted_tokens),
                 static_cast<unsigned long long>(mtp.verify_chunks),
                 static_cast<unsigned long long>(mtp.draft_forwards),
+                mtp.max_draft_forwards_per_round,
+                mtp.max_verify_chunks_per_round,
                 mtp.max_active_requests,
                 mtp.rounds > 0u ? mtp.round_ms / static_cast<double>(mtp.rounds) : 0.0);
     }

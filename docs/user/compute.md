@@ -214,16 +214,19 @@ dense checkpoint を TP=2 で動かす場合:
 - `--pipeline-parallel 2`、`--dump-logits` は未対応。
 - `--serve-stdio` は複数 request を同時に保持する。dense など QSA / PLE を持たない
   target は 1 round の verify を 4 request / 32 行ずつの chunk に分けて融合実行する。
-  qwen4exp は 深さごとに最大 4 request の Wavefront DECODE batch で検証する。
-  `--max-concurrent-requests` で request 数を制限する。
+  qwen4exp は MTP draft を深さ単位で batch 化し、verify は既定で request ごとの
+  1 行 DECODE を使う。`SHELF_MTP_WAVEFRONT=1` で最大 4 request の Wavefront batch を
+  選べる。`--max-concurrent-requests` で request 数を制限する。
 - partial accept は GDN の compact log replay で復元する。target の再 forward は行わない。
 - prefix cache は MTP 経路では使わない。
 - `--mtp --serve-stdio` でも、prefill / decode 中は 3 秒ごとに `prefill_tok_s` /
   `decode_tok_s` を出し、done 時に prefill / TTFT / decode の総括を stderr に出す。
   serve の終了時には `MTP_BATCH ... chunks=... max_active=...` を出す。
-- grouped expert（MoE）checkpoint でも MTP block は load / 実行される。qwen4exp は QSA / PLE を持つため、MTP draft を深さ単位で batch 化し、verify を
-  最大 4 request の Wavefront DECODE batch で実行する。生成列は target-only と一致する。融合 verify を使う family では near-tie により
-  target-only と一致しないことがある。実測値は [../perf/current.md](../perf/current.md)、
+- grouped expert（MoE）checkpoint でも MTP block は load / 実行される。qwen4exp は
+  QSA / PLE を持つため、MTP draft を深さ単位で batch 化し、verify は request ごとの
+  1 行 DECODE を使う。生成列は target-only と一致する。融合 verify を使う family では
+  near-tie により target-only と一致しないことがある。実測値は
+  [../perf/current.md](../perf/current.md)、
   経緯は [../research/20261105/moe_mtp.md](../research/20261105/moe_mtp.md) と
   [../research/20261121/mtp_multi_request_verify.md](../research/20261121/mtp_multi_request_verify.md)。
 

@@ -106,9 +106,9 @@ inline constexpr const char* kGdnRecurrenceWmmaVerifyExactSymbol =
 inline constexpr uint32_t kGdnRecurrenceWmmaThreads = 256u;
 inline constexpr uint32_t kGdnRecurrenceWmmaK = 128u;
 inline constexpr uint32_t kGdnRecurrenceWmmaVGroup = 64u;
-inline constexpr uint32_t kGdnRecurrenceVerifyBatchRows = 32u;
+inline constexpr uint32_t kGdnRecurrenceVerifyBatchRows = 64u;
 inline constexpr uint32_t kGdnRecurrenceVerifyRowsPerRequest = 8u;
-inline constexpr uint32_t kGdnRecurrenceVerifyMaxRequests = 4u;
+inline constexpr uint32_t kGdnRecurrenceVerifyMaxRequests = 8u;
 // Launch-time bound of the verify kernel itself (one block per request, so it is
 // not tied to the M32 tuning range above). Batched DFlash2 verify relies on it.
 inline constexpr uint32_t kGdnRecurrenceVerifyLaunchMaxRequests = 64u;

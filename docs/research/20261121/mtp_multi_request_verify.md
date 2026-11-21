@@ -16,9 +16,11 @@
 - **ACCEPT**: QSA / PLE を持つ qwen4exp は、MTP block を 1 つの共有 executor で動かし、
   depth 単位で全 request の draft を batch 化する。draft forward は K 回で、request 数に
   比例しない。
-- **ACCEPT**: verify は同じ深さの request を最大 4 request の Wavefront `DECODE` batch に
-  まとめる。この経路の生成列は target-only と一致し、`test_mtp_parity` は 64 token で
-  PASS する。8 request 同時の生成列も target-only の直列実行と一致した。
+- **ACCEPT**: verify は既定で request ごとの 1 行 `DECODE` を使う。同じ深さの request を
+  最大 4 request の Wavefront `DECODE` batch にまとめる経路は `SHELF_MTP_WAVEFRONT=1`
+  で選べる。8 request 同時の生成列は target-only の直列実行と一致した。
+- **REJECT**: Wavefront 4 request chunk を既定にすること。別 prompt で near-tie により
+  target-only と分岐したため、数値不変経路ができるまで既定 off とする。
 - **REJECT**: qwen4exp で K+1 行の融合 verify を既定にすること。near-tie が多く、
   行数に依存する kernel の差が 13 token 目以降の分岐として現れた。
 
@@ -70,7 +72,8 @@ MTP_PARITY: PASS (64 tokens, rounds=16, partial_accepts=11, gdn_restores=0)
 GPU 2,3 が別 process で使用中だったため、実測は TP=2 / EP=1、2 device、
 `--mtp-drafts 7`、`--max-num-batched-tokens 512` で行った。draft は 6 round で
 19 forward（最大 6 × 7 = 42 以下）に収まり、request 数 8 を掛けた 112 forward には
-なっていない。
+なっていない。既定の安全 verify は `max_verify_per_round=19`、Wavefront opt-in は
+`max_verify_per_round=6` だった。
 
 ```text
 [PASS] compute-mtp-batch:completed
