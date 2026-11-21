@@ -131,7 +131,10 @@ prefill は `max_visible_tokens < 12288` の間 masked tiled kernel を使い、
 - tensor parallel は **TP=2** まで。1 rank あたりの attention は local head
   （Qwen3.8-27B では q 12 / kv 2）で、QSA の block-sparse kernel 条件
   `q_heads == 6 * kv_heads` を満たす。`tp_size > 2` は `TpCoordinator` が拒否する。
-- YaRN などの非 default rope profile は未実装。
+- YaRN などの非 default rope profile に対応する。indexer は backbone と同じ補正済み
+  `inv_freq` を共有し、indexer の `rope_dim` は backbone の rope 幅以下を要求する。
+  block 選択は選択 score の正の定数倍に依存しないため、indexer の rope に
+  `attention_factor` を掛けなくても mask は変わらない。
 - MTP drafter は未配線。`LoadedModel::has_mtp_block()` は QSA family では false を返す
   （QSA checkpoint の MTP block を load する経路がまだ無い）。TP rank も MTP を load しない。
 - DFlash2 の chain / tree verify は `shelf::state::SpecStateHistory` で QSA state を
