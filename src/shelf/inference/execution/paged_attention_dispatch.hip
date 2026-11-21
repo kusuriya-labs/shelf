@@ -326,8 +326,32 @@ PagedAttentionPlan plan_paged_attention(
         (ctx.spec.max_visible_tokens + ::shelf::kernel::kQsaSparseBlockTokens - 1u) /
                 ::shelf::kernel::kQsaSparseBlockTokens <=
             args.qsa_top_k;
-    if (qsa_sparse_supported(args, ctx) && !within_qsa_budget &&
-        (!plan.use_prefill ||
+    // The tiled prefill kernel consumes the block mask directly (page bitmap + per-row
+    // token visibility) and runs WMMA. It wins while the selected blocks are dense in the
+    // visible range; with the model's fixed 512-block budget the density drops as the
+    // context grows and the scattered 4-token blocks leave WMMA lanes idle (measured at
+    // 65K: 21.7 s vs the sparse kernel's 12.9 s for the same prefill). Keep WMMA below the
+    // measured density crossover and the sparse kernel above it. SHELF_QSA_WMMA_PREFILL is
+    // a debug override: 0 forces sparse, 1/all forces the tiled path.
+    static const int wmma_prefill_mode = [] {
+        const char* env = std::getenv("SHELF_QSA_WMMA_PREFILL");
+        if (env == nullptr) return 0;
+        if (env[0] != '\0' && std::strcmp(env, "0") == 0) return -1;
+        return 1;
+    }();
+    const bool tiled_masked_prefill =
+        plan.use_prefill && args.common.block_mask != nullptr &&
+        args.common.rows >= kMaskedPrefillMinRows &&
+        (wmma_prefill_mode > 0 ||
+         (wmma_prefill_mode == 0 &&
+          ctx.spec.max_visible_tokens < kQsaSparsePrefillMinTokens));
+    // A masked prefill chunk below the tiled kernel's row floor cannot use the dense decode
+    // path (it would ignore the mask), so the sparse kernel handles it.
+    const bool masked_prefill_small =
+        plan.use_prefill && args.common.block_mask != nullptr &&
+        args.common.rows < kMaskedPrefillMinRows;
+    if (qsa_sparse_supported(args, ctx) && !within_qsa_budget && !tiled_masked_prefill &&
+        (masked_prefill_small || !plan.use_prefill ||
          ctx.spec.max_visible_tokens >= kQsaSparsePrefillMinTokens)) {
         plan.qsa_sparse = true;
         plan.splits = ::shelf::kernel::qsa_sparse_splits(

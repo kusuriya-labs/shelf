@@ -401,7 +401,28 @@ sparse attention の 372 us より軽い。ただし長文 decode の QSA コス
 masked WMMA は attention phase で最大 3.9 倍の余地があるが、4 token block を
 不連続ページから MMA tile へ載せる新カーネルが必要になる。F16 への丸めは logits を
 変え得るため optional approximate mode としてのみ追加し、target-only exact の既定は
-変えない（未実装）。
+変えない。
+
+#### tiled prefill（WMMA + mask）の実測
+
+tiled prefill カーネルは block mask を直接消費できる（page bitmap + per-row token
+visibility）。QSA の prefill を sparse と tiled masked で切り替えて測った（pp、TP=2）。
+
+| visible token | sparse | tiled masked | 差 |
+| ---: | ---: | ---: | ---: |
+| 4,096 | 1,386 ms | 1,382 ms | -0.3% |
+| 8,192 | 2,894 ms | 2,817 ms | **-2.7%** |
+| 16,384 | 5,891 ms | 5,868 ms | -0.4% |
+| 32,768 | 12,084 ms | 12,352 ms | +2.2% |
+| 65,536 | 24,941 ms | 26,319 ms | **+5.5%** |
+
+65K の attention kernel は sparse 12.9 s に対し tiled 21.7 s（1.68x 遅い）。固定
+512 block 予算では context が伸びるほど選択密度が下がり、散在する 4 token block で
+WMMA の 16 token lane が遊ぶ。page bitmap は tile 内 16 row の和集合なので訪問 token も
+約 1.6 倍になる。したがって **WMMA prefill は密度の高い領域（visible < 8,192）で有効**とし、
+それ以上は sparse を使う。`SHELF_QSA_WMMA_PREFILL=0`（sparse 固定）/ `=1`（tiled 固定）で
+A/B できる。masked prefill が tiled kernel の行数下限（256）未満の場合は、mask を無視する
+dense decode 経路に落ちないよう sparse を選ぶ。
 
 ## 6. 残課題
 
