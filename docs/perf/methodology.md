@@ -1,14 +1,21 @@
 # Measurement methodology
 
 RDNA4 (gfx1201) 上で最適化を計測・採否判断するときに今後も使う測定原則の正本である。
-`docs/research/20261022/optimization_findings.md` など R&D の記録は、測定原則について
-本ドキュメントを正本として参照する。個別 Gate の時系列ログや個別カーネルの結果は
-ここへ書かない（R&D 記録の正本は `docs/research/`）。
+ドキュメントの役割境界は次のとおり。
+
+- `docs/perf/methodology.md`（本書）: 測定原則・比較手順の正本
+- `docs/perf/current.md`: 現行ビルドで再現可能な性能基準値（新しい計測なしに数値を更新しない）
+- `docs/research/`: R&D の実験経緯・採否判断・棄却根拠の正本
+- [../user/bench.md](../user/bench.md): `shelf-bench` のサブコマンドとオプション一覧
+
+個別 Gate の時系列ログや個別カーネルの試行錯誤はここへ書かない。
 
 ## 1. 隔離と環境固定
 
 - **1 GPU = 1 bench process**。同一 GPU 上に複数 workload を重ねない
   （clock / 帯域の非対称汚染）。
+- **GPU 排他ロック**: 共有ホスト上では `flock /tmp/r9700.lock` などの `/tmp/*.lock` を取得して実行する
+  （`tools/quality/kld-vs-bf16.sh` も `/tmp/r9700.lock` を自動取得し、すでにロック内にある場合は `--already-locked` を渡す）。
 - 複数 GPU を使う場合も、ある GPU では同時に 1 つだけ動かす。
 - GPU0 は別 workload と共有していることがある。隔離された device を明示する。
 - 同一コマンドで条件を揃える: seed / warmup / samples / launches / rows / dtype / model。

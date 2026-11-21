@@ -13,7 +13,7 @@ Qwen3.8-27B、cases-v1 の 8 case・2,632 位置、R9700、ROCm 10.2、BF16 KV�
 
 4bpw 長文の BF16 基準比較では、4,097 token の 2 case・末尾 514 位置の平均 KLD / top-1 は B 0.004584 / 98.4436%、A 0.004577 / 99.0272%。反復 8k 入力の後続 64 位置は B 0.743497 / 87.50%、A 0.491307 / 89.0625%。8k は単一の反復入力であり一般化できない。BF16 基準の KV は FP16、候補は BF16 で、engine・chunk も異なるため、差は量子化誤差だけを示さない。
 
-A の algorithm cache は要求 workspace サイズも保存するが、**非ゼロ workspace を要する algorithm の cache 再利用は未検証**。B と A のいずれも prefill の分割により出力が bit 単位で変化し得る。通常生成と DFlash2 の不一致は B にも既存であり、ユーザーの採否方針では BF16 比の KLD / top-1 を判断基準とする。詳細な実験・DFlash2 の比較は [候補測定](a-path-default-candidate.md)、[6 入力比較](a-path-default-dflash-comparison.md)。
+A の algorithm cache は要求 workspace サイズも保存するが、**非ゼロ workspace を要する algorithm の cache 再利用は未検証**。B と A のいずれも prefill の分割により出力が bit 単位で変化し得る。通常生成と DFlash2 の不一致は B にも既存であり、ユーザーの採否方針では BF16 比の KLD / top-1 を判断基準とする。詳細な評価と一覧は [A 経路の評価](quality-bf16/a-path-assessment.md)、[BF16 基準の測定結果](quality-bf16/results.md)。
 
 ## 既定 A と B の動作確認
 

@@ -201,6 +201,22 @@ activation scale は 128 K ごとの行 scale である。
   `row_ref_exact` から決める。contract と test は
   [qwen35moe.md](qwen35moe.md) / `test_moe_grouped_linear`。
 
+### linear / EXL3 family（mul1 / mul24）
+
+EXL3 カーネル群は通常経路を `src/shelf/kernels/optimized/linear/exl3_family/`（`mul1/`・`mul24/`・
+`variant.cpp`）に、融合経路および MoE 用 grouped 経路を `src/shelf/kernels/fused/exl3/` に配置する。
+
+- `mul1/`（W16A16）: FP16 活性・FP16 WMMA のみ（`variant.cpp` が INT8 活性を拒否）。
+  `launch_plan.cpp` / `prefill.hip` / `verify.hip` と `fused/exl3/decode.hip` で構成する。
+- `mul24/`（EXL3-INT8）: FP16 または INT8 活性（BF16 活性モードは持たない）。
+  `decode.hip` / `prefill.hip`（A 経路の recon・rowscale 等）/ `prefill_wmma.hip`（B 経路の自前 gfx12 iu8 WMMA）/
+  `projection.hip` / `projection_prefill.hip` / `split_plan.cpp` / `workspace.cpp` で構成する。
+- `fused/exl3/`: `rotate_quantize.hip` / `rotate_out.hip` / `producer_rotate.hip` /
+  `producer_rotate_rows.hip` / `group_gemm.hip` / `epilogue.hip` / `grouped.hip`（MoE routed experts、
+  内部で回転するため事前回転済み入力は不可）。
+- prefill A（hipBLASLt INT8）と B（自前 WMMA）の切替条件、decode 融合、grouped 選択の詳細な契約は
+  [quantization.md](quantization.md#exl3-int8mul24) を正本とする。
+
 ### moe / routing・combine
 
 `src/shelf/kernels/optimized/moe/router.hip` と `combine.hip` は standalone launcher で、

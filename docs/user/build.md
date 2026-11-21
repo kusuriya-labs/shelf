@@ -55,14 +55,10 @@ Shelfが対象とするのは `gfx1201`（AMD Radeon AI PRO R9700）のみであ
 | `SHELF_BUILD_BENCHMARKS` | ON | benchmark executables（bench + E2E前提） |
 | `SHELF_HIP_GRAPH` | ON | HIP graph execution mode |
 | `SHELF_LIBCXX_LLVM_ROOT` | `/usr/lib/llvm-23` | host libc++ 23 root |
+| `SHELF_LOAD_LIBSTDCXX_FIRST` | ROCm 10 以上で ON、それ未満・不明時は OFF | ROCm C++ ライブラリ互換のため `libstdc++.so.6` を `libc++abi.so` より先にリンクする |
 | `CMAKE_HIP_ARCHITECTURES` | 必須 | 対象GPUアーキテクチャ（`gfx1201` のみ） |
 
-外部 model を要する optional / external test の model directory は cmake option
-ではなく環境変数で指定する。Qwen3.5 系の test は `SHELF_MODEL_DIR`、
-MTP は `SHELF_MODEL_DIR_MTP`、DFlash2 draft は
-`SHELF_MODEL_DIR_DFLASH2`、DFlash2 target は
-`SHELF_MODEL_DIR_DFLASH2_TARGET`、TP は `SHELF_TP_MODEL_DIR` を使う。
-指定が無い test は exit 77 で skip する。
+外部 model を要する optional / external test の model directory は CMake option ではなく環境変数（`SHELF_MODEL_DIR` 等）で指定する。環境変数の一覧は [env_vars.md](env_vars.md) を参照する。指定が無い test は exit 77 で skip する。
 
 `SHELF_HIP_GRAPH` は graph capture / replay による execution mode で、既定で有効である。
 無効にする場合:
@@ -71,15 +67,28 @@ MTP は `SHELF_MODEL_DIR_MTP`、DFlash2 draft は
 cmake -S . -B build -DSHELF_HIP_GRAPH=OFF
 ```
 
-PLaMo 3 の c=1 decode の graph だけを実行時に無効にする場合は `SHELF_PLAMO_HIP_GRAPH=0` を指定する。
+実行時に verify graph や PLaMo 3 の graph のみを無効化する環境変数（`SHELF_GRAPH_VERIFY=0`、`SHELF_PLAMO_HIP_GRAPH=0`）は [env_vars.md](env_vars.md#4-hip-graphgdnoctave-kvplamo-3-制御) を参照する。Qwen3.5 系の DFlash2 target では、条件を満たす単一 request の 8 行または 10 行の greedy verify（tree verify を含む）を既定で graph 実行する。複数 request、stochastic verify、QSA / PLE history、TP schedule、および対応する metadata が揃わない tree verify は通常経路へ戻る。Octave KV cache の append と decode / verify attention も同じ graph に capture される。
 
-Qwen3.5 系の DFlash2 target では、条件を満たす単一 request の 8 行または 10 行の
-greedy verify を既定で graph 実行する。tree verify も対象に含まれる。それ以外の
-行数は通常経路で実行する。実行時に
-`SHELF_GRAPH_VERIFY=0` を指定すると verify の graph を無効にできる。
-複数 request、stochastic verify、QSA / PLE history、TP schedule、および対応する
-metadata が揃わない tree verify は通常の実行経路に戻る。
-Octave KV cache の append と decode / verify attention も同じ graph に capture される。
+## ROCm バージョンごとの注意とトラブルシュート
+
+### ROCm 10.2 と hipBLASLt C++ ABI（`libstdc++` 先行読み込み）
+
+Shelf 本体は Clang + libc++ でビルドするが、ROCm の C++ ライブラリ（`libhipblaslt` / `libtensilelite-host.so.1`）は実行時に `libstdc++.so.6` に依存する。`libc++abi.so` が `libstdc++.so.6` より先に RTTI シンボルを束縛すると、hipBLASLt 初期化時に ABI 不一致が発生する。
+
+- **ROCm 10 以降（ROCm 10.2 等）**: `cmake/options.cmake` が ROCm のメジャーバージョンを自動検出し、`SHELF_LOAD_LIBSTDCXX_FIRST=ON` を既定値として `libstdc++.so.6` を `libc++abi.so` より先に直接リンクする。
+- **既存の CMake cache を使い回した場合**: cache に古い `SHELF_LOAD_LIBSTDCXX_FIRST=OFF` が残っていると、起動時に stderr へ次のようなメッセージが出て hipBLASLt 経路（EXL3-INT8 prefill の A 経路等）が初期化エラーになる。
+  ```text
+  shelf: hipBLASLt C++ ABI 検査に失敗: ... libstdc++ を libc++abi より先に読み込んでください
+  ```
+  この場合は `-DSHELF_LOAD_LIBSTDCXX_FIRST=ON` を明示して再 configure・再ビルドする。
+- **一時的な回避策**: 再ビルド前に動作確認だけ行いたい場合は、起動時に `LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6` を指定して `libstdc++` を先行読み込みできる（パスはディストリビューションの配置に合わせる）。
+- **ROCm 10 未満 / バージョン不明環境**: `SHELF_LOAD_LIBSTDCXX_FIRST` の既定値は `OFF` である。hipBLASLt の INT8 heuristic が使えない場合や `HIPBLASLT_USE_ROCROLLER=1` が設定されている場合、EXL3-INT8 prefill は自動的に B 経路（自前 gfx12 iu8 WMMA）へフォールバックする。
+
+### 起動時のその他の注意点
+
+- **`libhipblaslt.so.1` が見つからない**: 実行ファイルは `libhipblaslt.so.1` に直接リンクされているため、欠落すると起動前に動的リンカエラーになる。`LD_LIBRARY_PATH` に `${ROCM_PATH}/lib` と `${SHELF_LIBCXX_LLVM_ROOT}/lib` が含まれているか、ビルド時の RPATH が有効か確認する。
+- **デスクトップ表示と GPU を共有する環境（NixOS 等）**: 表示コンポジタが VRAM を消費するため、`--arena-gib auto` では 16 GiB カード等でメモリ上限に当たりやすい。`--arena-gib 14` のように明示指定する（[recipes/qwen3.8-27b-128k-16gib.md](recipes/qwen3.8-27b-128k-16gib.md)）。
+- **複数 GPU 環境での device 選択**: `rocm-smi` と ROCr の番号が一致しないことがある。使用する GPU を固定したい場合は `rocm-smi --showproductname --showuniqueid` で UUID を確認し、`ROCR_VISIBLE_DEVICES=GPU-<UUID> HIP_VISIBLE_DEVICES=0` で絞り込む。
 
 ## 成果物
 

@@ -518,7 +518,7 @@ E8M0 の operand 側 fold（`d = row_ref[row] - e8m0[row][blk]` を E4M3 仮数�
 1.5 刻みを丸めるため値が変わるので、loader は行単位の E8M0 幅を検査して
 `row_ref_exact` を立て、dispatch はその flag が true の payload でのみ fold を使う。
 fold を使う variant は Prefill2D のみ（rows >= 512）。実測と判断は
-[../../research/20261103/mxfp4_gate_a_prime.md](../../research/20261103/mxfp4_gate_a_prime.md)。
+[../research/20261103/mxfp4_gate_a_prime.md](../research/20261103/mxfp4_gate_a_prime.md)。
 
 row_ref は 1 byte / output row であり、1 byte / weight でも 1 byte / block でもない。
 例: out=17408, k=5120 の MXFP4 weight で codes + E8M0 が約 45 MB に対し row_ref は

@@ -3,9 +3,8 @@
 現在実装されている architecture / runtime / server / kernel contract のみを置く。
 過去の PoC・Gate・採否判断は Git history、現在の性能値は `docs/perf/` を参照。
 
-## ゴールと roadmap
+## roadmap
 
-- [objective.md](objective.md) — 現行のゴールと性能目標
 - [roadmap.md](roadmap.md) — 今後の作業予定
 
 ## architecture / runtime

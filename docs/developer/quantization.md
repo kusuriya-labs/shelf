@@ -9,12 +9,14 @@ canonical payload の stream / metadata / size formula / native preshuffle は
 本ドキュメントは format の概要と runtime の経路を示す。
 
 N-gram / Engram / PLE table 向けの別形式の契約は
-[ngram_quantization.md](ngram_quantization.md) を参照。現行 runtime は同形式を実装していない。
+[ngram_quantization.md](ngram_quantization.md) を参照。Qwen3.8-Flash-Next の PLE は
+同形式（`ngram-q`）を直接ロードする。
 
-本 repository は **量子化 artifact の読込専用**である。量子化 artifact を生成する
-offline pipeline / CLI は含まない。HF の FP8 checkpoint、および外部で生成した
-self-contained quantized safetensors を直接ロードする。load 時に BF16 checkpoint を
-量子化する経路（PLE n-gram table の INT6 W32 FP16）はこれに含まれない。
+実行時ランタイムは量子化 artifact の読込専用であり、HF の FP8 / Quark MXFP4 / EXL3 checkpoint および
+self-contained quantized safetensors を直接ロードする（load 時の BF16 → INT6 W32 FP16 変換や
+`lm_head` の INT8 W32 変換を除く）。EXL3-INT8（mul24）および Ngram4 / Ngram5 のオフライン変換・検査ツールは
+`tools/quantize/shelf_quantize.py`・`tools/quantize/ngram_quantize.py` として提供する
+（利用手順は [../user/quantize.md](../user/quantize.md) を参照）。
 
 ## フォーマット
 
@@ -23,7 +25,7 @@ self-contained quantized safetensors を直接ロードする。load 時に BF16
   numeric valueはin-memory専用で、file / manifestには保存しない。
   on-diskのencodingは `shelf_quantization.json` の文字列名で管理する。
 - 対応 encoding: BF16 / FP8 K128N128 / MXFP4 E2M1 + E8M0 group 32 /
-  EXL3 trellis（mul1）。
+  EXL3 trellis（mul1 / mul24）。
   `manifest/quantized_manifest.h` の `QuantizedEncoding` が唯一の on-disk encoding enum である。
   各formatの canonical stream、metadata、preshuffle は
   [canonical_soa_payload.md](canonical_soa_payload.md) を参照。
@@ -404,117 +406,99 @@ linear kernel 内で行い、出力は `svh` を掛けてから BF16 / F32 で�
 
 ### EXL3-INT8（mul24）
 
-marker の値が `0xDCD12D` の EXL3 を、`EXL3_MUL24_INT8_V1` / `EXL3_MUL24_INT8_W8A8_F32_BF16` /
-`LINEAR_EXL3_INT8` として実行する。EXL3 を最初から INT8 grid への復号を前提に量子化した形式
-（rocm_exl3 の `research/codebook`、仕様の正本は同 `doc/exl3_int8.md`）で、再量子化が必要。
-重みは trellis のまま常駐し、INT8 の重み行列は存在しない。manifest と plane は W16A16 と同じで、
-`weight_loader.cpp` が marker から spec を決める。
+marker（`<prefix>.mul1`）の値が `0x00DCD12D` の EXL3 を、`EXL3_MUL24_INT8_V1` /
+`EXL3_MUL24_INT8_W8A8_F32_BF16` / `LINEAR_EXL3_INT8` として実行する。重みは trellis のまま常駐し、
+INT8 の重み行列は常駐しない。manifest と plane は W16A16 と同じで、`weight_loader.cpp` が marker の値
+（`0x83DCD12D` = mul1、`0x00DCD12D` = mul24）から spec を決める。`.s0` tensor や half bit rate
+（1.5 / 2.5 / 3.5 bpw）、その他の multiplier は拒否する。
+
+実装は以下の 3 層に分かれる。
+
+- `src/shelf/kernels/optimized/linear/exl3_family/` — `mul1/`（W16A16）と `mul24/`（INT8 の decode /
+  prefill / prefill_wmma / projection / projection_prefill / split_plan / workspace）、および
+  variant 制約（`variant.cpp`）。
+- `src/shelf/kernels/fused/exl3/` — decode 融合（`decode.hip`, `producer_rotate.hip`,
+  `producer_rotate_rows.hip`, `rotate_quantize.hip`, `rotate_out.hip`, `epilogue.hip`, `group_gemm.hip`）および
+  MoE 用 grouped EXL3（`grouped.hip`）。
+- `src/shelf/inference/execution/` — dispatch 選択（`optimized_dispatch.hip`, `moe_dispatch.hip`,
+  `exl3_dispatch_decision.h`, `exl3_dense_gemm.hip`, `hipblaslt_abi.h`）。
+
+#### 復号と常駐レイアウト
 
 - 復号（GEMM 内、読むたびに）: 重み 1 個の state は、タイルの循環ビット列（word 内は MSB 先頭）から
   `(t * bits + bits - 16 + 256 * bits) mod (256 * bits)` の位置の 16 bit。`q = (B - 509) >> 2`、`B` は
   `state * 0xDCD12D`（uint32、24 bit 定数なので `v_mul_u32_u24` 1 命令）の 4 byte の和で、範囲は −128..127。
   実数値は `q * kExl3Int8GridStep`（`4 * 887 * 2^-17`）。タイル内の並びは WMMA の B フラグメント順で、
   ストリーム位置 `t` は行 `k = 8 * (t / 128) + t % 8`、列 `n = (t / 8) % 16`。lane `l` が復号する 8 個
-  （`t = 8l..8l+7`）がそのまま iu8 WMMA の B フラグメント（列 `l % 16`、連続 8 個の k）になる。
-  CPU 参照は `exl3_decode_int8`（テストの正解のみに使う）。
-- 常駐形式: 16x16 タイルを `[nt][kt]` の順に並べ替えて置く（`exl3_tiles_to_nmajor`、load 時に CPU）。
-  wave が K 方向に連続して読め、キャッシュに載らない重みでは `[kt][nt]` のままより約 2 割速い。
-- 実行（decode と rows < 256）: 3 launch。(1) 入力に `suh` を掛けて 128 ごとに Hadamard、128 ごとに `amax / 127` の scale で
-  int8 化（codes は自然な k 順）。(2) trellis を復号し、LDS を使わず直接 WMMA の B にして iu8 WMMA で
-  128 ごとに int32 で厳密に累積、F32 の scale と `kExl3Int8GridStep` を掛ける。(3) 128 ごとの Hadamard と
-  `svh` で bf16 / f32 に戻す。scale は fp32 のまま GEMM の外で掛ける。
-- BF16 入出力、64 行以下の 4 bit linear が同じ入力 slot を共有して連続する場合、最大 3 個を
-  1 組として入力回転・GEMM・出力回転の各 launch にまとめる。各 projection の重み、scale、
-  split 数と加算順を保持する。workspace 不足、入出力の重なり、出力列の部分書き込み、
-  debug override などの条件では個別実行へ戻る。routed expert と DFlash2 の独立した linear 実行は
-  この dispatch 統合の対象外である。
-- 出力回転は、整列した buffer と stride を満たす小・中行数について 128 列単位を wave に分ける。
-  256〜511 行では N=5120（256 行を除く）、6144、10240、12288、17408、65536 以上を対象とし、
-  512 行以上は従来の f4 経路を使う。新しい列分割では、F32 plane が 4 / 5 / 6 MiB の場合と、
-  BF16・N=5120・255 行・split=1 は scalar 経路に戻る。split の加算順は変えない。
-- 通常 GEMM は active rows の device 指定がなく、N=512 または 1024 の一部の 4 / 5 bit 形状で
-  行数と K に応じて tile を選ぶ。K は 1024 以上を要する。4 bit の N=512 は K<=17408・49〜64 行、
-  N=1024 は K<=5120・49〜64 行または K<=8192・56〜64 行が対象。5 bit の N=512 は K<=17408・
-  17〜64 行、N=1024 は K<=8192・17〜64 行または K<=17408・33〜64 行が対象で、次の K group の
-  先読みを省略する。適用外の形状と device 指定の補正行は従来の tile を使う。
-- decode（rows <= 16）の GEMM は K を split して wave を埋める（各 split が F32 出力の別スライスに書き、
-  (3) が足す。決定的）。n の小さい線形は wave が足りず帯域が落ちるため。
-- prefill（rows >= 256、`SHELF_EXL3_INT8_DENSE` で変更、0 で無効）は W16A16 の dense 経路と同じ構造で、
-  trellis を int8 の dense 行列 `[n][k]` に展開（`dense` 領域、k*n バイト）して hipBLASLt の int8 GEMM
-  （int8 x int8 -> int32）に流す。1 本の GEMM は K 全体にわたるので、活性の scale は 128 ごとではなく
-  **行ごとに 1 つ**（その行の group scale の最大）にして codes を丸め直す。1 つの group が scale energy の
-  `SHELF_EXL3_INT8_FLAG`（既定 0.5）を超える行（massive activation の token）は丸め直さず、group scale のまま
-  融合 kernel で計算する（1 batch で最大 `exl3_int8_flag_cap(rows)` = rows/8 行、行順で決定的）。
-  hipBLASLt に int8 の algorithm が無い形は融合 kernel に戻る。候補の実測選択は既定で行わない
-  （`SHELF_EXL3_INT8_TUNE=1` で有効。行数が変わるたびに約 0.15 s かかる）。
-- workspace: W16A16 の EXL3 workspace を共有する。xrot 領域に int8 codes と scale（dense 経路ではさらに
-  フラグ行の slot と codes / scale）、accum 領域に F32 の回転前出力（dense 経路では int32 の累積器に続けて
-  フラグ行の F32 出力）を置き、入らない行数は行を分けて実行する。accum 領域は `exl3_int8_flag_cap` 行ぶん大きい。
-- tensor parallel: rank-local の view（partition 後の trellis / `suh` / `svh`）に対し、各 rank が上と同じ経路を実行する。
-  分割は 128 の倍数でなければならない（Hadamard の block）。n 分割（列並列）は出力が列ごとに独立で、
-  1 GPU で全体を実行した結果とビット一致する。k 分割（行並列）は各 rank が自分の K 区間の部分和を出し、
-  collective で足す。group scale は 128 ごとなので分割の影響を受けず、dense 経路の行 scale だけが
-  rank-local の K 区間の最大になる（活性の丸めが変わるだけ）。`test_exl3_mul24_tp` が partition 実装、rank ごとの
-  INT8 経路、結合（n は連結、k は加算）を 1 GPU で再現して照合する（tp=2/4、実モデル形状を含む）。
-  hipBLASLt の handle と algorithm cache は rank の worker thread ごと（device ごと）に持つ。
-  **複数 GPU での実行（collective を含む）は未検証。**
-- MoE の routed expert（rank-3 の grouped EXL3）: mul24 の expert plane も `LINEAR_EXL3_W16A16_GROUPED` で実行する
-  （dispatch は `WeightSlot` の `compute_spec` が `EXL3_MUL24_INT8_W8A8_F32_BF16` のとき `Exl3GroupedArgs::mul24` を立てる）。
-  mul24 は専用の kernel（`exl3_mul24_grouped.hip`、group plan は mul1 の grouped と共通の
-  `exl3_group_plan_device.h`）で、活性の形を 2 つ持つ。
-  - **FP16 活性（既定、`SHELF_EXL3_INT8_MOE=0`）**: 活性は mul1 と同じく `suh` と H128 を掛けて FP16 にし、重みは
-    `q`（−128..127 の整数、FP16 で厳密）を WMMA(f16) の A フラグメントとして直接作る。`kExl3Int8GridStep` は
-    FP16 の重みに焼き込まず epilogue の scale（`kInvSqrt128 * kExl3Int8GridStep`）に畳む（`q * step` は FP16 で丸まるため）。
-  - **INT8 活性（`SHELF_EXL3_INT8_MOE=1`、`Exl3GroupedArgs::int8_act`）**: dense の decode 経路と同じ考え方で、回転後の活性を
-    **行ごと・128 ごと**に `amax / 127` の scale で int8 化し（`rint(v * (1 / scale))`、−128..127 に clamp）、復号した
-    `q` を iu8 WMMA に直接渡して 128 ごとに int32 で厳密に累積、fp32 の行 scale を block ごとに掛けて足す。最後に
-    `kExl3Int8GridStep`、H128、`svh`。行 scale＋flagged 行（dense の prefill 方式）は採らない: grouped には hipBLASLt の
-    1 本の GEMM がなく、decode 経路と同じ group scale のまま kernel 内で完結するほうが実装が小さく、massive activation の
-    行を特別扱いせずに済むため。
-  - 回転と INT8 化は **GEMM kernel に融合**し、workspace を持たない。回転は expert ごとの `suh` を掛けるので、gate/up/down
-    の間はもちろん、同じ token が複数 expert に行く場合も共有できない（gather の前に置けない）。gather は kernel 内で
-    `row_token` を引く。代償として、1 つの group（最大 2 group を融合）の行を n 方向の block 数だけ回転し直す
-    （Flash Next の gate は 5 回、down は 10 回）。
-  - 復号は bit rate（1..8）をテンプレートにし、窓の位置とシフトを定数にする（dense の INT8 kernel と同じ復号）。
-    この変更で FP16 の mul24 は prefill 2048 token の gate+down で 7.74 ms から 5.88 ms になった（実形状、R9700）。
-  - 融合 group 数は 1 か 2（それ以上は 2 として実行する。4 はレジスタが溢れて遅かった）。n-tile の上書き
-    （`SHELF_EXL3_GROUPED_NTILES`）が出力幅を割り切れない場合は launch を拒否する（列が落ちるため）。
-  - expert plane の trellis は dense のように n-major に並べ替えず、canonical の `[kt][nt]` のまま常駐する
-    （`load_expert_matrix` は expert ごとに trellis をそのまま upload する）。expert の分割は expert parallel（expert 軸の
-    切り出しのみ）で、trellis の中は分割しないため、rank-local の view でも並びは変わらない。
-  - loader は expert plane の全 expert の marker が同じ乗数であることを検査し、mul1 と mul24 の混在（plane 内、
-    1 層の gate / up / down の間、層をまたぐ plane 間）を明示エラーにする。dense の linear と expert の format の混在は
-    禁止していない（dispatch は weight ごと）。
-  - **速度（R9700、`bench_exl3_mul24_grouped`、Flash Next の実形状 hidden 2560 / intermediate 640 / 512 expert / top-10、
-    3 bit、一様な routing、gate+down の 1 層ぶん）**: INT8 活性は FP16 より速くない。decode 相当（1〜16 token）は
-    0.96〜1.02 倍、prefill（256〜2048 token）は 0.91〜0.98 倍。このため既定は FP16 活性のまま
-    （`kExl3Int8MoeDefault`、`moe_dispatch.hip`）。支配項は重みの復号と、n block ごとに繰り返す回転で、WMMA の
-    型（f16 か iu8 か）ではない。回転を省いた実験では gate が約 1.4 倍になったので、回転と INT8 化を別 kernel に出して
-    1 回だけ行えば INT8 が優位になる余地はあるが、その場合は workspace（行 × k の int8 と scale）が必要で未実装。
-- 制約: 整数 bit rate のみ（half は拒否。expert も同じで、loader と program 構築の両方で拒否する）、K と N が 128 の倍数。
-  expert の trellis は n-major ではない。correctness fallback は持たない。
-  **検証状況**: `test_exl3_mul24_grouped`（合成した expert plane を、FP16 と INT8 活性それぞれの CPU 参照
-  （活性の丸めまで鏡像）と照合、INT8 と FP16 の差は相対 RMS で 0.63〜0.69%、単一 GPU）、
-  `bench_exl3_mul24_grouped`（kernel 単体の速度）、`test_program_moe_plan`（program 構築）。
-  dispatch 経由は TP=2 の実モデルで実行し、FP16 活性は生成が安定した。INT8 活性は
-  4096 token prefill で FP16 より遅く、512 token prompt の生成が FP16 と一致しないため既定にしない。
-  複数 GPU の expert parallel と collective は EP=2 / 4 と EP=2 + TP=2 で
-  生成列が TP=2 と一致することを確認済み（Qwen3.8-Flash-Next EXL3 INT8 3.05bpw）。
+  （`t = 8l..8l+7`）がそのまま iu8 WMMA の B フラグメントになる。CPU 参照は `exl3_decode_int8`。
+- 常駐形式: dense 重みの 16x16 タイルはロード時に CPU で `[kt][nt]` から `[nt][kt]`（n-major）へ
+  並べ替える（`exl3_tiles_to_nmajor`）。MoE の expert plane は canonical の `[kt][nt]` のまま常駐する。
+
+#### カーネル選択条件（dense prefill A / B と decode 融合）
+
+`try_launch_linear_exl3_mul24`（`optimized_dispatch.hip`）は workspace layout
+（`exl3_detail::mul24::make_workspace_layout`）から chunk 行数と `dense_ok` を計算し、
+`exl3_mul24_use_dense(dense_ok, n_rows, dense_min_rows, rowsum_bytes)`（既定 `dense_min_rows = 256`、
+`SHELF_EXL3_INT8_DENSE` で変更、`0` で無効）で prefill 経路と decode 経路を分岐する。
+
+| 条件 | 選択経路 | 構造・launch 構成 |
+| --- | --- | --- |
+| `use_dense && exl3_mul24_use_a_prefill(!prefill_wmma_b, num_prefill_requests)` | **Prefill A（hipBLASLt INT8、gfx1201 既定）** | `rotate_quantize` → `rowscale`（行最大 scale へ再量子化、エネルギー比が `SHELF_EXL3_INT8_FLAG`（既定 0.5）超の行は最大 `rows/8` 行まで flagged 退避）→ `recon`（dense `[n][k]` INT8 展開）→ `exl3_dense_gemm_int8`（hipBLASLt `int8 × int8 → int32`）→ flagged 行の融合 GEMM → `rotate_out_i32`。`hipblaslt_abi_compatible()` 失敗や `hipErrorNotSupported` / `hipErrorInitializationError` / `hipErrorOutOfMemory` で B 経路へフォールバックする |
+| `use_dense && (prefill_wmma_b \|\| fallback_b)` | **Prefill B（自前 gfx12 iu8 WMMA）** | `SHELF_EXL3_MUL24_PREFILL_AB=B`、PLaMo 既定、`HIPBLASLT_USE_ROCROLLER=1`、または A 経路フォールバック時に選択。`rotate_quantize` → `recon_wmma` → `prefill_wmma`（K128 group scale のまま、rowscale / flagged GEMM なし）→ `rotate_out`（4 launch） |
+| `!use_dense`（decode・verify・小行数） | **Decode / 小・中行数（融合・K-split）** | 3 launch: `rotate_quantize` → `mul24_gemm`（`exl3_mul24_gemm_splits` が `rows <= 64` の K 分割数を決定）→ `rotate_out`。さらに下述の projection group 統合と producer / boundary 融合が条件成立時に適用される |
+
+- **A 経路の選択ゲート（`exl3_mul24_use_a`）**: `SHELF_EXL3_MUL24_PREFILL_AB` が未設定または `A` / `a`、
+  `HIPBLASLT_USE_ROCROLLER` が `"1"` でない、かつ device が `gfx1201` のときに true。
+  候補の実測選択は既定オフ（`SHELF_EXL3_INT8_TUNE=1` で有効）。
+- **Projection group 統合（`try_launch_exl3_projection`）**: BF16 入出力、`rows <= 64`、4-bit の
+  `LINEAR_EXL3_INT8` が同一入力 slot を共有して連続する場合、最大 3 個を 1 組として入力回転・GEMM・
+  出力回転の各 launch にまとめる（workspace 不足、入出力の重なり、出力列の部分書き込み、debug override、
+  A 経路 prefill 対象時は個別実行へ戻る）。
+- **Decode 融合（`src/shelf/kernels/fused/exl3/`）**: `num_prefill_requests == 0` かつ `rows <= 16` の
+  条件を満たす箇所で、前段演算と入力回転・量子化（または後段の `rotate_out` と残差加算・正規化）を
+  1 launch にまとめる。対象は `SWIGLU` → `down_proj`、`SIGMOID + MUL` → `o_proj`、GDN gated norm →
+  `out_proj`、`OUTPUT_GATHER + RMS_NORM` → `lm_head`（`rows <= 16`）、および boundary I8/I9
+  （`rotate_out + RESIDUAL_ADD + RMS_NORM + projection rotate`）。
+  個別の無効化環境変数は [../user/env_vars.md](../user/env_vars.md#8-診断計測デバッグ開発者切り分け用) を参照。
+- **出力回転と小・中行数 GEMM タイル**: 整列した buffer / stride を満たす小・中行数の出力回転は 128 列単位の
+  wave 分割を使い、512 行以上は f4 経路を使う。active rows の device 指定が無い一部 4 / 5-bit 形状
+  （`N=512 / 1024`, `K >= 1024`）は専用タイルを選ぶ。
+- **workspace**: W16A16 の EXL3 workspace を共有する。xrot 領域に int8 codes / scales（A 経路ではさらに
+  flagged 行の slot / codes / scales）、accum 領域に F32 出力（A 経路では int32 累積器 + flagged 行 F32 出力）を
+  配置し、入らない行数は chunk 分割で実行する。
+- **tensor parallel**: rank-local view（128 倍数境界で partition）に対し各 rank が同じ経路を実行する。
+  hipBLASLt の handle と algorithm cache は thread_local かつ device ごとに保持する。
+
+#### MoE routed experts（grouped EXL3）
+
+rank-3 の grouped EXL3 は `LINEAR_EXL3_W16A16_GROUPED`（`moe_dispatch.hip` →
+`src/shelf/kernels/fused/exl3/grouped.hip`）で実行する。`WeightSlot.compute_spec` が
+`EXL3_MUL24_INT8_W8A8_F32_BF16` のとき `Exl3GroupedArgs::mul24 = 1` を立てる。
+
+- **FP16 活性（既定、`SHELF_EXL3_INT8_MOE=0`）**: 活性に `suh` と H128 を掛けて FP16 とし、復号した
+  `q`（−128..127、FP16 で厳密）で FP16 WMMA を行う。`kExl3Int8GridStep` は epilogue の scale に畳む。
+- **INT8 活性（`SHELF_EXL3_INT8_MOE=1`、`Exl3GroupedArgs::int8_act`）**: 回転後の活性を 128 ごとに
+  int8 化し、iu8 WMMA で int32 累積して group scale を適用する。
+- 回転（および INT8 化）は GEMM kernel に融合するため grouped 用 workspace を持たない。融合 group 数は
+  1 または 2（`SHELF_EXL3_GROUPED_FUSE`）。`SHELF_EXL3_GROUPED_NTILES` が出力幅を割り切れない場合は
+  launch を拒否する。
+- loader は expert plane 内の全 expert で multiplier が一致することを検査し、mul1 / mul24 の混在や
+  mul24 の half bit rate を拒否する。
 
 ## KV quantization
 
 推論時のKVキャッシュは `PagedKVPool` の storage dtype として選択する。CLI では
 `--kv-cache-dtype` で指定し、weight 量子化とは独立。
 
-| dtype | code | scale | head_dim |
+| dtype | code | scale / 構造 | 備考 |
 | --- | --- | --- | --- |
-| `bf16` | bf16 | なし | 任意 |
-| `fp8` | fp8_e4m3 | per (token, kv_head) f32 | 任意 |
+| `bf16` | bf16 | なし | 既定。全モデル・TP / PP 対応 |
+| `fp8` | fp8_e4m3 | per (token, kv_head) f32 | 長 context decode で split-KV（LDS LUT 経由 dequant） |
+| `octave:cKvV` / `octave:bRnNvV` | Lloyd-Max bit-plane packed | 回転空間正規化 + codebook | 単一 GPU のみ（TP / PP / MoE は起動時拒否）。容量・性能は [../perf/kv-octave.md](../perf/kv-octave.md) |
 
 - `bf16` / `fp8` とも長 context decode で KV split/reduce（flash-decoding 型
-  2 kernel、`max_visible >= 2048`）を使う。fp8 の split は dequant を
-  LDS LUT 経由で行い、reduce は dtype 非依存の variant を流用する。
-- `--kv-cache-dtype` の受理値は `bf16` / `fp8` のみで、旧値は明示エラーで拒否する。
+  2 kernel、`max_visible >= 2048`）を使う。
+- 未定義の `--kv-cache-dtype` 文字列は起動時に明示エラーで拒否する。
 
 ### fp8 KV の paged attention 数値契約
 

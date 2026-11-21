@@ -170,15 +170,13 @@ request 1 個あたりの生成予算（推論予算）は `--inference-budget-t
   Queued になり、Active の完了後に admission される。
 - tool calling / sampling / cancel は DFlash2 経路でも利用できる。
 - verify は単一 request を含め既定で lossy chunk を使うため、非投機 greedy と
-  生成列が一致しない場合がある。`SHELF_GDN_VERIFY_CHUNKED=0` で serial に戻せる。
-  `SHELF_GDN_VERIFY_CHUNKED_EXACT=1` は exact chunk を選ぶが、bit 一致は保証しない。
-- `--dflash2-adaptive` は投機を自動で停止・再試行する実験的な方式で、投機を停止する batch 負荷の
-  上限は `SHELF_DFLASH2_POLICY_MAX_SESSIONS` で上書きできる（既定 12）。
+  生成列が一致しない場合がある。verify 経路切替・`--dflash2-adaptive` の上限上書き・
+  `SHELF_DFLASH2_PREFILL_ROWS` などの環境変数は [env_vars.md](env_vars.md#5-dflash2-投機デコード) を参照。
 
 TP=1 で drafter の block size が 8、sliding window が 256 以上の場合、prefill の
-context 構築は既定で最大 256 行ずつ処理する。`SHELF_DFLASH2_PREFILL_ROWS=8` で
-従来の処理に戻せる。`256` は明示的に既定を選択し、それ以外の値は起動エラーになる。
-TP>1 または上記の drafter 条件を満たさない場合は従来の処理に戻る。
+context 構築は既定で最大 256 行ずつ処理する（`--dflash2-prefill-rows 8` または
+`SHELF_DFLASH2_PREFILL_ROWS=8` で従来の処理に戻せる）。TP>1 または上記の drafter 条件を
+満たさない場合は従来の処理に戻る。
 
 Qwen3.8-27B-DFlash2、同時 request 1 件では追加 scratch は 16.953 MiB。KV の自動予算は
 その分減るため、収容できる context の上限も下がる。実際の容量は起動 log の

@@ -15,9 +15,14 @@ TP、pipeline parallel、MTP、DFlash2、2048 token 超の長文は未対応。
 
 ## EXL3-INT8 prefill
 
-gfx1201 の EXL3-INT8 mul24 は、既定で 256 行以上の prefill に hipBLASLt の INT8 経路を使用する。従来の経路に戻すには、プロセス起動時に `SHELF_EXL3_MUL24_PREFILL_AB=B` を指定する。INT8 algorithm が使えない場合は従来の経路へ切り替わる。decode と verify は融合経路を使う。PLaMo の既定経路は変わらない。
+gfx1201 の EXL3-INT8（mul24）は、256 行以上の prefill について 2 つの経路を持つ。
 
-prefill の chunk 境界や prefix cache の有無によって、同じ入力の出力が bit 単位で変わる場合がある。通常生成と DFlash2 の出力不一致は従来経路でも観測されている。BF16 比の精度と測定条件は [EXL3-INT8 prefill の品質](../perf/exl3-int8-prefill-quality.md) を参照。
+- **A 経路（既定、`SHELF_EXL3_MUL24_PREFILL_AB=A`）**: trellis を dense INT8 行列へ展開し、hipBLASLt の INT8 GEMM（行単位 scale + massive activation 行の融合補正）で計算する。高スループット。
+- **B 経路（`SHELF_EXL3_MUL24_PREFILL_AB=B`）**: 自前 gfx12 iu8 WMMA カーネルで K128 group scale のまま計算する（行再量子化なし）。
+
+hipBLASLt の INT8 algorithm が利用できない場合、ABI 検査に失敗した場合、または `HIPBLASLT_USE_ROCROLLER=1` が指定されている場合は、自動で B 経路へ切り替わる（stderr に 1 行通知）。decode と verify は融合経路を使う。PLaMo 3 は未指定時に独自 prefill 経路を維持する。
+
+prefill の chunk 境界や prefix cache の有無によって、同じ入力の出力が bit 単位で変わる場合がある。通常生成と DFlash2 の出力不一致は B 経路でも観測されている。BF16 比の精度と測定条件は [EXL3-INT8 prefill の品質](../perf/exl3-int8-prefill-quality.md)、関連する環境変数の一覧は [env_vars.md](env_vars.md#3-exl3--exl3-int8mul24経路制御) を参照。
 
 ## options
 
@@ -234,11 +239,9 @@ drafter ring は target の KV dtype と独立して BF16 のままである。s
 `prefix_cache_checkpoint_position`（`0` のみ受理）と `temperature > 0` を
 DFlash2 経路でも受け付ける。
 stdio serving の DFlash2 verify は単一 request でも既定で lossy chunk を使い、
-非投機 greedy と生成列が一致しない場合がある。`SHELF_GDN_VERIFY_CHUNKED=0` で
-serial verify に戻せる。`SHELF_GDN_VERIFY_CHUNKED_EXACT=1` は exact chunk を選ぶが、
-非投機との bit 一致を保証しない。単発 decoder は serial のままである。
-`--dflash2-adaptive` は投機を自動で停止・再試行する実験的な方式で、投機を停止する batch 負荷の
-上限は `SHELF_DFLASH2_POLICY_MAX_SESSIONS` で上書きできる（既定 12）。
+非投機 greedy と生成列が一致しない場合がある。serial verify への切替や
+`--dflash2-adaptive` の上限上書きなど、DFlash2 関連の環境変数は
+[env_vars.md](env_vars.md#5-dflash2-投機デコード) を参照。単発 decoder は serial のままである。
 
 stdio serving の prefill 行数、環境変数、追加メモリは
 [server の DFlash2 設定](server.md#dflash2-speculative-decoding)を参照。
@@ -415,7 +418,7 @@ stdoutは `KEY=VALUE` 行。推論結果は以下:
 ```text
 PROMPT_TOKENS=<prompt token数>
 GENERATED_TOKENS=<生成token数>
-KV_CACHE_DTYPE=bf16 | fp8
+KV_CACHE_DTYPE=bf16 | fp8 | octave:...
 KV_POOL_RESERVED_BYTES=<KV pool予約バイト数>
 GENERATED_IDS=<id1>,<id2>,...
 ```
