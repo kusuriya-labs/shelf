@@ -94,9 +94,13 @@ int main(int argc, char **argv) {
     for (auto &w : trellis_host)
         w = next_rand(seed);
     std::vector<uint16_t> ones_all(kExperts * 3 * 2 * 1536);
-    for (auto &v : ones_all) {
+    for (size_t i = 0; i < ones_all.size(); ++i) {
         unsigned r = next_rand(seed);
-        v = uint16_t((r & 0x8000) | (0x3400 + ((r >> 16) % 0x700)));
+        // Approximate the observed layer-1 expert-0 magnitudes; projections vary independently.
+        bool is_suh = i % (2 * 1536) < 1536;
+        unsigned magnitude = is_suh ? 0x2550 + ((r >> 16) % 96) - 48
+                                    : ((r >> 16) % 10 == 0 ? 0x2300 : 0x3c80) + ((r >> 20) % 96) - 48;
+        ones_all[i] = uint16_t((r & 0x8000) | magnitude);
     }
     std::vector<Hy4ExpertProjection> matrices_host(kExperts * 3);
     std::vector<uint32_t> *trellis_dev = new std::vector<uint32_t>[kExperts * 3];
