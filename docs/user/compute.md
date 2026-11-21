@@ -459,8 +459,14 @@ mask を次のように送る。
 ```
 
 次の mask を受け取るまでその request はスケジュールされない。他の request は
-進行できる。完了、cancel 後の mask は無視される。制約付き request は通常 decode を
-使い、DFlash2 / MTP による投機は行わない。
+進行できる。完了、cancel 後の mask は無視される。
+
+DFlash2 が有効な場合、制約付き request は通常 decode へ退避せず DFlash2 投機 decode で
+動作する。draft 生成後に `{"event":"draft","request_id":1,"round_id":1,"draft_tokens":[...]}`
+を返し、クライアントは `{"op":"draft_masks","request_id":1,"round_id":1,"valid_prefix":N,"bitmasks":[...]}`
+で `valid_prefix + 1` 行分の bitmask を返す。DFlash2 経路で出力される `token` event には
+`"need_mask":false` が付き、単一行 `mask` コマンドの送信は不要である。MTP 有効時は
+引き続き通常 decode へフォールバックする。
 
 R9700 の PLaMo 3 Translate BF16 の短文日→英（23 token、greedy）では、
 0.8B / 2B / 8B の prefill は 24.7 / 40.9 / 109.0 ms、decode は

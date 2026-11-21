@@ -40,8 +40,8 @@ compute の親プロセス死亡時の扱い:
 - `GET /v1/models`（各 model に `context_length` を含む）
 - `GET /v1/meta`（起動オプションの正本値、`inflight` / `queued`、compute の `kv_cache`）
 - `POST /v1/chat/completions` と `POST /v1/responses`（非 stream / SSE）
-- 構造化出力: Chat の `json_object` / `json_schema`、Responses の `text.format`、
-  strict tool schema の subset（[server.md](../user/server.md)）
+- 構造化出力: Chat の `json_object` / `json_schema`、Responses の `text.format`
+  （`text` / `json_object` / `json_schema`）、strict tool schema の subset（[server.md](../user/server.md)）
 - stream の usage: `stream_options.include_usage` 指定時のみ `[DONE]` 直前に
   `choices: []` の usage チャンク（`prompt_tokens_details.cached_tokens` 付き）
 - sampling: `temperature` / `top_p` / `top_k` / `seed` / `max_tokens` /
@@ -55,7 +55,7 @@ compute の親プロセス死亡時の扱い:
   thinking は request の推論予算から answer reserve を引いた地点で compute 側で閉じる）
 - concurrent serving（複数 request が Continuous Batching へ到達する）
 - request cancellation（HTTP client disconnect → JSONL cancel → ContinuousBatcher cancel）
-- DFlash2 speculative decode（constraint なしの通常経路）
+- DFlash2 speculative decode（通常経路および構造化出力付き request）
 
 ## Unsupported
 

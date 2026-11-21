@@ -1232,12 +1232,41 @@ verify の受理結果は残り token 数と停止 token の最初の位置で�
 target と DFlash2 context の状態を確定する。停止 token 自体は出力し、その後の行は確定しない。round の入力 `pending_token` が停止 token の場合は、
 step の先頭で何も draft せず `finished=true`（出力 0 個）を返す。
 
-### 構造化出力との接続状況
+### 構造化出力との併用
 
-verify sampler は request ごとに連続した行別 token bitmask を扱えるが、
-DFlash2 の draft / verify 間で server と mask を交換する処理は未実装である。
-構造化出力付き request は DFlash2 / MTP を使用せず通常 decode にフォールバックする。
-実装上の残作業は [接続案](../research/20261111/structured_output_speculative_design.md) を参照。
+DFlash2 有効時の構造化出力付き request は通常 decode へ退避せず、draft と verify の
+間で server と行別 bitmask を 1 往復交換する 2 phase round で動作する（MTP は引き続き
+通常 decode へフォールバックする）。
+
+- **prefill**: `dflash2_spec_prefill` の最終 chunk に初期 `token_bitmask` を適用する
+  （reasoning 遅延 grammar 中は適用しない）。
+- **Phase A（draft）**: `dflash2_spec_propose_slot` で最大 `K` 個の draft token を生成し、
+  `draft_round_id` を進めて mask 待ち状態（`DraftMaskState::PendingMask`）へ移す。
+  stdio server は `{"event":"draft","request_id":...,"round_id":...,"draft_tokens":[...]}`
+  を送信する。
+- **server 応答（`draft_masks`）**: server は `draft_tokens` を先頭から grammar で検証し、
+  受理可能な先頭長 `valid_prefix` と `valid_prefix + 1` 行分の bitmask を
+  `{"op":"draft_masks","request_id":...,"round_id":...,"valid_prefix":...,"bitmasks":[...]}`
+  で返す。stdio server は `valid_prefix` を超える行を全許可（`0xffffffff`）で埋めた
+  固定 `K + 1` 行の device buffer を用意し、`DraftMaskState::Ready` へ進める。
+- **Phase B（verify）**: `dflash2_spec_step_batch` は事前生成済み draft
+  （`precomputed_drafts`）と行別 bitmask（`token_bitmask` / `token_bitmask_row_stride_words`）
+  を使って固定 `K + 1` 行の verify を実行し、受理 draft 数の上限を
+  `max_accept_drafts = valid_prefix` で制限する（`valid_prefix == 0` のときは row 0 の
+  correction token のみを採用する）。
+- **reasoning 遅延 grammar**: thinking 中（`grammar_delayed == true`）は server との
+  mask 往復を行わず通常どおり DFlash2 を実行する。`stop_after_token` に close token を
+  設定し、自然な出力または thinking 予算による強制置換で close token を検出した位置で
+  出力と commit（GDN / KV / DFlash2 context）を切り詰め、次 round から grammar を有効化する。
+- **`need_mask` 抑止**: DFlash2 の構造化出力経路で出力する `token` event には
+  `"need_mask": false` を付与する。server は `grammar.accept(token)` で状態のみを進め、
+  不要な単一行 `mask` コマンドを送らない。
+- **HIP graph と高速経路**: bitmask 付き verify（greedy・8 / 10 行）は executor の固定
+  device bitmask staging（`graph_token_bitmask_staging`）と `has_token_bitmask` 付きの
+  graph cache key により HIP graph capture / replay に対応する（[sampling.md](sampling.md)）。
+  制約付き slot では tree verify・device token bridge・`--dflash2-adaptive` による通常 decode
+  への切り替えを無効化する一方、非制約 batch は既存の device token bridge + HIP graph
+  高速経路を維持する。
 
 ### 投機の適応制御（実験段階）
 

@@ -216,8 +216,16 @@ reserve 16384 である。`B < 1024` では予算を課さない（compute へ�
 
 ## 構造化出力との併用
 
-単一 token の close tag を持つモデルでは、compute は thinking 中に mask を適用せず、
-自然な close token または予算による強制 close token の出力直後に request を mask 待ちへ
-移す。server は close token を matcher に渡さず、初期 mask を返す。以後は回答 token ごとに
-matcher を進める。thinking 予算が 0 でも同様に自然な close を待つ。thinking 中に上限や EOS
-で終了した場合は回答がなく、JSON の完成は保証されない。制約付き request は投機しない。
+単一 token の close tag を持つモデルでは、compute は thinking 中に mask を適用しない。
+通常 decode では、自然な close token または予算による強制 close token の出力直後に
+request を mask 待ちへ移し、server は close token を matcher に渡さず初期 mask を返す。
+以後は回答 token ごとに matcher を進める。
+
+DFlash2 有効時も thinking 中は server との mask 往復なしで通常どおり DFlash2 を実行する。
+verify で自然な close token または予算による強制 close token を検出すると、その位置で
+出力と target 状態（GDN / KV）および DFlash2 context を切り詰めて commit し、次 round から
+grammar 制約付き DFlash2（`draft` / `draft_masks` 往復）へ切り替える（詳細は
+[dflash2.md](dflash2.md) を参照）。MTP 有効時は通常 decode へフォールバックする。
+
+thinking 予算が 0 でも同様に自然な close を待つ。thinking 中に上限や EOS で終了した
+場合は回答がなく、JSON の完成は保証されない。

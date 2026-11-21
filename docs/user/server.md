@@ -778,7 +778,8 @@ suite の詳細は [../developer/testing.md](../developer/testing.md) を参照�
 ## 構造化出力
 
 Chat Completions は `response_format` の `json_object` と `json_schema` を受理する。
-Responses は `text.format` の `json_schema` を同じ制約経路で受理する。
+Responses は `text.format` の `text`、`json_object`、`json_schema` を受理し、
+`json_object` と `json_schema` を同じ制約経路で処理する。
 thinking 有効時は `</think>` まで自由に生成し、その後の回答に制約を適用する。
 単一 token の close tag を持たないモデルでの thinking 併用、tools、stop との
 併用は HTTP 400 で拒否する。stream と非 stream、temperature > 0 に対応する。
@@ -798,7 +799,10 @@ string 内の tool markup による区切り衝突を避けるため、生成さ
 strict tools の stream は完成した tool call をまとめて送る。生成上限に達した未完成の call は
 返さない。strict tools と stop の併用、および response_format と tools の併用は 400 とする。
 
-制約付き request は DFlash2 / MTP が有効でも通常 decode を使用し、投機との併用は未対応である。
+制約付き request は DFlash2 が有効な場合、DFlash2 投機 decode と併用して動作する
+（thinking 有効時は `</think>` まで通常どおり DFlash2 で生成し、検出位置で状態を整えて
+次のラウンドから制約付き DFlash2 へ切り替える）。MTP が有効な場合は引き続き通常 decode へ
+フォールバックする。
 
 ## PLaMo 3 Translate
 

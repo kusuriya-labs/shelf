@@ -278,25 +278,39 @@ correctness backend と optimized kernel が同じ方式を使うときは
 
 `ScheduledRequest::token_bitmask` は device 上の `uint32_t` 配列を指し、
 token ID の下位 5 bit が word 内の bit を表す。bit が 0 の token は
-sampling 前に logit を `-Inf` にする。呼び出し元は語彙数に応じた
-word 数と、実行完了までのメモリ寿命を保証する。bitmask がない batch では
-追加の device kernel を起動しない。単一出力の通常 decode と最終 prefill
-のみで使用でき、投機検証、tensor parallel、pipeline parallel では拒否する。
-bitmask を含む batch は HIP graph を使用しない。
+sampling 前に logit を `-Inf` にする。`ScheduledRequest::token_bitmask_row_stride`
+は複数出力行（verify など）における行間の word ストライドであり、`0` のときは
+単一 mask を共有する。呼び出し元は語彙数に応じた word 数（`ceil(vocab_size / 32)`）
+と、実行完了までのメモリ寿命を保証する。bitmask がない batch では追加の device kernel
+を起動しない。tensor parallel および pipeline parallel では bitmask を拒否する。
 
-これは executor の入力 contract であり、server の構造化出力 API や
-compute の stdio protocol からはまだ利用できない。
+HIP graph 対応:
+
+- executor は固定の device 領域 `Executor::graph_token_bitmask_staging`
+  （`words * max_scheduled_output_rows` word）を遅延確保し、graph 実行前に
+  `hipMemcpy2DAsync`（device-to-device）で各 request の bitmask を固定アドレスへ
+  転送したうえで、graph 内の sampling へその固定アドレスと `words` ストライドを渡す。
+- `GraphCacheSlot::has_token_bitmask` で bitmask 有無をキャッシュキーとして分離する。
+  非制約 batch は従来のマスクなし graph をそのまま再利用する。
+- これにより、単一行 Decode（`R == 1, N == 1`）および DFlash2 Verify（greedy・8 / 10 行）
+  の bitmask 付き batch で HIP graph capture / replay が有効になる。
 
 ## 構造化出力の mask 待ち
 
-stdio の制約付き request は最初の prefill sample より前に device mask を受け取り、
-以降は token event ごとに次の mask を待つ。scheduler は待機中の request を飛ばし、
-他 request を batch に含める。bitmask は request ごとで、通常 request は null のまま。
-GPU 上の logits への適用は greedy / stochastic 共通の sampling 前に行う。
+stdio の制約付き request は最初の prefill sample より前に device mask を受け取る。
+通常 decode では token event ごとに次の `mask` コマンドを待つ。scheduler は待機中の
+request を飛ばし、他 request を batch に含める。bitmask は request ごとで、
+通常 request は null のまま。GPU 上の logits への適用は greedy / stochastic 共通の
+sampling 前に行う。
+
+DFlash2 有効時の制約付き request は通常 decode へ退避せず、round ごとに `draft` /
+`draft_masks` の 1 往復で行別 bitmask を交換して verify する。DFlash2 で採用された
+`token` event には `"need_mask": false` が付き、不要な単一行 `mask` 往復を抑止する
+（詳細は [dflash2.md](dflash2.md) を参照）。MTP 有効時は引き続き通常 decode へ
+フォールバックする。
 
 strict tool は Qwen XML structural tag を使用する。`auto` は `<tool_call>` で
 dispatch し、`required` / 名前指定は先頭から強制する。XGrammar の `excludes` で
 文字列の生の `<` を禁止し、parameter 終了タグとの衝突を防ぐ。型変換前の本文は
 空白を保持するが、enum 値の外側に XGrammar が許可する空白は宣言値へ対応付ける。
-非 strict のみの場合は従来の parser を使う。制約付き request は現時点では
-DFlash2 / MTP を使わず通常 decode へフォールバックする。
+非 strict のみの場合は従来の parser を使う。
