@@ -1,5 +1,6 @@
 #include <shelf/models/hy4_flash/checkpoint.h>
 #include <shelf/quantization/exl3/exl3_int8.h>
+#include <shelf/quantization/ngram/ngram.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <chrono>
@@ -84,7 +85,7 @@ void Checkpoint::populate_engram(bool lock) const {
         if (!count.ok())
             throw std::runtime_error("Engram の常駐確認に失敗しました: " + count.status().message());
         size_t total = (file.file_size() + page - 1) / page;
-        fprintf(stderr, "engram_populate layer=%zu pages=%zu total=%zu\n", 1 + 10 * g, count.value(), total);
+        fprintf(stderr, "engram_populate shard=%zu pages=%zu total=%zu\n", g, count.value(), total);
         complete &= count.value() == total;
     }
     if (!complete) {
@@ -120,6 +121,9 @@ Checkpoint::Checkpoint(const Path &model, const Path &engram, const Path &draft,
         require(!rdma, "このビルドでは Engram RDMA を使用できません");
 #endif
     }
+    const auto manifest_path = engram / "ngram_manifest.json";
+    ngram = std::filesystem::exists(manifest_path) || std::filesystem::is_symlink(manifest_path);
+    require(!(ngram && rdma), "Ngram Engram は RDMA に対応していません");
     const auto cfg = read_json(model / "config.json");
     require(cfg.value("model_type", std::string{}) == "hy_v4_flash" && cfg.value("exl3_text_only", false) &&
                 cfg.at("num_hidden_layers") == 42 && cfg.at("hc_mult") == 4 &&
@@ -151,7 +155,7 @@ Checkpoint::Checkpoint(const Path &model, const Path &engram, const Path &draft,
             rows += size;
             moduli[g][h] = size;
         }
-        if (rdma)
+        if (rdma || ngram)
             continue;
         auto key =
             "model.layers." + std::to_string(layer) + ".engram_layer.multi_head_embedding.embedding.weight";
@@ -166,9 +170,11 @@ Checkpoint::Checkpoint(const Path &model, const Path &engram, const Path &draft,
             auto data = take(reader.tensor_data(name, length));
             weights.emplace(name, Weight{spec, data, length, -1, 0});
         }
-        engram_files[g] = files.size();
+        engram_files.push_back(files.size());
         files.push_back(std::move(reader));
     }
+    if (ngram)
+        load_ngram(engram);
     if (has_draft) {
         auto q = read_json(draft / "conversion_report.json");
         require(q.at("method") == "dfly" && q.at("bits") == 4, "DFly の変換結果が不正です");
@@ -357,6 +363,56 @@ Checkpoint::Checkpoint(const Path &model, const Path &engram, const Path &draft,
         require(std::abs(bpw - 3.5) <= 0.0001 &&
                     std::abs(bpw - report.at("decoder_code_bpw").get<double>()) < 1e-8,
                 "実重みに基づく平均 bpw が一致しません");
+    }
+}
+void Checkpoint::load_ngram(const Path &engram) {
+    std::ifstream in(engram / "ngram_manifest.json", std::ios::binary);
+    require(bool(in), "Ngram manifest を開けません");
+    std::string text((std::istreambuf_iterator<char>(in)), {});
+    auto manifest = take(quantization::ngram::parse_manifest(text));
+    auto status = quantization::ngram::validate_bundle(engram, manifest);
+    require(status.ok(), "Ngram bundle が不正です: " + status.message());
+    require(manifest.tables.size() == 64, "Ngram の表数が不正です");
+    std::array<std::array<bool, 16>, 4> seen{};
+    std::map<std::string, size_t> shards;
+    for (const auto &table : manifest.tables) {
+        require(table.layer >= 1 && table.layer <= 31 && (table.layer - 1) % 10 == 0 && table.head < 16,
+                "Ngram の層または head が不正です");
+        size_t g = (table.layer - 1) / 10, h = table.head;
+        require(!seen[g][h] && table.ngram_order == 2 + h / 8 &&
+                table.dim == 96 && table.rows == size_t(moduli[g][h]),
+                "Ngram 表と checkpoint の構造が一致しません");
+        seen[g][h] = true;
+        auto it = shards.find(table.shard);
+        if (it == shards.end()) {
+            auto index = files.size();
+            files.push_back(take(io::SafetensorsReader::open((engram / table.shard).string())));
+            engram_files.push_back(index);
+            it = shards.emplace(table.shard, index).first;
+        }
+        auto &reader = files[it->second];
+        size_t length;
+        auto &head = ngram_heads[g][h];
+        head.bits = table.bits;
+        head.codes = static_cast<const uint8_t *>(take(reader.tensor_data(table.codes_tensor, length)));
+        head.scales = static_cast<const uint8_t *>(take(reader.tensor_data(table.scale_tensor, length)));
+        auto spec = take(reader.tensor_spec(table.codebook_tensor));
+        auto data = take(reader.tensor_data(table.codebook_tensor, length));
+        for (const auto &tensor : {table.codes_tensor, table.scale_tensor}) {
+            auto host_spec = take(reader.tensor_spec(tensor));
+            auto host_data = take(reader.tensor_data(tensor, length));
+            auto key = "__ngram_host." + std::to_string(g) + "." + std::to_string(h) + "." + tensor;
+            require(weights.emplace(key, Weight{std::move(host_spec), host_data, length, -1, 0}).second,
+                    "Ngram tensor 名が重複しています");
+        }
+        data = take(reader.tensor_data(table.codebook_tensor, length));
+        head.codebook = "__ngram_codebook." + std::to_string(g) + "." + std::to_string(h);
+        auto [entry, inserted] = weights.emplace(head.codebook, Weight{std::move(spec), data, length, 0, 0});
+        require(inserted, "Ngram codebook 名が重複しています");
+        auto &weight = entry->second;
+        weight.offset = (bytes[0] + 15) & ~size_t(15);
+        bytes[0] = weight.offset + weight.bytes;
+        upload_order.push_back(&weight);
     }
 }
 void Checkpoint::load(const Path &directory, bool draft) {

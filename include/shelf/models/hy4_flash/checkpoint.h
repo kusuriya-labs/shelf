@@ -19,6 +19,12 @@ struct Weight {
     size_t offset;
 };
 
+struct NgramHead {
+    const uint8_t *codes = nullptr, *scales = nullptr;
+    std::string codebook;
+    unsigned bits = 0;
+};
+
 struct Checkpoint {
     Checkpoint() = default;
     Checkpoint(const Path &model, const Path &engram, const Path &draft, const Owners &owners);
@@ -27,8 +33,11 @@ struct Checkpoint {
     void populate_engram(bool lock) const;
     void report_engram_residency(const char *phase) const;
     void load(const Path &directory, bool draft);
+    void load_ngram(const Path &directory);
     std::vector<io::SafetensorsReader> files;
-    std::array<size_t, 4> engram_files{};
+    std::vector<size_t> engram_files;
+    std::array<std::array<NgramHead, 16>, 4> ngram_heads{};
+    bool ngram = false;
     std::map<std::string, Weight> weights;
     std::vector<Weight *> upload_order;
     std::array<size_t, 3> bytes{};

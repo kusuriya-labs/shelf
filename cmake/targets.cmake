@@ -37,6 +37,15 @@ target_include_directories(shelf_io SYSTEM PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/
 target_link_libraries(shelf_io PUBLIC shelf_core hip::host)
 target_compile_options(shelf_io PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
+add_library(shelf_quant_ngram STATIC src/shelf/quantization/ngram/ngram.cpp)
+target_compile_features(shelf_quant_ngram PRIVATE cxx_std_20)
+target_include_directories(shelf_quant_ngram PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(shelf_quant_ngram SYSTEM PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/vendor")
+target_link_libraries(shelf_quant_ngram PUBLIC shelf_core shelf_io)
+target_compile_options(shelf_quant_ngram PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
+
+find_package(Threads REQUIRED)
+
 add_library(shelf_hy4_wmma OBJECT src/shelf/kernels/hy4_flash/wmma.hip src/shelf/kernels/hy4_flash/mla_prefill.hip)
 target_link_libraries(shelf_hy4_wmma PRIVATE shelf_core hip::host)
 set_target_properties(shelf_hy4_wmma PROPERTIES HIP_ARCHITECTURES gfx1201 POSITION_INDEPENDENT_CODE ON)
@@ -58,7 +67,7 @@ add_library(shelf_hy4_model STATIC
     src/shelf/models/hy4_flash/generate.hip
 )
 target_include_directories(shelf_hy4_model SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
-target_link_libraries(shelf_hy4_model PUBLIC shelf_io shelf_gpu shelf_hy4_flash)
+target_link_libraries(shelf_hy4_model PUBLIC shelf_io shelf_gpu shelf_hy4_flash shelf_quant_ngram)
 set_target_properties(shelf_hy4_model PROPERTIES HIP_ARCHITECTURES "gfx1030;gfx1201")
 if(SHELF_HY4_RDMA)
     find_package(OpenSSL REQUIRED)
@@ -593,14 +602,7 @@ target_link_libraries(shelf_quant_reference PUBLIC shelf_core)
 target_compile_options(shelf_quant_reference PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
 
-add_library(shelf_quant_ngram STATIC src/shelf/quantization/ngram/ngram.cpp)
-target_compile_features(shelf_quant_ngram PRIVATE cxx_std_20)
-target_include_directories(shelf_quant_ngram PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_include_directories(shelf_quant_ngram SYSTEM PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/vendor")
-target_link_libraries(shelf_quant_ngram PUBLIC shelf_core shelf_io)
-target_compile_options(shelf_quant_ngram PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
-find_package(Threads REQUIRED)
 add_library(shelf_ngram_quant_c SHARED
     src/shelf/quantization/ngram/ngram_c_api.cpp
     src/shelf/quantization/ngram/ngram.cpp

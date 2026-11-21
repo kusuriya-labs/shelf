@@ -1,5 +1,6 @@
 #include <shelf/models/hy4_flash/decoder.h>
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/decode.h>
+#include <hip/hip_fp16.h>
 #include <chrono>
 #include <sys/resource.h>
 #include <cmath>
@@ -14,9 +15,6 @@ constexpr int64_t multipliers[4][3] = {{81853575799317, 39690085502883, 24229915
                                        {19457948045719, 44729556510419, 84779352922315},
                                        {72974230057307, 21530602121221, 55998057243097},
                                        {29128509562787, 16745155128523, 22474588302733}};
-struct Norms {
-    const uint16_t *head[16];
-};
 __device__ float sum(float v, float *scratch) {
     int t = threadIdx.x;
     scratch[t] = v;
@@ -28,15 +26,28 @@ __device__ float sum(float v, float *scratch) {
     }
     return scratch[0];
 }
-__global__ void decode_heads(const uint8_t *packed, Norms norms, Mat embed) {
+__global__ void decode_heads(const uint8_t *packed, EngramNorms norms, Mat embed, NgramLayout layout, bool ngram) {
     __shared__ float scratch[128];
     int c = threadIdx.x, head = blockIdx.x;
-    const uint8_t *src = packed + (blockIdx.y * 16 + head) * 98;
+    const uint8_t *src = ngram ? packed + blockIdx.y * layout.stride + layout.offsets[head]
+                               : packed + (blockIdx.y * 16 + head) * 98;
     float v = 0;
     if (c < 96) {
-        int b = src[c], exp = (b >> 3) & 15, frac = b & 7;
-        float fp = exp ? ldexpf(1.f + frac / 8.f, exp - 7) : ldexpf(float(frac), -9);
-        v = (b & 128 ? -fp : fp) * bf16_bits_to_f32(uint16_t(src[96] | (src[97] << 8)));
+        if (ngram) {
+            unsigned bits = layout.bits[head], pos = c * bits, shift = pos % 8;
+            unsigned code = src[pos / 8] >> shift;
+            if (shift + bits > 8)
+                code |= unsigned(src[pos / 8 + 1]) << (8 - shift);
+            code &= (1u << bits) - 1;
+            unsigned width = 12 * bits;
+            uint16_t scale = uint16_t(src[width] | (src[width + 1] << 8));
+            v = scale ? __half2float(*reinterpret_cast<const __half *>(&scale)) *
+                            __half2float(*reinterpret_cast<const __half *>(layout.books[head] + code)) : 0.f;
+        } else {
+            int b = src[c], exp = (b >> 3) & 15, frac = b & 7;
+            float fp = exp ? ldexpf(1.f + frac / 8.f, exp - 7) : ldexpf(float(frac), -9);
+            v = (b & 128 ? -fp : fp) * bf16_bits_to_f32(uint16_t(src[96] | (src[97] << 8)));
+        }
         v = bf16_bits_to_f32(f32_to_bf16_rne_device(v));
     }
     float inv = rsqrtf(sum(v * v, scratch) / 96 + 1.1920928955e-7f);
@@ -68,6 +79,10 @@ __global__ void add_memory(Mat x, Mat k, Mat q, Mat value, const uint16_t *scale
             round_bf16(round_bf16(v * gate) + round_bf16(v * bf16_bits_to_f32(scale[i]))));
     }
 }
+}
+void launch_decode_heads(const uint8_t *packed, EngramNorms norms, Mat embed, NgramLayout layout, bool ngram) {
+    decode_heads<<<dim3(16, embed.rows), 128>>>(packed, norms, embed, layout, ngram);
+    checked(hipGetLastError());
 }
 std::vector<uint64_t> engram_indices(const Checkpoint &model, int g, const std::vector<int> &prior,
                                      const std::vector<int> &ids) {
@@ -135,6 +150,26 @@ std::span<const uint8_t> EngramSource::rows(int g, const std::vector<int> &prior
         return result;
     }
 #endif
+    if (op.gpu.model.ngram) {
+        const auto &heads = op.gpu.model.ngram_heads[g];
+        size_t stride = 0;
+        for (const auto &head : heads)
+            stride += 12 * head.bits + 2;
+        storage.resize(ids.size() * stride);
+        auto indices = engram_indices(op.gpu.model, g, prior, ids);
+        for (size_t r = 0; r < ids.size(); ++r) {
+            size_t dest_offset = r * stride, base = 0;
+            for (size_t h = 0; h < 16; ++h) {
+                const auto &head = heads[h];
+                size_t row = indices[r * 16 + h] - base, width = 12 * head.bits;
+                std::memcpy(storage.data() + dest_offset, head.codes + row * width, width);
+                std::memcpy(storage.data() + dest_offset + width, head.scales + row * 2, 2);
+                dest_offset += width + 2;
+                base += op.gpu.model.moduli[g][h];
+            }
+        }
+        return storage;
+    }
     auto table = "model.layers." + std::to_string(1 + 10 * g) +
                  ".engram_layer.multi_head_embedding.embedding.weight";
     auto bits = static_cast<const uint8_t *>(op.gpu.model.at(table).host);
@@ -178,11 +213,20 @@ Mat engram(Ops &op, int layer, Mat x, const std::vector<int> &prior, const std::
     auto memory = static_cast<uint8_t *>(op.arena.next(packed.size()));
     op.copy(memory, packed.data(), packed.size(), hipMemcpyHostToDevice);
     auto embed = op.mat(x.rows, 1536);
-    Norms norms{};
+    EngramNorms norms{};
     for (int i = 0; i < 16; ++i)
         norms.head[i] = bf("lookup_per_head_norms." + std::to_string(i) + ".weight");
-    decode_heads<<<dim3(16, x.rows), 128>>>(memory, norms, embed);
-    checked(hipGetLastError());
+    NgramLayout layout{};
+    if (op.gpu.model.ngram) {
+        for (int h = 0; h < 16; ++h) {
+            const auto &head = op.gpu.model.ngram_heads[g][h];
+            layout.books[h] = static_cast<const uint16_t *>(op.gpu.device(op.gpu.model.at(head.codebook)));
+            layout.bits[h] = head.bits;
+            layout.offsets[h] = layout.stride;
+            layout.stride += 12 * head.bits + 2;
+        }
+    }
+    launch_decode_heads(memory, norms, embed, layout, op.gpu.model.ngram);
     auto project = [&](const std::string &key) {
         Mat y = op.linear(p + key, embed);
         bias<<<(y.rows * y.cols + 255) / 256, 256>>>(y, bf(key + ".bias"));

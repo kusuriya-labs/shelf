@@ -1,12 +1,14 @@
 # N-gram table 量子化形式
 
-N-gram / Engram / PLE 埋め込み table のモデル非依存の保存形式を定義する。
-Qwen3.8-Flash-Next、Hy4-Flash、DeepSeek-V4.1-Flash などの同等の table 構造を対象とする。
-これは形式と変換器の契約であり、現行 Shelf runtime による読込の対応を意味しない。
+N-gram / Engram / PLE 埋め込み table の保存形式を定義する。
 既存の線形重み用 `shelf_quantization.json` とは別の形式である。
-評価の経緯は [offline 評価](../research/20261121/ngram_q_offline_eval.md)、
-[Hy4 評価](../research/20261121/ngram_q_step2_hy4.md)、
-[PopQA 生成評価](../research/20261121/ngram_q_step3_popqa_gen.md) を参照する。
+
+Hy4-flash は `--engram-dir` の `ngram_manifest.json` を検出すると、この形式を読み込む。
+4 層の各 16 head を個別の table として指定する。`layer` は 1、11、21、31、
+`head` は 0〜15、`ngram_order` は head 0〜7 で 2、8〜15 で 3 とする。
+各 table の `dim` は 96、`rows` は checkpoint の対応する head の語彙数に一致させる。
+`ngram4`、`ngram5`、`mixed` に対応し、RDMA ソースとの組み合わせは拒否する。
+manifest が存在しない場合は従来の FP8 形式を読み込む。
 
 ## プロファイル
 
