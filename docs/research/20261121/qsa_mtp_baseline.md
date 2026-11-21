@@ -234,6 +234,66 @@ production の top_k は 512 である。
 確認する。複数ウィンドウ（2 / 5 tile）、8192 / 8193 / 12000 / 16384 / 20000 blocks、
 同点、top_k 512 のケースを追加した。required 226/226、MTP safe 9/9、fused 10/10。
 
+### QSA sparse attention の K/V 共有と prefill dispatch 再評価（Phase 5）
+
+計測は `shelf-bench qsa-attention`（QSA sparse attention）と
+`shelf-bench paged-attention --variant prefill`（tiled dense prefill）で行う。
+geometry はモデルと同じ q_heads=24 / kv_heads=2（q_per_kv=12）、head_dim=256、
+block=4 token、page=16 token。
+
+#### decode / prefill の分離測定（bf16、selected=512 block = 2048 token）
+
+| rows | visible | splits | p50 |
+| ---: | ---: | ---: | ---: |
+| 1 | any | 32 (auto) | 31.4 us |
+| 4 | any | 16 | 46.2 us |
+| 8 | any | 8 | 75.8 us |
+| 64 | any | 1 | 492 us |
+| 128 | any | 1 | 827 us |
+| 512 | any | 1 | 3015 us |
+
+時間は visible token 数にほぼ依存せず、選択 block 数に線形である
+（rows=64 で selected 32/64/128/256/512/1024 → 46/75/131/263/507/990 us）。
+
+#### K/V 共有（warp group 内 LDS staging）は不採用
+
+q_per_kv=12 では 4 warp が同じ KV head の K/V を重複ロードしている。warp ごとに
+1 cell を LDS へ staging し、全 warp が LDS から読む実装を試した。
+
+| rows | 変更前 | LDS 共有 | 差 |
+| ---: | ---: | ---: | ---: |
+| 64 | 510 us | 573 us | +12% |
+| 128 | 798 us | 900 us | +13% |
+| 512 | 2939 us | 3402 us | +16% |
+
+重複ロードは L1/L2 が吸収しており、staging の LDS 書き込みと追加 barrier が上回る。
+計画の「キャッシュが効いているから必ず速くなると思わない」のとおりなので、
+実装は戻して既存の per-warp ロードを維持する。
+
+#### prefill dispatch の閾値再評価
+
+tiled dense prefill と sparse の比較（bf16、selected=512）:
+
+| rows | visible | dense | sparse |
+| ---: | ---: | ---: | ---: |
+| 64 | 4096 | 353 us | ~500 us |
+| 64 | 8192 | 683 us | ~500 us |
+| 64 | 12288 | 1002 us | ~500 us |
+| 128 | 4096 | 452 us | ~822 us |
+| 128 | 8192 | 874 us | 822 us |
+| 128 | 12288 | 1412 us | 822 us |
+| 512 | 4096 | 1623 us | ~2986 us |
+| 512 | 8192 | 3276 us | 2986 us |
+| 512 | 12288 | 4920 us | 2986 us |
+
+crossover は rows 64/128/512 で約 7-8K token。fp8 はさらに早く（rows=128, visible=8192 で
+dense 1410 us vs sparse 866 us）。固定 budget 512 block のため sparse 側は visible に
+依存しない。`kQsaSparsePrefillMinTokens` を 12,288 から 8,192 へ下げ、dense prefill 経路は
+引き続き選択可能に残す。
+
+残りは長文 prefill の gather + WMMA 実験（近似 mode は target-only exact の既定を
+変えない）と、長文 end-to-end 測定である。
+
 ## 6. 残課題
 
 - `R=8, K=7` の 64 行 1 forward fused verify は成立した（`max_verify_per_round=1`）。
@@ -242,4 +302,5 @@ production の top_k は 512 である。
 - Wavefront 4 request chunk は prompt によって target-only と分岐するため opt-in のまま。
 - QSA score の multi-request launch 集約は完了（2.57x 削減、score bit 一致）。
 - Top-k の全域再走査削減は完了（262K 相当で 2.99x、top_k=1024 で 7.3x）。
-- attention / key-cache の launch 集約、長文コンテキストの end-to-end 測定は未着手。
+- QSA sparse attention の K/V 共有は計測の結果不採用、prefill 閾値は 8192 へ再評価した。
+- gather + WMMA prefill 実験、key-cache の launch 集約、長文 end-to-end 測定は未着手。
