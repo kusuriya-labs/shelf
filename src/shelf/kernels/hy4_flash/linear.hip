@@ -13,9 +13,14 @@ using namespace shelf::kernel::exl3_detail::mul24;
 
 __global__ void rotate_input(const uint16_t *input, const uint16_t *suh, int8_t *codes, float *scales,
                              int width, int padded, const Hy4ExpertProjection *group = nullptr, int stride = 0,
-                             const Hy4Route *routes = nullptr) {
+                             const Hy4Route *routes = nullptr, int8_t *codes1 = nullptr, float *scales1 = nullptr) {
+    // Pair launches use z=0 for gate and z=1 for up; all other launches have z=0.
     if (group)
-        suh = group[(routes ? routes[blockIdx.y].expert : blockIdx.y) * stride].suh;
+        suh = group[(routes ? routes[blockIdx.y].expert : blockIdx.y) * stride + blockIdx.z].suh;
+    if (blockIdx.z) {
+        codes = codes1;
+        scales = scales1;
+    }
     const unsigned lane = threadIdx.x;
     const int base = blockIdx.x * 128 + lane * 4;
     float v[4];
@@ -96,7 +101,8 @@ __global__ void multiply(const int8_t *codes, const float *scales, const uint32_
 }
 
 template <bool Mixed>
-__global__ void multiply_pair(const int8_t *codes, const float *scales, const Hy4ExpertProjection *matrices,
+__global__ void multiply_pair(const int8_t *codes, const float *scales, const int8_t *codes1, const float *scales1,
+                              const Hy4ExpertProjection *matrices,
                               int stride, float *partial0, float *partial1, int k, int n,
                               const Hy4Route *routes) {
     const auto &mat0 = matrices[(routes ? routes[blockIdx.y].expert : blockIdx.y) * stride];
@@ -105,32 +111,33 @@ __global__ void multiply_pair(const int8_t *codes, const float *scales, const Hy
     const unsigned col = threadIdx.x % 16;
     const unsigned worker = threadIdx.x / 16;
     const int row = blockIdx.y;
-    __shared__ float sums0[16][16], sums1[16][16];
+    __shared__ float sums0[8][16], sums1[8][16];
     float acc0 = 0, acc1 = 0;
     const unsigned words = bits * 8;
-    for (unsigned kt = worker; kt < unsigned(k / 16); kt += 16) {
+    for (unsigned kt = worker; kt < unsigned(k / 16); kt += 8) {
         const uint32_t *tile0 = mat0.trellis + (size_t(kt) * (n / 16) + blockIdx.x) * words;
         const uint32_t *tile1 = mat1.trellis + (size_t(kt) * (n / 16) + blockIdx.x) * words;
         int dot0 = 0, dot1 = 0;
 #pragma unroll
         for (unsigned g = 0; g < 4; ++g) {
-            uint32_t a;
+            uint32_t a, a1;
             __builtin_memcpy(&a, codes + size_t(row) * k + kt * 16 + g * 4, 4);
+            __builtin_memcpy(&a1, codes1 + size_t(row) * k + kt * 16 + g * 4, 4);
             unsigned t = g / 2 * 128 + col * 8 + g % 2 * 4;
             uint32_t b0 = bits == 3 ? unpack_four<3>(tile0, t) : unpack_four<4>(tile0, t);
             uint32_t b1 = bits == 3 ? unpack_four<3>(tile1, t) : unpack_four<4>(tile1, t);
             dot0 = dot4(a, b0, dot0);
-            dot1 = dot4(a, b1, dot1);
+            dot1 = dot4(a1, b1, dot1);
         }
         float scale = scales[size_t(row) * (k / 128) + kt / 8];
         acc0 += dot0 * scale;
-        acc1 += dot1 * scale;
+        acc1 += dot1 * scales1[size_t(row) * (k / 128) + kt / 8];
     }
     sums0[worker][col] = acc0;
     sums1[worker][col] = acc1;
     __syncthreads();
     if (worker == 0) {
-        for (unsigned i = 1; i < 16; ++i) {
+        for (unsigned i = 1; i < 8; ++i) {
             acc0 += sums0[i][col];
             acc1 += sums1[i][col];
         }
@@ -201,10 +208,10 @@ __global__ void rotate_output(const float *partial, const uint16_t *svh, uint16_
 }
 
 template <bool Mixed>
-__global__ void expert_batch16_pair(const int8_t *codes, const float *scales, const Hy4ExpertProjection *matrices,
+__global__ void expert_batch16_pair(const int8_t *codes, const float *scales, const int8_t *codes1, const float *scales1, const Hy4ExpertProjection *matrices,
                                     const Hy4Route *routes, const Hy4ExpertBatch *batches, float *partial0,
                                     float *partial1) {
-    __shared__ uint32_t b0[32][16], b1[32][16], a[16][33];
+    __shared__ uint32_t b0[32][16], b1[32][16], a[16][33], a1[16][33];
     const auto batch = batches[blockIdx.y];
     unsigned tid = threadIdx.x, col = tid % 16, row = tid / 16;
     const auto &mat = matrices[3 * routes[batch.first].expert];
@@ -223,20 +230,21 @@ __global__ void expert_batch16_pair(const int8_t *codes, const float *scales, co
                 b1[seg * 4 + j][col] = bits == 3 ? unpack_four<3>(tile1, t) : unpack_four<4>(tile1, t);
             }
         }
-        for (unsigned j = tid; j < unsigned(batch.count * 32); j += 256)
-            __builtin_memcpy(&a[j / 32][j % 32],
-                             codes + size_t(batch.first + j / 32) * 1536 + g * 128 + (j % 32) * 4, 4);
+        for (unsigned j = tid; j < unsigned(batch.count * 32); j += 256) {
+            __builtin_memcpy(&a[j / 32][j % 32], codes + size_t(batch.first + j / 32) * 1536 + g * 128 + (j % 32) * 4, 4);
+            __builtin_memcpy(&a1[j / 32][j % 32], codes1 + size_t(batch.first + j / 32) * 1536 + g * 128 + (j % 32) * 4, 4);
+        }
         __syncthreads();
         if (row < unsigned(batch.count)) {
             int sum0 = 0, sum1 = 0;
 #pragma unroll
             for (int j = 0; j < 32; ++j) {
                 sum0 = dot4(a[row][j], b0[j][col], sum0);
-                sum1 = dot4(a[row][j], b1[j][col], sum1);
+                sum1 = dot4(a1[row][j], b1[j][col], sum1);
             }
             float scale = scales[(batch.first + row) * 12 + g];
             acc0 += sum0 * scale;
-            acc1 += sum1 * scale;
+            acc1 += sum1 * scales1[(batch.first + row) * 12 + g];
         }
         __syncthreads();
     }
@@ -341,21 +349,21 @@ extern "C" hipError_t shelf_hy4_expert_linear(const uint16_t *x, const Hy4Expert
 }
 
 extern "C" hipError_t shelf_hy4_expert_gate_up_swiglu(const uint16_t *x, const Hy4ExpertProjection *matrices,
-                                                      int stride, int8_t *codes, float *scales, float *partial0,
+                                                      int stride, int8_t *codes, float *scales, int8_t *codes1, float *scales1, float *partial0,
                                                       float *partial1, uint16_t *out, int rows,
                                                       const Hy4Route *routes, int mixed) {
-    if (!x || !matrices || !codes || !scales || !partial0 || !partial1 || !out || rows < 1 || rows > 65535 ||
+    if (!x || !matrices || !codes || !scales || !codes1 || !scales1 || !partial0 || !partial1 || !out || rows < 1 || rows > 65535 ||
         stride < 2 || !routes)
         return hipErrorInvalidValue;
-    rotate_input<<<dim3(12, rows), 32>>>(x, nullptr, codes, scales, 1536, 1536, matrices, stride, routes);
+    rotate_input<<<dim3(12, rows, 2), 32>>>(x, nullptr, codes, scales, 1536, 1536, matrices, stride, routes, codes1, scales1);
     auto status = hipGetLastError();
     if (status != hipSuccess)
         return status;
     if (mixed)
-        multiply_pair<true><<<dim3(96, rows), 256>>>(codes, scales, matrices, stride, partial0, partial1, 1536,
+        multiply_pair<true><<<dim3(96, rows), 128>>>(codes, scales, codes1, scales1, matrices, stride, partial0, partial1, 1536,
                                                      1536, routes);
     else
-        multiply_pair<false><<<dim3(96, rows), 256>>>(codes, scales, matrices, stride, partial0, partial1, 1536,
+        multiply_pair<false><<<dim3(96, rows), 128>>>(codes, scales, codes1, scales1, matrices, stride, partial0, partial1, 1536,
                                                       1536, routes);
     status = hipGetLastError();
     if (status != hipSuccess)
@@ -366,21 +374,21 @@ extern "C" hipError_t shelf_hy4_expert_gate_up_swiglu(const uint16_t *x, const H
 
 extern "C" hipError_t shelf_hy4_expert_batch_gate_up_swiglu(const uint16_t *x, const Hy4ExpertProjection *matrices,
                                                             const Hy4Route *routes, const Hy4ExpertBatch *batches,
-                                                            int8_t *codes, float *scales, float *partial0,
+                                                            int8_t *codes, float *scales, int8_t *codes1, float *scales1, float *partial0,
                                                             float *partial1, uint16_t *out, int rows,
                                                             int num_batches, int mixed) {
-    if (!x || !matrices || !routes || !batches || !codes || !scales || !partial0 || !partial1 || !out ||
+    if (!x || !matrices || !routes || !batches || !codes || !scales || !codes1 || !scales1 || !partial0 || !partial1 || !out ||
         rows < 1 || rows > 65535 || num_batches < 1 || num_batches > rows)
         return hipErrorInvalidValue;
-    rotate_input<<<dim3(12, rows), 32>>>(x, nullptr, codes, scales, 1536, 1536, matrices, 3, routes);
+    rotate_input<<<dim3(12, rows, 2), 32>>>(x, nullptr, codes, scales, 1536, 1536, matrices, 3, routes, codes1, scales1);
     auto status = hipGetLastError();
     if (status != hipSuccess)
         return status;
     if (mixed)
-        expert_batch16_pair<true><<<dim3(96, num_batches), 256>>>(codes, scales, matrices, routes, batches,
+        expert_batch16_pair<true><<<dim3(96, num_batches), 256>>>(codes, scales, codes1, scales1, matrices, routes, batches,
                                                                   partial0, partial1);
     else
-        expert_batch16_pair<false><<<dim3(96, num_batches), 256>>>(codes, scales, matrices, routes, batches,
+        expert_batch16_pair<false><<<dim3(96, num_batches), 256>>>(codes, scales, codes1, scales1, matrices, routes, batches,
                                                                    partial0, partial1);
     status = hipGetLastError();
     if (status != hipSuccess)

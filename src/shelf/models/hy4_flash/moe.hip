@@ -172,16 +172,18 @@ Mat moe(Ops &op, int layer, Mat x) {
             size_t mark = rank.arena.cursor;
             auto codes = static_cast<int8_t *>(rank.arena.next(size_t(count) * 1536));
             auto scales = static_cast<float *>(rank.arena.next(size_t(count) * 12 * 4));
+            auto codes1 = static_cast<int8_t *>(rank.arena.next(size_t(count) * 1536));
+            auto scales1 = static_cast<float *>(rank.arena.next(size_t(count) * 12 * 4));
             auto partial0 = static_cast<float *>(rank.arena.next(size_t(count) * 1536 * 4));
             auto partial1 = static_cast<float *>(rank.arena.next(size_t(count) * 1536 * 4));
             activation = rank.mat(count, 1536);
             auto desc = rank.gpu.matrices[rank.rank] + (layer - 1) * 1536;
             if (batches)
-                checked(shelf_hy4_expert_batch_gate_up_swiglu(a.p, desc, gpu_routes, batches, codes, scales,
+                checked(shelf_hy4_expert_batch_gate_up_swiglu(a.p, desc, gpu_routes, batches, codes, scales, codes1, scales1,
                                                               partial0, partial1, activation.p, count,
                                                               num_batches, rank.gpu.model.mixed));
             else
-                checked(shelf_hy4_expert_gate_up_swiglu(a.p, desc, 3, codes, scales, partial0, partial1,
+                checked(shelf_hy4_expert_gate_up_swiglu(a.p, desc, 3, codes, scales, codes1, scales1, partial0, partial1,
                                                         activation.p, count, gpu_routes, rank.gpu.model.mixed));
             rank.arena.cursor = mark;
         } else {

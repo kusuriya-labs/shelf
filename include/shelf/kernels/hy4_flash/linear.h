@@ -29,14 +29,14 @@ extern "C" hipError_t shelf_hy4_expert_linear(const uint16_t *x, const Hy4Expert
                                               const Hy4ExpertBatch *batches = nullptr, int num_batches = 0,
                                               int wmma = 0, int mixed = 0);
 extern "C" hipError_t shelf_hy4_expert_gate_up_swiglu(const uint16_t *x, const Hy4ExpertProjection *matrices,
-                                                      int stride, int8_t *codes, float *scales, float *partial0,
+                                                      int stride, int8_t *codes, float *scales, int8_t *codes1, float *scales1, float *partial0,
                                                       float *partial1, uint16_t *out, int rows,
                                                       const Hy4Route *routes, int mixed);
 extern "C" hipError_t shelf_hy4_expert_batch_gate_up_swiglu(const uint16_t *x,
                                                             const Hy4ExpertProjection *matrices,
                                                             const Hy4Route *routes,
                                                             const Hy4ExpertBatch *batches, int8_t *codes,
-                                                            float *scales, float *partial0, float *partial1,
+                                                            float *scales, int8_t *codes1, float *scales1, float *partial0, float *partial1,
                                                             uint16_t *out, int rows, int num_batches, int mixed);
 
 hipError_t shelf_hy4_head(const uint16_t *x, const uint16_t *suh, const uint16_t *svh, const uint32_t *trellis,
