@@ -187,6 +187,53 @@ batched 経路の score が bit 一致し、top-k と mask も一致すること
 残りは Top-k の全域再走査削減（Phase 4）、attention / key-cache の launch 集約、
 長文コンテキスト測定である。
 
+### 長文 Top-k の再走査を radix union select に置き換えた（Phase 4）
+
+計測は `shelf-bench qsa-select`（score と top-k を分離、rows × blocks × top_k）で行う。
+blocks は context / compress_ratio であり、16384 / 32768 / 65536 が 65K / 131K / 262K 相当。
+
+baseline（rows=1、compress=4、top_k=512）:
+
+| blocks | score | top-k（旧） |
+| ---: | ---: | ---: |
+| 16384 | 41 us | 2,707 us |
+| 32768 | 81 us | 2,879 us |
+| 65536 | 161 us | 2,991 us |
+
+ボトルネックは top-k が top_k 依存で O(k^2) 的に伸びることで、複数ウィンドウ時の
+per-call bitonic sort + merge が原因だった。単一ウィンドウの `select_once` 経路は
+top_k=512 / 8192 blocks で 168 us であり、複数ウィンドウ経路とは 16 倍の差があった。
+
+変更:
+
+- 直前 shortlist と新ウィンドウ候補の和集合から top-k を選ぶ `qsa_union_select` を追加。
+  値の 8-bit radix を 4 pass、同点は block index の 8-bit radix を 4 pass（上位から）
+  で解決し、gather で候補を書き出す。算術（score）は変更しない。
+- 候補数が k 未満のときは全候補を選ぶ（radix を回さない）。
+- mask の `atomicOr` は `block < args.blocks` を防御する。
+- 旧 sort + merge 経路は `QsaTopkArgs::legacy_merge`（bench `--legacy-merge 1`）で
+  比較用に残す。実測 crossover が top_k 128 と 256 の間にあるため、
+  `top_k >= 256` で union select、`top_k < 256` では旧経路を dispatch する。
+
+計測（rows=1、blocks=65536）:
+
+| top_k | 旧 sort+merge | 新 union select | 比 |
+| ---: | ---: | ---: | ---: |
+| 64 | 356 us | 357 us（旧経路） | 同等 |
+| 128 | 517 us | 523 us（旧経路） | 同等 |
+| 256 | 934 us | 714 us | 1.31x |
+| 512 | 2,960 us | 991 us | 2.99x |
+| 1024 | 10,425 us | 1,424 us | 7.3x |
+
+65K / 131K（top_k=512）は 2,707 → 498 us（5.4x）、2,879 → 659 us（4.4x）。
+バッチ行数を増やしても非悪化（65K 相当、top_k=512: rows=8 で 3,092 → 1,161 us、
+rows=64 で 3,675 → 1,952 us）。モデルの `indexer_budget=2048`、compress=4 から
+production の top_k は 512 である。
+
+正しさは `tests/unit/test_qsa_select.cpp` の CPU reference 一致（selected と mask）で
+確認する。複数ウィンドウ（2 / 5 tile）、8192 / 8193 / 12000 / 16384 / 20000 blocks、
+同点、top_k 512 のケースを追加した。required 226/226、MTP safe 9/9、fused 10/10。
+
 ## 6. 残課題
 
 - `R=8, K=7` の 64 行 1 forward fused verify は成立した（`max_verify_per_round=1`）。
@@ -194,4 +241,5 @@ batched 経路の score が bit 一致し、top-k と mask も一致すること
 - 行数依存の算術切替は BF16 selector と EXL3 split-K の 2 箇所で解消した。
 - Wavefront 4 request chunk は prompt によって target-only と分岐するため opt-in のまま。
 - QSA score の multi-request launch 集約は完了（2.57x 削減、score bit 一致）。
-- Top-k の全域再走査削減、attention / key-cache の launch 集約、長文測定は未着手。
+- Top-k の全域再走査削減は完了（262K 相当で 2.99x、top_k=1024 で 7.3x）。
+- attention / key-cache の launch 集約、長文コンテキストの end-to-end 測定は未着手。

@@ -20,6 +20,7 @@ int run_gdn_conv1d(int argc, char** argv);
 int run_elementwise(int argc, char** argv);
 int run_embedding(int argc, char** argv);
 int run_sampling(int argc, char** argv);
+int run_qsa_select(int argc, char** argv);
 int run_gpu_memory(int argc, char** argv);
 
 namespace {
@@ -55,6 +56,7 @@ void usage() {
     std::printf("  elementwise        Qwen elementwise benchmark\n");
     std::printf("  embedding          embedding lookup benchmark\n");
     std::printf("  sampling           greedy argmax sampling benchmark\n");
+    std::printf("  qsa-select         QSA score / top-k micro-benchmark\n");
     std::printf("\n");
     std::printf("Memory:\n");
     std::printf("  tp-reduce            tp sum_hidden transport microbenchmark\n");
@@ -95,6 +97,7 @@ int main(int argc, char** argv) {
     if (sub == "elementwise") return run_elementwise(argc - 1, argv + 1);
     if (sub == "embedding") return run_embedding(argc - 1, argv + 1);
     if (sub == "sampling") return run_sampling(argc - 1, argv + 1);
+    if (sub == "qsa-select") return run_qsa_select(argc - 1, argv + 1);
     if (sub == "gpu-memory") return run_gpu_memory(argc - 1, argv + 1);
     if (sub == "tp-reduce") return run_tp_reduce(argc - 1, argv + 1);
     std::fprintf(stderr, "unknown subcommand: %s\n", sub.c_str());

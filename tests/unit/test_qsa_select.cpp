@@ -759,6 +759,26 @@ int main() {
                   .max_sequences = 1u},
                  true, 2u);
 
+    run_scenario({.label = "blocks 16384 / compress 4 / split 2 tiles / top_k 512",
+                  .blocks = 16384u,
+                  .compress = 4u,
+                  .heads = 4u,
+                  .top_k = 512u,
+                  .positions = {65535u, 65532u, 2047u, 4096u, 40u},
+                  .row_slots = {0u, 0u, 0u, 0u, 0u},
+                  .max_sequences = 1u},
+                 true, 2u);
+
+    run_scenario({.label = "blocks 20000 / compress 4 / split 5 tiles / top_k 512",
+                  .blocks = 20000u,
+                  .compress = 4u,
+                  .heads = 4u,
+                  .top_k = 512u,
+                  .positions = {79999u, 79996u, 80000u, 12345u, 0u},
+                  .row_slots = {0u, 0u, 0u, 0u, 0u},
+                  .max_sequences = 1u},
+                 true, 5u);
+
     run_scenario({.label = "blocks 12000 / compress 4 / split 3 tiles",
                   .blocks = 12000u,
                   .compress = 4u,

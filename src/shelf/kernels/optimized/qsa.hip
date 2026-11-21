@@ -521,6 +521,121 @@ __device__ void qsa_radix_select(const float* scores, uint32_t usable, uint32_t 
     __syncthreads();
 }
 
+// Selects the top `k` entries of [0, count) ordered by (value desc, block index asc).
+// Used for the multi-window top-k: the previous shortlist and the new window candidates
+// are concatenated, so the result does not need a bitonic sort per window.
+__device__ void qsa_union_select(const float* values, const std::int32_t* block_index,
+                                 uint32_t count, uint32_t k, uint32_t* hist,
+                                 uint32_t* state, float* out_values,
+                                 std::int32_t* out_indices) {
+    const uint32_t t = threadIdx.x;
+    const uint32_t stride = blockDim.x;
+    if (t == 0u) state[3] = 0u;
+    __syncthreads();
+    for (uint32_t i = t; i < count; i += stride) {
+        if (block_index[i] >= 0) atomicAdd(&state[3], 1u);
+    }
+    __syncthreads();
+    const uint32_t valid = state[3];
+    if (k >= valid) {
+        if (t == 0u) state[3] = 0u;
+        __syncthreads();
+        for (uint32_t i = t; i < count; i += stride) {
+            if (block_index[i] < 0) continue;
+            const uint32_t pos = atomicAdd(&state[3], 1u);
+            out_values[pos] = values[i];
+            out_indices[pos] = block_index[i];
+        }
+        __syncthreads();
+        return;
+    }
+    uint32_t rank = k;
+    uint32_t prefix = 0u;
+    uint32_t above = 0u;
+    for (uint32_t pass = 0u; pass < 4u; ++pass) {
+        const uint32_t shift = 24u - 8u * pass;
+        for (uint32_t i = t; i < 256u; i += stride) hist[i] = 0u;
+        __syncthreads();
+        for (uint32_t i = t; i < count; i += stride) {
+            if (block_index[i] < 0) continue;
+            const uint32_t key = qsa_radix_key(values[i]);
+            if (pass == 0u || (key >> (shift + 8u)) == (prefix >> (shift + 8u)))
+                atomicAdd(&hist[(key >> shift) & 0xFFu], 1u);
+        }
+        __syncthreads();
+        if (t == 0u) {
+            uint32_t acc = 0u;
+            uint32_t bucket = 0u;
+            for (int b = 255; b >= 0; --b) {
+                const uint32_t bucket_count = hist[static_cast<uint32_t>(b)];
+                if (acc + bucket_count >= rank) {
+                    bucket = static_cast<uint32_t>(b);
+                    break;
+                }
+                acc += bucket_count;
+            }
+            state[0] = bucket;
+            state[1] = acc;
+            state[2] = rank - acc;
+        }
+        __syncthreads();
+        above += state[1];
+        rank = state[2];
+        prefix |= state[0] << shift;
+        __syncthreads();
+    }
+    const float threshold = qsa_radix_value(prefix);
+    uint32_t need = k - above;
+    uint32_t index_prefix = 0u;
+    for (uint32_t pass = 0u; pass < 4u && need != 0u; ++pass) {
+        const uint32_t shift = 24u - 8u * pass;
+        for (uint32_t i = t; i < 256u; i += stride) hist[i] = 0u;
+        __syncthreads();
+        for (uint32_t i = t; i < count; i += stride) {
+            if (block_index[i] < 0 || values[i] != threshold) continue;
+            const uint32_t index = static_cast<uint32_t>(block_index[i]);
+            if (pass != 0u && (index >> (shift + 8u)) != (index_prefix >> (shift + 8u)))
+                continue;
+            atomicAdd(&hist[(index >> shift) & 0xFFu], 1u);
+        }
+        __syncthreads();
+        if (t == 0u) {
+            uint32_t acc = 0u;
+            uint32_t bucket = 0u;
+            for (uint32_t b = 0u; b < 256u; ++b) {
+                const uint32_t bucket_count = hist[b];
+                if (acc + bucket_count >= need) {
+                    bucket = b;
+                    break;
+                }
+                acc += bucket_count;
+            }
+            state[0] = bucket;
+            state[1] = need - acc;
+        }
+        __syncthreads();
+        index_prefix |= state[0] << shift;
+        need = state[1];
+        __syncthreads();
+    }
+    if (t == 0u) state[3] = 0u;
+    __syncthreads();
+    for (uint32_t i = t; i < count; i += stride) {
+        const std::int32_t index = block_index[i];
+        if (index < 0) continue;
+        const float value = values[i];
+        if (value > threshold ||
+            (value == threshold && static_cast<uint32_t>(index) <= index_prefix)) {
+            const uint32_t pos = atomicAdd(&state[3], 1u);
+            if (pos < k) {
+                out_values[pos] = value;
+                out_indices[pos] = index;
+            }
+        }
+    }
+    __syncthreads();
+}
+
 __global__ __launch_bounds__(kQsaTopkMaxThreads) void qsa_topk_kernel(QsaTopkArgs args) {
     const uint32_t row = blockIdx.x;
     if (row >= args.rows) return;
@@ -538,6 +653,11 @@ __global__ __launch_bounds__(kQsaTopkMaxThreads) void qsa_topk_kernel(QsaTopkArg
     float* scores = reinterpret_cast<float*>(qsa_topk_dynamic);
     int32_t* indices =
         reinterpret_cast<int32_t*>(qsa_topk_dynamic + count * sizeof(float));
+    float* out_scores = reinterpret_cast<float*>(
+        qsa_topk_dynamic + count * (sizeof(float) + sizeof(int32_t)));
+    int32_t* out_indices = reinterpret_cast<int32_t*>(
+        qsa_topk_dynamic + count * (sizeof(float) + sizeof(int32_t)) +
+        half * sizeof(float));
     const uint32_t visible = [] (uint32_t position, uint32_t compress, uint32_t blocks) {
         const uint32_t complete = (position + 1u) / compress;
         return complete < blocks ? complete : blocks;
@@ -577,8 +697,24 @@ __global__ __launch_bounds__(kQsaTopkMaxThreads) void qsa_topk_kernel(QsaTopkArg
                 args.block_begin);
         }
 
-        qsa_sort_candidates_ascending(scores, indices, half, half);
-        qsa_merge_descending(scores, indices, count);
+        if (args.legacy_merge != 0u || top_k < kQsaTopkUnionSelectMinTopK) {
+            qsa_sort_candidates_ascending(scores, indices, half, half);
+            qsa_merge_descending(scores, indices, count);
+        } else {
+            const uint32_t keep = args.last != 0u ? block_max : half;
+            for (uint32_t i = t; i < half; i += kQsaThreads) {
+                out_scores[i] = -INFINITY;
+                out_indices[i] = -1;
+            }
+            __syncthreads();
+            qsa_union_select(scores, indices, count, keep, hist, radix_state,
+                             out_scores, out_indices);
+            for (uint32_t i = t; i < half; i += kQsaThreads) {
+                scores[i] = out_scores[i];
+                indices[i] = out_indices[i];
+            }
+            __syncthreads();
+        }
 
         if (args.last == 0u) {
             for (uint32_t i = t; i < half; i += kQsaThreads) {
@@ -615,7 +751,7 @@ __global__ __launch_bounds__(kQsaTopkMaxThreads) void qsa_topk_kernel(QsaTopkArg
     __syncthreads();
     for (uint32_t i = t; i < block_max; i += kQsaThreads) {
         const uint32_t block = static_cast<uint32_t>(indices[i]);
-        atomicOr(&words[block / 32u], 1u << (block % 32u));
+        if (block < args.blocks) atomicOr(&words[block / 32u], 1u << (block % 32u));
     }
     const uint32_t complete = (args.positions[row] + 1u) / args.compress_ratio;
     if (t == 0u && complete < args.blocks)
@@ -724,7 +860,7 @@ hipError_t launch_qsa_topk(const QsaTopkArgs& args, hipStream_t stream) {
     uint32_t half = kQsaSelectChunk;
     while (half < args.top_k) half <<= 1u;
     const std::size_t dynamic_bytes =
-        2u * static_cast<std::size_t>(half) *
+        3u * static_cast<std::size_t>(half) *
         (sizeof(float) + sizeof(std::int32_t));
     const uint32_t threads = args.rows <= kQsaTopkSmallRows
                                  ? kQsaTopkMaxThreads

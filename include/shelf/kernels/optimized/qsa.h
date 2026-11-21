@@ -31,6 +31,10 @@ inline constexpr uint32_t kQsaTopkSmallRows = 32u;
 inline constexpr uint32_t kQsaSelectChunk = 64u;
 inline constexpr uint32_t kQsaSelectMaxHeads = 8u;
 inline constexpr uint32_t kQsaSelectMaxTopK = 1024u;
+// Multi-window top-k keeps the bitonic sort + merge below this budget: measured on R9700 at
+// 65536 blocks, the radix union select is 1.33x/1.19x slower at top_k 64/128 and 1.31x/2.93x
+// faster at 256/512.
+inline constexpr uint32_t kQsaTopkUnionSelectMinTopK = 256u;
 inline constexpr uint32_t kQsaScoreRowTile = 2048u;
 inline constexpr uint32_t kQsaScoreBlockTile = 8192u;
 inline constexpr uint32_t kQsaScoreRowsPerCta = 16u;
@@ -127,6 +131,9 @@ struct QsaTopkArgs {
     uint32_t selected_row_stride = 0;
     uint32_t first = 0;
     uint32_t last = 0;
+    // 0: select the top-k of the previous shortlist and the new window candidates with a
+    // radix select. 1: keep the previous bitonic sort + merge path (reference for tests).
+    uint32_t legacy_merge = 0;
 };
 
 // One launch covers every staged request slice of a (row tile, block tile) window.
