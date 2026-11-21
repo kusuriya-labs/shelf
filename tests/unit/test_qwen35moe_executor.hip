@@ -162,6 +162,83 @@ bool run_rounds(q35::Executor& ex, st::PagedSequenceState& seq, hipStream_t stre
     return true;
 }
 
+void test_graph_masks(q35::Executor& ex, st::SequenceSlotPool& seq_pool,
+                      st::GdnStatePool& gdn_pool, st::PagedKVPool& kv_pool,
+                      shelf::gpu::GpuArena&, hipStream_t stream) {
+    constexpr uint32_t words = (107520u + 31u) / 32u;
+    constexpr uint32_t stride = words + 3u;
+    uint32_t* masks[2] = {};
+    if (hipMalloc(&masks[0], 10u * stride * sizeof(uint32_t)) != hipSuccess ||
+        hipMalloc(&masks[1], 10u * stride * sizeof(uint32_t)) != hipSuccess) {
+        check(false, "graph mask allocation");
+        if (masks[0]) (void)hipFree(masks[0]);
+        if (masks[1]) (void)hipFree(masks[1]);
+        return;
+    }
+    ::setenv("SHELF_GRAPH_VERIFY", "1", 1);
+    for (uint32_t scenario = 0; scenario < 4u; ++scenario) {
+        const uint32_t rows = scenario == 1u ? 8u : (scenario == 2u ? 10u : 1u);
+        const bool masked = scenario != 3u;
+        hipGraphExec_t captured = nullptr;
+        for (uint32_t step = 0; step < 5u; ++step) {
+            auto seq_result = st::create_paged_sequence_state(seq_pool, gdn_pool, kv_pool, 128u, stream);
+            if (!seq_result.ok()) { check(false, "graph sequence allocation"); break; }
+            auto seq = seq_result.release();
+            std::vector<int32_t> input(rows, 7);
+            std::vector<rt::ScheduledRequest> requests;
+            auto batch = make_batch(seq, requests, input.data(), rows, rows);
+            if (rows > 1u) {
+                requests[0].execution_class = rt::ExecutionClass::SPEC_VERIFY;
+                batch.num_prefill_requests = 0u;
+                batch.num_verify_requests = 1u;
+                batch.speculative_verify = true;
+            }
+            std::vector<uint32_t> host(rows * stride, 0u);
+            for (uint32_t row = 0; row < rows; ++row) {
+                const uint32_t token = 11u + step * 13u + row;
+                host[row * stride + token / 32u] |= 1u << (token % 32u);
+            }
+            check(hipMemcpyAsync(masks[step % 2u], host.data(), host.size() * sizeof(uint32_t),
+                                 hipMemcpyHostToDevice, stream) == hipSuccess, "graph mask upload");
+            if (masked) {
+                requests[0].token_bitmask = masks[step % 2u];
+                requests[0].token_bitmask_row_stride = rows == 1u ? 0u : stride;
+            }
+            q35::ExecuteBatchOptions options;
+            if (rows > 1u) {
+                options.gdn_spec_history.recurrent_history = reinterpret_cast<st::GdnStateScalar*>(masks[0]);
+                options.gdn_spec_history.capture_rows = rows;
+            }
+            auto result = q35::execute_batch(ex, batch, stream, options);
+            if (!result.ok()) {
+                check(false, "graph execute: " + result.status().message());
+                (void)st::release_paged_sequence_state(seq, stream);
+                break;
+            }
+            auto output = result.release();
+            std::vector<int32_t> sampled(rows, -1);
+            check(hipMemcpy(sampled.data(), output.sampled_tokens.data<int32_t>(),
+                            rows * sizeof(int32_t), hipMemcpyDeviceToHost) == hipSuccess,
+                  "graph sampled readback");
+            for (uint32_t row = 0; masked && row < rows; ++row)
+                check(sampled[row] == static_cast<int32_t>(11u + step * 13u + row),
+                      "graph mask output rows=" + std::to_string(rows) + " step=" + std::to_string(step));
+            const auto& slot = ex.graph_cache[0];
+            if (step == 2u) {
+                check(slot.valid && slot.has_token_bitmask == static_cast<uint8_t>(masked) && slot.token_count == rows,
+                      "graph mask capture rows=" + std::to_string(rows));
+                captured = slot.exec;
+            } else if (step > 2u) {
+                check(captured != nullptr && slot.valid && slot.exec == captured,
+                      "graph mask replay rows=" + std::to_string(rows));
+            }
+            (void)st::release_paged_sequence_state(seq, stream);
+        }
+    }
+    check(hipFree(masks[0]) == hipSuccess, "graph mask free 0");
+    check(hipFree(masks[1]) == hipSuccess, "graph mask free 1");
+}
+
 }  // namespace
 
 int main() {
@@ -224,6 +301,45 @@ int main() {
     st::SequenceSlotPool seq_pool = seq_pool_result.release();
     st::GdnStatePool gdn_pool = gdn_pool_result.release();
     st::PagedKVPool kv_pool = kv_pool_result.release();
+
+    {
+        Fixture graph_fixture;
+        if (!write_fixture(graph_fixture, root / "graph", false, true, kInter, kInter,
+                           false, true, 107520u)) {
+            check(false, "graph fixture write");
+        } else {
+            auto graph_model_result = shelf::models::LoadedModel::load(
+                (root / "graph").string(), gpu_arena, stream);
+            if (!graph_model_result.ok()) {
+                check(false, "graph fixture load: " + graph_model_result.status().message());
+            } else {
+                auto graph_model = graph_model_result.release();
+                q35::ExecutorConfig config;
+                config.max_batch_rows = 16u;
+                config.max_scheduled_requests = 1u;
+                config.max_scheduled_output_rows = 10u;
+                auto graph_gdn_result = st::GdnStatePool::create(
+                    gpu_arena, 2u, q35::make_qwen35_gdn_state_layout(graph_model.hybrid_config()));
+                auto graph_kv_result = st::PagedKVPool::create(
+                    gpu_arena, num_pages, page_tokens, 2u, kv_heads, head_dim,
+                    shelf::kernel::KVCacheDType::BF16);
+                if (!graph_gdn_result.ok() || !graph_kv_result.ok()) {
+                    check(false, "graph pool create");
+                    return 1;
+                }
+                auto graph_gdn = graph_gdn_result.release();
+                auto graph_kv = graph_kv_result.release();
+                auto graph_executor = graph_model.create_executor(seq_pool, graph_gdn, graph_kv, gpu_arena, config);
+                if (!graph_executor.ok()) {
+                    check(false, "graph executor create: " + graph_executor.status().message());
+                } else {
+                    auto ex = graph_executor.release();
+                    test_graph_masks(ex, seq_pool, graph_gdn, graph_kv, gpu_arena, stream);
+                    check(q35::executor_shutdown(ex).ok(), "graph executor shutdown");
+                }
+            }
+        }
+    }
 
     auto make_prompt = [](uint32_t count) {
         std::vector<int32_t> ids(count);

@@ -75,9 +75,9 @@ struct Fixture {
 
 inline shelf::qwen35moe::Qwen35MoeTextConfig text_config(
     std::uint32_t shared_inter = kInter, std::uint32_t inter = kInter,
-    bool all_attention = false) {
+    bool all_attention = false, std::size_t vocab = kVocab) {
     shelf::qwen35moe::Qwen35MoeTextConfig c;
-    c.vocab_size = 1024;
+    c.vocab_size = vocab;
     c.hidden_size = kHidden;
     c.num_hidden_layers = kLayers;
     c.ffn.num_experts = kExperts;
@@ -101,9 +101,12 @@ inline shelf::qwen35moe::Qwen35MoeTextConfig text_config(
 }
 
 inline std::string config_json(std::uint32_t shared_inter = kInter,
-                                std::uint32_t inter = kInter, bool all_attention = false) {
+                                std::uint32_t inter = kInter, bool all_attention = false,
+                                std::size_t vocab = kVocab) {
     std::string json = R"json({"model_type":"qwen3_5_moe","tie_word_embeddings":false,"text_config":{)json";
-    json += R"json("model_type":"qwen3_5_moe_text","vocab_size":1024,"hidden_size":)json";
+    json += R"json("model_type":"qwen3_5_moe_text","vocab_size":)json";
+    json += std::to_string(vocab);
+    json += R"json(,"hidden_size":)json";
     json += std::to_string(kHidden);
     json += R"json(,"num_hidden_layers":)json";
     json += std::to_string(kLayers);
@@ -325,9 +328,9 @@ inline void add_mtp_tensors(std::vector<PlannedTensor>& planned, Fixture& f,
 inline bool write_fixture(Fixture& f, const fs::path& dir, bool with_nan_byte = false,
                           bool model_level = false, std::uint32_t shared_inter = kInter,
                           std::uint32_t inter = kInter, bool with_mtp = false,
-                          bool all_attention = false) {
+                          bool all_attention = false, std::size_t vocab = kVocab) {
     f.dir = dir;
-    f.config = text_config(shared_inter, inter, all_attention);
+    f.config = text_config(shared_inter, inter, all_attention, vocab);
     f.mtp = with_mtp;
     std::error_code ec;
     fs::create_directories(dir, ec);
@@ -335,9 +338,9 @@ inline bool write_fixture(Fixture& f, const fs::path& dir, bool with_nan_byte = 
     std::vector<PlannedTensor> planned;
     if (model_level) {
         planned.push_back({"model.language_model.embed_tokens.weight", shelf::io::SType::BF16,
-                           {kVocab, kHidden}, make_bf16(kVocab * kHidden, 3u)});
+                           {vocab, kHidden}, make_bf16(vocab * kHidden, 3u)});
         planned.push_back({"model.language_model.lm_head.weight", shelf::io::SType::BF16,
-                           {kVocab, kHidden}, make_bf16(kVocab * kHidden, 5u)});
+                           {vocab, kHidden}, make_bf16(vocab * kHidden, 5u)});
         planned.push_back({"model.language_model.norm.weight", shelf::io::SType::BF16, {kHidden},
                            make_bf16(kHidden, 11u)});
     }
@@ -399,7 +402,7 @@ inline bool write_fixture(Fixture& f, const fs::path& dir, bool with_nan_byte = 
         return false;
 
     std::ofstream cfg(dir / "config.json", std::ios::binary | std::ios::trunc);
-    cfg << config_json(shared_inter, inter, all_attention);
+    cfg << config_json(shared_inter, inter, all_attention, vocab);
     return cfg.good();
 }
 

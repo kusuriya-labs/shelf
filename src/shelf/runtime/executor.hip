@@ -1040,7 +1040,6 @@ Result<PendingBatch> submit_co_batch(
                   exec_role == ::shelf::runtime::ExecutionRole::Decode)
                : ((R == 1u && N == 1u && exec_role == ::shelf::runtime::ExecutionRole::Decode) ||
                   verify_graph)) &&
-        !prep.has_token_bitmask &&
         executor.tp_schedules.empty() &&
         N > 0 &&
         graph_slot_idx >= 0 &&
@@ -1069,6 +1068,40 @@ Result<PendingBatch> submit_co_batch(
                 executor, *program, N, max_visible_tokens, attn_use_prefill,
                 attention_plan_key))
             graph_active = false;
+    }
+    if (graph_active && prep.has_token_bitmask) {
+        const size_t words = (static_cast<size_t>(executor.model.config->vocab_size) + 31u) / 32u;
+        for (uint32_t i = 0; i < R; ++i) {
+            const auto& sampling = staging[i].sampling;
+            if (sampling.token_bitmask != nullptr && sampling.token_bitmask_row_stride != 0u &&
+                sampling.token_bitmask_row_stride < words) {
+                shelf::gpu::discard_cleanup_result(hipEventDestroy(done));
+                return on_error(Status::invalid_argument("token bitmask row stride is too small", __FILE__, __LINE__));
+            }
+        }
+        if (executor.graph_token_bitmask_staging == nullptr) {
+            const hipError_t err = hipMalloc(&executor.graph_token_bitmask_staging,
+                words * executor.config.max_scheduled_output_rows * sizeof(uint32_t));
+            if (err != hipSuccess) {
+                shelf::gpu::discard_cleanup_result(hipEventDestroy(done));
+                return on_error(Status::hip_error("hipMalloc graph token bitmask", hipGetErrorString(err), __FILE__, __LINE__));
+            }
+        }
+        for (uint32_t i = 0; i < R; ++i) {
+            auto& sampling = staging[i].sampling;
+            if (sampling.token_bitmask == nullptr) continue;
+            uint32_t* dst = executor.graph_token_bitmask_staging + staging[i].output_index * words;
+            const size_t rows = sampling.token_bitmask_row_stride == 0u ? 1u : staging[i].output_count;
+            const size_t src_pitch = sampling.token_bitmask_row_stride == 0u ? words : sampling.token_bitmask_row_stride;
+            const hipError_t err = hipMemcpy2DAsync(dst, words * sizeof(uint32_t), sampling.token_bitmask,
+                src_pitch * sizeof(uint32_t), words * sizeof(uint32_t), rows, hipMemcpyDeviceToDevice, stream);
+            if (err != hipSuccess) {
+                shelf::gpu::discard_cleanup_result(hipEventDestroy(done));
+                return on_error(Status::hip_error("hipMemcpy2DAsync graph token bitmask", hipGetErrorString(err), __FILE__, __LINE__));
+            }
+            sampling.token_bitmask = dst;
+            if (sampling.token_bitmask_row_stride != 0u) sampling.token_bitmask_row_stride = static_cast<uint32_t>(words);
+        }
     }
     const uint8_t graph_exec_role = static_cast<uint8_t>(exec_role);
     const uint8_t graph_has_spec_history =
@@ -1176,6 +1209,7 @@ Result<PendingBatch> submit_co_batch(
                 gslot->attention_plan_key == attention_plan_key &&
                 gslot->exec_role == graph_exec_role &&
                 gslot->has_spec_history == graph_has_spec_history &&
+                gslot->has_token_bitmask == static_cast<uint8_t>(prep.has_token_bitmask) &&
                 gslot->capture_rows == graph_capture_rows &&
                 gslot->gdn_conv_history == graph_gdn_conv_history &&
                 gslot->gdn_recurrent_history == graph_gdn_recurrent_history &&
@@ -1249,6 +1283,7 @@ Result<PendingBatch> submit_co_batch(
                             gslot->attention_plan_key = attention_plan_key;
                             gslot->exec_role = graph_exec_role;
                             gslot->has_spec_history = graph_has_spec_history;
+                            gslot->has_token_bitmask = static_cast<uint8_t>(prep.has_token_bitmask);
                             gslot->capture_rows = graph_capture_rows;
                             gslot->gdn_conv_history = graph_gdn_conv_history;
                             gslot->gdn_recurrent_history = graph_gdn_recurrent_history;
@@ -1398,6 +1433,7 @@ Executor::Executor(Executor&& other) noexcept
       program_staging_meta(std::move(other.program_staging_meta)),
       graph_cache(other.graph_cache),
       dflash_verify_graph_cache(other.dflash_verify_graph_cache),
+      graph_token_bitmask_staging(other.graph_token_bitmask_staging),
       host_token_graph_staging(other.host_token_graph_staging),
       host_token_graph_staging_bytes(other.host_token_graph_staging_bytes),
       host_ctx_graph_staging(other.host_ctx_graph_staging),
@@ -1458,6 +1494,7 @@ Executor::Executor(Executor&& other) noexcept
     other.program_staging_meta.clear();
     other.graph_cache = {};
     other.dflash_verify_graph_cache = {};
+    other.graph_token_bitmask_staging = nullptr;
     other.host_token_graph_staging = nullptr;
     other.host_token_graph_staging_bytes = 0;
     other.host_ctx_graph_staging = nullptr;
@@ -1559,6 +1596,7 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         other.program_staging_meta.clear();
         graph_cache = other.graph_cache;
         dflash_verify_graph_cache = other.dflash_verify_graph_cache;
+        graph_token_bitmask_staging = other.graph_token_bitmask_staging;
         host_token_graph_staging = other.host_token_graph_staging;
         host_token_graph_staging_bytes = other.host_token_graph_staging_bytes;
         host_ctx_graph_staging = other.host_ctx_graph_staging;
@@ -1609,6 +1647,7 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         other.host_dispatch_staging = nullptr;
         other.graph_cache = {};
         other.dflash_verify_graph_cache = {};
+        other.graph_token_bitmask_staging = nullptr;
         other.host_token_graph_staging = nullptr;
         other.host_token_graph_staging_bytes = 0;
         other.host_ctx_graph_staging = nullptr;
@@ -1651,7 +1690,7 @@ Executor& Executor::operator=(Executor&& other) noexcept {
 
 bool Executor::is_shutdown() const noexcept {
     return host_request_staging == nullptr && host_pending_staging == nullptr &&
-           batch_context == nullptr &&
+           batch_context == nullptr && graph_token_bitmask_staging == nullptr &&
            batch_context_storage.device_struct.allocation_base() == nullptr;
 }
 
@@ -1747,6 +1786,12 @@ Status executor_shutdown(Executor& ex) noexcept {
         }
     }
 #endif
+    if (ex.graph_token_bitmask_staging != nullptr) {
+        const hipError_t err = hipFree(ex.graph_token_bitmask_staging);
+        if (first_error.ok() && err != hipSuccess)
+            first_error = Status::hip_error("hipFree graph_token_bitmask_staging", hipGetErrorString(err), __FILE__, __LINE__);
+        ex.graph_token_bitmask_staging = nullptr;
+    }
     if (ex.host_token_graph_staging != nullptr) {
         hipError_t err = hipHostFree(ex.host_token_graph_staging);
         if (first_error.ok() && err != hipSuccess) {
