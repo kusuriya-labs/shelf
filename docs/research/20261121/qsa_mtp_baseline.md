@@ -317,6 +317,24 @@ request ごとに 1 CTA が行を直列処理）と並列 kernel（`launch_qsa_k
 cr=1 のモデルでは逐次経路を使う必要がある）。`test_qsa_state_pool` /
 `test_qsa_key_path` / `test_qsa_spec_state_replay` は bit 一致のまま PASS。
 
+### 長文コンテキストの end-to-end（TP=2、bf16 KV、EXL3-INT8、greedy）
+
+prefill は `shelf-bench pp`、decode は `shelf-bench tg --mode forward`（context を保持した
+状態で 8 token を生成）で測る。GPU は 0,1 の TP=2。
+
+| context | prefill | prefill tok/s | decode | decode tok/s |
+| ---: | ---: | ---: | ---: | ---: |
+| 4K | 1,376 ms | 2.98K | 30.7 ms/token | 32.6 |
+| 8K | - | - | 29.5 ms/token | 33.9 |
+| 16K | 5,850 ms | 2.80K | 29.6 ms/token | 33.8 |
+| 32K | - | - | 30.6 ms/token | 32.7 |
+| 65K | 25,038 ms | 2.62K | 32.6 ms/token | 30.7 |
+| 131K | - | - | 35.7 ms/token | 28.0 |
+
+prefill は context 4K→65K で 2.98K→2.62K tok/s（-12%）、decode は 8K→131K で
+33.9→28.0 tok/s（-17%）。131K の KV 実使用は 5.6 GiB。QSA の score/top-k/attention は
+この範囲で single forward の 10〜17% 程度に収まっている。
+
 ## 6. 残課題
 
 - `R=8, K=7` の 64 行 1 forward fused verify は成立した（`max_verify_per_round=1`）。
@@ -327,5 +345,7 @@ cr=1 のモデルでは逐次経路を使う必要がある）。`test_qsa_state
 - Top-k の全域再走査削減は完了（262K 相当で 2.99x、top_k=1024 で 7.3x）。
 - QSA sparse attention の K/V 共有は計測の結果不採用、prefill 閾値は 8192 へ再評価した。
 - key cache の短い prefill 並列化は 64 行閾値へ更新した。
-- gather + WMMA prefill 実験、長文 end-to-end 測定、per-request dense bypass（6.2）、
-  QSA の graph-safe 化（6.3）は未着手。
+- 長文 end-to-end は 4K〜131K で測定した（prefill 2.6〜3.0K tok/s、decode 28〜34 tok/s）。
+- gather + WMMA prefill 実験、per-request dense bypass（6.2）、QSA の graph-safe 化（6.3）は未着手。
+  6.3 は「block window を device position から決め、capture 時は pool 容量の固定 grid で
+  empty tile を device guard する」か「bucket graph」が必要で、131K までの step 検証を含む。
