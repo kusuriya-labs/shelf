@@ -555,3 +555,14 @@ target_include_directories(shelf_quant_ngram PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}
 target_include_directories(shelf_quant_ngram SYSTEM PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/vendor")
 target_link_libraries(shelf_quant_ngram PUBLIC shelf_core shelf_io)
 target_compile_options(shelf_quant_ngram PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
+
+find_package(Threads REQUIRED)
+add_library(shelf_ngram_quant_c SHARED
+    src/shelf/quantization/ngram/ngram_c_api.cpp
+    src/shelf/quantization/ngram/ngram.cpp
+    src/shelf/io/safetensors_reader.cpp
+)
+target_compile_features(shelf_ngram_quant_c PRIVATE cxx_std_20)
+target_include_directories(shelf_ngram_quant_c PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(shelf_ngram_quant_c SYSTEM PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/vendor")
+target_link_libraries(shelf_ngram_quant_c PRIVATE hip::host Threads::Threads)

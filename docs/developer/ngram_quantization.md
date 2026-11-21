@@ -107,3 +107,10 @@ loader は使用前に manifest、参照先、全 tensor の内容を検証し�
 ## 拡張
 
 新方式は `codec` ID または `version` を追加して表し、既存の `lloyd-row-f16` 契約を変更しない。
+
+変換・検査には `tools/quantize/ngram_quantize.py` の `convert` / `verify` を使う。
+`--tensor-spec` は `name`, `layer`, `ngram_order`, `head` を持つオブジェクトの JSON 配列、
+`--bits-map` は tensor 名から bit 幅への JSON オブジェクトを指定する。自動検出では
+layer を名前から取得し、次数と head はそれぞれ 1 と 0 に設定するため、実際の構造を
+識別する必要がある場合は `--tensor-spec` で明示する。Python には NumPy、実行時には
+`shelf_ngram_quant_c` 共有ライブラリが必要である。
