@@ -9,7 +9,7 @@
 ## モデル
 
 - ベース: <https://huggingface.co/Qwen/Qwen3.8-27B>
-- 量子化: EXL3-INT8 3.05bpw (重み 9.59 GiB)。**量子化済み重みは未公開**で、公開 URL はまだない。
+- 量子化済み: <https://huggingface.co/kusuriya-labs/Qwen3.8-27B-EXL3-INT8-3.05bpw> (EXL3-INT8 3.05bpw、重み 9.59 GiB)
 
 ## 起動
 
