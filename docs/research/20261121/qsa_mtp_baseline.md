@@ -372,6 +372,37 @@ clamp は device descriptor（score）と device position（topk の `visible`�
 window を pool 容量へ広げた分、短い context では空 tile の CTA が増えるが、上記 e2e で
 有意な悪化は出ていない。required 226/226 PASS。
 
+### 長文 prefill の gather + WMMA 比較（Phase 5.3）
+
+選択 KV を連続バッファへ gather して dense（WMMA）attention を回す案と、masked kernel を
+WMMA に載せる案を、実測と転送量で比較した。geometry はモデルと同じ
+q_heads=24 / kv_heads=2 / head_dim=256 / block=4 token。
+
+dense tiled prefill と同じ token 数での比較（rows=512、2048 visible token = 512 block）:
+
+| 経路 | p50 |
+| --- | ---: |
+| dense tiled prefill（WMMA） | 788 us |
+| sparse masked（scalar、全 block 選択） | 3,055 us |
+
+WMMA 経路は同じ token 数で 3.9 倍速い。ただし masked 経路の選択 block は KV pool 上で
+不連続なので、この差をそのまま使うには masked/gather 側の WMMA 化が要る。
+
+gather 案の転送量: 1 row・1 layer あたり 512 block × 4 token × 256 dim × 2 B ×
+K/V × 2 kv_head = 4.2 MB。prefill 512 row では 1 layer 2.15 GB、12 layer で 25.8 GB。
+R9700 の DRAM 636 GB/s で 40.5 ms かかり、sparse 経路の 12 layer 合計 36.6 ms
+（3.05 ms/layer）より高くつく。dense attention 本体（12 layer 9.5 ms）を足すと
+1.4 倍遅い。**prefill の gather 案は REJECT**。
+
+decode（1 row）では gather が 12 layer で 50 MB = 79 us、dense 14 us の合計 ~93 us で、
+sparse attention の 372 us より軽い。ただし長文 decode の QSA コストは top-k
+（131K で ~6 ms/step）が支配的で、attention phase の改善は全体の ~1% に留まる。
+
+masked WMMA は attention phase で最大 3.9 倍の余地があるが、4 token block を
+不連続ページから MMA tile へ載せる新カーネルが必要になる。F16 への丸めは logits を
+変え得るため optional approximate mode としてのみ追加し、target-only exact の既定は
+変えない（未実装）。
+
 ## 6. 残課題
 
 - `R=8, K=7` の 64 行 1 forward fused verify は成立した（`max_verify_per_round=1`）。
@@ -384,4 +415,5 @@ window を pool 容量へ広げた分、短い context では空 tile の CTA �
 - key cache の短い prefill 並列化は 64 行閾値へ更新した。
 - 長文 end-to-end は 4K〜131K で測定した（prefill 2.6〜3.0K tok/s、decode 28〜34 tok/s）。
 - per-request dense bypass（6.2）と QSA の graph-safe 化（6.3）は実装・検証済み。
-- 長文 prefill の gather + WMMA 実験は未着手（gather は per-row 選択集合のため要検討）。
+- 長文 prefill の gather 案は転送量の実測見積で REJECT。masked WMMA は attention phase
+  で最大 3.9 倍の余地があるが新カーネル実装（optional approximate）が残っている。
