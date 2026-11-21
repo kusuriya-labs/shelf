@@ -49,6 +49,10 @@ struct ComputeOptions {
     bool dflash2_tree_budget_explicit = false;
     bool mtp = false;
     unsigned long mtp_drafts = 7;
+    // Measured default: the acceptance rate is unchanged at 4K/8K/32K while the MTP
+    // prefill and KV reserve drop sharply. --mtp-window 0 restores the full context.
+    unsigned long mtp_window = 4096;
+    unsigned long mtp_sink = 64;
     int mtp_stats = 1;
     int prefix_cache_enabled = 1;
     unsigned long prefix_cache_checkpoints = 16;

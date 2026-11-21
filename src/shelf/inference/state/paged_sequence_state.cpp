@@ -1,6 +1,9 @@
 #include <shelf/inference/state/paged_sequence_state.h>
 #include <hip/hip_runtime.h>
 
+#include <algorithm>
+#include <vector>
+
 namespace shelf {
 namespace state {
 
@@ -9,7 +12,8 @@ Result<PagedSequenceState> create_paged_sequence_state(
     GdnStatePool& recurrent_pool,
     PagedKVPool& kv_pool,
     uint32_t max_seq_len,
-    hipStream_t stream) {
+    hipStream_t stream,
+    uint32_t ring_blocks) {
 
     uint32_t page_tokens = kv_pool.page_tokens();
     if (page_tokens == 0) {
@@ -54,6 +58,46 @@ Result<PagedSequenceState> create_paged_sequence_state(
         return init_result;
     }
 
+    if (ring_blocks != 0u) {
+        // A ring wider than the logical table would acquire pages no table entry aliases.
+        if (ring_blocks > max_blocks_per_seq) ring_blocks = max_blocks_per_seq;
+        if (ring_blocks > kv_pool.num_pages()) {
+            (void)seq_pool.release_handle(handle);
+            return Status::invalid_argument("ring_blocks exceeds the KV pool", __FILE__,
+                                            __LINE__);
+        }
+        std::vector<PageId> ring;
+        ring.reserve(ring_blocks);
+        Status acquire = Status::make_ok();
+        for (uint32_t i = 0; i < ring_blocks; ++i) {
+            auto page = kv_pool.allocate();
+            if (!page.ok()) {
+                acquire = page.status();
+                break;
+            }
+            ring.push_back(page.value());
+        }
+        if (!acquire.ok()) {
+            for (PageId page : ring) (void)kv_pool.release(page);
+            (void)seq_pool.release_handle(handle);
+            return acquire;
+        }
+        state.block_table.resize(max_blocks_per_seq);
+        for (uint32_t i = 0; i < max_blocks_per_seq; ++i)
+            state.block_table[i] = ring[i % ring_blocks];
+        auto device_table = seq_pool.device_block_table(state.slot);
+        const hipError_t err = hipMemcpyAsync(
+            device_table.data<uint32_t>(), state.block_table.data(),
+            static_cast<std::size_t>(max_blocks_per_seq) * sizeof(uint32_t),
+            hipMemcpyHostToDevice, stream);
+        if (err != hipSuccess) {
+            for (PageId page : ring) (void)kv_pool.release(page);
+            (void)seq_pool.release_handle(handle);
+            return Status::hip_error("ring block table upload", hipGetErrorString(err),
+                                     __FILE__, __LINE__);
+        }
+    }
+
     return state;
 }
 
@@ -86,7 +130,11 @@ Status release_paged_sequence_state(PagedSequenceState& seq, hipStream_t stream)
 
     const ::shelf::runtime::RequestHandle handle = seq.request_handle();
 
-    auto release_pages = seq.kv_pool_->release_many(seq.block_table);
+    std::vector<PageId> unique_pages(seq.block_table.begin(), seq.block_table.end());
+    std::sort(unique_pages.begin(), unique_pages.end());
+    unique_pages.erase(std::unique(unique_pages.begin(), unique_pages.end()),
+                       unique_pages.end());
+    auto release_pages = seq.kv_pool_->release_many(unique_pages);
     if (!release_pages.ok()) return release_pages;
 
     auto release_recurrent = seq.recurrent_pool_->release(seq.slot);

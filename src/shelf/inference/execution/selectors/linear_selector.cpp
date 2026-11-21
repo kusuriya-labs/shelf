@@ -241,6 +241,19 @@ select_bf16_gemm_config(const Bf16GemmSelectorInput& input) {
 
     if (input.out_features <= shelf::kernel::kBf16GemmSplitKMaxOutFeatures)
         return shelf::kernel::Bf16GemmConfig{Id::WmmaKPartition, 0u};
+    if (input.allow_exact_rows
+        && input.rows > shelf::kernel::kBf16GemmExactRowsKernelMax
+        && input.rows <= shelf::kernel::kBf16GemmExactRowsMax
+        && input.out_features <= shelf::kernel::kBf16GemmExactRowsChunkNarrowMaxOutFeatures
+        && k_aligned
+        && input.weight_aligned16
+        && input.input_aligned16
+        && (input.input_row_stride & (shelf::kernel::kBf16GemmExactRowStrideAlignment - 1u)) == 0u) {
+        if (input.allow_dot2_rows)
+            return shelf::kernel::Bf16GemmConfig{Id::ExactRowsDot2,
+                                              static_cast<uint8_t>(input.rows)};
+        return shelf::kernel::Bf16GemmConfig{Id::ExactRows, static_cast<uint8_t>(input.rows)};
+    }
     if (input.rows >= shelf::kernel::kBf16GemmWideMinRows)
         return shelf::kernel::Bf16GemmConfig{Id::WmmaWide, 0u};
     return shelf::kernel::Bf16GemmConfig{Id::Wmma, 0u};

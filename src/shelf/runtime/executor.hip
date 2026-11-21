@@ -121,13 +121,23 @@ Status build_host_execution_context(
         if (i == 0u) {
             ctx.external_input_storage[i] = first_stage ? static_cast<void*>(token_ids)
                                                        : pipeline_in;
-        } else {
+        } else if (i == 1u) {
             void* hidden_in = executor.input_hidden.data<void>();
             if (hidden_in == nullptr) {
                 return Status::invalid_state(
                     "external hidden input has no bound buffer", __FILE__, __LINE__);
             }
             ctx.external_input_storage[i] = hidden_in;
+        } else if (i == 2u) {
+            void* mask_in = executor.input_mask.data<void>();
+            if (mask_in == nullptr) {
+                return Status::invalid_state(
+                    "external mask input has no bound buffer", __FILE__, __LINE__);
+            }
+            ctx.external_input_storage[i] = mask_in;
+        } else {
+            return Status::invalid_state("external input has no bound buffer", __FILE__,
+                                         __LINE__);
         }
     }
     for (uint32_t i = 0; i < program.external_output_count; ++i) {
@@ -343,11 +353,9 @@ Status build_host_execution_context(
         executor.stochastic_topk_active_counts.data<uint32_t>();
     ctx.spec.min_visible_tokens = min_visible_tokens;
     ctx.spec.max_visible_tokens = max_visible_tokens;
-    ctx.splitk_tuning_rows =
-        role == ::shelf::runtime::ExecutionRole::Verify
-            ? std::min(executor.config.max_scheduled_output_rows,
-                       ::shelf::kernel::kGdnRecurrenceVerifyBatchRows)
-            : 0u;
+    ctx.splitk_tuning_rows = 0u;
+    ctx.attention_tuning_rows =
+        role == ::shelf::runtime::ExecutionRole::Verify ? 1u : 0u;
     return Status::make_ok();
 }
 
@@ -1029,13 +1037,17 @@ Result<PendingBatch> submit_co_batch(
     const char* plamo_graph_env = std::getenv("SHELF_PLAMO_HIP_GRAPH");
     const bool plamo_graph_enabled = plamo_graph_env == nullptr ||
         (plamo_graph_env[0] != '\0' && std::strcmp(plamo_graph_env, "0") != 0);
-    // QSA select tiles the score/top-k work by the current visible block count, which is
-    // captured in QsaTopkArgs. A graph replay would keep the first decode step's
-    // block_count while positions grow, so qsa_topk would read indices that were never
-    // filled. Keep QSA-active programs out of the graph until the count is device-side.
+    // QSA select tiles the score/top-k work over the pool capacity, so the captured
+    // window, grid and first/last flags do not depend on the step's visible blocks: the
+    // kernels clamp each request from the device descriptor / position. SHELF_QSA_HIP_GRAPH=0
+    // keeps QSA programs out of the graph for A/B checks.
+    static const bool qsa_graph_enabled = [] {
+        const char* env = std::getenv("SHELF_QSA_HIP_GRAPH");
+        return env == nullptr || (env[0] != '\0' && std::strcmp(env, "0") != 0);
+    }();
     const bool graph_eligible =
         !executor.graph_failed &&
-        !program_needs_qsa_workspace(*program) &&
+        (qsa_graph_enabled || !program_needs_qsa_workspace(*program)) &&
         (plamo ? (plamo_graph_enabled && R == 1u && N == 1u &&
                   exec_role == ::shelf::runtime::ExecutionRole::Decode)
                : ((R == 1u && N == 1u && exec_role == ::shelf::runtime::ExecutionRole::Decode) ||
@@ -1440,6 +1452,7 @@ Executor::Executor(Executor&& other) noexcept
       graph_failed(other.graph_failed),
       input_ids(std::move(other.input_ids)),
       input_hidden(std::move(other.input_hidden)),
+      input_mask(std::move(other.input_mask)),
       rope_inv_freq(std::move(other.rope_inv_freq)),
       rope_table_stride(other.rope_table_stride),
       rope_table_count(other.rope_table_count),
@@ -1508,6 +1521,7 @@ Executor::Executor(Executor&& other) noexcept
     other.batch_context_storage = ::shelf::runtime::DeviceBatchContextStorage{};
     other.input_ids = gpu::Tensor{};
     other.input_hidden = gpu::Tensor{};
+    other.input_mask = gpu::Tensor{};
     other.rope_inv_freq = gpu::Tensor{};
     other.output_hidden = gpu::Tensor{};
     other.logits = gpu::Tensor{};
@@ -1605,6 +1619,7 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         execution_workspace = std::move(other.execution_workspace);
         input_ids = std::move(other.input_ids);
         input_hidden = std::move(other.input_hidden);
+        input_mask = std::move(other.input_mask);
         rope_inv_freq = std::move(other.rope_inv_freq);
         rope_table_stride = other.rope_table_stride;
         rope_table_count = other.rope_table_count;
@@ -1669,6 +1684,7 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         other.batch_context_storage = ::shelf::runtime::DeviceBatchContextStorage{};
         other.input_ids = gpu::Tensor{};
         other.input_hidden = gpu::Tensor{};
+    other.input_mask = gpu::Tensor{};
         other.rope_inv_freq = gpu::Tensor{};
         other.output_hidden = gpu::Tensor{};
         other.logits = gpu::Tensor{};
@@ -1861,6 +1877,7 @@ Status executor_shutdown(Executor& ex) noexcept {
     for (auto& tap : ex.dflash_target_hidden) tap = gpu::Tensor{};
     ex.input_ids = gpu::Tensor{};
     ex.input_hidden = gpu::Tensor{};
+    ex.input_mask = gpu::Tensor{};
     ex.rope_inv_freq = gpu::Tensor{};
     ex.model = RuntimeModelView{};
     ex.sequence_pool = nullptr;
@@ -2201,6 +2218,15 @@ Result<Executor> create_executor(
             config.external_hidden_width != 0u ? config.external_hidden_width : H;
         st = allocate_contiguous_tensor<bf16_t>(arena, {Npad, external_width},
                                                 ex.input_hidden);
+        if (!st.ok()) return st;
+    }
+    if (input.lowered.graph.external_inputs.size() > 2u) {
+        if (config.external_mask_bytes == 0u) {
+            return Status::invalid_argument(
+                "third external input needs external_mask_bytes", __FILE__, __LINE__);
+        }
+        st = allocate_contiguous_tensor<uint8_t>(
+            arena, {Npad, config.external_mask_bytes}, ex.input_mask);
         if (!st.ok()) return st;
     }
     if (config.emit_normed_token_hidden) {

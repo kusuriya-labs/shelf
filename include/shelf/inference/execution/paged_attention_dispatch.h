@@ -28,6 +28,10 @@ struct PagedAttentionResolvedArgs {
     const float* octave_levels = nullptr;
     ::shelf::kernel::OctaveKVCacheFormat octave_format{};
     uint32_t octave_source_layer = 0u;
+    // Block budget of the QSA select that produced block_mask (0 when the mask has no
+    // QSA producer). A batch whose visible blocks fit the budget selects every block, so
+    // the dense attention path is used instead of the masked one.
+    uint32_t qsa_top_k = 0u;
 };
 
 Result<PagedAttentionResolvedArgs>

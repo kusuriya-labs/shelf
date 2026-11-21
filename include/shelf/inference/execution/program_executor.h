@@ -82,6 +82,7 @@ struct HostExecutionContext {
     // a verify's row count follows how many requests are active, and the split count
     // changes the K reduction order. 0 tunes on the actual row count.
     uint32_t splitk_tuning_rows = 0;
+    uint32_t attention_tuning_rows = 0;
     uint32_t bucket_m = 0;
     void* staging = nullptr;
     uint64_t staging_bytes = 0;

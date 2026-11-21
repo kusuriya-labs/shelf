@@ -31,6 +31,10 @@ inline constexpr uint32_t kQsaTopkSmallRows = 32u;
 inline constexpr uint32_t kQsaSelectChunk = 64u;
 inline constexpr uint32_t kQsaSelectMaxHeads = 8u;
 inline constexpr uint32_t kQsaSelectMaxTopK = 1024u;
+// Multi-window top-k keeps the bitonic sort + merge below this budget: measured on R9700 at
+// 65536 blocks, the radix union select is 1.33x/1.19x slower at top_k 64/128 and 1.31x/2.93x
+// faster at 256/512.
+inline constexpr uint32_t kQsaTopkUnionSelectMinTopK = 256u;
 inline constexpr uint32_t kQsaScoreRowTile = 2048u;
 inline constexpr uint32_t kQsaScoreBlockTile = 8192u;
 inline constexpr uint32_t kQsaScoreRowsPerCta = 16u;
@@ -127,9 +131,44 @@ struct QsaTopkArgs {
     uint32_t selected_row_stride = 0;
     uint32_t first = 0;
     uint32_t last = 0;
+    // 0: select the top-k of the previous shortlist and the new window candidates with a
+    // radix select. 1: keep the previous bitonic sort + merge path (reference for tests).
+    uint32_t legacy_merge = 0;
+};
+
+// One launch covers every staged request slice of a (row tile, block tile) window.
+// Each CTA resolves its request descriptor on the device, clamps the rows to the row
+// tile, and derives the request's visible block count from sequence_length.
+struct QsaScoreBatchedArgs {
+    const bf16_t* q = nullptr;
+    const bf16_t* pooled_base = nullptr;
+    float* scores = nullptr;
+    const uint32_t* row_sequence_slots = nullptr;
+    const ::shelf::runtime::DeviceRequestDescriptor* requests = nullptr;
+    uint32_t request_count = 0;
+    uint32_t row_tile_begin = 0;
+    uint32_t row_tile_rows = 0;
+    uint32_t block_begin = 0;
+    uint32_t block_count = 0;
+    uint32_t block_tile = kQsaScoreBlocksPerCta;
+    uint32_t max_row_groups = 0;
+    uint32_t max_block_tiles = 0;
+    uint32_t max_blocks = 0;
+    uint32_t score_row_stride = 0;
+    uint32_t n_heads = 0;
+    uint32_t head_dim = 0;
+    uint32_t compress_ratio = 0;
+    uint32_t state_index = 0;
+    uint32_t max_sequences = 0;
+    uint32_t q_row_stride = 0;
+    uint64_t pooled_slot_stride = 0;
+    uint64_t pooled_layer_stride = 0;
+    float scale = 0.0f;
 };
 
 hipError_t launch_qsa_score_wmma(const QsaScoreArgs& args, hipStream_t stream);
+hipError_t launch_qsa_score_wmma_batched(const QsaScoreBatchedArgs& args,
+                                         hipStream_t stream);
 hipError_t launch_qsa_topk(const QsaTopkArgs& args, hipStream_t stream);
 
 hipError_t launch_qsa_pool(const QsaPoolArgs& args, hipStream_t stream);

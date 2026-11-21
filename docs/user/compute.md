@@ -80,6 +80,8 @@ prefill の chunk 境界や prefix cache の有無によって、同じ入力の
 | `--dflash2-max-sessions N` | requests that may speculate at once (serve; default min(--max-concurrent-requests, 8)); the rest decode without speculation |
 | `--dflash2-stats 0\|1` | print speculative decode statistics (default 1) |
 | `--mtp` | enable the checkpoint's MTP block as the drafter |
+| `--mtp-window N` | draft attention window in tokens (0 = full context) |
+| `--mtp-sink N` | attention-sink tokens kept before the window |
 | `--mtp-drafts N` | speculative draft tokens per round (default 7, max 31) |
 | `--mtp-stats 0\|1` | print MTP speculative decode statistics (default 1) |
 | `--prefix-cache 0\|1` | enable prefix cache (default 1) |
@@ -182,9 +184,10 @@ gfx1201 の HIP kernel で decode を実行する既定構成である。選択�
 
 ### MTP speculative decoding
 
-`--mtp` を指定すると、checkpoint の MTP block（`mtp.*`）を drafter として使う単一
-request の speculative decode 経路に入る。DFlash2 とは排他的で、
-`--dflash2-model-dir` と同時に指定できない。
+`--mtp` を指定すると、checkpoint の MTP block（`mtp.*`）を drafter として使う
+speculative decode 経路に入る。DFlash2 とは排他的で、`--dflash2-model-dir` と
+同時に指定できない。単発生成では単一 request、`--serve-stdio` では複数 request を
+同時に保持し、active な request の verify をまとめて実行する。
 
 ```bash
 ./build/shelf-compute \
@@ -207,19 +210,27 @@ dense checkpoint を TP=2 で動かす場合:
 制約:
 
 - checkpoint に MTP block（`mtp.*`）が必要。無い checkpoint で `--mtp` を指定すると起動時に失敗する。
-- dense checkpoint は `--tensor-parallel 2` に対応する。grouped expert（MoE）の TP では
-  MTP block を rank に分割しないため、現行の MoE TP load は MTP を拒否する。
+- dense checkpoint は `--tensor-parallel 2` に対応する。qwen4exp は TP / EP に対応し、
+  MTP block は rank0 が持つ。TP で target の lm_head が語彙分割されるときは、rank0 が
+  drafter 用の全語彙 head を追加で持つ。
 - `--pipeline-parallel 2`、`--dump-logits` は未対応。
-- `--serve-stdio` は MTP を 1 request ずつ直列に処理する。`--max-concurrent-requests`
-  を 2 以上にしても、MTP の生成中は次の request を開始しない。
+- `--serve-stdio` は複数 request を同時に保持する。dense など QSA / PLE を持たない
+  target は 1 round の verify を 4 request / 32 行ずつの chunk に分けて融合実行する。
+  qwen4exp は MTP draft を深さ単位で batch 化し、verify は既定で request ごとの
+  1 行 DECODE を使う。`SHELF_MTP_WAVEFRONT=1` で最大 4 request の Wavefront batch を
+  選べる。`--max-concurrent-requests` で request 数を制限する。
 - partial accept は GDN の compact log replay で復元する。target の再 forward は行わない。
 - prefix cache は MTP 経路では使わない。
 - `--mtp --serve-stdio` でも、prefill / decode 中は 3 秒ごとに `prefill_tok_s` /
   `decode_tok_s` を出し、done 時に prefill / TTFT / decode の総括を stderr に出す。
-- grouped expert（MoE）checkpoint でも MTP block は load / 実行され、`--mtp` の生成列は
-  target-only の greedy 列と一致する。MoE でも speedup がある（`--mtp-drafts 4` で 1.88 倍）。
-  実測値は [../perf/current.md](../perf/current.md)、経緯は
-  [../research/20261105/moe_mtp.md](../research/20261105/moe_mtp.md)。
+  serve の終了時には `MTP_BATCH ... chunks=... max_active=...` を出す。
+- grouped expert（MoE）checkpoint でも MTP block は load / 実行される。qwen4exp は
+  QSA / PLE を持つため、MTP draft を深さ単位で batch 化し、verify は request ごとの
+  1 行 DECODE を使う。生成列は target-only と一致する。融合 verify を使う family では
+  near-tie により target-only と一致しないことがある。実測値は
+  [../perf/current.md](../perf/current.md)、
+  経緯は [../research/20261105/moe_mtp.md](../research/20261105/moe_mtp.md) と
+  [../research/20261121/mtp_multi_request_verify.md](../research/20261121/mtp_multi_request_verify.md)。
 
 詳細な round 契約は [../developer/mtp.md](../developer/mtp.md) を参照。
 
@@ -254,7 +265,7 @@ stdio serving の prefill 行数、環境変数、追加メモリは
 - `auto` はチェックポイントの `text_config.rope_parameters.rope_type` に従う。`default` なら Native、`yarn` ならその `factor` を使う。
 - `1` は Native を強制する。`2` / `4` は静的 YaRN を強制する。
 - YaRN の元の長さは `rope_parameters.original_max_position_embeddings`、無ければ `text_config.max_position_embeddings`（Qwen3.8 は 262,144）。
-- `--max-seq-len` の上限は Native 262,144 / 2x 524,288 / 4x 1,000,000（Qwen 公式の案内値）。超える指定は起動時に拒否する。
+- `--max-seq-len` の上限は `min(元の長さ * factor, 1,048,576)`。Qwen3.8 は Native 262,144 / 2x 524,288 / 4x 1,048,576。超える指定は起動時に拒否する。
 - 起動時に `ROPE profile:` 行を stderr へ出し、type / factor / theta / rotary_dim / 元の長さ / attention factor / 決定元（cli か config）を表示する。
 - KV 容量計画は factor と独立である。必要な最小ページ数は `--max-seq-len` だけで決まり、残りのページ数は arena の余りで決まる。
 - 静的 YaRN は入力長に関係なく係数が一定であり、短文の品質にも影響しうる（Qwen 公式の注意）。長文を扱うときだけ有効化する。

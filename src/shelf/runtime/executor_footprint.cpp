@@ -99,6 +99,9 @@ std::size_t executor_reserve_bytes(const shelf::qwen_hybrid::QwenHybridConfig& t
     if (config.external_hidden_input) {
         total += align_up(rows * hidden * sizeof(bf16_t));
     }
+    if (config.external_mask_bytes != 0u) {
+        total += align_up(rows * config.external_mask_bytes);
+    }
 
     const std::size_t out_cap = std::max(requests, rows);
     total += align_up(3u * rows * sizeof(std::uint32_t));

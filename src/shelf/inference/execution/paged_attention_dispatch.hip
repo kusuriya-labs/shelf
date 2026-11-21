@@ -44,7 +44,12 @@ const ::shelf::runtime::StateBinding* find_state_binding_for_descriptor(
 
 constexpr uint32_t kPrefillKernelMinRows = kPagedAttentionPrefillMinRows;
 constexpr uint32_t kMaskedPrefillMinRows = 256u;
-constexpr uint32_t kQsaSparsePrefillMinTokens = 12288u;
+// Crossover of the tiled masked prefill (WMMA, dense selection) and the sparse kernel with
+// the model's fixed 512-block budget. Measured pp (TP=2) at 4K/8K/16K/20K/24K/28K/32K/65K:
+// tiled is -0.3%/-2.7%/-0.5% at 4K/8K/16K and +0.3%/+0.9%/+1.3%/+2.2%/+5.5% from 20K on, so
+// the crossover sits between 16K and 20K visible tokens. Use the tiled path below 16K and
+// the sparse kernel at or above it.
+constexpr uint32_t kQsaSparsePrefillMinTokens = 16384u;
 
 bool qsa_sparse_supported(const PagedAttentionResolvedArgs& args,
                           const HostExecutionContext& ctx) {
@@ -148,6 +153,16 @@ Result<PagedAttentionResolvedArgs> resolve_paged_attention_args(
     PagedAttentionResolvedArgs out_args;
     out_args.kv_dtype = kv_dtype;
     out_args.output_dtype = out.dtype;
+    if (b.input_count == 2u) {
+        for (const auto& producer : program.dispatches) {
+            if (producer.kernel_id == KernelId::QSA_SELECT && producer.output_count == 1u &&
+                producer.output_slots[0] == b.input_slots[1]) {
+                out_args.qsa_top_k = producer.compute_spec;
+                break;
+            }
+        }
+    }
+
 
     if (octave) {
         const PagedKVPoolOctaveView& kv = ctx.model_state.kv_octave;
@@ -301,12 +316,48 @@ PagedAttentionPlan plan_paged_attention(
     // The tiled prefill implementation is specialized for head_dim 256.
     // Use the optimized per-row decode kernel for shorter heads as well.
     plan.use_prefill = use_prefill && args.common.head_dim == 256u;
-    if (qsa_sparse_supported(args, ctx) &&
-        (!plan.use_prefill ||
+    const uint32_t split_rows = ctx.attention_tuning_rows != 0u
+        ? ctx.attention_tuning_rows
+        : (ctx.splitk_tuning_rows != 0u ? ctx.splitk_tuning_rows
+                                        : args.common.rows);
+    // A batch whose visible blocks all fit the select budget keeps every block, so the
+    // mask costs a selection without changing the result. Run the dense attention instead
+    // and let the select skip its score/top-k work.
+    const bool within_qsa_budget =
+        args.qsa_top_k != 0u && ctx.spec.max_visible_tokens != 0u &&
+        (ctx.spec.max_visible_tokens + ::shelf::kernel::kQsaSparseBlockTokens - 1u) /
+                ::shelf::kernel::kQsaSparseBlockTokens <=
+            args.qsa_top_k;
+    // The tiled prefill kernel consumes the block mask directly (page bitmap + per-row
+    // token visibility) and runs WMMA. It wins while the selected blocks are dense in the
+    // visible range; with the model's fixed 512-block budget the density drops as the
+    // context grows and the scattered 4-token blocks leave WMMA lanes idle (measured at
+    // 65K: 21.7 s vs the sparse kernel's 12.9 s for the same prefill). Keep WMMA below the
+    // measured density crossover and the sparse kernel above it. SHELF_QSA_WMMA_PREFILL is
+    // a debug override: 0 forces sparse, 1/all forces the tiled path.
+    static const int wmma_prefill_mode = [] {
+        const char* env = std::getenv("SHELF_QSA_WMMA_PREFILL");
+        if (env == nullptr) return 0;
+        if (env[0] != '\0' && std::strcmp(env, "0") == 0) return -1;
+        return 1;
+    }();
+    const bool tiled_masked_prefill =
+        plan.use_prefill && args.common.block_mask != nullptr &&
+        args.common.rows >= kMaskedPrefillMinRows &&
+        (wmma_prefill_mode > 0 ||
+         (wmma_prefill_mode == 0 &&
+          ctx.spec.max_visible_tokens < kQsaSparsePrefillMinTokens));
+    // A masked prefill chunk below the tiled kernel's row floor cannot use the dense decode
+    // path (it would ignore the mask), so the sparse kernel handles it.
+    const bool masked_prefill_small =
+        plan.use_prefill && args.common.block_mask != nullptr &&
+        args.common.rows < kMaskedPrefillMinRows;
+    if (qsa_sparse_supported(args, ctx) && !within_qsa_budget && !tiled_masked_prefill &&
+        (masked_prefill_small || !plan.use_prefill ||
          ctx.spec.max_visible_tokens >= kQsaSparsePrefillMinTokens)) {
         plan.qsa_sparse = true;
         plan.splits = ::shelf::kernel::qsa_sparse_splits(
-            args.common.rows, args.common.kv_heads, ctx.decode_attn_partial_bytes,
+            split_rows, args.common.kv_heads, ctx.decode_attn_partial_bytes,
             args.common.q_heads / args.common.kv_heads);
         return plan;
     }
@@ -335,7 +386,7 @@ PagedAttentionPlan plan_paged_attention(
         uint32_t s = 16u;
         while (s > 1u) {
             const uint64_t need =
-                static_cast<uint64_t>(args.common.rows) * args.common.kv_heads * s
+                static_cast<uint64_t>(split_rows) * args.common.kv_heads * s
                 * q_per_kv * (2u + ::shelf::kernel::kPagedAttentionHeadLimit) * 4u;
             if (need <= ctx.decode_attn_partial_bytes) {
                 plan.splits = s;
@@ -354,7 +405,7 @@ PagedAttentionPlan plan_paged_attention(
         const uint32_t q_per_kv = args.common.q_heads / args.common.kv_heads;
         const uint32_t s = 16u;
         const uint64_t need =
-            static_cast<uint64_t>(args.common.rows) * args.common.kv_heads * s
+            static_cast<uint64_t>(split_rows) * args.common.kv_heads * s
             * q_per_kv * (2u + ::shelf::kernel::kPagedAttentionHeadLimit) * 4u;
         if (need <= ctx.decode_attn_partial_bytes)
             plan.splits = s;

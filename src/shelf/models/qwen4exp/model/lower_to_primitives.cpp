@@ -625,7 +625,9 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_mtp_to_primitives(
     };
 
     const std::uint32_t embed_index = add_weight(weights.embed_tokens);
-    const std::uint32_t lm_index = add_weight(weights.lm_head);
+    const shelf::weights::MatrixWeight& head_weights =
+        weights.mtp_lm_head.rows != 0u ? weights.mtp_lm_head : weights.lm_head;
+    const std::uint32_t lm_index = add_weight(head_weights);
     const std::uint32_t fc_hidden_index = add_weight(mtp.fc_hidden);
     const std::uint32_t fc_embedding_index = add_weight(mtp.fc_embedding);
 
@@ -785,6 +787,19 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_mtp_to_primitives(
     layer.moe_indices = {router, shared_gate, shared_gate_proj, shared_up_proj,
                          shared_down_proj, gate_experts, up_experts, down_experts};
 
+    // The drafter attention reads a sliding window of the draft KV: the mask marks the
+    // attention sink and the recent window, and the drafter rewrites it every step. The
+    // mask is an external input so the drafter owns the buffer.
+    constexpr std::uint32_t kMtpMaskBlockTokens = 4u;
+    const std::uint32_t mtp_mask_blocks =
+        (options.max_context_tokens + kMtpMaskBlockTokens - 1u) / kMtpMaskBlockTokens;
+    const std::uint32_t mtp_mask_bytes = ((mtp_mask_blocks + 7u) / 8u + 3u) & ~3u;
+    const RT::ValueId mtp_mask = em.value(mtp_mask_bytes, RT::ValueDType::U8);
+    pg.external_inputs.push_back(mtp_mask);
+    layer.qsa_indices.attention.has_block_mask = true;
+    layer.qsa_indices.attention.block_mask = mtp_mask;
+    layer.qsa_indices.attention.block_size = kMtpMaskBlockTokens;
+
     auto block_output = emit_qwen4exp_layer(em, layer, hyper, "mtp.block.");
     if (!block_output.ok()) return block_output.status();
 
@@ -808,7 +823,7 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_mtp_to_primitives(
     head.eps = eps;
     head.final_norm_param = UINT32_MAX;
     head.apply_final_norm = false;
-    head.lm_shape = RT::MatrixwiseShapeKey{weights.lm_head.rows, weights.lm_head.cols};
+    head.lm_shape = RT::MatrixwiseShapeKey{head_weights.rows, head_weights.cols};
     head.lm_weight_index = lm_index;
     head.out_vocab = vocab;
     QH::emit_hybrid_head(em, head, mixed.value().mixed, "mtp.head.");

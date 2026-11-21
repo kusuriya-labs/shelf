@@ -251,6 +251,11 @@ struct MtpServeContext {
     uint64_t rounds = 0u;
     uint64_t accepted_drafts = 0u;
     uint64_t emitted_tokens = 0u;
+    uint64_t verify_chunks = 0u;
+    uint64_t draft_forwards = 0u;
+    uint32_t max_active_requests = 0u;
+    uint32_t max_draft_forwards_per_round = 0u;
+    uint32_t max_verify_chunks_per_round = 0u;
     double round_ms = 0.0;
 };
 
@@ -1112,6 +1117,14 @@ void serve_mtp_step(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state
     const auto& result = stepped.value();
     mtp.rounds += 1u;
     mtp.round_ms += result.round_ms;
+    mtp.verify_chunks += result.verify_chunks;
+    mtp.draft_forwards += result.draft_forwards;
+    if (result.draft_forwards > mtp.max_draft_forwards_per_round)
+        mtp.max_draft_forwards_per_round = result.draft_forwards;
+    if (result.verify_chunks > mtp.max_verify_chunks_per_round)
+        mtp.max_verify_chunks_per_round = result.verify_chunks;
+    if (static_cast<uint32_t>(slots.size()) > mtp.max_active_requests)
+        mtp.max_active_requests = static_cast<uint32_t>(slots.size());
     std::vector<bool> finished(slots.size(), false);
     std::vector<const char*> reasons(slots.size(), "length");
     for (std::size_t j = 0u; j < slots.size(); ++j) {
@@ -1139,10 +1152,18 @@ void serve_mtp_step(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state
         serve_mtp_release(runtime, state, mtp, indices[j]);
     }
     if (mtp.active.empty() && !state.exit_requested) {
-        fprintf(stderr, "MTP_BATCH rounds=%llu accepted=%llu emitted=%llu round_ms=%.3f\n",
+        fprintf(stderr,
+                "MTP_BATCH rounds=%llu accepted=%llu emitted=%llu chunks=%llu "
+                "draft_forwards=%llu max_draft_per_round=%u max_verify_per_round=%u "
+                "max_active=%u round_ms=%.3f\n",
                 static_cast<unsigned long long>(mtp.rounds),
                 static_cast<unsigned long long>(mtp.accepted_drafts),
                 static_cast<unsigned long long>(mtp.emitted_tokens),
+                static_cast<unsigned long long>(mtp.verify_chunks),
+                static_cast<unsigned long long>(mtp.draft_forwards),
+                mtp.max_draft_forwards_per_round,
+                mtp.max_verify_chunks_per_round,
+                mtp.max_active_requests,
                 mtp.rounds > 0u ? mtp.round_ms / static_cast<double>(mtp.rounds) : 0.0);
     }
 }
@@ -1605,6 +1626,8 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
         state.mtp.drafts = runtime.config().mtp_drafts == 0u ? 4u : runtime.config().mtp_drafts;
         shelf::qwen35::runtime::MtpDrafterConfig mtp_config;
         mtp_config.num_drafts = state.mtp.drafts;
+        mtp_config.window_tokens = static_cast<uint32_t>(runtime.config().mtp_window);
+        mtp_config.sink_tokens = static_cast<uint32_t>(runtime.config().mtp_sink);
         mtp_config.max_seq_len = runtime.config().max_seq_len;
         mtp_config.page_tokens = runtime.config().page_tokens;
         mtp_config.max_batch_rows = std::min(

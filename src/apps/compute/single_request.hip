@@ -954,6 +954,8 @@ int run_mtp_shot(shelf::app::Qwen35ComputeRuntime& runtime,
 
     shelf::qwen35::runtime::MtpDrafterConfig drafter_config;
     drafter_config.num_drafts = mtp_drafts;
+    drafter_config.window_tokens = static_cast<uint32_t>(runtime.config().mtp_window);
+    drafter_config.sink_tokens = static_cast<uint32_t>(runtime.config().mtp_sink);
     drafter_config.max_seq_len = max_seq;
     drafter_config.page_tokens = runtime.config().page_tokens;
     drafter_config.max_batch_rows = std::min(

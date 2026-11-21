@@ -49,6 +49,30 @@ MTP block 自身の `mtp_exl3_linear_shape` で staging plane を見積もる。
 grouped expert（MoE）の TP load は MTP block を分割しないため、MTP との併用を
 `build_moe_tp_rank_model` が拒否する。TP=2 を qualified とし、TP=4 は未計測である。
 
+qwen4exp の MTP は TP / EP でも rank0 が block を持ち、`TpRankRuntimeConfig` の
+`load_mtp_layers` で全 rank の loader に伝播する。target の lm_head が TP で語彙分割
+されるときは、rank0 だけが drafter 用の全語彙 head を `mtp_lm_head` として追加 load し、
+target の head は分割されたまま使う。drafter executor の staging plane は MTP block と
+この head の両方の shape から見積もる。
+
+qwen4exp のように QSA / PLE の per-row state を持つ target は、MTP block を 1 つの
+共有 executor で動かす。request ごとの MTP KV / hidden / position は独立させたまま、
+draft は depth 単位で request をまとめて 1 forward にする。draft 数 K に対して
+MTP forward は最大 K 回であり、request 数 N に比例しない。
+
+既定の verify は draft 列 `[pending, draft0, ...]` を request ごとに 1 row ずつ
+target の `DECODE` で流し、最初の不一致で止める。target の state は受理した prefix
+だけを進めるため、GDN snapshot / compact log replay を必要としない。
+`SHELF_MTP_WAVEFRONT=1` では同じ深さの active な request を最大 4 request の
+Wavefront batch にまとめる。Wavefront は forward 数を減らすが、near-tie で
+target-only と分岐する prompt が残るため既定 off である。dense など QSA / PLE を
+持たない target は従来どおり K+1 行の融合 verify を使う。
+
+`SHELF_MTP_FUSED_VERIFY=1` は qwen4exp でも K+1 行の融合 verify を選ぶ比較用の
+フラグである。GDN verify の上限は 8 request / 64 行へ拡張した。1〜2 request の
+fused verify は target-only と一致するが、4 request / 20 行では near-tie 分岐が
+残るため既定 off である。
+
 ## serve-stdio
 
 `--mtp --serve-stdio` は複数 request を同時に保持する継続バッチ serve である。
@@ -58,12 +82,15 @@ grouped expert（MoE）の TP load は MTP block を分割しないため、MTP 
   共有 GDN history / compact log、QSA / PLE の per-row history を持つ。
 - request の prefill は admit 時に行い、以後の round は active な request をまとめて進める。
   終了した request は sequence と drafter slot を解放する。
-- 各 round は request ごとに draft し、active な request の target verify を 1 forward に
-  融合する。融合する request の数は round ごとに変わるため、verify の数値が round の
-  row 数に依存しないことが要件になる（下記「verify の行数不変性」）。
+- 各 round は request ごとに draft する。融合 verify を使う target は active な request の
+  target verify を 1 forward にまとめる。qwen4exp は深さごとに最大 4 request の
+  Wavefront `DECODE` batch を使う。融合する request の数は round ごとに変わるため、
+  融合 verify では数値が round の row 数に依存しないことが要件になる
+  （下記「verify の行数不変性」）。
 - `token` event を request ごとに emit し、`done` で `generated_ids` を返す。
-- TP では `TpCoordinator` の per-rank options 経路を使い、rank ごとの GDN / QSA / PLE
-  history と snapshot で rollback する。
+- 融合 verify の TP では `TpCoordinator` の per-rank options 経路を使い、rank ごとの
+  GDN / QSA / PLE history と snapshot で rollback する。qwen4exp の Wavefront 検証は
+  通常の TP decode 経路を使う。
 
 ## verify の行数不変性
 
@@ -77,12 +104,18 @@ admission のタイミングで生成列が分岐した。
 （`ExecutorConfig::max_scheduled_output_rows` を GDN verify kernel の上限 32 行で頭打ちに
 した値）を渡し、分割数と scratch の見積をその容量で計算する。実行する行数ではなく容量で
 決まるため、同じ request は同居する request 数にも設定した同時実行数にも関係なく同じ
-分割数を使う。decode（`rows == 1`）と prefill は従来どおりである。
+分割数を使う。mul1 と mul24（EXL3-INT8）の両方がこの値に従う。QSA の sparse attention
+も同じ容量で split 数を決める。decode（`rows == 1`）と prefill は従来どおりである。
+QSA / PLE を持つ qwen4exp はこの融合 verify を使わず、深さごとの Wavefront `DECODE`
+batch を使うため、融合 verify の行数不変性の問題を避ける。Wavefront の batch は
+最大 4 request に区切り、それ以上同時に並べた場合の数値差を避ける。
 
 ## verify の 1 forward 上限
 
-GDN の verify kernel は 1 launch あたり **4 request / 32 行**
-（`kGdnRecurrenceVerifyMaxRequests` / `kGdnRecurrenceVerifyBatchRows`）までである。
+GDN の verify kernel の定数は **8 request / 64 行**
+（`kGdnRecurrenceVerifyMaxRequests` / `kGdnRecurrenceVerifyBatchRows`）である。
+qwen4exp の既定経路は 1 request / 1 行ずつの安全 verify を使う。融合 verify の
+chunk はこの上限で分割する。
 DFlash2 の 4 session × block 8 と同じ上限で、これが融合 verify の実効上限になる。
 
 MTP の batch context 自体は `min(max_num_batched_tokens, 512)` 行まで request を保持でき、
@@ -145,7 +178,9 @@ MTP 層は target とは独立した KV pool を持つ。
 - page 数は `ceil((max_seq_len + 1) / page_tokens) + 1` である。target pool の page 数
   ではない。
 - MTP 用の `SequenceSlotPool` / `GdnStatePool` / `PagedSequenceState` を別に持つ。
-  `GdnStatePool` は `create_executor` の geometry 検証を通すための 1 state だけを持つ。
+  単一 request では `GdnStatePool` は `create_executor` の geometry 検証を通すための
+  1 state だけを持つ。batch の qwen4exp は request 数分の slot / GDN state / MTP page を
+  1 つの共有 executor に持つ。
 - `mtp_spec_step` の各 round は MTP sequence を round 開始位置まで rewind してから
   first pass を実行する。rewind は必要な page 数を残して余剰 page を release し、
   `position` を戻す。
@@ -180,16 +215,18 @@ prompt を `executor.config.max_batch_rows` 単位で chunk prefill する。
    draft 0 を得る。
 2. **draft loop**: `i = 1..K-1` について、token は `draft[i-1]`、hidden は直前の
    MTP normed hidden、position は `position + i - 1`。greedy で `draft[i]` を得る。
-3. **verify**: target に `[pending, draft0..draftK-1]` の `K+1` row を
-   `SPEC_VERIFY` で流し、各行の target sample を得る。
-4. **accept**: `spec_greedy_accept` で longest prefix を取る。full accept では
-   bonus token、partial accept では correction token を次 round の pending にする。
+3. **verify**: dense など QSA / PLE を持たない target は
+   `[pending, draft0..draftK-1]` の `K+1` row を `SPEC_VERIFY` で 1 forward に流す。
+   qwen4exp のように QSA / PLE を持つ target は同じ列を深さごとに `DECODE` し、
+   同じ深さの request を最大 4 request の Wavefront batch にまとめる。
+4. **accept**: longest prefix を取る。full accept では bonus token、partial accept では
+   correction token を次 round の pending にする。
 
 すべての draft は target verify で棄却可能であり、出力の正しさは target が担保する。
 
 ## Partial reject
 
-MTP の verify は target の GDN recurrence / conv を `K+1` row 分進める。verify には
+融合 verify を使う target は GDN recurrence / conv を `K+1` row 分進めるため、
 DFlash2 と同じ GDN spec history（conv）と compact log を渡す。partial accept では次を
 順に行う。
 
@@ -242,6 +279,13 @@ MTP_EMITTED_PER_ROUND MTP_VERIFY_ROWS MTP_GDN_RESTORES
 MTP_DRAFT_MS MTP_VERIFY_MS MTP_GDN_RESTORE_MS MTP_COMPACT_REPLAY_MS MTP_ROUND_MS
 ```
 
+serve の終了時には
+`MTP_BATCH rounds=... accepted=... emitted=... chunks=... draft_forwards=... max_active=...`
+を 1 行出す。`chunks` は verify の target forward 数、`draft_forwards` は MTP draft の
+forward 数、`max_active` は同時に進めた request 数の最大値である。qwen4exp では
+draft が depth 単位で batch 化されるため、`draft_forwards` は round 数 × drafts 以下に
+収まり、request 数には比例しない。
+
 `GENERATED_IDS` の形式は target-only と同一である。
 
 ## 制約
@@ -259,14 +303,23 @@ MTP_DRAFT_MS MTP_VERIFY_MS MTP_GDN_RESTORE_MS MTP_COMPACT_REPLAY_MS MTP_ROUND_MS
 - Octave target と併用した MTP KV は BF16 であり、target の descriptor を MTP block へ
   伝播しない。
 - qwen4exp の MTP block は rank0 だけが load し、drafter の入力は final norm ではなく
-  pre-mixer の wide residual（`hc * hidden`）である。speculative verify は
-  `PleConvStatePool` と `QsaKeyStatePool` の partial 状態を row 単位の history から復元する。
-- verify の split-K は行容量で固定する。これがないと、同居する request 数で argmax が
-  変わる（[../research/20261108/qwen4exp_mtp.md](../research/20261108/qwen4exp_mtp.md)）。
+  pre-mixer の wide residual（`hc * hidden`）である。QSA / PLE を持つ target は
+  `PleConvStatePool` / `QsaKeyStatePool` の per-row state を戻さずに済むよう、
+  深さごとの Wavefront `DECODE` batch で検証する。この経路の生成列は target-only と
+  一致する。TP で target の lm_head が語彙分割されるときは rank0 が全語彙 head を
+  追加で持つ。
+- verify の split-K は行容量で固定する。mul1 / mul24 の両方と QSA sparse attention が
+  この値に従う。融合 verify を使う family では、これがないと同居する request 数で
+  argmax が変わる。
+- 融合 verify を使う family では、split を固定しても MoE grouped path などの数値は
+  完全な行数不変ではない。near-tie が多い checkpoint では target-only との bit 一致が
+  保証されないため、QSA / PLE を持つ qwen4exp は上記の 1 行検証経路を使う。
 
 ## Source map
 
 - `include/shelf/kernels/optimized/linear/exl3_family/types.h`（`splitk_tuning_rows`）
+- `src/shelf/inference/execution/optimized_dispatch.hip`（mul24 split の容量固定）
+- `src/shelf/inference/execution/paged_attention_dispatch.hip`（QSA split の容量固定）
 
 - `include/shelf/models/qwen35/runtime/mtp_drafter.h`（`MtpDrafterInput`、`mtp_drafter_rows`）
 - `src/shelf/models/qwen35/runtime/mtp_drafter.cpp`
@@ -274,6 +327,8 @@ MTP_DRAFT_MS MTP_VERIFY_MS MTP_GDN_RESTORE_MS MTP_COMPACT_REPLAY_MS MTP_ROUND_MS
 - `src/shelf/models/qwen35/model/lower_to_primitives.cpp`
 - `include/shelf/models/qwen35moe/model/lower_to_primitives.h`（`lower_qwen35_moe_mtp_to_primitives`）
 - `include/shelf/models/loaded_model.h`（`has_mtp_block` / `mtp_drafter_input` / `mtp_drafter_reserve_bytes`）
+- `include/shelf/models/qwen4exp/weights/qwen4exp_weights.h`（`mtp_lm_head` / `mtp_exl3_linear_shape`）
+- `src/shelf/runtime/tp/tensor_parallel.cpp`（`load_mtp_layers` の rank 伝播）
 - `src/shelf/models/qwen35/runtime/executor.hip`（hidden external input / normed output）
 - `src/apps/compute/single_request.hip`（`run_mtp_shot`）
 - `src/apps/compute/stdio_server.hip`（`serve_mtp_admit` / `serve_mtp_step`）

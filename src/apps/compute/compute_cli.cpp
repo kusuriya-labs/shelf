@@ -144,6 +144,8 @@ void compute_usage(const char* prog) {
     printf("                            without speculation\n");
     printf("  --dflash2-stats 0|1    print speculative decode statistics (default 1)\n");
     printf("  --mtp                  enable the checkpoint's MTP block as the drafter\n");
+    printf("  --mtp-window N         draft attention window in tokens (0 = full context)\n");
+    printf("  --mtp-sink N           attention-sink tokens kept before the window\n");
     printf("  --mtp-drafts N         speculative draft tokens per round (default 7,\n");
     printf("                         max %u)\n", shelf::qwen35::runtime::kMtpMaxDrafts);
     printf("  --mtp-stats 0|1        print MTP speculative decode statistics (default 1)\n");
@@ -435,6 +437,16 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
                 fprintf(stderr, "bad --prefix-cache (expected 0 or 1)\n");
                 return kComputeParseError;
             }
+        } else if (std::strcmp(argv[i], "--mtp-window") == 0 && i + 1 < argc) {
+            char* end = nullptr;
+            const unsigned long v = std::strtoul(argv[++i], &end, 10);
+            if (end == argv[i] || *end != '\0') return kComputeParseError;
+            opt.mtp_window = v;
+        } else if (std::strcmp(argv[i], "--mtp-sink") == 0 && i + 1 < argc) {
+            char* end = nullptr;
+            const unsigned long v = std::strtoul(argv[++i], &end, 10);
+            if (end == argv[i] || *end != '\0') return kComputeParseError;
+            opt.mtp_sink = v;
         } else if (std::strcmp(argv[i], "--working-set-reserve-gib") == 0 && i + 1 < argc) {
             if (!parse_uint(argv[++i], working_set_reserve_gib)) {
                 fprintf(stderr, "bad --working-set-reserve-gib\n");

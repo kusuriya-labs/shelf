@@ -92,6 +92,8 @@ def build_compute_argv(opts) -> list[str]:
         "--device", str(opts.device),
         "--kv-cache-dtype", opts.kv_cache_dtype,
         "--max-concurrent-requests", str(opts.max_concurrent_requests),
+        "--mtp-window", str(opts.mtp_window),
+        "--mtp-sink", str(opts.mtp_sink),
         "--max-num-batched-tokens", str(opts.max_num_batched_tokens),
         "--working-set-reserve-gib", str(opts.working_set_reserve_gib),
         "--rope-factor", opts.rope_factor,
@@ -549,6 +551,10 @@ def parse_args(argv=None):
                         help="KV cache dtype (default bf16)")
     parser.add_argument("--page-tokens", type=int, default=16,
                         help="paged KV page size in tokens (default 16)")
+    parser.add_argument("--mtp-window", type=int, default=4096,
+                        help="MTP draft attention window in tokens (0 = full context)")
+    parser.add_argument("--mtp-sink", type=int, default=64,
+                        help="MTP draft attention sink tokens kept before the window")
     parser.add_argument("--working-set-reserve-gib", type=int, default=0,
                         help="arena headroom kept free for the working set "
                              "(0 = size it from the row bucket, default 0)")

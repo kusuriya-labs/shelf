@@ -82,7 +82,8 @@ struct PagedSequenceState {
         GdnStatePool& recurrent_pool,
         PagedKVPool& kv_pool,
         uint32_t max_seq_len,
-        hipStream_t stream);
+        hipStream_t stream,
+        uint32_t ring_blocks);
 
     friend Status release_paged_sequence_state(PagedSequenceState& seq, hipStream_t stream);
 
@@ -116,12 +117,16 @@ struct PagedSequenceState {
         PagedSequenceState&& src);
 };
 
+// `ring_blocks` turns the block table into a ring: the logical length stays max_seq_len,
+// but only `ring_blocks` physical pages are acquired and the table aliases them as
+// page % ring_blocks.
 Result<PagedSequenceState> create_paged_sequence_state(
     SequenceSlotPool& seq_pool,
     GdnStatePool& recurrent_pool,
     PagedKVPool& kv_pool,
     uint32_t max_seq_len,
-    hipStream_t stream);
+    hipStream_t stream,
+    uint32_t ring_blocks = 0u);
 
 Status release_paged_sequence_state(PagedSequenceState& seq, hipStream_t stream);
 

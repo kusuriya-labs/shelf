@@ -198,8 +198,8 @@ int main() {
                 check(p.factor == 4.0, "yarn4 factor");
                 check_close(p.attention_factor, 1.138629436111989, 1e-12,
                             "yarn4 attention factor matches transformers");
-                check(rope_max_seq_len_cap(p) == 1000000,
-                      "yarn4 cap is capped at official 1000000");
+                check(rope_max_seq_len_cap(p) == 1048576,
+                      "yarn4 cap is capped at official 1048576");
             }
             auto forced = resolve_effective_rope_profile(params.value(),
                                                          RopeFactorSelection::Two);

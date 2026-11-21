@@ -230,6 +230,7 @@ class ComputeHarness:
                  model_path: Path | str | None = None,
                  working_set_reserve_gib: int | None = None,
                  tp: int = 1,
+                 ep: int = 1,
                  devices: str | None = None,
                  auto_arena: bool = False,
                  prefix_cache_enabled: bool = True,
@@ -238,7 +239,10 @@ class ComputeHarness:
                  prefix_cache_save_interval: int | None = None,
                  max_num_batched_tokens: int | None = None,
                  rope_factor: str | None = None,
-                 mtp: bool = False):
+                 mtp: bool = False,
+                 mtp_drafts: int = 4,
+                 mtp_window: int | None = None,
+                 mtp_sink: int | None = None):
         self.log_path = log_path
         self.arena_gib = arena_gib
         self.auto_arena = auto_arena
@@ -249,6 +253,11 @@ class ComputeHarness:
         self.max_num_batched_tokens = max_num_batched_tokens
         self.rope_factor = rope_factor
         self.mtp = mtp
+        self.mtp_drafts = mtp_drafts
+        self.mtp_window = (int(os.environ.get("SHELF_MTP_WINDOW", "0"))
+                           if mtp_window is None else mtp_window)
+        self.mtp_sink = (int(os.environ.get("SHELF_MTP_SINK", "64"))
+                         if mtp_sink is None else mtp_sink)
         self.max_seq_len = max_seq_len
         self.device = device
         self.max_concurrent_requests = max_concurrent_requests
@@ -260,6 +269,7 @@ class ComputeHarness:
         self.model_path = Path(model_path) if model_path is not None else None
         self.working_set_reserve_gib = working_set_reserve_gib
         self.tp = tp
+        self.ep = ep
         self.devices = devices
         self.proc: subprocess.Popen | None = None
         self.stderr_lines: list[str] = []
@@ -273,7 +283,9 @@ class ComputeHarness:
         self.arena_gib = arena_gib
         if self.tp > 1 and not self.devices:
             raise Failure("devices is required when tp > 1")
-        device_arg = self.devices if self.tp > 1 else str(_test_device(self.device))
+        if self.ep > 1 and not self.devices:
+            raise Failure("devices is required when ep > 1")
+        device_arg = self.devices if self.tp > 1 or self.ep > 1 else str(_test_device(self.device))
         argv = [
             str(binary),
             "--model-dir", str(self.model_path or model_dir()),
@@ -311,6 +323,8 @@ class ComputeHarness:
             argv += ["--rope-factor", self.rope_factor]
         if self.tp > 1:
             argv += ["--tensor-parallel", str(self.tp)]
+        if self.ep > 1:
+            argv += ["--expert-parallel", str(self.ep)]
         reserve = _test_working_set_reserve_gib(self.working_set_reserve_gib)
         if reserve is not None:
             argv += ["--working-set-reserve-gib", str(reserve)]
@@ -319,7 +333,10 @@ class ComputeHarness:
                      "--dflash2-drafts", str(self.dflash2_drafts),
                      "--dflash2-tree-budget", "0"]
         if self.mtp:
-            argv += ["--mtp", "--mtp-drafts", "4"]
+            argv += ["--mtp", "--mtp-drafts", str(self.mtp_drafts)]
+            if self.mtp_window:
+                argv += ["--mtp-window", str(self.mtp_window),
+                         "--mtp-sink", str(self.mtp_sink)]
         env = dict(os.environ)
         if self.batch_trace:
             env["SHELF_BATCH_TRACE"] = "1"

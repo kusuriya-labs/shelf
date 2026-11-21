@@ -21,7 +21,7 @@
 ## speculative decode
 
 - [dflash2.md](dflash2.md) — DFlash2 speculative decoding の現在の設計仕様
-- [mtp.md](mtp.md) — checkpoint の MTP block を drafter にする単一 request 経路
+- [mtp.md](mtp.md) — checkpoint の MTP block を drafter にする compute / serve 経路
 
 ## server
 

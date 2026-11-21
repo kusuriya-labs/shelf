@@ -854,6 +854,8 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
     if (config_.mtp) {
         qwen35::runtime::MtpDrafterConfig mtp_options;
         mtp_options.num_drafts = config_.mtp_drafts == 0u ? 7u : config_.mtp_drafts;
+        mtp_options.window_tokens = static_cast<uint32_t>(config_.mtp_window);
+        mtp_options.sink_tokens = static_cast<uint32_t>(config_.mtp_sink);
         mtp_options.max_seq_len = config_.max_seq_len;
         mtp_options.page_tokens = config_.page_tokens;
         mtp_options.max_batch_rows = std::min(
@@ -883,21 +885,36 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
             options.max_batch_rows = cfg.max_batch_rows;
             options.kv_dtype = cfg.kv_dtype;
             std::size_t drafter_bytes = 0u;
+            std::size_t state_bytes = 0u;
             if (tp_rank == 0u) {
-                drafter_bytes = qwen35::runtime::mtp_drafter_reserve_bytes(
-                    tc, options, model.token_row_ffn_size(),
-                    model.mtp_grouped_reserve_bytes(
-                        qwen35::runtime::mtp_drafter_rows(options),
-                        options.max_seq_len + 1u),
-                    model.uses_exl3_linear(),
-                    model.mtp_exl3_linear_shape(),
-                    &layout) * cfg.max_requests;
+                if (model.uses_qsa_state()) {
+                    const uint32_t batch_rows = std::max(
+                        options.max_batch_rows,
+                        cfg.max_requests * (options.num_drafts + 1u));
+                    drafter_bytes =
+                        qwen35::runtime::mtp_shared_draft_reserve_bytes(
+                            tc, options, model.token_row_ffn_size(),
+                            model.mtp_grouped_reserve_bytes(batch_rows,
+                                                           options.max_seq_len + 1u),
+                            model.uses_exl3_linear(),
+                            model.mtp_exl3_linear_shape(), cfg.max_requests);
+                } else {
+                    drafter_bytes = qwen35::runtime::mtp_drafter_reserve_bytes(
+                        tc, options, model.token_row_ffn_size(),
+                        model.mtp_grouped_reserve_bytes(
+                            qwen35::runtime::mtp_drafter_rows(options),
+                            options.max_seq_len + 1u),
+                        model.uses_exl3_linear(),
+                        model.mtp_exl3_linear_shape(),
+                        &layout) * cfg.max_requests;
+                    state_bytes =
+                        qwen35::runtime::mtp_batch_rank_state_reserve_bytes(
+                            layout,
+                            qwen35::runtime::mtp_spec_rows(cfg.max_requests,
+                                                           options.num_drafts),
+                            cfg.max_requests);
+                }
             }
-            const std::size_t state_bytes =
-                qwen35::runtime::mtp_batch_rank_state_reserve_bytes(
-                    layout,
-                    qwen35::runtime::mtp_spec_rows(cfg.max_requests, options.num_drafts),
-                    cfg.max_requests);
             return drafter_bytes + state_bytes;
         };
     }

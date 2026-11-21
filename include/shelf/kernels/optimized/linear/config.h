@@ -6,6 +6,10 @@ namespace shelf::kernel {
 
 inline constexpr uint32_t kBf16GemmExactRowsMax = 64u;
 inline constexpr uint32_t kBf16GemmExactRowsKernelMax = 16u;
+// Mid-size batches above the exact-rows kernel max stay on ExactRows (launched as
+// 16-row chunks) only for narrow outputs: measured R9700 p50 at 20/64 rows is
+// 3.1x/1.13x faster than Wmma at 320 outputs and 4.0x/6.5x slower at 10240.
+inline constexpr uint32_t kBf16GemmExactRowsChunkNarrowMaxOutFeatures = 512u;
 // One block per output row, all 256 threads on K, up to 8 token accumulators.
 // Used for the narrow-output small-M shapes where one warp per row leaves too
 // few blocks on the device.

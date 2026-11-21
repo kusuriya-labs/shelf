@@ -369,6 +369,315 @@ void run_scenario(const Scenario& s, bool split = false, std::uint32_t tiles = 1
 
 }  // namespace
 
+struct RequestSpec {
+    std::uint32_t row_begin;
+    std::uint32_t row_count;
+    std::uint32_t sequence_length;
+    std::uint32_t slot;
+};
+
+void run_multi_request_compare(const std::string& label, std::uint32_t pool_blocks,
+                               const std::vector<RequestSpec>& requests,
+                               bool tie_blocks = false, std::uint32_t top_k = 8u) {
+    constexpr std::uint32_t kHeadDim = shelf::kernel::kQsaHeadDim;
+    constexpr std::uint32_t kStates = 2u;
+    constexpr std::uint32_t kPooledState = 1u;
+    constexpr std::uint32_t kHeads = 4u;
+    constexpr std::uint32_t kCompress = 4u;
+    constexpr std::uint32_t kScoreStride = shelf::kernel::kQsaScoreBlockTile;
+
+    const std::uint32_t rows = requests.back().row_begin + requests.back().row_count;
+    std::uint32_t max_slots = 1u;
+    for (const auto& r : requests) max_slots = std::max(max_slots, r.slot + 1u);
+    const std::uint32_t mask_row_bytes = ((pool_blocks + 31u) / 32u) * 4u;
+    std::uint32_t half = shelf::kernel::kQsaSelectChunk;
+    while (half < top_k) half <<= 1u;
+    const std::uint32_t state_count = half * 2u;
+
+    std::mt19937 rng(20261121u);
+    auto q = random_bf16(rows * kHeads * kHeadDim, rng);
+    auto pooled = random_bf16(max_slots * kStates * pool_blocks * kHeadDim, rng);
+    if (tie_blocks && pool_blocks >= 3u) {
+        for (std::uint32_t d = 0; d < kHeadDim; ++d) {
+            const std::size_t base = (std::size_t(kPooledState) * pool_blocks) * kHeadDim + d;
+            pooled[base + kHeadDim] = pooled[base];
+            pooled[base + 2u * kHeadDim] = pooled[base];
+        }
+    }
+    std::vector<std::uint32_t> slots(rows, 0u);
+    std::vector<std::uint32_t> positions(rows, 0u);
+    for (const auto& r : requests) {
+        for (std::uint32_t i = 0u; i < r.row_count; ++i) {
+            slots[r.row_begin + i] = r.slot;
+            positions[r.row_begin + i] = r.sequence_length - r.row_count + i;
+        }
+    }
+
+    void* d_q = nullptr;
+    void* d_pooled = nullptr;
+    void* d_slots = nullptr;
+    void* d_positions = nullptr;
+    void* d_scores_legacy = nullptr;
+    void* d_scores_batched = nullptr;
+    void* d_state_scores_legacy = nullptr;
+    void* d_state_indices_legacy = nullptr;
+    void* d_state_scores_batched = nullptr;
+    void* d_state_indices_batched = nullptr;
+    void* d_selected_legacy = nullptr;
+    void* d_selected_batched = nullptr;
+    void* d_mask_legacy = nullptr;
+    void* d_mask_batched = nullptr;
+    shelf::runtime::DeviceRequestDescriptor* d_requests = nullptr;
+    const std::size_t scores_bytes =
+        static_cast<std::size_t>(rows) * kScoreStride * sizeof(float);
+    bool ok = hipMalloc(&d_q, q.size() * sizeof(shelf::bf16_t)) == hipSuccess;
+    ok = ok && hipMalloc(&d_pooled, pooled.size() * sizeof(shelf::bf16_t)) == hipSuccess;
+    ok = ok && hipMalloc(&d_slots, slots.size() * sizeof(std::uint32_t)) == hipSuccess;
+    ok = ok && hipMalloc(&d_positions, positions.size() * sizeof(std::uint32_t)) == hipSuccess;
+    ok = ok && hipMalloc(&d_scores_legacy, scores_bytes) == hipSuccess;
+    ok = ok && hipMalloc(&d_scores_batched, scores_bytes) == hipSuccess;
+    ok = ok && hipMalloc(&d_state_scores_legacy,
+                         std::size_t(rows) * state_count * sizeof(float)) == hipSuccess;
+    ok = ok && hipMalloc(&d_state_scores_batched,
+                         std::size_t(rows) * state_count * sizeof(float)) == hipSuccess;
+    ok = ok && hipMalloc(&d_state_indices_legacy,
+                         std::size_t(rows) * state_count * sizeof(std::int32_t)) == hipSuccess;
+    ok = ok && hipMalloc(&d_state_indices_batched,
+                         std::size_t(rows) * state_count * sizeof(std::int32_t)) == hipSuccess;
+    ok = ok && hipMalloc(&d_selected_legacy,
+                         std::size_t(rows) * top_k * sizeof(std::int32_t)) == hipSuccess;
+    ok = ok && hipMalloc(&d_selected_batched,
+                         std::size_t(rows) * top_k * sizeof(std::int32_t)) == hipSuccess;
+    ok = ok && hipMalloc(&d_mask_legacy, std::size_t(rows) * mask_row_bytes) == hipSuccess;
+    ok = ok && hipMalloc(&d_mask_batched, std::size_t(rows) * mask_row_bytes) == hipSuccess;
+    ok = ok && hipHostMalloc(reinterpret_cast<void**>(&d_requests),
+                             std::max<std::size_t>(requests.size(), 1u) *
+                                 sizeof(shelf::runtime::DeviceRequestDescriptor)) == hipSuccess;
+    ok = ok && hipMemcpy(d_q, q.data(), q.size() * sizeof(shelf::bf16_t),
+                         hipMemcpyHostToDevice) == hipSuccess;
+    ok = ok && hipMemcpy(d_pooled, pooled.data(), pooled.size() * sizeof(shelf::bf16_t),
+                         hipMemcpyHostToDevice) == hipSuccess;
+    ok = ok && hipMemcpy(d_slots, slots.data(), slots.size() * sizeof(std::uint32_t),
+                         hipMemcpyHostToDevice) == hipSuccess;
+    ok = ok && hipMemcpy(d_positions, positions.data(),
+                         positions.size() * sizeof(std::uint32_t),
+                         hipMemcpyHostToDevice) == hipSuccess;
+    ok = ok && hipMemset(d_scores_legacy, 0, scores_bytes) == hipSuccess;
+    ok = ok && hipMemset(d_scores_batched, 0, scores_bytes) == hipSuccess;
+    ok = ok && hipMemset(d_mask_legacy, 0, std::size_t(rows) * mask_row_bytes) == hipSuccess;
+    ok = ok && hipMemset(d_mask_batched, 0, std::size_t(rows) * mask_row_bytes) == hipSuccess;
+    for (std::size_t i = 0u; i < requests.size(); ++i) {
+        shelf::runtime::DeviceRequestDescriptor desc{};
+        desc.request_handle.slot = requests[i].slot;
+        desc.row_begin = requests[i].row_begin;
+        desc.row_count = requests[i].row_count;
+        desc.sequence_length = requests[i].sequence_length;
+        d_requests[i] = desc;
+    }
+    check(ok, label + ": device setup");
+    if (!ok) {
+        shelf::gpu::discard_cleanup_result(hipFree(d_q));
+        shelf::gpu::discard_cleanup_result(hipFree(d_pooled));
+        shelf::gpu::discard_cleanup_result(hipFree(d_slots));
+        shelf::gpu::discard_cleanup_result(hipFree(d_positions));
+        shelf::gpu::discard_cleanup_result(hipFree(d_scores_legacy));
+        shelf::gpu::discard_cleanup_result(hipFree(d_scores_batched));
+        shelf::gpu::discard_cleanup_result(hipFree(d_state_scores_legacy));
+        shelf::gpu::discard_cleanup_result(hipFree(d_state_scores_batched));
+        shelf::gpu::discard_cleanup_result(hipFree(d_state_indices_legacy));
+        shelf::gpu::discard_cleanup_result(hipFree(d_state_indices_batched));
+        shelf::gpu::discard_cleanup_result(hipFree(d_selected_legacy));
+        shelf::gpu::discard_cleanup_result(hipFree(d_selected_batched));
+        shelf::gpu::discard_cleanup_result(hipFree(d_mask_legacy));
+        shelf::gpu::discard_cleanup_result(hipFree(d_mask_batched));
+        shelf::gpu::discard_cleanup_result(hipHostFree(d_requests));
+        return;
+    }
+
+    const float scale = 1.0f / std::sqrt(static_cast<float>(kHeadDim));
+    const std::uint64_t slot_stride =
+        static_cast<std::uint64_t>(kStates) * pool_blocks * kHeadDim;
+    const std::uint64_t layer_stride = static_cast<std::uint64_t>(pool_blocks) * kHeadDim;
+    const std::uint32_t block_tile =
+        rows < 64u ? 64u : (rows < 256u ? 256u : shelf::kernel::kQsaScoreBlocksPerCta);
+
+    auto fill_common = [&](shelf::kernel::QsaSelectBatchArgs& args) {
+        args.q = static_cast<const shelf::bf16_t*>(d_q);
+        args.pooled_base = static_cast<const shelf::bf16_t*>(d_pooled);
+        args.block_mask = static_cast<std::uint8_t*>(d_mask_legacy);
+        args.row_sequence_slots = static_cast<const std::uint32_t*>(d_slots);
+        args.positions = static_cast<const std::uint32_t*>(d_positions);
+        args.rows = rows;
+        args.blocks = pool_blocks;
+        args.n_heads = kHeads;
+        args.head_dim = kHeadDim;
+        args.compress_ratio = kCompress;
+        args.state_index = kPooledState;
+        args.max_sequences = max_slots;
+        args.top_k = top_k;
+        args.q_row_stride = kHeads * kHeadDim;
+        args.selected_row_stride = top_k;
+        args.mask_row_bytes = mask_row_bytes;
+        args.pooled_slot_stride = slot_stride;
+        args.pooled_layer_stride = layer_stride;
+        args.scale = scale;
+    };
+    shelf::kernel::QsaSelectBatchArgs common;
+    fill_common(common);
+
+    std::uint32_t max_blocks = 0u;
+    for (const auto& r : requests) {
+        max_blocks = std::max(max_blocks, std::min(pool_blocks, r.sequence_length / kCompress));
+    }
+
+    bool launch_ok = true;
+    for (std::uint32_t bt = 0u; bt < max_blocks;
+         bt += shelf::kernel::kQsaScoreBlockTile) {
+        const std::uint32_t tile_blocks =
+            std::min(shelf::kernel::kQsaScoreBlockTile, max_blocks - bt);
+        std::uint32_t max_row_groups = 0u;
+        std::uint32_t max_block_tiles = 0u;
+        for (const auto& r : requests) {
+            const std::uint32_t rblocks = std::min(pool_blocks, r.sequence_length / kCompress);
+            if (rblocks <= bt) continue;
+            max_row_groups = std::max(
+                max_row_groups,
+                (r.row_count + shelf::kernel::kQsaScoreRowsPerCta - 1u) /
+                    shelf::kernel::kQsaScoreRowsPerCta);
+            const std::uint32_t here = std::min(tile_blocks, rblocks - bt);
+            max_block_tiles = std::max(max_block_tiles, (here + block_tile - 1u) / block_tile);
+        }
+        if (max_block_tiles != 0u) {
+            for (const auto& r : requests) {
+                const std::uint32_t rblocks =
+                    std::min(pool_blocks, r.sequence_length / kCompress);
+                if (rblocks <= bt) continue;
+                shelf::kernel::QsaScoreArgs sa{};
+                sa.q = common.q + static_cast<std::uint64_t>(r.row_begin) *
+                                      common.q_row_stride;
+                sa.pooled_base = common.pooled_base;
+                sa.scores = static_cast<float*>(d_scores_legacy);
+                sa.row_sequence_slots = common.row_sequence_slots + r.row_begin;
+                sa.rows = r.row_count;
+                sa.row_begin = r.row_begin;
+                sa.block_begin = bt;
+                sa.blocks = std::min(tile_blocks, rblocks - bt);
+                sa.block_tile = block_tile;
+                sa.score_row_stride = kScoreStride;
+                sa.n_heads = kHeads;
+                sa.head_dim = kHeadDim;
+                sa.compress_ratio = kCompress;
+                sa.state_index = kPooledState;
+                sa.max_sequences = max_slots;
+                sa.q_row_stride = common.q_row_stride;
+                sa.pooled_slot_stride = slot_stride;
+                sa.pooled_layer_stride = layer_stride;
+                sa.scale = scale;
+                launch_ok = launch_ok &&
+                    shelf::kernel::launch_qsa_score_wmma(sa, nullptr) == hipSuccess;
+            }
+            shelf::kernel::QsaScoreBatchedArgs ba{};
+            ba.q = common.q;
+            ba.pooled_base = common.pooled_base;
+            ba.scores = static_cast<float*>(d_scores_batched);
+            ba.row_sequence_slots = common.row_sequence_slots;
+            ba.requests = d_requests;
+            ba.request_count = static_cast<std::uint32_t>(requests.size());
+            ba.row_tile_begin = 0u;
+            ba.row_tile_rows = rows;
+            ba.block_begin = bt;
+            ba.block_count = tile_blocks;
+            ba.block_tile = block_tile;
+            ba.max_row_groups = max_row_groups;
+            ba.max_block_tiles = max_block_tiles;
+            ba.max_blocks = pool_blocks;
+            ba.score_row_stride = kScoreStride;
+            ba.n_heads = kHeads;
+            ba.head_dim = kHeadDim;
+            ba.compress_ratio = kCompress;
+            ba.state_index = kPooledState;
+            ba.max_sequences = max_slots;
+            ba.q_row_stride = common.q_row_stride;
+            ba.pooled_slot_stride = slot_stride;
+            ba.pooled_layer_stride = layer_stride;
+            ba.scale = scale;
+            launch_ok = launch_ok &&
+                shelf::kernel::launch_qsa_score_wmma_batched(ba, nullptr) == hipSuccess;
+        }
+        for (int variant = 0; variant < 2; ++variant) {
+            shelf::kernel::QsaTopkArgs ta{};
+            ta.scores = static_cast<const float*>(variant == 0 ? d_scores_legacy
+                                                               : d_scores_batched);
+            ta.state_scores = static_cast<float*>(variant == 0 ? d_state_scores_legacy
+                                                               : d_state_scores_batched);
+            ta.state_indices = static_cast<std::int32_t*>(variant == 0 ? d_state_indices_legacy
+                                                                       : d_state_indices_batched);
+            ta.block_mask = static_cast<std::uint8_t*>(variant == 0 ? d_mask_legacy
+                                                                    : d_mask_batched);
+            ta.selected = static_cast<std::int32_t*>(variant == 0 ? d_selected_legacy
+                                                                  : d_selected_batched);
+            ta.positions = common.positions;
+            ta.rows = rows;
+            ta.block_begin = bt;
+            ta.block_count = tile_blocks;
+            ta.score_row_stride = kScoreStride;
+            ta.blocks = pool_blocks;
+            ta.compress_ratio = kCompress;
+            ta.top_k = top_k;
+            ta.mask_row_bytes = mask_row_bytes;
+            ta.selected_row_stride = top_k;
+            ta.first = bt == 0u ? 1u : 0u;
+            ta.last = bt + tile_blocks >= max_blocks ? 1u : 0u;
+            launch_ok = launch_ok &&
+                shelf::kernel::launch_qsa_topk(ta, nullptr) == hipSuccess;
+        }
+    }
+    check(launch_ok && hipDeviceSynchronize() == hipSuccess, label + ": launch");
+    if (!launch_ok) return;
+
+    std::vector<float> scores_legacy(static_cast<std::size_t>(rows) * kScoreStride);
+    std::vector<float> scores_batched(static_cast<std::size_t>(rows) * kScoreStride);
+    std::vector<std::int32_t> selected_legacy(static_cast<std::size_t>(rows) * top_k);
+    std::vector<std::int32_t> selected_batched(static_cast<std::size_t>(rows) * top_k);
+    std::vector<std::uint8_t> mask_legacy(static_cast<std::size_t>(rows) * mask_row_bytes);
+    std::vector<std::uint8_t> mask_batched(static_cast<std::size_t>(rows) * mask_row_bytes);
+    ok = hipMemcpy(scores_legacy.data(), d_scores_legacy, scores_bytes, hipMemcpyDeviceToHost) == hipSuccess;
+    ok = ok && hipMemcpy(scores_batched.data(), d_scores_batched, scores_bytes,
+                         hipMemcpyDeviceToHost) == hipSuccess;
+    ok = ok && hipMemcpy(selected_legacy.data(), d_selected_legacy,
+                         selected_legacy.size() * sizeof(std::int32_t),
+                         hipMemcpyDeviceToHost) == hipSuccess;
+    ok = ok && hipMemcpy(selected_batched.data(), d_selected_batched,
+                         selected_batched.size() * sizeof(std::int32_t),
+                         hipMemcpyDeviceToHost) == hipSuccess;
+    ok = ok && hipMemcpy(mask_legacy.data(), d_mask_legacy, mask_legacy.size(),
+                         hipMemcpyDeviceToHost) == hipSuccess;
+    ok = ok && hipMemcpy(mask_batched.data(), d_mask_batched, mask_batched.size(),
+                         hipMemcpyDeviceToHost) == hipSuccess;
+    check(ok, label + ": read back");
+    if (ok) {
+        check(scores_legacy == scores_batched, label + ": batched scores are bit identical");
+        check(selected_legacy == selected_batched, label + ": batched top-k matches");
+        check(mask_legacy == mask_batched, label + ": batched mask matches");
+    }
+
+    shelf::gpu::discard_cleanup_result(hipFree(d_q));
+    shelf::gpu::discard_cleanup_result(hipFree(d_pooled));
+    shelf::gpu::discard_cleanup_result(hipFree(d_slots));
+    shelf::gpu::discard_cleanup_result(hipFree(d_positions));
+    shelf::gpu::discard_cleanup_result(hipFree(d_scores_legacy));
+    shelf::gpu::discard_cleanup_result(hipFree(d_scores_batched));
+    shelf::gpu::discard_cleanup_result(hipFree(d_state_scores_legacy));
+    shelf::gpu::discard_cleanup_result(hipFree(d_state_scores_batched));
+    shelf::gpu::discard_cleanup_result(hipFree(d_state_indices_legacy));
+    shelf::gpu::discard_cleanup_result(hipFree(d_state_indices_batched));
+    shelf::gpu::discard_cleanup_result(hipFree(d_selected_legacy));
+    shelf::gpu::discard_cleanup_result(hipFree(d_selected_batched));
+    shelf::gpu::discard_cleanup_result(hipFree(d_mask_legacy));
+    shelf::gpu::discard_cleanup_result(hipFree(d_mask_batched));
+    shelf::gpu::discard_cleanup_result(hipHostFree(d_requests));
+}
+
 int main() {
     constexpr std::uint32_t kChunk = shelf::kernel::kQsaSelectChunk;
 
@@ -450,6 +759,26 @@ int main() {
                   .max_sequences = 1u},
                  true, 2u);
 
+    run_scenario({.label = "blocks 16384 / compress 4 / split 2 tiles / top_k 512",
+                  .blocks = 16384u,
+                  .compress = 4u,
+                  .heads = 4u,
+                  .top_k = 512u,
+                  .positions = {65535u, 65532u, 2047u, 4096u, 40u},
+                  .row_slots = {0u, 0u, 0u, 0u, 0u},
+                  .max_sequences = 1u},
+                 true, 2u);
+
+    run_scenario({.label = "blocks 20000 / compress 4 / split 5 tiles / top_k 512",
+                  .blocks = 20000u,
+                  .compress = 4u,
+                  .heads = 4u,
+                  .top_k = 512u,
+                  .positions = {79999u, 79996u, 80000u, 12345u, 0u},
+                  .row_slots = {0u, 0u, 0u, 0u, 0u},
+                  .max_sequences = 1u},
+                 true, 5u);
+
     run_scenario({.label = "blocks 12000 / compress 4 / split 3 tiles",
                   .blocks = 12000u,
                   .compress = 4u,
@@ -459,6 +788,22 @@ int main() {
                   .row_slots = {0u, 0u, 0u, 0u},
                   .max_sequences = 1u},
                  true, 3u);
+
+    run_multi_request_compare(
+        "multi request / different lengths", 256u,
+        {{0u, 2u, 40u, 0u}, {2u, 5u, 300u, 1u}, {7u, 9u, 900u, 2u}, {16u, 1u, 8u, 0u}});
+    run_multi_request_compare(
+        "multi request / equal scores", 64u,
+        {{0u, 3u, 128u, 0u}, {3u, 2u, 256u, 1u}}, true);
+    run_multi_request_compare(
+        "multi request / 8191 blocks", 8191u,
+        {{0u, 2u, 32763u, 0u}, {2u, 3u, 32u, 1u}});
+    run_multi_request_compare(
+        "multi request / 8192 blocks", 8192u,
+        {{0u, 2u, 32767u, 0u}, {2u, 3u, 32u, 1u}});
+    run_multi_request_compare(
+        "multi request / 8193 blocks", 8193u,
+        {{0u, 2u, 32771u, 0u}, {2u, 3u, 32u, 1u}});
 
     std::printf("%s (%d failures)\n", failures == 0 ? "PASS" : "FAIL", failures);
     return failures == 0 ? 0 : 1;
