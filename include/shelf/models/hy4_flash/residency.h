@@ -54,7 +54,7 @@ struct Residency {
     std::array<void *, 4> ep_recv{};
     std::array<void *, 4> tp_ptr{};
     std::array<size_t, 4> tp_bytes{};
-    std::array<hipEvent_t, 4> lane_ready{}, lane_done{};
+    std::array<hipEvent_t, 4> lane_ready{}, lane_done{}, tp_consumed{}, ep_consumed{};
     std::array<std::unique_ptr<std::barrier<>>, 4> tp_barrier{}, ep_barrier{};
     void tp_sum(void *data, int rank, size_t bytes);
     void ep_reduce(void *data, int rank, size_t bytes);
