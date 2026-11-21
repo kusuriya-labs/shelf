@@ -8,6 +8,9 @@ canonical payload の stream / metadata / size formula / native preshuffle は
 [canonical_soa_payload.md](canonical_soa_payload.md) を正本とする。
 本ドキュメントは format の概要と runtime の経路を示す。
 
+N-gram / Engram / PLE table 向けの別形式の契約は
+[ngram_quantization.md](ngram_quantization.md) を参照。現行 runtime は同形式を実装していない。
+
 本 repository は **量子化 artifact の読込専用**である。量子化 artifact を生成する
 offline pipeline / CLI は含まない。HF の FP8 checkpoint、および外部で生成した
 self-contained quantized safetensors を直接ロードする。load 時に BF16 checkpoint を

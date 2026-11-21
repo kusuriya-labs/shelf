@@ -31,6 +31,7 @@
 ## quantization / formats
 
 - [quantization.md](quantization.md) — 量子化フォーマットと offline pipeline の overview
+- [ngram_quantization.md](ngram_quantization.md) — Ngram4 / Ngram5 table の形式契約
 - [canonical_soa_payload.md](canonical_soa_payload.md) — canonical payload の binary/layout 仕様
 - [tensor_partition.md](tensor_partition.md) — TP tensor partition と canonical → partition → preshuffle の weight materialization contract
 
