@@ -1,6 +1,11 @@
 #include <shelf/models/hy4_flash/routes.h>
+#include <shelf/models/hy4_flash/residency.h>
 #include <cstdio>
 #include <limits>
+#include <atomic>
+#include <chrono>
+#include <future>
+#include <thread>
 
 using namespace shelf::hy4;
 
@@ -12,6 +17,55 @@ int main() {
             ++failures;
         }
     };
+    for (bool push : {false, true})
+        for (bool source : {false, true})
+            for (bool destination : {false, true}) {
+                auto expected = push ? (source ? ReduceTransport::push : ReduceTransport::host)
+                                     : (destination ? ReduceTransport::peer : ReduceTransport::host);
+                check(select_reduce_transport(push, source, destination) == expected,
+                      "転送方式の選択が不正です");
+            }
+    {
+        SyncBarrier barrier(2);
+        std::atomic<int> progress{0};
+        std::thread worker([&] {
+            for (int i = 0; i < 100; ++i) {
+                ++progress;
+                barrier.arrive_and_wait();
+                barrier.arrive_and_wait();
+            }
+        });
+        for (int i = 0; i < 100; ++i) {
+            barrier.arrive_and_wait();
+            check(progress == i + 1, "barrier の世代が一致しません");
+            barrier.arrive_and_wait();
+        }
+        worker.join();
+        std::promise<void> started;
+        auto released = std::async(std::launch::async, [&] {
+            started.set_value();
+            try { barrier.arrive_and_wait(); }
+            catch (const CollectiveAborted &) { return true; }
+            return false;
+        });
+        started.get_future().wait();
+        barrier.abort();
+        check(released.wait_for(std::chrono::seconds(2)) == std::future_status::ready,
+              "中断時に待機が解除されません");
+        check(released.get(), "中断例外が送出されません");
+        bool aborted = false;
+        try { barrier.arrive_and_wait(); }
+        catch (const CollectiveAborted &) { aborted = true; }
+        check(aborted, "中断後の参加が拒否されません");
+        barrier.reset();
+        std::thread again([&] { barrier.arrive_and_wait(); });
+        barrier.arrive_and_wait();
+        again.join();
+    }
+    check(multi_gpu_vmm_allowed(1, "1"), "単一 GPU の VMM が拒否されました");
+    check(multi_gpu_vmm_allowed(4, "0"), "通常の複数 GPU 実行が拒否されました");
+    check(!multi_gpu_vmm_allowed(2, "1") && !multi_gpu_vmm_allowed(4, "1"),
+          "複数 GPU の VMM が拒否されません");
     for (int rows : {1, 8, 24, 1024}) {
         for (int ranks : {1, 3, 4}) {
             std::array<int, 512> owners{};

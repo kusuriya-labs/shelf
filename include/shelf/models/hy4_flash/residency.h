@@ -3,11 +3,16 @@
 #include <shelf/core/memory/arena.h>
 #include <shelf/models/hy4_flash/linear.h>
 #include <shelf/models/hy4_flash/checkpoint.h>
-#include <barrier>
+#include <shelf/models/hy4_flash/sync.h>
 #include <memory>
+#include <string_view>
 
 namespace shelf::hy4 {
 inline constexpr int max_prefill_chunk = 1024;
+
+inline bool multi_gpu_vmm_allowed(int ranks, std::string_view vmm) {
+    return ranks <= 1 || vmm != "1";
+}
 
 struct Region {
     uint8_t *base = nullptr;
@@ -54,8 +59,16 @@ struct Residency {
     std::array<void *, 4> ep_recv{};
     std::array<void *, 4> tp_ptr{};
     std::array<size_t, 4> tp_bytes{};
-    std::array<hipEvent_t, 4> lane_ready{}, lane_done{}, tp_consumed{}, ep_consumed{};
-    std::array<std::unique_ptr<std::barrier<>>, 4> tp_barrier{}, ep_barrier{};
+    std::array<std::array<hipEvent_t, 2>, 4> tp_ready{}, tp_done{}, tp_arrived{}, tp_consumed{};
+    std::array<std::array<hipEvent_t, 2>, 4> ep_ready{}, ep_done{}, ep_arrived{}, ep_consumed{};
+    std::array<std::array<bool, 2>, 4> tp_recorded{}, ep_recorded{};
+    std::array<int, 4> tp_parity{}, ep_parity{};
+    std::array<void *, 4> reduce_staging{};
+    std::array<std::unique_ptr<SyncBarrier>, 4> tp_barrier{}, ep_barrier{};
+    std::unique_ptr<SyncBarrier> all_barrier;
+    void abort_collectives();
+    void reset_collectives();
+    void reduce_pair(void *data, int rank, size_t bytes, bool ep);
     void tp_sum(void *data, int rank, size_t bytes);
     void ep_reduce(void *data, int rank, size_t bytes);
     void *route_buffer(int rank, size_t bytes);
