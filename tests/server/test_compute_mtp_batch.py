@@ -52,6 +52,15 @@ def max_batched_tokens():
     return int(os.environ.get("SHELF_MTP_MAX_BATCH", "512"))
 
 
+def max_seq_len():
+    return int(os.environ.get("SHELF_MTP_MAX_SEQ", "512"))
+
+
+def reserve_gib():
+    value = os.environ.get("SHELF_MTP_RESERVE_GIB")
+    return None if value is None else int(value)
+
+
 def model_dir() -> Path:
     env = os.environ.get("SHELF_MODEL_DIR_MTP") or os.environ.get("SHELF_MODEL_DIR")
     if env:
@@ -99,9 +108,10 @@ def target_baseline() -> dict[int, list[int]]:
     harness = ComputeHarness(
         model_path=model_dir(),
         auto_arena=True,
-        max_seq_len=512,
+        max_seq_len=max_seq_len(),
         max_concurrent_requests=len(prompts()),
         max_num_batched_tokens=max_batched_tokens(),
+        working_set_reserve_gib=reserve_gib(),
         prefix_cache_enabled=False,
         devices=os.environ.get("SHELF_MTP_DEVICES", "0,1,2,3"),
         tp=parallel_tp(),
@@ -134,9 +144,10 @@ def main() -> int:
     harness = ComputeHarness(
         model_path=model_dir(),
         auto_arena=True,
-        max_seq_len=512,
+        max_seq_len=max_seq_len(),
         max_concurrent_requests=len(prompts()),
         max_num_batched_tokens=max_batched_tokens(),
+        working_set_reserve_gib=reserve_gib(),
         prefix_cache_enabled=False,
         devices=devices,
         tp=parallel_tp(),
@@ -167,7 +178,8 @@ def main() -> int:
         checker.check("mtp-batch-enabled", "MTP_SERVE=batch" in stderr, stderr[-500:])
         match = re.search(
             r"MTP_BATCH rounds=(\d+) accepted=(\d+) emitted=(\d+) chunks=(\d+) "
-            r"draft_forwards=(\d+) max_active=(\d+)",
+            r"draft_forwards=(\d+) max_draft_per_round=(\d+) "
+            r"max_verify_per_round=(\d+) max_active=(\d+)",
             stderr)
         checker.check("mtp-batch-stats", match is not None, stderr[-500:])
         if match is not None:
@@ -175,7 +187,9 @@ def main() -> int:
             rounds = int(match.group(1))
             chunks = int(match.group(4))
             draft_forwards = int(match.group(5))
-            max_active = int(match.group(6))
+            max_draft_per_round = int(match.group(6))
+            max_verify_per_round = int(match.group(7))
+            max_active = int(match.group(8))
             checker.check("multi-request-round", max_active >= 2, match.group(0))
             checker.check("multi-batch-verify", chunks >= 2 and rounds >= 2,
                           match.group(0))
@@ -183,6 +197,13 @@ def main() -> int:
             checker.check("draft-forwards-bounded",
                           rounds <= draft_forwards <= rounds * drafts,
                           match.group(0))
+            checker.check("draft-forwards-per-round",
+                          max_draft_per_round <= drafts,
+                          match.group(0))
+            if os.environ.get("SHELF_MTP_WAVEFRONT", "0") not in ("", "0"):
+                checker.check("verify-forwards-per-round",
+                              max_verify_per_round <= drafts + 1,
+                              match.group(0))
     except Exception as exc:  # noqa: BLE001 - the harness reports failures as text
         checker.check("exception", False, repr(exc))
     finally:

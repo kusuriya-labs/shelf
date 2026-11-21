@@ -18,6 +18,24 @@ namespace {
 
 constexpr uint32_t kMtpKvLayers = 1u;
 
+
+bool mtp_wavefront_enabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("SHELF_MTP_WAVEFRONT");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    return enabled;
+}
+
+bool mtp_fused_verify_enabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("SHELF_MTP_FUSED_VERIFY");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    return enabled;
+}
+
+
 uint32_t ceil_div_u32(uint32_t value, uint32_t divisor) noexcept {
     return (value + divisor - 1u) / divisor;
 }
@@ -533,7 +551,8 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
     drafter->target_pool = &target_gdn_pool;
     drafter->target_stream = stream;
     drafter->serial_verify =
-        target->qsa_state_pool != nullptr || target->ple_conv_state_pool != nullptr;
+        (target->qsa_state_pool != nullptr || target->ple_conv_state_pool != nullptr) &&
+        !mtp_fused_verify_enabled();
     const hipError_t device_err = hipGetDevice(&drafter->target_device);
     if (device_err != hipSuccess) {
         return Status::hip_error("hipGetDevice", hipGetErrorString(device_err), __FILE__,
@@ -1848,7 +1867,7 @@ Result<MtpSpecBatchOutput> mtp_verify_wavefront(
     const hipStream_t stream = context.ranks.empty() ? nullptr
                                                      : context.ranks.front().stream;
     const auto started = std::chrono::steady_clock::now();
-    constexpr std::size_t kWavefrontChunk = 4u;
+    const std::size_t kWavefrontChunk = mtp_wavefront_enabled() ? 4u : 1u;
     for (uint32_t depth = 0u; depth <= max_drafts; ++depth) {
         std::vector<std::size_t> depth_slots;
         for (std::size_t i = 0u; i < count; ++i) {

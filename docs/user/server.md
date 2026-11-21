@@ -204,8 +204,8 @@ Qwen3.8-27B-DFlash2、同時 request 1 件では追加 scratch は 16.953 MiB。
 
 - server の MTP は複数 request を同時に保持する。dense など QSA / PLE を持たない
   target は active な request の verify を 4 request / 32 行ずつの chunk にまとめて
-  実行する。qwen4exp は MTP draft を深さ単位で batch 化し、verify を最大 4 request の
-  Wavefront DECODE batch で実行する。
+  実行する。qwen4exp は MTP draft を深さ単位で batch 化し、verify は既定で request ごとの
+  1 行 DECODE を使う。`SHELF_MTP_WAVEFRONT=1` で最大 4 request の Wavefront batch を選べる。
   `--max-concurrent-requests` が同時に保持する request 数の上限である。
 - tool calling / sampling / cancel は MTP 経路でも利用できる。cancel は prefill 中なら
   次の chunk 境界、生成中なら次の spec round で反映される。
