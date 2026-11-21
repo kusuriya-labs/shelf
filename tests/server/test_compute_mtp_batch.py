@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""MTP のマルチリクエスト融合 verify を shelf-compute --serve-stdio で確認する。"""
+"""MTP のマルチリクエスト Wavefront verify を shelf-compute --serve-stdio で確認する。
+
+環境変数:
+    SHELF_MODEL_DIR_MTP   対象 checkpoint
+    SHELF_MTP_DEVICES     device list（default 0,1,2,3）
+    SHELF_MTP_TP          tensor parallel（default 1）
+    SHELF_MTP_EP          expert parallel（default 4）
+    SHELF_MTP_REQUESTS    同時 request 数（default 8）
+    SHELF_MTP_DRAFTS      MTP drafts per round（default 4）
+    SHELF_MTP_MAX_BATCH   max-num-batched-tokens（default 512）
+"""
 
 from __future__ import annotations
 
@@ -23,6 +33,23 @@ PROMPTS = [
     [248041, 77094, 279, 2614],
 ]
 MAX_NEW_TOKENS = 8
+
+
+def prompts():
+    count = int(os.environ.get("SHELF_MTP_REQUESTS", "8"))
+    return PROMPTS[:count]
+
+
+def parallel_tp():
+    return int(os.environ.get("SHELF_MTP_TP", "1"))
+
+
+def parallel_ep():
+    return int(os.environ.get("SHELF_MTP_EP", "4"))
+
+
+def max_batched_tokens():
+    return int(os.environ.get("SHELF_MTP_MAX_BATCH", "512"))
 
 
 def model_dir() -> Path:
@@ -55,8 +82,9 @@ def collect(harness: ComputeHarness, request_ids: list[int]) -> dict[int, dict]:
 
 
 def run_batch(harness: ComputeHarness, base_id: int) -> dict[int, dict]:
-    ids = [base_id + i for i in range(len(PROMPTS))]
-    for request_id, prompt in zip(ids, PROMPTS):
+    prompt_list = prompts()
+    ids = [base_id + i for i in range(len(prompt_list))]
+    for request_id, prompt in zip(ids, prompt_list):
         harness.send({
             "op": "generate",
             "request_id": request_id,
@@ -72,17 +100,19 @@ def target_baseline() -> dict[int, list[int]]:
         model_path=model_dir(),
         auto_arena=True,
         max_seq_len=512,
-        max_concurrent_requests=len(PROMPTS),
-        max_num_batched_tokens=512,
+        max_concurrent_requests=len(prompts()),
+        max_num_batched_tokens=max_batched_tokens(),
         prefix_cache_enabled=False,
         devices=os.environ.get("SHELF_MTP_DEVICES", "0,1,2,3"),
-        ep=4,
+        tp=parallel_tp(),
+        ep=parallel_ep(),
+        mtp_drafts=int(os.environ.get("SHELF_MTP_DRAFTS", "4")),
     )
     try:
         harness.start()
         harness.wait_ready()
         baseline = {}
-        for request_id, prompt in enumerate(PROMPTS):
+        for request_id, prompt in enumerate(prompts()):
             harness.send({
                 "op": "generate",
                 "request_id": request_id,
@@ -105,12 +135,14 @@ def main() -> int:
         model_path=model_dir(),
         auto_arena=True,
         max_seq_len=512,
-        max_concurrent_requests=len(PROMPTS),
-        max_num_batched_tokens=512,
+        max_concurrent_requests=len(prompts()),
+        max_num_batched_tokens=max_batched_tokens(),
         prefix_cache_enabled=False,
         devices=devices,
-        ep=4,
+        tp=parallel_tp(),
+        ep=parallel_ep(),
         mtp=True,
+        mtp_drafts=int(os.environ.get("SHELF_MTP_DRAFTS", "4")),
     )
     try:
         harness.start()
@@ -123,27 +155,33 @@ def main() -> int:
             repr(first))
         checker.check("matches-target", all(
             first[100 + i]["generated_ids"] == baseline[i]
-            for i in range(len(PROMPTS))),
+            for i in range(len(prompts()))),
             repr([(first[100 + i]["generated_ids"], baseline[i])
-                  for i in range(len(PROMPTS))]))
+                  for i in range(len(prompts()))]))
         checker.check("deterministic", all(
             first[100 + i]["generated_ids"] == second[200 + i]["generated_ids"]
-            for i in range(len(PROMPTS))),
-            repr([first[100 + i]["generated_ids"] for i in range(len(PROMPTS))]))
+            for i in range(len(prompts()))),
+            repr([first[100 + i]["generated_ids"] for i in range(len(prompts()))]))
 
         stderr = "\n".join(harness.stderr_lines)
         checker.check("mtp-batch-enabled", "MTP_SERVE=batch" in stderr, stderr[-500:])
         match = re.search(
             r"MTP_BATCH rounds=(\d+) accepted=(\d+) emitted=(\d+) chunks=(\d+) "
-            r"max_active=(\d+)",
+            r"draft_forwards=(\d+) max_active=(\d+)",
             stderr)
         checker.check("mtp-batch-stats", match is not None, stderr[-500:])
         if match is not None:
+            print(f"MTP_BATCH_STATS: {match.group(0)}")
             rounds = int(match.group(1))
             chunks = int(match.group(4))
-            max_active = int(match.group(5))
+            draft_forwards = int(match.group(5))
+            max_active = int(match.group(6))
             checker.check("multi-request-round", max_active >= 2, match.group(0))
             checker.check("multi-batch-verify", chunks >= 2 and rounds >= 2,
+                          match.group(0))
+            drafts = int(os.environ.get("SHELF_MTP_DRAFTS", "4"))
+            checker.check("draft-forwards-bounded",
+                          rounds <= draft_forwards <= rounds * drafts,
                           match.group(0))
     except Exception as exc:  # noqa: BLE001 - the harness reports failures as text
         checker.check("exception", False, repr(exc))

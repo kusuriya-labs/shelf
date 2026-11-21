@@ -55,11 +55,16 @@ qwen4exp の MTP は TP / EP でも rank0 が block を持ち、`TpRankRuntimeCo
 target の head は分割されたまま使う。drafter executor の staging plane は MTP block と
 この head の両方の shape から見積もる。
 
-qwen4exp のように QSA / PLE の per-row state を持つ target は、1 行ずつ target の
-通常 decode と同じ条件で検証する。draft は `[pending, draft0, ...]` の順に target へ
-1 行ずつ流し、最初に一致しなかった行で止める。target の state は受理した prefix だけを
-進めるため、GDN snapshot / compact log replay を必要としない。dense など QSA / PLE を
-持たない target は従来どおり K+1 行の融合 verify を使う。
+qwen4exp のように QSA / PLE の per-row state を持つ target は、MTP block を 1 つの
+共有 executor で動かす。request ごとの MTP KV / hidden / position は独立させたまま、
+draft は depth 単位で request をまとめて 1 forward にする。draft 数 K に対して
+MTP forward は最大 K 回であり、request 数 N に比例しない。
+
+verify は draft 列 `[pending, draft0, ...]` を深さごとに target の `DECODE` で流す。
+同じ深さの active な request を最大 4 request の Wavefront batch にまとめ、最初に
+一致しなかった request はそれ以降の深さから外す。target の state は受理した prefix
+だけを進めるため、GDN snapshot / compact log replay を必要としない。dense など
+QSA / PLE を持たない target は従来どおり K+1 行の融合 verify を使う。
 
 ## serve-stdio
 
@@ -71,13 +76,14 @@ qwen4exp のように QSA / PLE の per-row state を持つ target は、1 行�
 - request の prefill は admit 時に行い、以後の round は active な request をまとめて進める。
   終了した request は sequence と drafter slot を解放する。
 - 各 round は request ごとに draft する。融合 verify を使う target は active な request の
-  target verify を 1 forward にまとめる。qwen4exp は request ごとに target の 1 行 decode を
-  使う。融合する request の数は round ごとに変わるため、融合 verify では数値が round の
-  row 数に依存しないことが要件になる（下記「verify の行数不変性」）。
+  target verify を 1 forward にまとめる。qwen4exp は深さごとに最大 4 request の
+  Wavefront `DECODE` batch を使う。融合する request の数は round ごとに変わるため、
+  融合 verify では数値が round の row 数に依存しないことが要件になる
+  （下記「verify の行数不変性」）。
 - `token` event を request ごとに emit し、`done` で `generated_ids` を返す。
 - 融合 verify の TP では `TpCoordinator` の per-rank options 経路を使い、rank ごとの
-  GDN / QSA / PLE history と snapshot で rollback する。qwen4exp の 1 行検証は通常の
-  TP decode 経路を使う。
+  GDN / QSA / PLE history と snapshot で rollback する。qwen4exp の Wavefront 検証は
+  通常の TP decode 経路を使う。
 
 ## verify の行数不変性
 
@@ -93,8 +99,9 @@ admission のタイミングで生成列が分岐した。
 決まるため、同じ request は同居する request 数にも設定した同時実行数にも関係なく同じ
 分割数を使う。mul1 と mul24（EXL3-INT8）の両方がこの値に従う。QSA の sparse attention
 も同じ容量で split 数を決める。decode（`rows == 1`）と prefill は従来どおりである。
-QSA / PLE を持つ qwen4exp はこの融合 verify を使わず、target の 1 行 decode を
-そのまま使うため、行数不変性の問題を避ける。
+QSA / PLE を持つ qwen4exp はこの融合 verify を使わず、深さごとの Wavefront `DECODE`
+batch を使うため、融合 verify の行数不変性の問題を避ける。Wavefront の batch は
+最大 4 request に区切り、それ以上同時に並べた場合の数値差を避ける。
 
 ## verify の 1 forward 上限
 
@@ -163,7 +170,9 @@ MTP 層は target とは独立した KV pool を持つ。
 - page 数は `ceil((max_seq_len + 1) / page_tokens) + 1` である。target pool の page 数
   ではない。
 - MTP 用の `SequenceSlotPool` / `GdnStatePool` / `PagedSequenceState` を別に持つ。
-  `GdnStatePool` は `create_executor` の geometry 検証を通すための 1 state だけを持つ。
+  単一 request では `GdnStatePool` は `create_executor` の geometry 検証を通すための
+  1 state だけを持つ。batch の qwen4exp は request 数分の slot / GDN state / MTP page を
+  1 つの共有 executor に持つ。
 - `mtp_spec_step` の各 round は MTP sequence を round 開始位置まで rewind してから
   first pass を実行する。rewind は必要な page 数を残して余剰 page を release し、
   `position` を戻す。
@@ -200,8 +209,8 @@ prompt を `executor.config.max_batch_rows` 単位で chunk prefill する。
    MTP normed hidden、position は `position + i - 1`。greedy で `draft[i]` を得る。
 3. **verify**: dense など QSA / PLE を持たない target は
    `[pending, draft0..draftK-1]` の `K+1` row を `SPEC_VERIFY` で 1 forward に流す。
-   qwen4exp のように QSA / PLE を持つ target は同じ列を 1 row ずつ通常の `DECODE` で
-   流し、最初の不一致で止める。
+   qwen4exp のように QSA / PLE を持つ target は同じ列を深さごとに `DECODE` し、
+   同じ深さの request を最大 4 request の Wavefront batch にまとめる。
 4. **accept**: longest prefix を取る。full accept では bonus token、partial accept では
    correction token を次 round の pending にする。
 
@@ -262,10 +271,12 @@ MTP_EMITTED_PER_ROUND MTP_VERIFY_ROWS MTP_GDN_RESTORES
 MTP_DRAFT_MS MTP_VERIFY_MS MTP_GDN_RESTORE_MS MTP_COMPACT_REPLAY_MS MTP_ROUND_MS
 ```
 
-serve の終了時には `MTP_BATCH rounds=... accepted=... emitted=... chunks=... max_active=...`
-を 1 行出す。`chunks` は verify の target forward 数、`max_active` は同時に進めた
-request 数の最大値である。融合 verify の target では 1 round あたりの chunk 数、
-1 行ずつ検証する qwen4exp では target decode の回数になる。
+serve の終了時には
+`MTP_BATCH rounds=... accepted=... emitted=... chunks=... draft_forwards=... max_active=...`
+を 1 行出す。`chunks` は verify の target forward 数、`draft_forwards` は MTP draft の
+forward 数、`max_active` は同時に進めた request 数の最大値である。qwen4exp では
+draft が depth 単位で batch 化されるため、`draft_forwards` は round 数 × drafts 以下に
+収まり、request 数には比例しない。
 
 `GENERATED_IDS` の形式は target-only と同一である。
 
@@ -286,9 +297,9 @@ request 数の最大値である。融合 verify の target では 1 round あ�
 - qwen4exp の MTP block は rank0 だけが load し、drafter の入力は final norm ではなく
   pre-mixer の wide residual（`hc * hidden`）である。QSA / PLE を持つ target は
   `PleConvStatePool` / `QsaKeyStatePool` の per-row state を戻さずに済むよう、
-  target の 1 行 decode をそのまま使う安全経路で検証する。この経路の生成列は
-  target-only と一致する。TP で target の lm_head が語彙分割されるときは rank0 が
-  全語彙 head を追加で持つ。
+  深さごとの Wavefront `DECODE` batch で検証する。この経路の生成列は target-only と
+  一致する。TP で target の lm_head が語彙分割されるときは rank0 が全語彙 head を
+  追加で持つ。
 - verify の split-K は行容量で固定する。mul1 / mul24 の両方と QSA sparse attention が
   この値に従う。融合 verify を使う family では、これがないと同居する request 数で
   argmax が変わる。

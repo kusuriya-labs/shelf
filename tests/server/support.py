@@ -239,7 +239,8 @@ class ComputeHarness:
                  prefix_cache_save_interval: int | None = None,
                  max_num_batched_tokens: int | None = None,
                  rope_factor: str | None = None,
-                 mtp: bool = False):
+                 mtp: bool = False,
+                 mtp_drafts: int = 4):
         self.log_path = log_path
         self.arena_gib = arena_gib
         self.auto_arena = auto_arena
@@ -250,6 +251,7 @@ class ComputeHarness:
         self.max_num_batched_tokens = max_num_batched_tokens
         self.rope_factor = rope_factor
         self.mtp = mtp
+        self.mtp_drafts = mtp_drafts
         self.max_seq_len = max_seq_len
         self.device = device
         self.max_concurrent_requests = max_concurrent_requests
@@ -325,7 +327,7 @@ class ComputeHarness:
                      "--dflash2-drafts", str(self.dflash2_drafts),
                      "--dflash2-tree-budget", "0"]
         if self.mtp:
-            argv += ["--mtp", "--mtp-drafts", "4"]
+            argv += ["--mtp", "--mtp-drafts", str(self.mtp_drafts)]
         env = dict(os.environ)
         if self.batch_trace:
             env["SHELF_BATCH_TRACE"] = "1"

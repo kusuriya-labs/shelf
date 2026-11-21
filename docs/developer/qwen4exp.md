@@ -17,8 +17,8 @@ PLE conv state を shadow slot に保持し（[prefix_cache.md](prefix_cache.md)
 PLE の n-gram history を復元 prefix で再 seed する。DFlash2 は
 `--dflash2-model-dir` で有効になる。`--mtp` も使える。MTP block は rank0 が load し、
 TP で target の lm_head が語彙分割されるときは drafter 用に全語彙の lm_head を
-rank0 へ追加で load する（[mtp.md](mtp.md)）。QSA / PLE を持つため verify は target の
-1 行 decode を使い、生成列は target-only と一致する。routed expert は
+rank0 へ追加で load する（[mtp.md](mtp.md)）。QSA / PLE を持つため verify は深さごとの Wavefront DECODE batch を使い、
+生成列は target-only と一致する。routed expert は
 `--expert-parallel` で expert 軸に分割でき、TP と EP の積が device 数になる。
 
 `--pipeline-parallel` にも対応する。各 stage は担当地の層だけをロードし、

@@ -116,6 +116,15 @@ struct MtpGdnRankState {
     std::uint32_t ple_conv_history_rows = 0;
 };
 
+struct MtpDraftShared {
+    shelf::qwen_hybrid::QwenHybridConfig config;
+    std::unique_ptr<state::SequenceSlotPool> slot_pool;
+    std::unique_ptr<state::GdnStatePool> gdn_pool;
+    std::unique_ptr<state::PagedKVPool> kv_pool;
+    Executor executor;
+    bool initialized = false;
+};
+
 struct MtpDrafter {
     shelf::qwen_hybrid::QwenHybridConfig config;
     std::unique_ptr<state::SequenceSlotPool> slot_pool;
@@ -123,6 +132,7 @@ struct MtpDrafter {
     std::unique_ptr<state::PagedKVPool> kv_pool;
     std::unique_ptr<state::PagedSequenceState> sequence;
     Executor executor;
+    MtpDraftShared* shared_draft = nullptr;
 
     void* gdn_conv_snapshot = nullptr;
     void* gdn_recurrent_snapshot = nullptr;
@@ -213,6 +223,15 @@ std::size_t mtp_drafter_reserve_bytes(const shelf::qwen_hybrid::QwenHybridConfig
                                       const state::GdnStatePoolLayout* target_gdn =
                                           nullptr) noexcept;
 
+std::size_t mtp_shared_draft_reserve_bytes(
+    const shelf::qwen_hybrid::QwenHybridConfig& config,
+    const MtpDrafterConfig& options,
+    std::size_t token_row_intermediate,
+    std::size_t grouped_executor_bytes,
+    bool exl3_linear_workspace,
+    const shelf::weights::Exl3LinearShape& exl3_linear_shape,
+    std::uint32_t max_requests) noexcept;
+
 Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
     const MtpDrafterInput& input,
     Executor* target,
@@ -221,7 +240,8 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
     hipStream_t stream,
     const MtpDrafterConfig& options,
     const std::vector<MtpGdnRankBinding>* extra_ranks = nullptr,
-    ::shelf::runtime::TpBatchHook* tp_hook = nullptr);
+    ::shelf::runtime::TpBatchHook* tp_hook = nullptr,
+    MtpDraftShared* shared_draft = nullptr);
 
 Status mtp_drafter_shutdown(MtpDrafter& drafter, hipStream_t stream) noexcept;
 
@@ -275,6 +295,7 @@ struct MtpSpecBatchOutput {
     std::vector<MtpIterationOutput> slots;
     uint32_t total_rows = 0u;
     uint32_t verify_chunks = 0u;
+    uint32_t draft_forwards = 0u;
     uint32_t rounds = 0u;
     double round_ms = 0.0;
 };
@@ -286,6 +307,7 @@ struct MtpSpecBatchOutput {
 struct MtpSpecBatchContext {
     Executor* target = nullptr;
     std::vector<std::unique_ptr<MtpDrafter>> drafters;
+    std::unique_ptr<MtpDraftShared> shared_draft;
     // One entry per rank: pool / stream / device, the shared history and compact log, and
     // the commit descriptor this rank's accept path uploads.
     std::vector<MtpGdnRankState> ranks;
