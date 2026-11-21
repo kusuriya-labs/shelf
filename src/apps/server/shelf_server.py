@@ -551,7 +551,7 @@ def parse_args(argv=None):
                         help="KV cache dtype (default bf16)")
     parser.add_argument("--page-tokens", type=int, default=16,
                         help="paged KV page size in tokens (default 16)")
-    parser.add_argument("--mtp-window", type=int, default=0,
+    parser.add_argument("--mtp-window", type=int, default=4096,
                         help="MTP draft attention window in tokens (0 = full context)")
     parser.add_argument("--mtp-sink", type=int, default=64,
                         help="MTP draft attention sink tokens kept before the window")

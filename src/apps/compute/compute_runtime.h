@@ -62,7 +62,7 @@ struct Qwen35RuntimeConfig {
     bool mtp = false;
     bool mtp_serve = false;
     uint32_t mtp_drafts = 7;
-    uint32_t mtp_window = 0;
+    uint32_t mtp_window = 4096;
     uint32_t mtp_sink = 64;
     uint32_t max_seq_len = 512;
     uint32_t max_num_batched_tokens = 0;
