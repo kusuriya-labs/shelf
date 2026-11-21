@@ -5,6 +5,7 @@
 #include <shelf/kernels/model_dispatch_state.h>
 #include <shelf/kernels/fused/qsa_key_cache.h>
 #include <shelf/kernels/optimized/qsa.h>
+#include <shelf/kernels/optimized/attention/qsa_sparse.h>
 
 #include <algorithm>
 
@@ -199,6 +200,23 @@ Result<OptimizedLaunchResult> try_launch_qsa_select(
         return bad("qsa select: row metadata missing");
     const uint32_t rows = ctx.actual_rows;
     if (rows == 0u) return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
+    // Every visible block fits the top-k budget, so the selection keeps all of them. The
+    // attention dispatch routes the same batch to the dense path; filling the mask keeps
+    // the masked path correct if it is still taken.
+    if (b.compute_spec != 0u && ctx.spec.max_visible_tokens != 0u &&
+        (ctx.spec.max_visible_tokens + ::shelf::kernel::kQsaSparseBlockTokens - 1u) /
+                ::shelf::kernel::kQsaSparseBlockTokens <=
+            b.compute_spec) {
+        const hipError_t error = hipMemsetAsync(
+            mask.value().ptr, 0xFF,
+            static_cast<std::size_t>(rows) * mask.value().row_stride, stream);
+        if (error != hipSuccess)
+            return Status::hip_error("qsa select budget mask", hipGetErrorString(error),
+                                     __FILE__, __LINE__);
+        record_physical_launch(1u);
+        record_optimized_op();
+        return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
+    }
 
     ::shelf::kernel::QsaSelectBatchArgs args;
     args.q = static_cast<const ::shelf::bf16_t*>(q.value().ptr);
@@ -254,18 +272,15 @@ Result<OptimizedLaunchResult> try_launch_qsa_select(
                     : ::shelf::kernel::kQsaScoreRowTile;
                 Slice slices[kMaxSlices];
                 uint32_t slice_count = 0u;
-                uint32_t max_blocks = 0u;
                 for (uint32_t i = 0u; i < req_count; ++i) {
                     const auto& req = reqs[i];
                     const uint32_t begin = std::max(req.row_begin, rc);
                     const uint32_t end = std::min(req.row_begin + req.row_count, rc + rc_rows);
                     if (end <= begin) continue;
-                    const uint32_t blocks = std::min(
-                        args.blocks, req.sequence_length / args.compress_ratio);
-                    slices[slice_count++] = Slice{begin, end - begin, blocks};
-                    if (blocks > max_blocks) max_blocks = blocks;
+                    slices[slice_count++] = Slice{begin, end - begin, 0u};
                 }
-                if (max_blocks == 0u) {
+                (void)0;
+                if (slice_count == 0u) {
                     ::shelf::kernel::QsaTopkArgs ta{};
                     ta.scores = ctx.qsa_scores;
                     ta.state_scores = ctx.qsa_topk_scores;
@@ -310,20 +325,17 @@ Result<OptimizedLaunchResult> try_launch_qsa_select(
                         ::shelf::kernel::kQsaScoreRowsPerCta;
                     if (groups > max_row_groups) max_row_groups = groups;
                 }
-                for (uint32_t bt = 0u; bt < max_blocks;
+                // The block windows cover the pool capacity, not the current visible
+                // blocks: a captured decode graph replays the same grid every step and the
+                // kernels clamp per request from the device descriptor / position.
+                for (uint32_t bt = 0u; bt < args.blocks;
                      bt += ::shelf::kernel::kQsaScoreBlockTile) {
                     const uint32_t tile_blocks =
-                        max_blocks - bt < ::shelf::kernel::kQsaScoreBlockTile
-                            ? max_blocks - bt
+                        args.blocks - bt < ::shelf::kernel::kQsaScoreBlockTile
+                            ? args.blocks - bt
                             : ::shelf::kernel::kQsaScoreBlockTile;
-                    uint32_t max_block_tiles = 0u;
-                    for (uint32_t si = 0u; si < slice_count; ++si) {
-                        const Slice& slice = slices[si];
-                        if (slice.blocks <= bt) continue;
-                        const uint32_t here = std::min(tile_blocks, slice.blocks - bt);
-                        const uint32_t groups = (here + block_tile - 1u) / block_tile;
-                        if (groups > max_block_tiles) max_block_tiles = groups;
-                    }
+                    const uint32_t max_block_tiles =
+                        (tile_blocks + block_tile - 1u) / block_tile;
                     if (max_block_tiles != 0u) {
                         ::shelf::kernel::QsaScoreBatchedArgs ba{};
                         ba.q = args.q;
@@ -379,7 +391,7 @@ Result<OptimizedLaunchResult> try_launch_qsa_select(
                     ta.mask_row_bytes = args.mask_row_bytes;
                     ta.selected_row_stride = args.selected_row_stride;
                     ta.first = bt == 0u ? 1u : 0u;
-                    ta.last = bt + tile_blocks >= max_blocks ? 1u : 0u;
+                    ta.last = bt + tile_blocks >= args.blocks ? 1u : 0u;
                     const hipError_t error =
                         ::shelf::kernel::launch_qsa_topk(ta, stream);
                     if (error != hipSuccess)

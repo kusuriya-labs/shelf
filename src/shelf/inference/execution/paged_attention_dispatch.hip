@@ -151,6 +151,16 @@ Result<PagedAttentionResolvedArgs> resolve_paged_attention_args(
     PagedAttentionResolvedArgs out_args;
     out_args.kv_dtype = kv_dtype;
     out_args.output_dtype = out.dtype;
+    if (b.input_count == 2u) {
+        for (const auto& producer : program.dispatches) {
+            if (producer.kernel_id == KernelId::QSA_SELECT && producer.output_count == 1u &&
+                producer.output_slots[0] == b.input_slots[1]) {
+                out_args.qsa_top_k = producer.compute_spec;
+                break;
+            }
+        }
+    }
+
 
     if (octave) {
         const PagedKVPoolOctaveView& kv = ctx.model_state.kv_octave;
@@ -308,7 +318,15 @@ PagedAttentionPlan plan_paged_attention(
         ? ctx.attention_tuning_rows
         : (ctx.splitk_tuning_rows != 0u ? ctx.splitk_tuning_rows
                                         : args.common.rows);
-    if (qsa_sparse_supported(args, ctx) &&
+    // A batch whose visible blocks all fit the select budget keeps every block, so the
+    // mask costs a selection without changing the result. Run the dense attention instead
+    // and let the select skip its score/top-k work.
+    const bool within_qsa_budget =
+        args.qsa_top_k != 0u && ctx.spec.max_visible_tokens != 0u &&
+        (ctx.spec.max_visible_tokens + ::shelf::kernel::kQsaSparseBlockTokens - 1u) /
+                ::shelf::kernel::kQsaSparseBlockTokens <=
+            args.qsa_top_k;
+    if (qsa_sparse_supported(args, ctx) && !within_qsa_budget &&
         (!plan.use_prefill ||
          ctx.spec.max_visible_tokens >= kQsaSparsePrefillMinTokens)) {
         plan.qsa_sparse = true;

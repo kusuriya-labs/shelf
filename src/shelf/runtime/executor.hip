@@ -1027,13 +1027,17 @@ Result<PendingBatch> submit_co_batch(
     const char* plamo_graph_env = std::getenv("SHELF_PLAMO_HIP_GRAPH");
     const bool plamo_graph_enabled = plamo_graph_env == nullptr ||
         (plamo_graph_env[0] != '\0' && std::strcmp(plamo_graph_env, "0") != 0);
-    // QSA select tiles the score/top-k work by the current visible block count, which is
-    // captured in QsaTopkArgs. A graph replay would keep the first decode step's
-    // block_count while positions grow, so qsa_topk would read indices that were never
-    // filled. Keep QSA-active programs out of the graph until the count is device-side.
+    // QSA select tiles the score/top-k work over the pool capacity, so the captured
+    // window, grid and first/last flags do not depend on the step's visible blocks: the
+    // kernels clamp each request from the device descriptor / position. SHELF_QSA_HIP_GRAPH=0
+    // keeps QSA programs out of the graph for A/B checks.
+    static const bool qsa_graph_enabled = [] {
+        const char* env = std::getenv("SHELF_QSA_HIP_GRAPH");
+        return env == nullptr || (env[0] != '\0' && std::strcmp(env, "0") != 0);
+    }();
     const bool graph_eligible =
         !executor.graph_failed &&
-        !program_needs_qsa_workspace(*program) &&
+        (qsa_graph_enabled || !program_needs_qsa_workspace(*program)) &&
         (plamo ? (plamo_graph_enabled && R == 1u && N == 1u &&
                   exec_role == ::shelf::runtime::ExecutionRole::Decode)
                : ((R == 1u && N == 1u && exec_role == ::shelf::runtime::ExecutionRole::Decode) ||

@@ -335,6 +335,43 @@ prefill は context 4K→65K で 2.98K→2.62K tok/s（-12%）、decode は 8K�
 33.9→28.0 tok/s（-17%）。131K の KV 実使用は 5.6 GiB。QSA の score/top-k/attention は
 この範囲で single forward の 10〜17% 程度に収まっている。
 
+### QSA の budget 内 dense bypass（Phase 6.2）
+
+可視 block が select の budget に収まる request は全 block が選択されるため、mask は
+結果を変えない。2 箇所で分岐する。
+
+- `try_launch_qsa_select`: `ceil(max_visible_tokens / 4) <= top_k` なら score/top-k を
+  省き、mask を 0xFF で埋める（1 launch）。
+- paged attention dispatch: mask の producer（`QSA_SELECT`）の `compute_spec` から
+  budget を引き、同じ条件なら dense attention 経路を使う。mask を消費しないので
+  選択の計算も不要になる。QSA key cache は後続の長文のため維持する。
+
+計測（rows=8、visible=2048 = 全 512 block 選択、bench は同一 slot で L2 に乗るため
+楽観値）: masked attention 75.5 us に対し dense は 1.2 us。e2e（512 token prompt、
+max_seq_len 131072）は 421 ms vs 410 ms で有意差なし（この長さでは QSA の寄与が小さい）。
+一方 MTP fused verify（64 row、短 context）は dense 経路になり、target-only と
+**完全一致**（safe/fused とも 9/9 exact）になった。
+
+### QSA の graph-safe 化（Phase 6.3）
+
+原因は decode graph が capture 時の `block_count` を replay し続けることだった。
+select の block window を「現在の可視 block 数」ではなく **pool 容量**で決めるようにし、
+score/topk の grid・`first`/`last`・`block_count` を step 非依存にした。1 request の
+clamp は device descriptor（score）と device position（topk の `visible`）から行う。
+これで `graph_eligible` から QSA 除外を削除しても replay が正しくなる
+（`SHELF_QSA_HIP_GRAPH=0` で A/B 可能）。
+
+検証:
+
+| prompt | graph off | graph on | 生成 ID |
+| ---: | ---: | ---: | --- |
+| 512 token | 1,142 ms | 1,127 ms | 一致 |
+| 130,000 token | 52,853 ms | 53,338 ms | 一致 |
+
+130K まで step を進めてメモリフォルトなし、mask 同一性（生成 ID 一致）を確認した。
+window を pool 容量へ広げた分、短い context では空 tile の CTA が増えるが、上記 e2e で
+有意な悪化は出ていない。required 226/226 PASS。
+
 ## 6. 残課題
 
 - `R=8, K=7` の 64 行 1 forward fused verify は成立した（`max_verify_per_round=1`）。
@@ -346,6 +383,5 @@ prefill は context 4K→65K で 2.98K→2.62K tok/s（-12%）、decode は 8K�
 - QSA sparse attention の K/V 共有は計測の結果不採用、prefill 閾値は 8192 へ再評価した。
 - key cache の短い prefill 並列化は 64 行閾値へ更新した。
 - 長文 end-to-end は 4K〜131K で測定した（prefill 2.6〜3.0K tok/s、decode 28〜34 tok/s）。
-- gather + WMMA prefill 実験、per-request dense bypass（6.2）、QSA の graph-safe 化（6.3）は未着手。
-  6.3 は「block window を device position から決め、capture 時は pool 容量の固定 grid で
-  empty tile を device guard する」か「bucket graph」が必要で、131K までの step 検証を含む。
+- per-request dense bypass（6.2）と QSA の graph-safe 化（6.3）は実装・検証済み。
+- 長文 prefill の gather + WMMA 実験は未着手（gather は per-row 選択集合のため要検討）。
