@@ -134,7 +134,8 @@ Mat moe(Ops &op, int layer, Mat x) {
             for (int j = 0; j < count; ++j) {
                 sorted[j] = route[order[j]];
                 undo[order[j]] = j;
-                if (!j || sorted[j - 1].expert != sorted[j].expert || groups.back().count == 16)
+                if (!j || sorted[j - 1].expert != sorted[j].expert ||
+                    groups.back().count == (use_wmma ? 16 : 8))
                     groups.push_back({j, 0});
                 ++groups.back().count;
             }
@@ -166,9 +167,31 @@ Mat moe(Ops &op, int layer, Mat x) {
             checked(hipEventRecord(op.gpu.expert_begin[r]));
         gather_route<<<dim3(6, count), 256>>>(input, gpu_routes, a);
         checked(hipGetLastError());
-        Mat g = grouped(rank, a, gpu_routes, layer, 0, batches, num_batches, use_wmma),
-            u = grouped(rank, a, gpu_routes, layer, 1, batches, num_batches, use_wmma);
-        Mat v = grouped(rank, rank.swiglu(g, u, true), gpu_routes, layer, 2, batches, num_batches, use_wmma);
+        Mat activation;
+        if (!use_wmma) {
+            size_t mark = rank.arena.cursor;
+            auto codes = static_cast<int8_t *>(rank.arena.next(size_t(count) * 1536));
+            auto scales = static_cast<float *>(rank.arena.next(size_t(count) * 12 * 4));
+            auto codes1 = static_cast<int8_t *>(rank.arena.next(size_t(count) * 1536));
+            auto scales1 = static_cast<float *>(rank.arena.next(size_t(count) * 12 * 4));
+            auto partial0 = static_cast<float *>(rank.arena.next(size_t(count) * 1536 * 4));
+            auto partial1 = static_cast<float *>(rank.arena.next(size_t(count) * 1536 * 4));
+            activation = rank.mat(count, 1536);
+            auto desc = rank.gpu.matrices[rank.rank] + (layer - 1) * 1536;
+            if (batches)
+                checked(shelf_hy4_expert_batch_gate_up_swiglu(a.p, desc, gpu_routes, batches, codes, scales, codes1, scales1,
+                                                              partial0, partial1, activation.p, count,
+                                                              num_batches, rank.gpu.model.mixed));
+            else
+                checked(shelf_hy4_expert_gate_up_swiglu(a.p, desc, 3, codes, scales, codes1, scales1, partial0, partial1,
+                                                        activation.p, count, gpu_routes, rank.gpu.model.mixed));
+            rank.arena.cursor = mark;
+        } else {
+            Mat g = grouped(rank, a, gpu_routes, layer, 0, batches, num_batches, use_wmma);
+            Mat u = grouped(rank, a, gpu_routes, layer, 1, batches, num_batches, use_wmma);
+            activation = rank.swiglu(g, u, true);
+        }
+        Mat v = grouped(rank, activation, gpu_routes, layer, 2, batches, num_batches, use_wmma);
         result[r] = rank.mat(x.rows, 1536);
         weighted<<<dim3(6, x.rows), 256>>>(v, gpu_routes, offsets_gpu, inverse, result[r]);
         checked(hipGetLastError());
