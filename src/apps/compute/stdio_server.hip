@@ -68,9 +68,10 @@ const char* status_error_code(shelf::Status::Code code) {
     }
 }
 
-void emit_token(int64_t request_id, int32_t token_id) {
-    emit_json(nlohmann::json{
-        {"event", "token"}, {"request_id", request_id}, {"token_id", token_id}});
+void emit_token(int64_t request_id, int32_t token_id, bool need_mask = true) {
+    nlohmann::json event = {{"event", "token"}, {"request_id", request_id}, {"token_id", token_id}};
+    if (!need_mask) event["need_mask"] = false;
+    emit_json(event);
 }
 
 constexpr std::size_t kRecentTerminalLimit = 256;
@@ -86,6 +87,9 @@ struct ServeGeneration {
     std::size_t last_log_tokens = 0;
     bool has_first_token = false;
     std::shared_ptr<uint32_t> token_bitmask;
+    std::shared_ptr<uint32_t> draft_bitmask;
+    size_t draft_bitmask_capacity = 0;
+    uint64_t emitted_draft_round = 0;
     bool waiting_for_mask = false;
     bool grammar_delayed = false;
     int32_t grammar_close_token = -1;
@@ -342,12 +346,15 @@ void serve_emit_tokens(shelf::app::Qwen35ComputeRuntime& runtime,
             generation.has_first_token = true;
         }
         const int32_t token = request->generated[generation.emitted_tokens];
-        emit_token(generation.external_request_id, token);
+        const bool structured_spec = generation.token_bitmask && request->dflash_used &&
+                                     request->structured_dflash;
+        emit_token(generation.external_request_id, token, !structured_spec);
         ++generation.emitted_tokens;
         if (generation.grammar_delayed && token == generation.grammar_close_token) {
             generation.grammar_delayed = false;
+            if (structured_spec) (void)runtime.activate_grammar(generation.internal_request_id);
         }
-        if (generation.token_bitmask && !generation.grammar_delayed &&
+        if (!structured_spec && generation.token_bitmask && !generation.grammar_delayed &&
             request->state != shelf::qwen35::runtime::RequestState::Finished) {
             generation.waiting_for_mask = true;
             (void)runtime.set_token_bitmask(generation.internal_request_id,
@@ -456,6 +463,7 @@ void serve_retire(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state,
                 static_cast<long long>(generation.external_request_id),
                 retire_status.message().c_str());
     }
+    generation.draft_bitmask.reset();
     state.inflight.erase(generation.external_request_id);
 }
 
@@ -483,6 +491,7 @@ void serve_fail_all(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state
             fprintf(stderr, "retire after failure failed: %s\n",
                     retire_status.message().c_str());
         }
+        generation.draft_bitmask.reset();
         state.inflight.erase(it);
     }
 }
@@ -544,6 +553,13 @@ void serve_step(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state) {
     for (auto& entry : state.inflight) {
         serve_emit_tokens(runtime, entry.second);
         const auto* request = runtime.request(entry.second.internal_request_id);
+        if (request != nullptr && request->draft_mask_state == shelf::qwen35::runtime::DraftMaskState::PendingMask &&
+            request->draft_round_id > entry.second.emitted_draft_round) {
+            emit_json({{"event", "draft"}, {"request_id", entry.first},
+                       {"round_id", request->draft_round_id}, {"draft_tokens", request->pending_drafts}});
+            entry.second.emitted_draft_round = request->draft_round_id;
+            entry.second.waiting_for_mask = true;
+        }
         if (request != nullptr &&
             request->state == shelf::qwen35::runtime::RequestState::Finished) {
             finished.push_back(entry.first);
@@ -773,9 +789,10 @@ bool serve_parse_generate(shelf::app::Qwen35ComputeRuntime& runtime, ServeState&
         return false;
     }
 
-    shelf::Result<uint64_t> submit_result =
-        grammar ? runtime.submit_unconstrained_decode(std::move(input_ids), max_new_tokens, sampling, thinking)
-                : runtime.submit(std::move(input_ids), max_new_tokens, sampling, thinking);
+    shelf::Result<uint64_t> submit_result = grammar
+        ? (dflash.enabled ? runtime.submit_structured_dflash(std::move(input_ids), max_new_tokens, sampling, thinking)
+                          : runtime.submit_unconstrained_decode(std::move(input_ids), max_new_tokens, sampling, thinking))
+        : runtime.submit(std::move(input_ids), max_new_tokens, sampling, thinking);
     if (!submit_result.ok()) {
         emit_error_with_code(request_id,
                              status_error_code(submit_result.status().code()),
@@ -783,6 +800,16 @@ bool serve_parse_generate(shelf::app::Qwen35ComputeRuntime& runtime, ServeState&
         return false;
     }
     generation.internal_request_id = submit_result.release();
+    if (grammar && dflash.enabled) {
+        auto st = runtime.set_structured_dflash(generation.internal_request_id,
+                                                generation.grammar_delayed, generation.grammar_close_token);
+        if (!st.ok()) {
+            (void)runtime.cancel(generation.internal_request_id);
+            (void)runtime.retire(generation.internal_request_id);
+            emit_error(request_id, st.message());
+            return false;
+        }
+    }
     if (grammar && !generation.grammar_delayed) {
         auto st = runtime.set_token_bitmask(generation.internal_request_id,
                                             generation.token_bitmask.get(), false);
@@ -1225,6 +1252,75 @@ void serve_handle_command(shelf::app::Qwen35ComputeRuntime& runtime, ServeState&
         } else {
             emit_error(request_id, "unknown or mismatched request_id");
         }
+        return;
+    }
+    if (op == "draft_masks") {
+        if (!request.contains("request_id") || !request["request_id"].is_number_integer()) {
+            emit_error(nullptr, "missing or invalid request_id");
+            return;
+        }
+        const int64_t id = request["request_id"].get<int64_t>();
+        auto it = state.inflight.find(id);
+        if (it == state.inflight.end()) return;
+        if (!request.contains("round_id") || !request["round_id"].is_number_unsigned()) {
+            emit_error_with_code(request["request_id"], "invalid_argument", "invalid draft round id");
+            (void)runtime.cancel(it->second.internal_request_id);
+            serve_push_terminal(state, id);
+            serve_retire(runtime, state, it->second);
+            return;
+        }
+        const auto* active = runtime.request(it->second.internal_request_id);
+        const uint64_t round = request["round_id"].get<uint64_t>();
+        if (active == nullptr || active->state == shelf::qwen35::runtime::RequestState::Finished ||
+            active->draft_mask_state != shelf::qwen35::runtime::DraftMaskState::PendingMask ||
+            round != active->draft_round_id) return;
+        const size_t words = (runtime.model().hybrid_config().vocab_size + 31u) / 32u;
+        const size_t count = active->pending_drafts.size();
+        bool valid = request.contains("valid_prefix") && request["valid_prefix"].is_number_unsigned() &&
+                     request.contains("bitmasks") && request["bitmasks"].is_array();
+        uint64_t prefix = valid ? request["valid_prefix"].get<uint64_t>() : 0;
+        valid = valid && prefix <= count && request["bitmasks"].size() == prefix + 1u;
+        std::vector<uint32_t> masks((count + 1u) * words, 0xffffffffu);
+        if (valid) {
+            for (size_t row = 0; row <= prefix; ++row) {
+                std::vector<uint8_t> bytes;
+                const auto& encoded = request["bitmasks"][row];
+                if (!encoded.is_string() || !decode_mask(encoded.get<std::string>(), bytes) ||
+                    bytes.size() != words * sizeof(uint32_t) ||
+                    std::none_of(bytes.begin(), bytes.end(), [](uint8_t b) { return b != 0; })) {
+                    valid = false;
+                    break;
+                }
+                std::memcpy(masks.data() + row * words, bytes.data(), bytes.size());
+            }
+        }
+        const size_t bytes = masks.size() * sizeof(uint32_t);
+        if (valid && it->second.draft_bitmask_capacity < bytes) {
+            uint32_t* device = nullptr;
+            valid = hipMalloc(reinterpret_cast<void**>(&device), bytes) == hipSuccess;
+            if (valid) {
+                it->second.draft_bitmask = std::shared_ptr<uint32_t>(device, [](uint32_t* p) {
+                    const hipError_t err = hipFree(p);
+                    if (err != hipSuccess) std::fprintf(stderr, "draft mask cleanup failed: %s\n", hipGetErrorString(err));
+                });
+                it->second.draft_bitmask_capacity = bytes;
+            }
+        }
+        uint32_t* device = it->second.draft_bitmask.get();
+        if (valid) valid = hipMemcpy(device, masks.data(), bytes, hipMemcpyHostToDevice) == hipSuccess;
+        if (valid) {
+            auto st = runtime.set_draft_masks(it->second.internal_request_id, round, device,
+                                              static_cast<uint32_t>(words), static_cast<uint32_t>(prefix));
+            valid = st.ok();
+        }
+        if (!valid) {
+            emit_error_with_code(request["request_id"], "invalid_argument", "invalid draft masks");
+            (void)runtime.cancel(it->second.internal_request_id);
+            serve_push_terminal(state, id);
+            serve_retire(runtime, state, it->second);
+            return;
+        }
+        it->second.waiting_for_mask = false;
         return;
     }
     if (op == "mask") {

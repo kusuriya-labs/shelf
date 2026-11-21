@@ -109,6 +109,15 @@ class ResponsesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 400)
         self.assertEqual((await response.json())["error"]["param"], "text.format.schema")
 
+    async def test_text_format_json_object(self):
+        for stream in (False, True):
+            response = await self.post(stream=stream, text={"format": {"type": "json_object"}})
+            self.assertEqual(response.status, 200)
+            await response.read()
+            self.assertEqual(self.service.request.response_schema, {"type": "object"})
+        response = await self.post(text={"format": {"type": "json_object", "name": "extra"}})
+        self.assertEqual(response.status, 400)
+
     async def test_input_history_and_tools(self):
         self.service.tool = True
         data = await (await self.post(input=[

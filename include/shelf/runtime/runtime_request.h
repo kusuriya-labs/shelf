@@ -29,6 +29,8 @@ enum class FinishReason : uint8_t {
     Error,
 };
 
+enum class DraftMaskState : uint8_t { Idle, PendingMask, Ready };
+
 struct DFlash2RequestSession {
     dflash2::DFlash2ContextState* context = nullptr;
     std::unique_ptr<DFlash2SpecDecoder> decoder;
@@ -61,6 +63,15 @@ struct RuntimeRequest {
     // pointer preserves the ordinary, unconstrained sampling path.
     const uint32_t* token_bitmask = nullptr;
     bool waiting_for_token_bitmask = false;
+    bool structured_dflash = false;
+    bool grammar_delayed = false;
+    int32_t grammar_close_token = -1;
+    DraftMaskState draft_mask_state = DraftMaskState::Idle;
+    uint64_t draft_round_id = 0;
+    std::vector<int32_t> pending_drafts;
+    const uint32_t* draft_bitmask = nullptr;
+    uint32_t draft_mask_stride = 0;
+    uint32_t draft_valid_prefix = 0;
 
     uint32_t max_kv_tokens = 0;
     uint32_t max_kv_pages = 0;
@@ -86,6 +97,7 @@ struct RuntimeRequest {
     uint32_t prefill_log_tokens = 0;
 
     bool speculative_decode = false;
+    bool dflash_used = false;
     std::unique_ptr<DFlash2RequestSession> dflash;
 
     std::string error_message;

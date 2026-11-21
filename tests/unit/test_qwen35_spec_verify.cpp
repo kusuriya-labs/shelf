@@ -144,6 +144,20 @@ int main() {
         {}, 0u, "k0_no_drafts");
 
     {
+        const int32_t drafts[] = {10, 11, 12, 13};
+        const int32_t target[] = {10, 11, 42, 13, 99};
+        for (uint32_t limit : {1u, 2u}) {
+            SpecVerifyResult out;
+            auto st = shelf::runtime::spec_greedy_accept(drafts, limit, target, true, out);
+            check(st.ok(), "prefix limit accept");
+            check(out.num_accepted_drafts == limit, "prefix limit accepted");
+            check(out.emitted_tokens.size() == limit + 1u, "prefix limit emitted");
+            check(out.emitted_tokens.back() == target[limit], "prefix limit correction");
+            check(out.num_committed_target_tokens == limit + 1u, "prefix limit committed");
+        }
+    }
+
+    {
         SpecVerifyResult out;
         auto st = shelf::runtime::spec_greedy_accept(nullptr, 0u, nullptr, true, out);
         check(!st.ok(), "null target_tokens rejected");

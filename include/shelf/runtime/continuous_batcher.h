@@ -138,6 +138,10 @@ class ContinuousBatcher {
     const RuntimeRequest* request(uint64_t id) const;
 
     Status set_token_bitmask(uint64_t id, const uint32_t* mask, bool waiting);
+    Status set_structured_dflash(uint64_t id, bool delayed, int32_t close_token);
+    Status activate_grammar(uint64_t id);
+    Status set_draft_masks(uint64_t id, uint64_t round, const uint32_t* mask,
+                           uint32_t stride, uint32_t valid_prefix);
 
     Status set_external_request_id(uint64_t id, int64_t external_request_id);
 

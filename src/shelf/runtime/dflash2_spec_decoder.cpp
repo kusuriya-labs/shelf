@@ -744,7 +744,8 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
     uint32_t page_tokens,
     const std::function<void(uint32_t)>& on_chunk_complete,
     uint32_t checkpoint_position,
-    uint32_t second_checkpoint_position) {
+    uint32_t second_checkpoint_position,
+    const uint32_t* token_bitmask) {
     if (!decoder.initialized) {
         return Status::invalid_state("dflash2_spec_prefill: not initialized", __FILE__,
                                      __LINE__);
@@ -891,6 +892,7 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
         ScheduledBatch batch = make_prefill_batch(
             *decoder.sequence, requests, prompt_tokens + offset, n, offset, final_chunk,
             final_chunk ? &decoder.sampling : nullptr, decoder.sample_index);
+        if (final_chunk) requests[0].token_bitmask = token_bitmask;
         std::vector<ExecuteBatchOptions> poptions = build_gdn_options(decoder, 1u);
         if (ple_worker.has_value()) {
             for (auto& opt : poptions) {
@@ -1145,7 +1147,8 @@ Status run_single_target(
     DFlash2SpecDecoder& decoder,
     int32_t token,
     DFlash2SpecIterationOutput& out,
-    int32_t forced_token = -1) {
+    int32_t forced_token = -1,
+    const uint32_t* token_bitmask = nullptr) {
     DFlash2SpecTiming* tm = decoder.timing;
     const uint32_t position = decoder.sequence->position;
     std::vector<ScheduledRequest> requests;
@@ -1153,6 +1156,7 @@ Status run_single_target(
     ScheduledBatch batch = make_verify_batch(
         *decoder.sequence, requests, &single, 1u, position, 1u, false,
         TokenIdsLocation::Host, &decoder.sampling, decoder.sample_index);
+    requests[0].token_bitmask = token_bitmask;
     const std::vector<ExecuteBatchOptions> soptions = build_gdn_options(decoder, 1u);
     auto executed = run_target_batch(decoder, batch, soptions);
     if (!executed.ok()) return executed.status();
@@ -1992,6 +1996,41 @@ std::array<const bf16_t*, shelf::kernel::kDFlash2TargetTaps> batch_target_taps(
 }  // namespace
 
 
+Result<std::vector<int32_t>> dflash2_spec_propose_slot(
+    DFlash2SpecBatchContext& context, const DFlash2SpecBatchSlot& slot) {
+    DFlash2SpecDecoder* decoder = slot.decoder;
+    if (decoder == nullptr || !decoder->initialized || decoder->sequence == nullptr ||
+        decoder->draft == nullptr || decoder->context == nullptr ||
+        context.verify_token_ids_device == nullptr) {
+        return Status::invalid_argument("invalid draft slot", __FILE__, __LINE__);
+    }
+    const uint32_t position = decoder->sequence->position;
+    const uint32_t room = decoder->sequence->max_seq_len > position
+        ? decoder->sequence->max_seq_len - position : 0u;
+    uint32_t drafts = slot.remaining_tokens > 1u && room >= 2u
+        ? std::min(slot.num_drafts, std::min(slot.remaining_tokens - 1u, room - 1u)) : 0u;
+    if (slot.thinking_allowance != kDFlash2NoThinkingAllowance)
+        drafts = std::min(drafts, slot.thinking_allowance);
+    if (slot.page_tokens != 0u && drafts > 0u)
+        drafts = std::min(drafts, slot.page_tokens - position % slot.page_tokens - 1u);
+    std::vector<int32_t> result(drafts);
+    if (drafts == 0u) return result;
+    dflash2::DFlash2ProposeRequest request;
+    request.context = decoder->context;
+    request.anchor_token = slot.anchor_token;
+    request.num_drafts = drafts;
+    int32_t* output = context.verify_token_ids_device;
+    const Status st = dflash2::dflash2_propose_batch(
+        *decoder->draft, &request, &output, 1u, decoder->stream);
+    if (!st.ok()) return st;
+    hipError_t err = hipStreamSynchronize(decoder->stream);
+    if (err == hipSuccess)
+        err = hipMemcpy(result.data(), output, drafts * sizeof(int32_t), hipMemcpyDeviceToHost);
+    if (err != hipSuccess)
+        return Status::hip_error("draft copy", hipGetErrorString(err), __FILE__, __LINE__);
+    return result;
+}
+
 Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
     DFlash2SpecBatchContext& context,
     std::span<const DFlash2SpecBatchSlot> slots,
@@ -2027,6 +2066,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
     };
     struct SlotPlan {
         DFlash2SpecDecoder* decoder = nullptr;
+        const DFlash2SpecBatchSlot* slot = nullptr;
         int32_t anchor = 0;
         uint32_t drafts = 0u;
         uint32_t proposal_drafts = 0u;
@@ -2077,6 +2117,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         }
         SlotPlan plan;
         plan.decoder = decoder;
+        plan.slot = &slot;
         plan.anchor = slot.anchor_token;
         plan.drafts = drafts;
         plan.proposal_drafts = std::max(drafts, std::min(slot.proposal_drafts, room_max));
@@ -2134,7 +2175,10 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         std::fprintf(stderr, "DFLASH2_TREE_ROUND speculative=%u budget=%u decoding=%u\n",
                      speculative_count, tree_budget, decoding_count);
     const bool tree_mode = tree_budget != 0u &&
-        tree_budget > plans.front().decoder->config.num_drafts + 1u;
+        tree_budget > plans.front().decoder->config.num_drafts + 1u &&
+        std::none_of(slots.begin(), slots.end(), [](const auto& slot) {
+            return slot.disable_tree || slot.token_bitmask != nullptr || slot.precomputed_drafts != nullptr;
+        });
     if (tree_mode) {
         for (const SlotPlan& plan : plans) {
             if (plan.batched && plan.decoder->sampling.temperature != 0.0f)
@@ -2146,7 +2190,8 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
     if (bridge) {
         for (const SlotPlan& plan : plans) {
             if (!plan.batched) continue;
-            if (!plan.decoder->device_token_bridge) {
+            if (!plan.decoder->device_token_bridge || plan.slot->precomputed_drafts != nullptr ||
+                plan.slot->token_bitmask != nullptr) {
                 bridge = false;
                 break;
             }
@@ -2163,6 +2208,10 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
     for (std::size_t i = 0; i < plans.size(); ++i) {
         SlotPlan& plan = plans[i];
         if (!plan.batched) continue;
+        if (plan.slot->precomputed_drafts != nullptr) {
+            std::copy_n(plan.slot->precomputed_drafts, plan.drafts, drafts[i].begin());
+            continue;
+        }
         DFlash2SpecDecoder& decoder = *plan.decoder;
         if (propose_executor == nullptr) {
             propose_executor = decoder.draft;
@@ -2209,7 +2258,8 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             static_cast<uint32_t>(propose_requests.size()), propose_stream);
         if (!st.ok()) return st;
         for (const SlotPlan& plan : plans) {
-            if (!plan.batched || plan.proposal_drafts == plan.drafts) continue;
+            if (!plan.batched || plan.slot->precomputed_drafts != nullptr ||
+                plan.proposal_drafts == plan.drafts) continue;
             const hipError_t relay = hipMemcpyAsync(
                 context.verify_token_ids_device + plan.row_begin + 1u,
                 plan.decoder->verify_token_ids_device,
@@ -2236,7 +2286,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
     if (!bridge && need_host_drafts) {
         for (std::size_t i = 0; i < plans.size(); ++i) {
             SlotPlan& plan = plans[i];
-            if (!plan.batched) continue;
+            if (!plan.batched || plan.slot->precomputed_drafts != nullptr) continue;
             const hipError_t err = hipMemcpy(
                 drafts[i].data(), context.verify_token_ids_device + plan.row_begin + 1u,
                 static_cast<std::size_t>(plan.drafts) * sizeof(int32_t),
@@ -2330,6 +2380,8 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         req.sample = true;
         req.num_output_rows = plan.total_rows;
         req.sampling = decoder.sampling;
+        req.token_bitmask = plan.slot->token_bitmask;
+        req.token_bitmask_row_stride = plan.slot->token_bitmask_row_stride_words;
         req.sampling_index = plan.sample_index;
         requests.push_back(req);
     }
@@ -2511,7 +2563,8 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         if (!plan.batched) {
             const int32_t forced =
                 plan.thinking_allowance == 0u ? plan.thinking_close_token : -1;
-            const Status st = run_single_target(decoder, plan.anchor, result_out, forced);
+            const Status st = run_single_target(decoder, plan.anchor, result_out, forced,
+                                                plan.slot->token_bitmask);
             if (!st.ok()) return st;
             mark(single_ms);
             if (qwen_hybrid::is_stop_token(decoder.config.eos_tokens, result_out.pending_token)) {
@@ -2543,9 +2596,32 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             verify.num_emitted_tokens = static_cast<uint32_t>(verify.emitted_tokens.size());
             verify.num_committed_target_tokens = accepted + 1u;
         } else {
-            const Status accept_st = spec_greedy_accept(
-                drafts[i].data(), plan.drafts, sampled.data() + plan.row_begin, true, verify);
-            if (!accept_st.ok()) return accept_st;
+            const uint32_t limit = std::min(plan.drafts, plan.slot->max_accept_drafts);
+            if (limit == 0u) {
+                verify.first_reject_index = 0u;
+                verify.correction_valid = true;
+                verify.correction_token = sampled[plan.row_begin];
+                verify.emitted_tokens.push_back(verify.correction_token);
+                verify.num_emitted_tokens = 1u;
+                verify.num_committed_target_tokens = 1u;
+            } else {
+                const Status accept_st = spec_greedy_accept(
+                    drafts[i].data(), limit, sampled.data() + plan.row_begin, true, verify);
+                if (!accept_st.ok()) return accept_st;
+            }
+        }
+        if (plan.slot->stop_after_token >= 0) {
+            const auto end = std::find(verify.emitted_tokens.begin(), verify.emitted_tokens.end(),
+                                       plan.slot->stop_after_token);
+            if (end != verify.emitted_tokens.end()) {
+                const uint32_t j = static_cast<uint32_t>(end - verify.emitted_tokens.begin());
+                verify.emitted_tokens.resize(j + 1u);
+                verify.num_accepted_drafts = j;
+                verify.num_committed_target_tokens = j + 1u;
+                verify.correction_valid = true;
+                verify.correction_token = plan.slot->stop_after_token;
+                verify.bonus_token_valid = false;
+            }
         }
         result_out.finished = spec_bound_result(verify, plan.remaining, decoder.config.eos_tokens);
         const uint32_t accepted = verify.num_accepted_drafts;

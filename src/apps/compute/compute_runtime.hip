@@ -1051,6 +1051,27 @@ Status Qwen35ComputeRuntime::set_token_bitmask(uint64_t id, const uint32_t* mask
     return batcher_->set_token_bitmask(id, mask, waiting);
 }
 
+Result<uint64_t> Qwen35ComputeRuntime::submit_structured_dflash(
+    std::vector<int32_t> input_ids, uint32_t max_new_tokens,
+    const qwen35::runtime::SamplingConfig& sampling,
+    const qwen35::runtime::ThinkingBudget& thinking) {
+    if (batcher_ == nullptr) return Status::invalid_state("runtime not initialized", __FILE__, __LINE__);
+    return batcher_->submit(std::move(input_ids), max_new_tokens, sampling, true, thinking);
+}
+
+Status Qwen35ComputeRuntime::set_structured_dflash(uint64_t id, bool delayed, int32_t close_token) {
+    return batcher_->set_structured_dflash(id, delayed, close_token);
+}
+
+Status Qwen35ComputeRuntime::activate_grammar(uint64_t id) {
+    return batcher_->activate_grammar(id);
+}
+
+Status Qwen35ComputeRuntime::set_draft_masks(uint64_t id, uint64_t round, const uint32_t* mask,
+                                             uint32_t stride, uint32_t valid_prefix) {
+    return batcher_->set_draft_masks(id, round, mask, stride, valid_prefix);
+}
+
 Status Qwen35ComputeRuntime::set_dflash2_batcher(
     const qwen35::runtime::DFlash2BatcherBinding& binding) {
     if (batcher_ == nullptr) {

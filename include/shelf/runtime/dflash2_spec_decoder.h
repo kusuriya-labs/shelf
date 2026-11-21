@@ -191,7 +191,8 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
     uint32_t page_tokens = 0u,
     const std::function<void(uint32_t)>& on_chunk_complete = {},
     uint32_t checkpoint_position = 0u,
-    uint32_t second_checkpoint_position = 0u);
+    uint32_t second_checkpoint_position = 0u,
+    const uint32_t* token_bitmask = nullptr);
 
 struct DFlash2TargetSnapshot {
     uint32_t position = 0u;
@@ -313,7 +314,16 @@ struct DFlash2SpecBatchSlot {
     uint32_t page_tokens = 0u;
     uint32_t thinking_allowance = kDFlash2NoThinkingAllowance;
     int32_t thinking_close_token = -1;
+    const uint32_t* token_bitmask = nullptr;
+    uint32_t token_bitmask_row_stride_words = 0u;
+    const int32_t* precomputed_drafts = nullptr;
+    uint32_t max_accept_drafts = UINT32_MAX;
+    int32_t stop_after_token = -1;
+    bool disable_tree = false;
 };
+
+Result<std::vector<int32_t>> dflash2_spec_propose_slot(
+    DFlash2SpecBatchContext& context, const DFlash2SpecBatchSlot& slot);
 
 struct DFlash2SpecBatchOutput {
     std::vector<DFlash2SpecIterationOutput> slots;

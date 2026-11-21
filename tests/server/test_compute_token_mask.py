@@ -34,8 +34,11 @@ def main():
                 if event.get("event") == "token":
                     seen.append(event["token_id"])
                     assert seen[-1] == expected[len(seen)-1], event
-                    if len(seen) < len(expected):
+                    if len(seen) < len(expected) and event.get("need_mask", True):
                         h.send({"op":"mask", "request_id":rid, "bitmask":mask(expected[len(seen)])})
+                if event.get("event") == "draft":
+                    h.send({"op":"draft_masks", "request_id":rid, "round_id":event["round_id"],
+                            "valid_prefix":0, "bitmasks":[mask(expected[len(seen)])]})
                 if event.get("event") == "done":
                     assert seen == expected and event["generated_ids"] == seen, event
                     break
@@ -55,12 +58,17 @@ def main():
                     assert seen[0] != 104, event
                 elif len(seen) == 2:
                     assert seen[-1] == 104, event
-                    h.send({"op":"mask", "request_id":12, "bitmask":mask(101)})
+                    if event.get("need_mask", True):
+                        h.send({"op":"mask", "request_id":12, "bitmask":mask(101)})
                 elif len(seen) == 3:
                     assert seen[-1] == 101, event
-                    h.send({"op":"mask", "request_id":12, "bitmask":mask(102)})
+                    if event.get("need_mask", True):
+                        h.send({"op":"mask", "request_id":12, "bitmask":mask(102)})
                 else:
                     assert seen[-1] == 102, event
+            elif event.get("event") == "draft":
+                h.send({"op":"draft_masks", "request_id":12, "round_id":event["round_id"],
+                        "valid_prefix":0, "bitmasks":[mask(99 + len(seen))]})
             elif event.get("event") == "done":
                 assert len(seen) == 4 and event["generated_ids"] == seen, event
                 break
@@ -68,6 +76,8 @@ def main():
         h.send({"op":"generate", "request_id":20, "input_ids":[248041,77091],
                 "max_new_tokens":10, "grammar":True, "bitmask":mask(100)})
         assert h.recv()["token_id"] == 100
+        if mode == "dflash2":
+            assert h.recv()["event"] == "draft"
         h.send({"op":"generate", "request_id":21, "input_ids":[248041,77091], "max_new_tokens":3})
         while True:
             e = h.recv()

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+from contextlib import aclosing
 import json
 import os
 import signal
@@ -421,34 +422,19 @@ class AsyncComputeClient:
         prefix_cache_checkpoint_position: int = 0,
         reasoning_budget_tokens: int = 0,
         reasoning_close_token: int = -1,
+        grammar=None,
     ) -> dict:
-        request_id, mailbox = await self._begin_request()
-        sent = False
-        completed = False
-        try:
-            await self._send_generate(
-                request_id, input_ids, max_new_tokens, temperature,
-                top_p, min_p, top_k, seed, prefix_cache_checkpoint_position,
-                reasoning_budget_tokens, reasoning_close_token)
-            sent = True
-            while True:
-                event = await mailbox.get()
-                if isinstance(event, Exception):
-                    raise event
-                kind = event.get("event")
-                if kind == "error":
-                    completed = True
-                    raise self._error_from_event(event)
-                if kind == "done":
-                    completed = True
-                    if event.get("finish_reason") == "cancelled":
-                        raise ComputeCancelled(f"request {request_id} was cancelled")
-                    return event
-        finally:
-            if sent and not completed:
-                await self.cancel(request_id)
-                await self._drain_terminal(mailbox)
-            await self._end_request(request_id)
+        async with aclosing(self.generate_stream(
+            input_ids, max_new_tokens, temperature, top_p, min_p, top_k, seed,
+            prefix_cache_checkpoint_position, reasoning_budget_tokens,
+            reasoning_close_token, grammar)) as stream:
+            async for event in stream:
+                if "done" in event:
+                    done = event["done"]
+                    if done.get("finish_reason") == "cancelled":
+                        raise ComputeCancelled("request was cancelled")
+                    return done
+        raise ComputeProtocolError("compute stream ended without a terminal event")
 
     async def generate_stream(
         self,
@@ -475,6 +461,7 @@ class AsyncComputeClient:
         sent = False
         completed = False
         grammar_waiting_for_reasoning = grammar is not None and grammar.after_reasoning
+        last_draft_round = -1
 
         try:
             await self._send_generate(
@@ -497,14 +484,32 @@ class AsyncComputeClient:
                     if grammar_waiting_for_reasoning:
                         if token == reasoning_close_token:
                             grammar_waiting_for_reasoning = False
+                            if event.get("need_mask", True):
+                                await self._send({"op": "mask", "request_id": request_id,
+                                                  "bitmask": grammar.next_mask()})
+                    elif grammar is not None and grammar.accept(token):
+                        if event.get("need_mask", True):
                             await self._send({"op": "mask", "request_id": request_id,
                                               "bitmask": grammar.next_mask()})
-                    elif grammar is not None and grammar.accept(token):
-                        await self._send({"op": "mask", "request_id": request_id,
-                                          "bitmask": grammar.next_mask()})
                     yield {
                         "token_id": token
                     }
+
+                elif kind == "draft":
+                    round_id = event.get("round_id")
+                    tokens = event.get("draft_tokens")
+                    if (grammar is None or grammar_waiting_for_reasoning or
+                        isinstance(round_id, bool) or not isinstance(round_id, int) or round_id < 0 or
+                        not isinstance(tokens, list) or
+                        any(isinstance(token, bool) or not isinstance(token, int) for token in tokens)):
+                        raise ComputeProtocolError("invalid draft event")
+                    if round_id <= last_draft_round:
+                        continue
+                    last_draft_round = round_id
+                    valid_prefix, rows = grammar.draft_masks(tokens)
+                    await self._send({"op": "draft_masks", "request_id": request_id,
+                                      "round_id": round_id, "valid_prefix": valid_prefix,
+                                      "bitmasks": rows})
 
                 elif kind == "error":
                     completed = True

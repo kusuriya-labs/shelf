@@ -196,6 +196,38 @@ Status ContinuousBatcher::set_token_bitmask(uint64_t id, const uint32_t* mask,
     return Status::make_ok();
 }
 
+Status ContinuousBatcher::set_structured_dflash(uint64_t id, bool delayed, int32_t close_token) {
+    auto it = request_index_.find(id);
+    if (it == request_index_.end()) return Status::invalid_argument("request not found", __FILE__, __LINE__);
+    it->second->structured_dflash = true;
+    it->second->grammar_delayed = delayed;
+    it->second->grammar_close_token = close_token;
+    return Status::make_ok();
+}
+
+Status ContinuousBatcher::activate_grammar(uint64_t id) {
+    auto it = request_index_.find(id);
+    if (it == request_index_.end()) return Status::invalid_argument("request not found", __FILE__, __LINE__);
+    it->second->grammar_delayed = false;
+    return Status::make_ok();
+}
+
+Status ContinuousBatcher::set_draft_masks(uint64_t id, uint64_t round, const uint32_t* mask,
+                                          uint32_t stride, uint32_t valid_prefix) {
+    auto it = request_index_.find(id);
+    if (it == request_index_.end()) return Status::invalid_argument("request not found", __FILE__, __LINE__);
+    RuntimeRequest& request = *it->second;
+    if (request.draft_mask_state != DraftMaskState::PendingMask || request.draft_round_id != round ||
+        mask == nullptr || stride == 0u || valid_prefix > request.pending_drafts.size())
+        return Status::invalid_argument("unexpected draft masks", __FILE__, __LINE__);
+    request.draft_bitmask = mask;
+    request.draft_mask_stride = stride;
+    request.draft_valid_prefix = valid_prefix;
+    request.draft_mask_state = DraftMaskState::Ready;
+    request.waiting_for_token_bitmask = false;
+    return Status::make_ok();
+}
+
 Status ContinuousBatcher::set_external_request_id(uint64_t id,
                                                   int64_t external_request_id) {
     auto it = request_index_.find(id);
@@ -1012,6 +1044,7 @@ Status ContinuousBatcher::open_dflash2_context(RuntimeRequest& request) {
     session->context = &pool.slot(index).context;
     session->pool_index = index;
     request.dflash = std::move(session);
+    request.dflash_used = true;
     return Status::make_ok();
 }
 
@@ -1094,7 +1127,8 @@ Status ContinuousBatcher::open_dflash2_session(RuntimeRequest& request) {
     auto prefill_result = dflash2_spec_prefill(
         *session.decoder, request.input_tokens.data(), prompt_count,
         request.restored_tokens, 0u, save_input_boundary,
-        first_checkpoint, second_checkpoint);
+        first_checkpoint, second_checkpoint,
+        request.grammar_delayed ? nullptr : request.token_bitmask);
     request.prefill_ms += std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - prefill_started)
                               .count();
@@ -1172,7 +1206,7 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
             return Status::invalid_state("dflash2 session is not ready", __FILE__,
                                          __LINE__);
         }
-        if (dflash_.adaptive && request->dflash->adaptive_rows == 0u) {
+        if (dflash_.adaptive && !request->structured_dflash && request->dflash->adaptive_rows == 0u) {
             request->pending_decode_token = request->dflash->pending_token;
             ++other_decoding_requests;
             continue;
@@ -1181,7 +1215,7 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
         DFlash2SpecBatchSlot slot;
         slot.decoder = request->dflash->decoder.get();
         slot.anchor_token = request->dflash->pending_token;
-        slot.num_drafts = dflash_.adaptive ? request->dflash->adaptive_rows - 1u
+        slot.num_drafts = dflash_.adaptive && !request->structured_dflash ? request->dflash->adaptive_rows - 1u
                                            : dflash_.num_drafts;
         static const char* const measure_drafts = std::getenv("SHELF_DFLASH2_MEASURE_VERIFY_DRAFTS");
         if (!dflash_.adaptive && measure_drafts != nullptr) {
@@ -1198,6 +1232,29 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
             request->prefix_capture != 0u ? config_.page_tokens : 0u;
         slot.thinking_allowance = thinking_allowance(*request);
         slot.thinking_close_token = request->thinking.close_token;
+        if (request->structured_dflash) {
+            slot.disable_tree = true;
+            if (request->grammar_delayed) {
+                slot.stop_after_token = request->grammar_close_token;
+            } else if (request->draft_mask_state == DraftMaskState::PendingMask) {
+                continue;
+            } else if (request->draft_mask_state == DraftMaskState::Idle) {
+                auto proposed = dflash2_spec_propose_slot(*dflash_.batch, slot);
+                if (!proposed.ok()) return proposed.status();
+                request->pending_drafts = proposed.release();
+                ++request->draft_round_id;
+                request->draft_mask_state = DraftMaskState::PendingMask;
+                request->waiting_for_token_bitmask = true;
+                executed = true;
+                continue;
+            } else {
+                slot.num_drafts = static_cast<uint32_t>(request->pending_drafts.size());
+                slot.precomputed_drafts = request->pending_drafts.data();
+                slot.token_bitmask = request->draft_bitmask;
+                slot.token_bitmask_row_stride_words = request->draft_mask_stride;
+                slot.max_accept_drafts = request->draft_valid_prefix;
+            }
+        }
         slots.push_back(slot);
         slot_requests.push_back(request);
     }
@@ -1280,6 +1337,11 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
         }
         for (std::size_t i = 0; i < slot_requests.size(); ++i) {
             RuntimeRequest& request = *slot_requests[i];
+            if (request.structured_dflash && request.draft_mask_state == DraftMaskState::Ready) {
+                request.draft_mask_state = DraftMaskState::Idle;
+                request.pending_drafts.clear();
+                request.draft_bitmask = nullptr;
+            }
             const DFlash2SpecIterationOutput& step = results.slots[i];
             if (phase_trace) {
                 std::fprintf(stderr, "DFPHASE_REQUEST id=%lld slot=%u accepted=%u emitted=%u drafts=%u\n",

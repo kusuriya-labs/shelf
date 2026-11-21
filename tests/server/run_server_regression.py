@@ -42,11 +42,13 @@ GROUPS = OrderedDict([
     ("core", [
         "test_server_cli.py",
         "test_compute_client_reader.py",
+        "test_dflash2_grammar_protocol.py",
         "test_compute_input_ids.py",
         "test_compute_pids_scope.py",
         "test_compute_service.py",
         "test_compute_token_mask.py",
         "test_compute_dflash2.py",
+        "test_compute_dflash2_grammar_protocol.py",
         "test_compute_dflash2_tree.py",
         "test_compute_dflash2_octave.py",
         "test_compute_dflash2_unaligned.py",

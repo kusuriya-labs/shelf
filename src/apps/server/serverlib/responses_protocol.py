@@ -130,9 +130,12 @@ def parse_responses_request(body, *, inference_budget_tokens):
         fmt = body["text"].get("format")
         if fmt is not None and fmt != {"type": "text"}:
             fields(fmt, {"type", "name", "description", "schema", "strict"}, "text.format")
-            if fmt.get("type") != "json_schema":
+            if fmt == {"type": "json_object"}:
+                response_format = {"type": "json_object"}
+            elif fmt.get("type") == "json_schema":
+                response_format = {"type": "json_schema", "json_schema": {k: v for k, v in fmt.items() if k != "type"}}
+            else:
                 reject("text.format")
-            response_format = {"type": "json_schema", "json_schema": {k: v for k, v in fmt.items() if k != "type"}}
     if body.get("max_output_tokens") is not None:
         value = body["max_output_tokens"]
         if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= (1 << 63) - 1:

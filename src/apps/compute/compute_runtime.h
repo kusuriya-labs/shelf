@@ -121,6 +121,14 @@ class Qwen35ComputeRuntime {
         const qwen35::runtime::ThinkingBudget& thinking);
 
     Status set_token_bitmask(uint64_t id, const uint32_t* mask, bool waiting);
+    Status set_structured_dflash(uint64_t id, bool delayed, int32_t close_token);
+    Status activate_grammar(uint64_t id);
+    Status set_draft_masks(uint64_t id, uint64_t round, const uint32_t* mask,
+                           uint32_t stride, uint32_t valid_prefix);
+    Result<uint64_t> submit_structured_dflash(
+        std::vector<int32_t> input_ids, uint32_t max_new_tokens,
+        const qwen35::runtime::SamplingConfig& sampling,
+        const qwen35::runtime::ThinkingBudget& thinking);
 
     Result<qwen35::runtime::StepResult> step();
 

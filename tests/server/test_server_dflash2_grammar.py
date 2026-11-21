@@ -57,7 +57,7 @@ async def exercise(server, log):
         assert value["color"] in ("red", "blue") and isinstance(value["enabled"], bool), value
         assert value["kind"] in ("first", "second"), value
         seen = rounds()[offset:]
-        assert (1, 8, 2) in seen, seen
+        assert any(speculative == 2 and decoding == 2 for speculative, _, decoding in seen), seen
         result = await ordinary
         choice = result["choices"][0]
         assert choice["finish_reason"] in ("stop", "length"), choice
@@ -78,14 +78,14 @@ def main():
         server = ServerHarness(log_path=log, max_seq_len=1536, arena_gib=31,
                                max_concurrent_requests=2,
                                dflash2_model_dir=os.environ["SHELF_DFLASH2_MODEL_DIR"],
-                               dflash2_tree_budget=None, startup_timeout=420,
+                               dflash2_tree_budget="auto", startup_timeout=420,
                                env={"SHELF_DFLASH2_TREE_TRACE_ROUND": "1"})
         try:
             server.start()
             asyncio.run(exercise(server, log))
         finally:
             server.close()
-    print("PASS: grammar normal decode alongside speculative tree/chain/tree")
+    print("PASS: grammar DFlash2 alongside speculative tree/chain/tree")
 
 
 if __name__ == "__main__":

@@ -44,6 +44,8 @@ def main():
             for stream in (False, True):
                 body = dict(base, temperature=0.8 if stream else 0, stream=stream,
                             response_format={"type":"json_schema", "json_schema":{"name":"test", "schema":schema, "strict":True}})
+                if schema["type"] == "array":
+                    body["messages"] = [{"role":"user", "content":"Return an empty JSON array, with no items."}]
                 if stream:
                     events = list(http_sse(url, body))
                     text = "".join(e["choices"][0].get("delta", {}).get("content", "") for e in events if e.get("choices"))
