@@ -222,6 +222,7 @@ public:
         std::uint64_t total = 0;
         add_matrix(total, w.embed_tokens);
         add_matrix(total, w.lm_head);
+        add_matrix(total, w.mtp_lm_head);
         add_hyper(total, w.mixer);
         for (const auto& layer : w.layers) {
             add_hyper(total, layer.attn_hyper_connection);
@@ -328,7 +329,7 @@ public:
     }
 
     shelf::weights::Exl3LinearShape mtp_exl3_linear_shape() const override {
-        return qwen4exp::mtp_exl3_linear_shape(model_.weights().mtp);
+        return qwen4exp::mtp_exl3_linear_shape(model_.weights());
     }
 
     std::uint32_t normed_token_hidden_width() const override {

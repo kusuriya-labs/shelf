@@ -14,8 +14,12 @@ checkpoint を Qwen4Exp と判定する。`model_type` は allowlist gate であ
 
 `shelf-compute` は `--tensor-parallel 2|4` で起動する。prefix cache は QSA key state と
 PLE conv state を shadow slot に保持し（[prefix_cache.md](prefix_cache.md)）、restore 時に
-PLE の n-gram history を復元 prefix で再 seed する。MTP は無効である。DFlash2 は
-`--dflash2-model-dir` で有効になる。
+PLE の n-gram history を復元 prefix で再 seed する。DFlash2 は
+`--dflash2-model-dir` で有効になる。`--mtp` も使える。MTP block は rank0 が load し、
+TP で target の lm_head が語彙分割されるときは drafter 用に全語彙の lm_head を
+rank0 へ追加で load する（[mtp.md](mtp.md)）。QSA / PLE を持つため verify は target の
+1 行 decode を使い、生成列は target-only と一致する。routed expert は
+`--expert-parallel` で expert 軸に分割でき、TP と EP の積が device 数になる。
 
 `--pipeline-parallel` にも対応する。各 stage は担当地の層だけをロードし、
 embedding は先頭、final mixer と lm_head は末尾の stage が持つ。stage 間では
@@ -47,6 +51,9 @@ prefill で non-finite になる既知の問題があり、PP 単体と短いプ
   vocab-parallel head は `Int8W32`、DFlash2 の sharded proposal も `Int8W32` 経路で
   動く。無効にすると BF16 のままになり、DFlash2 の sharded proposal は
   BF16 用の exact-rows GEMM 経路を使う。
+- `--mtp` で TP を使うとき、rank0 は target の語彙分割 lm_head とは別に、drafter 用の
+  全語彙 lm_head を `mtp_lm_head` として追加 load する。target の forward は分割 head の
+  ままである。
 - routed expert は既定で全 local expert を VRAM に置く。`--moe-host-experts N`
   （layer あたり）を設定すると、各 layer の N expert を pinned host の plane に置き、
   残りを VRAM の slot に置く。host plane は `hipHostMallocMapped` で、GPU の grouped

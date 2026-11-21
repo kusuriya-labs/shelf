@@ -783,7 +783,9 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
     const auto layout = ::shelf::kernel::exl3_detail::mul24::make_workspace_layout(
         rows, n, k, ctx.exl3_xrot_bytes, ctx.exl3_accum_bytes, ctx.exl3_dense_bytes);
     if (layout.chunk_rows == 0u)
-        return Status::insufficient_memory("exl3 int8 linear: workspace smaller than one row", __FILE__, __LINE__);
+        return Status::insufficient_memory(
+            "exl3 int8 linear: workspace smaller than one row (n=" +
+                std::to_string(n) + " k=" + std::to_string(k) + ")", __FILE__, __LINE__);
     const uint32_t chunk = layout.chunk_rows;
     const uint32_t scratch_rows = layout.scratch_rows;
     const uint32_t code_stride = layout.code_stride;
@@ -955,7 +957,9 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
             launches += done ? 4u : 0u;
         }
         if (!done && herr == hipSuccess) {
-            uint32_t splits = ::shelf::kernel::exl3_mul24_gemm_splits(n_rows, n, k, scratch_rows, e.exl3_ka);
+            const uint32_t split_rows =
+                ctx.splitk_tuning_rows != 0u ? ctx.splitk_tuning_rows : n_rows;
+            uint32_t splits = ::shelf::kernel::exl3_mul24_gemm_splits(split_rows, n, k, scratch_rows, e.exl3_ka);
             if (e.plamo_exl3_split4 && ctx.num_prefill_requests == 0u && ctx.splitk_tuning_rows == 0u &&
                 n_rows > 16u && n_rows <= 64u && scratch_rows >= 4u * n_rows)
                 splits = 4u;
@@ -1202,7 +1206,9 @@ Result<OptimizedLaunchResult> try_launch_exl3_projection(
         p.svh = static_cast<const uint16_t*>(w.exl3_svh);
         const uint32_t scratch_rows = static_cast<uint32_t>(std::min<uint64_t>(
             ctx.exl3_accum_bytes / (static_cast<uint64_t>(p.n) * 4u), UINT32_MAX));
-        p.splits = ::shelf::kernel::exl3_mul24_gemm_splits(rows, p.n, group.k, scratch_rows, w.exl3_ka);
+        const uint32_t split_rows =
+            ctx.splitk_tuning_rows != 0u ? ctx.splitk_tuning_rows : rows;
+        p.splits = ::shelf::kernel::exl3_mul24_gemm_splits(split_rows, p.n, group.k, scratch_rows, w.exl3_ka);
         if (w.plamo_exl3_split4 && ctx.num_prefill_requests == 0u && ctx.splitk_tuning_rows == 0u &&
             rows > 16u && rows <= 64u && scratch_rows >= 4u * rows) p.splits = 4u;
         xoffset = align(xoffset);

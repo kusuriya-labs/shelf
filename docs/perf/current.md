@@ -834,7 +834,8 @@ FlashNext-exl3（3.0 / 3.5 bpw）にも同じ固定 rate path を適用した。
 | DFlash2 drafts=4、32 new token | - | **53.37 tok/s** |
 | DFlash2 drafts=6、32 new token | 50.71 tok/s | 51.41 tok/s |
 
-- FlashNext の MTP は `--mtp` が TP1、Qwen4Exp が TP2 以上を要求するため実行できない。
+- この節の FlashNext 測定時点では MTP 未対応だった。現在は `--mtp` を TP / EP で
+  実行できるが、この節と同じ条件の MTP 性能は未測定である。
 - 27B-exl3 の MTP（TP1、`--mtp --mtp-drafts 4`）は **44.51〜44.67 tok/s**
   （target-only 17.09、mean accepted 2.750）。同条件の DFlash2 TP1 は drafts=6 で
   45.45〜45.84 tok/s。TP2 + DFlash2 は 32 token で 63.38 tok/s（fast path 入り）。

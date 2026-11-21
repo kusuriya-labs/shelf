@@ -114,6 +114,9 @@ struct Qwen4ExpRankWeights {
     std::vector<Qwen4ExpLayerWeights> layers;
     // The draft head is a rank-local copy on rank 0. It is not sharded by the TP plan.
     Qwen4ExpMtpWeights mtp;
+    // Full-vocabulary LM head for the MTP drafter on rank 0 when the target LM head is
+    // vocabulary-sharded. Empty when the rank's LM head is already full width.
+    shelf::weights::MatrixWeight mtp_lm_head;
     // Cold routed experts of every layer. Pinned host memory, device-readable.
     shelf::weights::PinnedHostArena expert_host;
     // Device int32 [layers][local_experts]: >= 0 is a VRAM slot, -1 - slot is a host
@@ -181,19 +184,30 @@ inline shelf::weights::Exl3LinearShape exl3_linear_shape(
     return shape;
 }
 
-// The staging-plane geometry of the MTP block, which runs in its own executor.
+// The staging-plane geometry of the MTP block and the LM head it ends with. The drafter
+// runs in its own executor, so both shapes share that executor's staging plane.
 inline shelf::weights::Exl3LinearShape mtp_exl3_linear_shape(
-    const Qwen4ExpMtpWeights& weights) noexcept {
+    const Qwen4ExpRankWeights& weights) noexcept {
     shelf::weights::Exl3LinearShape shape;
-    if (!weights.present) return shape;
-    shelf::weights::note_exl3_linear(weights.fc_hidden, shape);
-    shelf::weights::note_exl3_linear(weights.fc_embedding, shape);
-    note_exl3_linear(weights.mixer, shape);
-    note_exl3_linear(weights.layer.attn_hyper_connection, shape);
-    note_exl3_linear(weights.layer.mlp_hyper_connection, shape);
-    note_exl3_linear(weights.layer.attention, shape);
-    note_exl3_linear(weights.layer.mlp, shape);
-    note_exl3_linear(weights.layer.ple, shape);
+    if (!weights.mtp.present) return shape;
+    const Qwen4ExpMtpWeights& mtp = weights.mtp;
+    shelf::weights::note_exl3_linear(mtp.fc_hidden, shape);
+    shelf::weights::note_exl3_linear(mtp.fc_embedding, shape);
+    note_exl3_linear(mtp.mixer, shape);
+    note_exl3_linear(mtp.layer.attn_hyper_connection, shape);
+    note_exl3_linear(mtp.layer.mlp_hyper_connection, shape);
+    note_exl3_linear(mtp.layer.attention, shape);
+    note_exl3_linear(mtp.layer.mlp, shape);
+    note_exl3_linear(mtp.layer.ple, shape);
+    const shelf::weights::MatrixWeight& head =
+        weights.mtp_lm_head.rows != 0u ? weights.mtp_lm_head : weights.lm_head;
+    if (head.encoding == shelf::weights::MatrixEncoding::Exl3) {
+        const std::size_t head_k = head.k_padded > head.cols ? head.k_padded : head.cols;
+        if (head_k > shape.max_k) shape.max_k = head_k;
+        const std::size_t head_accum = head.rows * sizeof(float) * 32u;
+        if (head_accum > shape.max_int8_decode_accum_bytes)
+            shape.max_int8_decode_accum_bytes = head_accum;
+    }
     return shape;
 }
 
