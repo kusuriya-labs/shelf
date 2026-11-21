@@ -59,6 +59,8 @@ Result<PagedSequenceState> create_paged_sequence_state(
     }
 
     if (ring_blocks != 0u) {
+        // A ring wider than the logical table would acquire pages no table entry aliases.
+        if (ring_blocks > max_blocks_per_seq) ring_blocks = max_blocks_per_seq;
         if (ring_blocks > kv_pool.num_pages()) {
             (void)seq_pool.release_handle(handle);
             return Status::invalid_argument("ring_blocks exceeds the KV pool", __FILE__,

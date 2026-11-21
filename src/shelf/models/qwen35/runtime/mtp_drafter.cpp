@@ -248,7 +248,7 @@ constexpr uint32_t kDraftWindowBlockTokens = 4u;
 
 bool draft_ring_enabled() noexcept {
     const char* env = std::getenv("SHELF_MTP_RING");
-    return env != nullptr && env[0] != '\0' && std::strcmp(env, "0") != 0;
+    return env == nullptr || (env[0] != '\0' && std::strcmp(env, "0") != 0);
 }
 
 uint32_t draft_ring_pages(const MtpDrafterConfig& options) noexcept {
@@ -256,8 +256,11 @@ uint32_t draft_ring_pages(const MtpDrafterConfig& options) noexcept {
     if (options.window_tokens == 0u || options.page_tokens == 0u) return 0u;
     const uint64_t tokens = static_cast<uint64_t>(options.sink_tokens) +
                             options.window_tokens + options.num_drafts + 1u;
-    return static_cast<uint32_t>(ceil_div_u32(static_cast<uint32_t>(tokens),
-                                              options.page_tokens)) + 1u;
+    const uint32_t ring = static_cast<uint32_t>(ceil_div_u32(
+                              static_cast<uint32_t>(tokens), options.page_tokens)) + 1u;
+    const uint32_t logical =
+        ceil_div_u32(options.max_seq_len + 1u, options.page_tokens) + 1u;
+    return ring < logical ? ring : logical;
 }
 
 uint32_t draft_mask_bytes(uint32_t max_seq_len) noexcept {
@@ -319,8 +322,14 @@ Result<BatchExecutionOutput> run_mtp_forward(MtpDrafter& drafter,
         return Status::invalid_argument("mtp forward has no tokens", __FILE__, __LINE__);
     }
     if (prefix != drafter.sequence->position) {
-        return Status::invalid_state("mtp sequence position diverged from prefix", __FILE__,
-                                     __LINE__);
+        // A windowed drafter skips the prompt spans outside sink+window, so the prefix can
+        // jump. The ring block table aliases the physical pages and the mask hides the
+        // skipped span.
+        if (drafter.window_tokens == 0u || drafter.ring_pages == 0u) {
+            return Status::invalid_state("mtp sequence position diverged from prefix",
+                                         __FILE__, __LINE__);
+        }
+        drafter.sequence->position = prefix;
     }
     const uint32_t rows = static_cast<uint32_t>(tokens.size());
     const ::shelf::runtime::ExecutionClass execution_class =
@@ -976,8 +985,15 @@ Status mtp_drafter_reset_sequence(MtpDrafter& drafter, hipStream_t stream) noexc
         return Status::invalid_state("mtp reset: drafter is not initialized", __FILE__,
                                      __LINE__);
     }
+    if (std::getenv("SHELF_MTP_RING_DEBUG") != nullptr)
+        std::fprintf(stderr, "MTP_RING reset free_before=%u ring_pages=%u table=%zu\n",
+                     draft_kv_pool(drafter).num_free_pages(), drafter.ring_pages,
+                     drafter.sequence->block_table.size());
     Status st = state::release_paged_sequence_state(*drafter.sequence, stream);
     if (!st.ok()) return st;
+    if (std::getenv("SHELF_MTP_RING_DEBUG") != nullptr)
+        std::fprintf(stderr, "MTP_RING reset free_after_release=%u\n",
+                     draft_kv_pool(drafter).num_free_pages());
     auto sequence = state::create_paged_sequence_state(
         draft_slot_pool(drafter), draft_gdn_pool(drafter), draft_kv_pool(drafter),
         drafter.max_seq_len, stream, drafter.ring_pages);
@@ -993,6 +1009,16 @@ Status mtp_drafter_reset_sequence(MtpDrafter& drafter, hipStream_t stream) noexc
     drafter.sample_index = 0u;
     drafter.timing = MtpTiming{};
     return Status::make_ok();
+}
+
+// The draft attention only reads the attention sink and the last window of the prompt, so
+// the MTP block's K/V for the middle of a long prompt is never read. Skip those chunks.
+bool mtp_prefill_needed(const MtpDrafter& drafter, uint32_t chunk_begin, uint32_t chunk_end,
+                        uint32_t prompt_count) {
+    if (drafter.window_tokens == 0u) return true;
+    const uint32_t window_begin =
+        prompt_count > drafter.window_tokens ? prompt_count - drafter.window_tokens : 0u;
+    return chunk_begin < drafter.sink_tokens || chunk_end > window_begin;
 }
 
 Result<MtpPrefillOutput> mtp_spec_prefill(
@@ -1061,6 +1087,7 @@ Result<MtpPrefillOutput> mtp_spec_prefill(
             const uint32_t build_end = rows > 1u ? last_row : begin;
             for (uint32_t mtp_begin = begin; mtp_begin < build_end; mtp_begin += mtp_limit) {
                 const uint32_t mtp_end = std::min(build_end, mtp_begin + mtp_limit);
+                if (!mtp_prefill_needed(drafter, mtp_begin, mtp_end, prompt_count)) continue;
                 const uint32_t mtp_rows = mtp_end - mtp_begin;
                 mtp_tokens.resize(mtp_rows);
                 for (uint32_t i = 0u; i < mtp_rows; ++i) {
@@ -1085,6 +1112,7 @@ Result<MtpPrefillOutput> mtp_spec_prefill(
 
         for (uint32_t mtp_begin = begin; mtp_begin < end; mtp_begin += mtp_limit) {
             const uint32_t mtp_end = std::min(end, mtp_begin + mtp_limit);
+            if (!mtp_prefill_needed(drafter, mtp_begin, mtp_end, prompt_count)) continue;
             const uint32_t mtp_rows = mtp_end - mtp_begin;
             mtp_tokens.resize(mtp_rows);
             for (uint32_t i = 0u; i < mtp_rows; ++i) {
