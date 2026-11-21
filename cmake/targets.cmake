@@ -548,3 +548,10 @@ target_include_directories(shelf_quant_reference PUBLIC "${CMAKE_CURRENT_SOURCE_
 target_link_libraries(shelf_quant_reference PUBLIC shelf_core)
 target_compile_options(shelf_quant_reference PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
+
+add_library(shelf_quant_ngram STATIC src/shelf/quantization/ngram/ngram.cpp)
+target_compile_features(shelf_quant_ngram PRIVATE cxx_std_20)
+target_include_directories(shelf_quant_ngram PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(shelf_quant_ngram SYSTEM PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/vendor")
+target_link_libraries(shelf_quant_ngram PUBLIC shelf_core shelf_io)
+target_compile_options(shelf_quant_ngram PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
