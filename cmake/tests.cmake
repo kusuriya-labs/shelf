@@ -554,7 +554,7 @@ set_tests_properties(test_compute_rope_factor_reject_yarn_word PROPERTIES
                      PASS_REGULAR_EXPRESSION "bad --rope-factor")
 
 # ---------------------------------------------------------------------------
-# --rope-factor caps --max-seq-len at min(original_len * factor, 1000000).
+# --rope-factor caps --max-seq-len at min(original_len * factor, 1048576).
 # Rejection happens before any GPU query / model load.
 # ---------------------------------------------------------------------------
 set(_shelf_rope_fixture "${CMAKE_SOURCE_DIR}/tests/fixtures/rope_cap")
@@ -623,10 +623,10 @@ set_tests_properties(test_compute_rope_cap_2x_over PROPERTIES
 
 add_test(NAME test_compute_rope_cap_4x_over
          COMMAND $<TARGET_FILE:shelf-compute>
-             --model-dir "${_shelf_rope_fixture}" --rope-factor 4 --max-seq-len 1000001)
+             --model-dir "${_shelf_rope_fixture}" --rope-factor 4 --max-seq-len 1048577)
 set_tests_properties(test_compute_rope_cap_4x_over PROPERTIES
                      LABELS "cpu;required"
-                     PASS_REGULAR_EXPRESSION "exceeds the rope factor limit 1000000")
+                     PASS_REGULAR_EXPRESSION "exceeds the rope factor limit 1048576")
 
 
 add_test(NAME test_quality_gate_selftest

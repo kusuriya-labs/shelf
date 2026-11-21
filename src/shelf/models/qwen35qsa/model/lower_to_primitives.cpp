@@ -180,11 +180,6 @@ Result<shelf::qwen35::Qwen35LoweredPrimitives> lower_qwen35qsa_to_primitives(
             "qwen35qsa: kept block count exceeds the select kernel limit", __FILE__,
             __LINE__);
     }
-    if (backbone_options.rope_profile.type != shelf::qwen35::EffectiveRopeProfile::Type::Default) {
-        return Status::unsupported(
-            "qwen35qsa: sparse selection requires the default rope profile", __FILE__,
-            __LINE__);
-    }
     Status model_st =
         shelf::qwen35::validate_qwen35_weights(
             weights.backbone, config,
@@ -239,6 +234,11 @@ Result<shelf::qwen35::Qwen35LoweredPrimitives> lower_qwen35qsa_to_primitives(
     if (partial == 0) partial = 0.25f;
     const std::uint32_t rotary_dim =
         static_cast<std::uint32_t>((double)head_dim * (double)partial);
+    if (config.indexer.rope_dim > rotary_dim) {
+        return Status::unsupported(
+            "qwen35qsa: indexer rope_dim exceeds the backbone rope width", __FILE__,
+            __LINE__);
+    }
 
     QH::GdnGeometry gdn_geometry;
     gdn_geometry.key_heads = local_key_heads;

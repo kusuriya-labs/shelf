@@ -9,7 +9,7 @@ namespace qwen35 {
 
 namespace {
 
-constexpr std::uint64_t kOfficialMaxContextTokens = 1000000ull;
+constexpr std::uint64_t kMaxRopeContextTokens = 1048576ull;
 
 bool finite_positive(double v) {
     return std::isfinite(v) && v > 0.0;
@@ -292,8 +292,8 @@ std::uint32_t rope_max_seq_len_cap(const EffectiveRopeProfile& profile) {
     const std::uint64_t extended =
         static_cast<std::uint64_t>(static_cast<double>(profile.original_max_position_embeddings) *
                                    profile.factor);
-    const std::uint64_t capped = extended > kOfficialMaxContextTokens
-        ? kOfficialMaxContextTokens
+    const std::uint64_t capped = extended > kMaxRopeContextTokens
+        ? kMaxRopeContextTokens
         : extended;
     return static_cast<std::uint32_t>(capped);
 }
