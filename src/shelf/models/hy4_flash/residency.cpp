@@ -245,6 +245,9 @@ void Residency::upload() {
         if (tp_size > 1) {
             check(hipEventCreateWithFlags(&lane_ready[r], hipEventDisableTiming));
             check(hipEventCreateWithFlags(&lane_done[r], hipEventDisableTiming));
+            check(hipEventCreateWithFlags(&tp_consumed[r], hipEventDisableTiming | hipEventReleaseToSystem));
+            if (ep_size > 1)
+                check(hipEventCreateWithFlags(&ep_consumed[r], hipEventDisableTiming | hipEventReleaseToSystem));
         }
         for (int layer = 1; layer < 42; ++layer)
             upload_experts(r, layer);
@@ -305,18 +308,22 @@ void Residency::tp_sum(void *data, int rank, size_t bytes) {
             const int b = a + t;
             check(hipSetDevice(physical[b]));
             check(hipStreamWaitEvent(nullptr, lane_ready[b], 0));
+            check(hipStreamWaitEvent(nullptr, tp_consumed[a], 0));
             peer_copy(tp_recv[a], tp_ptr[b], bytes);
             check(hipEventRecord(lane_done[b], nullptr));
             check(hipSetDevice(physical[a]));
             check(hipStreamWaitEvent(nullptr, lane_ready[a], 0));
+            check(hipStreamWaitEvent(nullptr, tp_consumed[b], 0));
             peer_copy(tp_recv[b], tp_ptr[a], bytes);
             check(hipEventRecord(lane_done[a], nullptr));
             check(hipSetDevice(physical[a]));
             check(hipStreamWaitEvent(nullptr, lane_done[b], 0));
             tp_add_bf16(tp_ptr[a], tp_recv[a], bytes);
+            check(hipEventRecord(tp_consumed[a], nullptr));
             check(hipSetDevice(physical[b]));
             check(hipStreamWaitEvent(nullptr, lane_done[a], 0));
             tp_add_bf16(tp_ptr[b], tp_recv[b], bytes);
+            check(hipEventRecord(tp_consumed[b], nullptr));
         }
     }
     tp_barrier[group]->arrive_and_wait();
@@ -334,18 +341,22 @@ void Residency::ep_reduce(void *data, int rank, size_t bytes) {
     if (rank == a) {
         check(hipSetDevice(physical[b]));
         check(hipStreamWaitEvent(nullptr, lane_ready[b], 0));
+        check(hipStreamWaitEvent(nullptr, ep_consumed[a], 0));
         peer_copy(ep_recv[a], tp_ptr[b], bytes);
         check(hipEventRecord(lane_done[b], nullptr));
         check(hipSetDevice(physical[a]));
         check(hipStreamWaitEvent(nullptr, lane_ready[a], 0));
+        check(hipStreamWaitEvent(nullptr, ep_consumed[b], 0));
         peer_copy(ep_recv[b], tp_ptr[a], bytes);
         check(hipEventRecord(lane_done[a], nullptr));
         check(hipSetDevice(physical[a]));
         check(hipStreamWaitEvent(nullptr, lane_done[b], 0));
         tp_add_bf16(tp_ptr[a], ep_recv[a], bytes);
+        check(hipEventRecord(ep_consumed[a], nullptr));
         check(hipSetDevice(physical[b]));
         check(hipStreamWaitEvent(nullptr, lane_done[a], 0));
         tp_add_bf16(tp_ptr[b], ep_recv[b], bytes);
+        check(hipEventRecord(ep_consumed[b], nullptr));
     }
     ep_barrier[lane]->arrive_and_wait();
     check(hipSetDevice(physical[rank]));
@@ -375,7 +386,7 @@ void Residency::shutdown() {
             errors += std::string(hipGetErrorString(e)) + "\n";
     };
     for (int r = 0; r < ranks; ++r)
-        if (lane_ready[r] || lane_done[r]) {
+        if (lane_ready[r] || lane_done[r] || tp_consumed[r] || ep_consumed[r]) {
             auto status = hipSetDevice(physical[r]);
             collect(status);
             if (status == hipSuccess) {
@@ -383,8 +394,12 @@ void Residency::shutdown() {
                     collect(hipEventDestroy(lane_ready[r]));
                 if (lane_done[r])
                     collect(hipEventDestroy(lane_done[r]));
+                if (tp_consumed[r])
+                    collect(hipEventDestroy(tp_consumed[r]));
+                if (ep_consumed[r])
+                    collect(hipEventDestroy(ep_consumed[r]));
             }
-            lane_ready[r] = lane_done[r] = nullptr;
+            lane_ready[r] = lane_done[r] = tp_consumed[r] = ep_consumed[r] = nullptr;
         }
     for (int r = 0; r < ranks; ++r)
         if (expert_begin[r] || expert_end[r]) {
