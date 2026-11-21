@@ -33,6 +33,10 @@ PROMPTS = [
     [248041, 77094, 279, 2614],
 ]
 MAX_NEW_TOKENS = 8
+# 計算経路差による logits 不一致は許容契約である。fused / wavefront verify では
+# target-only との分岐が near-tie の argmax 反転だけで説明できることを
+# SHELF_MTP_TOP2 の margin で確認する。safe 経路は完全一致を要求する。
+NEAR_TIE_MARGIN = float(os.environ.get("SHELF_MTP_NEAR_TIE_MARGIN", "0.5"))
 
 
 def prompts():
@@ -137,9 +141,82 @@ def target_baseline() -> dict[int, list[int]]:
         harness.close()
 
 
+def top2_lines(stderr_lines: list[str]) -> list[dict]:
+    pattern = re.compile(
+        r"MTP_TOP2 tag=fused slot=(\d+) pos=(\d+) top1=(-?\d+) (\S+) "
+        r"top2=(-?\d+) (\S+) margin=(-?\S+)")
+    out = []
+    for line in stderr_lines:
+        match = pattern.search(line)
+        if match:
+            out.append({
+                "slot": int(match.group(1)),
+                "pos": int(match.group(2)),
+                "top1": int(match.group(3)),
+                "margin": float(match.group(7)),
+            })
+    return out
+
+
+def sampled_lines(stderr_lines: list[str]) -> list[dict]:
+    pattern = re.compile(r"MTP_SAMPLED slot=(\d+) pos=(\d+) token=(-?\d+)")
+    out = []
+    for line in stderr_lines:
+        match = pattern.search(line)
+        if match:
+            out.append({
+                "slot": int(match.group(1)),
+                "pos": int(match.group(2)),
+                "token": int(match.group(3)),
+            })
+    return out
+
+
+def near_tie_divergences(first: dict[int, dict], baseline: dict[int, list[int]],
+                         stderr_lines: list[str]) -> tuple[list, list]:
+    # 分岐した最初の token について、fused verify が同じ token を sampled した行を探し、
+    # その行の top-1 が一致した上で margin が閾値以下であることを確認する。
+    top2 = top2_lines(stderr_lines)
+    sampled = sampled_lines(stderr_lines)
+    accepted = []
+    rejected = []
+    for i, prompt in enumerate(prompts()):
+        fused = first[100 + i]["generated_ids"]
+        target = baseline[i]
+        index = None
+        for j in range(min(len(fused), len(target))):
+            if fused[j] != target[j]:
+                index = j
+                break
+        if index is None:
+            continue
+        token = fused[index]
+        witness = None
+        for sample in sampled:
+            if sample["slot"] != i or sample["token"] != token:
+                continue
+            for line in top2:
+                if (line["slot"] != sample["slot"] or line["pos"] != sample["pos"] or
+                        line["top1"] != token):
+                    continue
+                if witness is None or line["margin"] < witness["margin"]:
+                    witness = line
+        record = (i, index, token, target[index],
+                  None if witness is None else witness["margin"])
+        if witness is not None and witness["margin"] <= NEAR_TIE_MARGIN:
+            accepted.append(record + (witness["pos"],))
+        else:
+            rejected.append(record)
+    return accepted, rejected
+
+
 def main() -> int:
     checker = Checker("compute-mtp-batch")
     devices = os.environ.get("SHELF_MTP_DEVICES", "0,1,2,3")
+    near_tie_mode = bool(os.environ.get("SHELF_MTP_FUSED_VERIFY") or
+                         os.environ.get("SHELF_MTP_WAVEFRONT"))
+    if near_tie_mode:
+        os.environ["SHELF_MTP_TOP2"] = "1"
     baseline = target_baseline()
     harness = ComputeHarness(
         model_path=model_dir(),
@@ -164,11 +241,27 @@ def main() -> int:
         checker.check("completed", all(
             item.get("finish_reason") in ("length", "stop") for item in first.values()),
             repr(first))
-        checker.check("matches-target", all(
+        exact = all(
             first[100 + i]["generated_ids"] == baseline[i]
-            for i in range(len(prompts()))),
-            repr([(first[100 + i]["generated_ids"], baseline[i])
-                  for i in range(len(prompts()))]))
+            for i in range(len(prompts())))
+        if exact:
+            checker.check("matches-target", True, "")
+        else:
+            accepted, rejected = near_tie_divergences(
+                first, baseline, harness.stderr_lines)
+            checker.check(
+                "matches-target", near_tie_mode and not rejected,
+                repr({
+                    "accepted": accepted,
+                    "rejected": rejected,
+                    "margin_limit": NEAR_TIE_MARGIN,
+                    "pairs": [(first[100 + i]["generated_ids"], baseline[i])
+                              for i in range(len(prompts()))],
+                }))
+            if near_tie_mode:
+                if accepted:
+                    print("MTP_NEAR_TIE divergences=" + repr(accepted))
+                checker.check("near-tie-divergences", not rejected, repr(accepted))
         checker.check("deterministic", all(
             first[100 + i]["generated_ids"] == second[200 + i]["generated_ids"]
             for i in range(len(prompts()))),

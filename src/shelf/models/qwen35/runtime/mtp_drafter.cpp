@@ -126,6 +126,44 @@ const gpu::Tensor& drafter_hidden_output(const MtpDrafter& drafter) {
     return drafter.wide_hidden ? executor.normed_token_hidden : executor.token_hidden;
 }
 
+
+bool mtp_top2_enabled() {
+    static const bool enabled = std::getenv("SHELF_MTP_TOP2") != nullptr;
+    return enabled;
+}
+
+void log_top2(const gpu::Tensor& logits, uint32_t row, const char* tag,
+              uint32_t position, uint32_t slot) {
+    if (!mtp_top2_enabled() || logits.ndim() < 2 || row >= logits.dim(0)) return;
+    const std::size_t vocab = logits.dim(1);
+    std::vector<float> values(vocab);
+    const float* src = logits.data<float>() + static_cast<std::size_t>(row) *
+                                                   logits.strides_data()[0];
+    if (hipMemcpy(values.data(), src, vocab * sizeof(float),
+                  hipMemcpyDeviceToHost) != hipSuccess)
+        return;
+    int32_t first = -1;
+    int32_t second = -1;
+    float top1 = -INFINITY;
+    float top2 = -INFINITY;
+    for (std::size_t i = 0; i < vocab; ++i) {
+        const float v = values[i];
+        if (v > top1) {
+            top2 = top1;
+            second = first;
+            top1 = v;
+            first = static_cast<int32_t>(i);
+        } else if (v > top2) {
+            top2 = v;
+            second = static_cast<int32_t>(i);
+        }
+    }
+    std::fprintf(stderr,
+                 "MTP_TOP2 tag=%s slot=%u pos=%u top1=%d %.6f top2=%d %.6f "
+                 "margin=%.6f\n",
+                 tag, slot, position, first, top1, second, top2, top1 - top2);
+}
+
 Result<int32_t> copy_sampled_token(const gpu::Tensor& sampled, hipStream_t stream) {
     int32_t token = -1;
     const hipError_t err =
@@ -1050,6 +1088,7 @@ Result<MtpIterationOutput> mtp_verify_serial(
         if (!cache.ok()) return cache;
         auto sampled = copy_sampled_token(step.value().sampled_tokens, stream);
         if (!sampled.ok()) return sampled.status();
+        log_top2(step.value().logits, 0u, "safe", plan.position + i, 0u);
         committed = i + 1u;
         bool keep_verifying = false;
         if (i == drafts) {
@@ -1941,6 +1980,11 @@ Result<MtpSpecBatchOutput> mtp_verify_wavefront(
                 return Status::hip_error("mtp wavefront sample copy",
                                          hipGetErrorString(copy), __FILE__, __LINE__);
             }
+            for (std::size_t b = 0u; b < requests.size(); ++b) {
+                const std::size_t i = depth_slots[begin + b];
+                log_top2(output.logits, static_cast<uint32_t>(b), "safe",
+                         plans[i].position + depth, static_cast<uint32_t>(i));
+            }
             ++out.verify_chunks;
             for (std::size_t b = 0u; b < requests.size(); ++b) {
                 const std::size_t i = depth_slots[begin + b];
@@ -2205,6 +2249,19 @@ Result<MtpSpecBatchOutput> mtp_spec_step_batch(
         if (err != hipSuccess) {
             return Status::hip_error("mtp batch sample copy", hipGetErrorString(err),
                                      __FILE__, __LINE__);
+        }
+        for (std::size_t c = 0u; c < chunk.size(); ++c) {
+            const std::size_t i = chunk[c];
+            for (uint32_t r = 0u; r <= drafts[i].drafts; ++r) {
+                log_top2(output.logits, chunk_row_begin[c] + r, "fused",
+                         drafts[i].position + r, static_cast<uint32_t>(i));
+                if (mtp_top2_enabled()) {
+                    std::fprintf(stderr,
+                                 "MTP_SAMPLED slot=%u pos=%u token=%d\n",
+                                 static_cast<uint32_t>(i), drafts[i].position + r,
+                                 sampled[chunk_row_begin[c] + r]);
+                }
+            }
         }
 
         for (std::size_t c = 0u; c < chunk.size(); ++c) {

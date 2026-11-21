@@ -141,12 +141,19 @@ Target verify forward は round あたり 1 回になる。
 
 計算経路による logits 不一致と near-tie の argmax 分岐は許容する契約とした。
 safe 経路は target-only 完全一致（9/9 PASS）。fused は 8 request 中 6 件が完全一致し、
-残り 2 件は調査時の一時 instrumentation で測った near-tie だった。
+残り 2 件は near-tie だった。
 
-| request | 位置 | fused | target-only | 分岐行の top-1 / top-2 margin |
-| ---: | ---: | ---: | ---: | --- |
-| 3 | 10 | 17 | 16 | 17 (11.950) / 18 (11.904) = 0.047 |
-| 7 | 8 | 3855 | 561 | 3855 (12.801) / 561 (12.546) = 0.254 |
+この契約を `tests/server/test_compute_mtp_batch.py` が機械的に検証する。
+fused / wavefront（opt-in）では `SHELF_MTP_TOP2=1` を有効にし、各 request の最初の分岐
+token について「fused verify が同じ token を sampled した行の top-1 がその token と一致し、
+かつ margin <= `SHELF_MTP_NEAR_TIE_MARGIN`（既定 0.5）」を witness として要求する。
+safe 経路は従来どおり完全一致のみを受け入れる。witness は
+`MTP_NEAR_TIE divergences=[...]` として出力する。
+
+| request | 分岐 index | fused | target-only | 分岐行 margin | witness pos |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 7 | 17 | 16 | 0.046824 | 9 |
+| 6 | 4 | 3855 | 561 | 0.254333 | 7 |
 
 ### QSA score の multi-request launch 集約（Phase 3）
 
