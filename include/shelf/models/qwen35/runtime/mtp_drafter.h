@@ -133,6 +133,7 @@ struct MtpDrafter {
     uint32_t window_tokens = 0u;
     uint32_t sink_tokens = 0u;
     uint32_t mask_bytes = 0u;
+    uint32_t ring_pages = 0u;
     shelf::qwen_hybrid::QwenHybridConfig config;
     std::unique_ptr<state::SequenceSlotPool> slot_pool;
     std::unique_ptr<state::GdnStatePool> gdn_pool;

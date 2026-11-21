@@ -246,6 +246,20 @@ Status rewind_sequence(state::PagedSequenceState& sequence, uint32_t position,
 
 constexpr uint32_t kDraftWindowBlockTokens = 4u;
 
+bool draft_ring_enabled() noexcept {
+    const char* env = std::getenv("SHELF_MTP_RING");
+    return env != nullptr && env[0] != '\0' && std::strcmp(env, "0") != 0;
+}
+
+uint32_t draft_ring_pages(const MtpDrafterConfig& options) noexcept {
+    if (!draft_ring_enabled()) return 0u;
+    if (options.window_tokens == 0u || options.page_tokens == 0u) return 0u;
+    const uint64_t tokens = static_cast<uint64_t>(options.sink_tokens) +
+                            options.window_tokens + options.num_drafts + 1u;
+    return static_cast<uint32_t>(ceil_div_u32(static_cast<uint32_t>(tokens),
+                                              options.page_tokens)) + 1u;
+}
+
 uint32_t draft_mask_bytes(uint32_t max_seq_len) noexcept {
     const uint32_t blocks =
         (max_seq_len + 1u + kDraftWindowBlockTokens - 1u) / kDraftWindowBlockTokens;
@@ -521,8 +535,10 @@ std::size_t mtp_drafter_reserve_bytes(const shelf::qwen_hybrid::QwenHybridConfig
         return 0u;
     }
     shelf::qwen_hybrid::QwenHybridConfig mtp = mtp_executor_config(config);
-    const uint32_t pages =
+    const uint32_t full_pages =
         ceil_div_u32(options.max_seq_len + 1u, options.page_tokens) + 1u;
+    const uint32_t ring = draft_ring_pages(options);
+    const uint32_t pages = ring != 0u ? ring : full_pages;
     const std::size_t kv = state::PagedKVPool::page_bytes(
         options.page_tokens, kMtpKvLayers,
         static_cast<uint32_t>(mtp.num_key_value_heads),
@@ -572,8 +588,10 @@ std::size_t mtp_shared_draft_reserve_bytes(
         return 0u;
     }
     shelf::qwen_hybrid::QwenHybridConfig mtp = mtp_executor_config(config);
-    const uint32_t pages =
+    const uint32_t full_pages =
         ceil_div_u32(options.max_seq_len + 1u, options.page_tokens) + 1u;
+    const uint32_t ring = draft_ring_pages(options);
+    const uint32_t pages = ring != 0u ? ring : full_pages;
     const std::size_t kv = state::PagedKVPool::page_bytes(
         options.page_tokens, kMtpKvLayers,
         static_cast<uint32_t>(mtp.num_key_value_heads),
@@ -659,9 +677,11 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
     drafter->window_tokens = options.window_tokens;
     drafter->sink_tokens = options.sink_tokens;
     drafter->mask_bytes = draft_mask_bytes(options.max_seq_len);
+    drafter->ring_pages = draft_ring_pages(options);
 
     const uint32_t pages =
         ceil_div_u32(options.max_seq_len + 1u, options.page_tokens) + 1u;
+    const uint32_t ring_pages = draft_ring_pages(options);
     if (shared_draft == nullptr) {
         auto slot_pool = state::SequenceSlotPool::create(arena, 1u, pages);
         if (!slot_pool.ok()) return slot_pool.status();
@@ -675,8 +695,8 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
         drafter->gdn_pool = std::make_unique<state::GdnStatePool>(gdn_pool.release());
 
         auto kv_pool = state::PagedKVPool::create(
-            arena, pages, options.page_tokens, kMtpKvLayers,
-            static_cast<uint32_t>(drafter->config.num_key_value_heads),
+            arena, ring_pages != 0u ? ring_pages : pages, options.page_tokens,
+            kMtpKvLayers, static_cast<uint32_t>(drafter->config.num_key_value_heads),
             static_cast<uint32_t>(drafter->config.attention_head_dim), options.kv_dtype);
         if (!kv_pool.ok()) return kv_pool.status();
         drafter->kv_pool = std::make_unique<state::PagedKVPool>(kv_pool.release());
@@ -684,7 +704,7 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
 
     auto sequence = state::create_paged_sequence_state(
         draft_slot_pool(*drafter), draft_gdn_pool(*drafter), draft_kv_pool(*drafter),
-        options.max_seq_len, stream);
+        options.max_seq_len, stream, ring_pages);
     if (!sequence.ok()) return sequence.status();
     drafter->sequence =
         std::make_unique<state::PagedSequenceState>(sequence.release());
@@ -960,7 +980,7 @@ Status mtp_drafter_reset_sequence(MtpDrafter& drafter, hipStream_t stream) noexc
     if (!st.ok()) return st;
     auto sequence = state::create_paged_sequence_state(
         draft_slot_pool(drafter), draft_gdn_pool(drafter), draft_kv_pool(drafter),
-        drafter.max_seq_len, stream);
+        drafter.max_seq_len, stream, drafter.ring_pages);
     if (!sequence.ok()) {
         drafter.sequence.reset();
         return sequence.status();
@@ -1570,6 +1590,7 @@ Result<MtpSpecBatchContext> create_mtp_spec_batch_context(
         shared.config = mtp_executor_config(*input.config);
         const uint32_t pages =
             ceil_div_u32(options.max_seq_len + 1u, options.page_tokens) + 1u;
+        const uint32_t ring_pages = draft_ring_pages(options);
         auto slot_pool =
             state::SequenceSlotPool::create(arena, max_requests, pages);
         if (!slot_pool.ok()) return slot_pool.status();
@@ -1580,8 +1601,11 @@ Result<MtpSpecBatchContext> create_mtp_spec_batch_context(
         auto gdn_pool = state::GdnStatePool::create(arena, max_requests, gdn_layout);
         if (!gdn_pool.ok()) return gdn_pool.status();
         shared.gdn_pool = std::make_unique<state::GdnStatePool>(gdn_pool.release());
+        // One reset can hold the outgoing and incoming sequence at once.
+        const uint32_t ring_scale = ring_pages != 0u ? max_requests + 1u : max_requests;
         auto kv_pool = state::PagedKVPool::create(
-            arena, pages * max_requests, options.page_tokens, kMtpKvLayers,
+            arena, (ring_pages != 0u ? ring_pages : pages) * ring_scale,
+            options.page_tokens, kMtpKvLayers,
             static_cast<uint32_t>(shared.config.num_key_value_heads),
             static_cast<uint32_t>(shared.config.attention_head_dim), options.kv_dtype);
         if (!kv_pool.ok()) return kv_pool.status();
