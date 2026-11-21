@@ -184,7 +184,13 @@ void Residency::upload() {
                 if (status != hipSuccess)
                     (void)hipGetLastError();
             }
-            if (peer[dst][src]) {
+        }
+    for (int dst = 0; dst < ranks; ++dst)
+        for (int src = 0; src < ranks; ++src) {
+            if (src == dst)
+                continue;
+            const bool available = push ? peer[src][dst] : peer[dst][src];
+            if (available) {
                 for (int q = 0; q < 2; ++q) {
                     check(hipSetDevice(physical[src]));
                     check(hipEventCreateWithFlags(&ready[src][dst][q],
@@ -193,10 +199,10 @@ void Residency::upload() {
                     check(hipEventCreateWithFlags(&ack[dst][src][q], hipEventDisableTiming));
                 }
             }
-            if (!peer[dst][src] && !staging)
+            if (!available && !staging)
                 check(hipHostMalloc(&staging, max_prefill_chunk * 3072u * 2u, hipHostMallocPortable));
             fprintf(stderr, "transfer=%d->%d method=%s\n", src, dst,
-                    peer[dst][src] ? (push ? "push" : "peer") : "host");
+                    available ? (push ? "push" : "peer") : "host");
         }
     const auto begin = std::chrono::steady_clock::now();
     constexpr size_t chunk = 16ull << 20;
@@ -260,7 +266,7 @@ void Residency::transfer(void *dst, int destination, const void *src, int source
     std::chrono::steady_clock::time_point begin;
     if (expert_begin[0])
         begin = std::chrono::steady_clock::now();
-    if (peer[destination][source]) {
+    if (push ? peer[source][destination] : peer[destination][source]) {
         const int p = parity[source][destination];
         hipEvent_t ready_event = ready[source][destination][p];
         hipEvent_t ack_event = ack[destination][source][p];
