@@ -63,6 +63,7 @@ int run(const Path &dir, int repeats) {
     if (layer < 0 || layer >= 42 || ids.empty() || ids.size() > 128)
         throw std::runtime_error("fixture の範囲が不正です");
     model.shape = fixture.at("shapes").get<decltype(model.shape)>();
+    model.local_shape[0] = model.shape;
     for (int g = 0; g < 4; ++g) {
         auto sizes = fixture.at("moduli").at(std::to_string(2 + g * 10));
         for (int i = 0; i < 16; ++i)
@@ -84,7 +85,7 @@ int run(const Path &dir, int repeats) {
             size_t offset = (model.bytes[0] + 255) & ~size_t(255);
             if (rank == 0)
                 model.bytes[0] = offset + bytes;
-            model.weights.emplace(key, Weight{spec, ptr, bytes, rank, offset});
+            (rank < 0 ? model.source : model.local[0]).emplace(key, Weight{spec, ptr, bytes, rank, offset});
         }
         model.files.push_back(std::move(reader));
     }
@@ -105,19 +106,19 @@ int run(const Path &dir, int repeats) {
         auto alloc = take(gpu.arenas[0].allocate_aligned(capacity, 256));
         Region memory{static_cast<uint8_t *>(alloc.data()), capacity};
         gpu.weight_base[0] = static_cast<uint8_t *>(memory.next(model.bytes[0]));
-        for (const auto &[key, w] : model.weights)
+        for (const auto &[key, w] : model.local[0])
             if (w.rank == 0)
                 checked(hipMemcpy(gpu.weight_base[0] + w.offset, w.host, w.bytes, hipMemcpyHostToDevice));
-        gpu.cache[layer] = static_cast<uint8_t *>(memory.next(slots * 294));
-        gpu.index_keys[layer] = static_cast<uint16_t *>(memory.next((capacity_tokens / 4 + 12) * 256));
-        for (auto &[key, dest] : gpu.folded)
+        gpu.cache[0][layer] = static_cast<uint8_t *>(memory.next(slots * 294));
+        gpu.index_keys[0][layer] = static_cast<uint16_t *>(memory.next((capacity_tokens / 4 + 12) * 256));
+        for (auto &[key, dest] : gpu.folded[0])
             dest = memory.next(size_t(model.shape.at(key)[1]) * 512 * 2);
         gpu.matrices[0] = static_cast<Hy4ExpertProjection *>(memory.next(gpu.matrix_bytes));
         if (layer)
             gpu.upload_experts(0, layer);
         gpu.workspace[0] = {static_cast<uint8_t *>(memory.next(work)), work};
-        if (!gpu.folded.empty())
-            fold_kv_weights(gpu);
+        if (!gpu.folded[0].empty())
+            fold_kv_weights(gpu, 0);
         Ops op(gpu);
         if (!layer)
             check_rejection(op);
@@ -135,9 +136,9 @@ int run(const Path &dir, int repeats) {
                             throw std::runtime_error("保存 KV のサイズが不正です");
                         op.copy(dest, ptr, size, hipMemcpyHostToDevice);
                     };
-                    restore("kv", gpu.cache[layer], slots * 294);
+                    restore("kv", gpu.cache[0][layer], slots * 294);
                     if (layer == 0 || layer % 4 == 1)
-                        restore("index", gpu.index_keys[layer], (capacity_tokens / 4 + 12) * 256);
+                        restore("index", gpu.index_keys[0][layer], (capacity_tokens / 4 + 12) * 256);
                 }
                 for (int i = 0; i < int(ids.size()); i += chunk) {
                     int count = std::min(chunk, int(ids.size()) - i);
