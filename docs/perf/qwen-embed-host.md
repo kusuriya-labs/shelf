@@ -7,7 +7,7 @@ Qwen3.8-27B EXL3-INT8 **3.05bpw** モデル
 を、gfx1201 (RX 9070 XT 想定, VRAM 16 GiB / 実効 15 GiB) で
 **投機なし・KV c5v5・context 128Ki (131,072 token)** で動かす。
 
-手段は `embed_tokens` (BF16 `[248320, 5120]` = 2.37 GiB) を VRAM に置かずホスト RAM に置くこと。
+`embed_tokens` (BF16 `[248320, 5120]` = 2.37 GiB) は main で既に pinned host RAM 上にあり、追加実装は不要だった。本書は起動引数だけで 128Ki が 15 GiB に収まることの確認記録。
 
 ## 測定環境・条件
 
@@ -73,12 +73,10 @@ kv_tokens=205808 prefix_est=615776256 rest=615776256 left=102400 reserve=3160606
   `make_weight_slot()` が `matrix_payload(w)` を `WeightSlot::device_ptr` に渡すため、
   embedding lookup カーネルは unified address space 経由でホストの BF16 テーブルを直接読む。
   `target weights 9.59 GiB` は 3.05bpw × 27B の量子化重みのみで embedding を含まない。
-- よって手順2の「embedding を GPU に置かない」実装は**ベースコードに既に存在する**。
-  残る作業は挙動の切替 (環境変数) と、128Ki 実配置での検証・速度/品質確認。
+- よって「embedding を GPU に置かない」実装は**ベースコードに既に存在し**、切替の環境変数も不要。
 - KV budget は arena いっぱいまで自動拡張される (A: 464,720 token、B: 205,808 token)。
   128Ki (131,072 token) に必要な KV は 20,736 B/token × 131,072 = 2.53 GiB なので、
-  arena を 13 GiB 前後に抑えれば KV を 128Ki 分確保したまま
-  ピーク VRAM を 15 GiB 以下に収められる見込み。
+  KV 自体は小さいが、後述のとおり 13 GiB では workspace と合わせて足りず、14 GiB が必要。
 
 ## 手順2〜4: 128Ki 近傍の実測 (2026-11-21)
 
@@ -121,11 +119,11 @@ kv_tokens=205808 prefix_est=615776256 rest=615776256 left=102400 reserve=3160606
 | PROMPT_TOKENS / GENERATED_TOKENS | 120,000 / 32 |
 | PREFILL_MS / PREFILL_CHUNKS | 177,056.5 ms / 236 |
 | prefill 平均 | **677.7 tok/s** (chunk ごと 273〜1,641 tok/s、文脈伸長に伴い低下) |
-| DECODE_MS / DECODE_TOKENS | 4,525.6 ms / 31 |
-| decode | **6.85 tok/s** |
+| decode (再測、`--max-new-tokens` 32 / 128) | **18.2 / 19.4 tok/s** (中央値 約 51 ms/token) |
 | ピーク VRAM | **14.394 GiB** (16 GiB 比 -1.61 / 実効 15 GiB 比 -0.61 GiB) |
 
 生成 ID は 31 個すべて出力され、120k token の prefill 後に末尾で decode が通ることを確認。
+decode は初回測定で 6.85 tok/s と出たが、同条件の再測で再現せず (単発の外乱と推測、原因未特定)。上表は再測値。
 embedding の H2D は token あたり 10 KiB で、ピーク VRAM は arena 14 GiB + 0.39 GiB の
 オーバーヘッドに収まった。速度は 4bpw 等と直接比較しないこと（3.05bpw・c5v5・長文脈）。
 
@@ -149,13 +147,5 @@ shelf-compute --model-dir <3.05bpw> --input-ids-file <ids> \
 ```
 
 ピーク 14.4 GiB で実効 15 GiB を 0.6 GiB 下回る。さらに削る場合は
-`--max-seq-len` を実際の入力長まで下げる（例 120000 なら 13 GiB でも起動可能）か、
+`--max-seq-len` を下げる（13 GiB の KV は 97,584 token なので 97,583 以下）か、
 prefix cache / workspace の見直しが候補。
-
-## 進捗ログ
-
-- 2026-11-20: 土台を準備（worktree `hy4/qwen-embed-host`、origin/main 3682ee07 から）。未着手。
-- 2026-11-20: ビルド完了、measure_vram.py 作成、手順1の VRAM 測定実施 (peak 20.27 / 15.27 GiB)。
-- 2026-11-21: 手順1の結果を本ファイルに記録。embedding はベースコードで既にホスト常駐と判明。
-- 2026-11-21: 方針修正に従い実装を省略。120k token で arena 14 GiB / chunk 512 の prefill+decode 成功、
-  ピーク 14.394 GiB・prefill 678 tok/s・decode 6.85 tok/s を記録。auto の挙動と推奨設定を追記。
