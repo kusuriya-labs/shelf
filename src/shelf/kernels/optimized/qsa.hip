@@ -264,31 +264,18 @@ constexpr uint32_t kQsaWmmaPitch = kQsaHeadDim + 8u;
 constexpr uint32_t kQsaWmmaKPitch = 40u;
 constexpr uint32_t kQsaScoreChunk = 32u;
 
-__global__ __launch_bounds__(kQsaThreads, 2) void qsa_score_wmma_kernel(
-    QsaScoreArgs args) {
-    const uint32_t row_group = blockIdx.x * kQsaScoreRowsPerCta;
-    const uint32_t block_tile = args.block_tile == 0u ? kQsaScoreBlocksPerCta : args.block_tile;
-    const uint32_t block_group = blockIdx.y * block_tile;
-    if (row_group >= args.rows || block_group >= args.blocks) return;
-    const uint32_t valid_rows = args.rows - row_group < kQsaScoreRowsPerCta
-        ? args.rows - row_group
-        : kQsaScoreRowsPerCta;
-    const uint32_t block_here = args.blocks - block_group < block_tile
-        ? args.blocks - block_group
-        : block_tile;
+__device__ __forceinline__ void qsa_score_cta_body(
+    const bf16_t* q_rows, uint32_t q_row_stride,
+    const bf16_t* pooled,
+    float* score_rows, uint32_t score_row_stride,
+    uint32_t block_begin, uint32_t block_group, uint32_t block_here,
+    uint32_t valid_rows, float scale,
+    bf16_t (*q_tile)[kQsaWmmaPitch], bf16_t (*k_tile)[kQsaWmmaKPitch],
+    float (*score_tile)[kQsaScoreChunk]) {
     const uint32_t t = threadIdx.x;
     const uint32_t lane = t & 31u;
     const uint32_t hi = lane >> 4u;
     const uint32_t lo = lane & 15u;
-
-    __shared__ bf16_t q_tile[64][kQsaWmmaPitch];
-    __shared__ bf16_t k_tile[kQsaHeadDim][kQsaWmmaKPitch];
-    __shared__ float score_tile[16][kQsaScoreChunk];
-
-    const uint32_t slot = args.row_sequence_slots[row_group];
-    const bf16_t* pooled = args.pooled_base +
-        static_cast<uint64_t>(slot) * args.pooled_slot_stride +
-        static_cast<uint64_t>(args.state_index) * args.pooled_layer_stride;
 
     for (uint32_t i = t; i < 64u * kQsaHeadDim; i += kQsaThreads) {
         const uint32_t m = i / kQsaHeadDim;
@@ -296,7 +283,7 @@ __global__ __launch_bounds__(kQsaThreads, 2) void qsa_score_wmma_kernel(
         const uint32_t r = m / 4u;
         const uint32_t h = m % 4u;
         q_tile[m][d] = r < valid_rows
-            ? args.q[static_cast<uint64_t>(row_group + r) * args.q_row_stride +
+            ? q_rows[static_cast<uint64_t>(r) * q_row_stride +
                      static_cast<uint64_t>(h) * kQsaHeadDim + d]
             : bf16_t{0};
     }
@@ -310,7 +297,7 @@ __global__ __launch_bounds__(kQsaThreads, 2) void qsa_score_wmma_kernel(
             const uint32_t b = i / kQsaHeadDim;
             const uint32_t d = i % kQsaHeadDim;
             k_tile[d][b] = b < n
-                ? pooled[static_cast<uint64_t>(args.block_begin + block_group + chunk + b) *
+                ? pooled[static_cast<uint64_t>(block_begin + block_group + chunk + b) *
                              kQsaHeadDim + d]
                 : bf16_t{0};
         }
@@ -334,9 +321,9 @@ __global__ __launch_bounds__(kQsaThreads, 2) void qsa_score_wmma_kernel(
                 const uint32_t col = nt * 16u + lo;
                 const uint32_t ra = mt * 4u + 2u * hi;
                 const float sa = (fmaxf(c[0], 0.0f) + fmaxf(c[1], 0.0f) +
-                                  fmaxf(c[2], 0.0f) + fmaxf(c[3], 0.0f)) * args.scale;
+                                  fmaxf(c[2], 0.0f) + fmaxf(c[3], 0.0f)) * scale;
                 const float sb = (fmaxf(c[4], 0.0f) + fmaxf(c[5], 0.0f) +
-                                  fmaxf(c[6], 0.0f) + fmaxf(c[7], 0.0f)) * args.scale;
+                                  fmaxf(c[6], 0.0f) + fmaxf(c[7], 0.0f)) * scale;
                 if (ra < valid_rows) score_tile[ra][col] = sa;
                 if (ra + 1u < valid_rows) score_tile[ra + 1u][col] = sb;
             }
@@ -347,13 +334,94 @@ __global__ __launch_bounds__(kQsaThreads, 2) void qsa_score_wmma_kernel(
             const uint32_t r = i / kQsaScoreChunk;
             const uint32_t b = i % kQsaScoreChunk;
             if (b < n) {
-                args.scores[static_cast<uint64_t>(args.row_begin + row_group + r) *
-                                args.score_row_stride +
-                            block_group + chunk + b] = score_tile[r][b];
+                score_rows[static_cast<uint64_t>(r) * score_row_stride +
+                           block_group + chunk + b] = score_tile[r][b];
             }
         }
         __syncthreads();
     }
+}
+
+__global__ __launch_bounds__(kQsaThreads, 2) void qsa_score_wmma_kernel(
+    QsaScoreArgs args) {
+    const uint32_t row_group = blockIdx.x * kQsaScoreRowsPerCta;
+    const uint32_t block_tile = args.block_tile == 0u ? kQsaScoreBlocksPerCta : args.block_tile;
+    const uint32_t block_group = blockIdx.y * block_tile;
+    if (row_group >= args.rows || block_group >= args.blocks) return;
+    const uint32_t valid_rows = args.rows - row_group < kQsaScoreRowsPerCta
+        ? args.rows - row_group
+        : kQsaScoreRowsPerCta;
+    const uint32_t block_here = args.blocks - block_group < block_tile
+        ? args.blocks - block_group
+        : block_tile;
+
+    __shared__ bf16_t q_tile[64][kQsaWmmaPitch];
+    __shared__ bf16_t k_tile[kQsaHeadDim][kQsaWmmaKPitch];
+    __shared__ float score_tile[16][kQsaScoreChunk];
+
+    const uint32_t slot = args.row_sequence_slots[row_group];
+    const bf16_t* pooled = args.pooled_base +
+        static_cast<uint64_t>(slot) * args.pooled_slot_stride +
+        static_cast<uint64_t>(args.state_index) * args.pooled_layer_stride;
+
+    qsa_score_cta_body(
+        args.q + static_cast<uint64_t>(row_group) * args.q_row_stride,
+        args.q_row_stride, pooled,
+        args.scores + static_cast<uint64_t>(args.row_begin + row_group) *
+                          args.score_row_stride,
+        args.score_row_stride, args.block_begin, block_group, block_here,
+        valid_rows, args.scale, q_tile, k_tile, score_tile);
+}
+
+__global__ __launch_bounds__(kQsaThreads, 2) void qsa_score_slices_kernel(
+    QsaScoreBatchedArgs args) {
+    const ::shelf::runtime::DeviceRequestDescriptor req = args.requests[blockIdx.z];
+    const uint32_t tile_end = args.row_tile_begin + args.row_tile_rows;
+    const uint32_t request_end = req.row_begin + req.row_count;
+    const uint32_t begin = req.row_begin > args.row_tile_begin
+        ? req.row_begin
+        : args.row_tile_begin;
+    const uint32_t end = request_end < tile_end ? request_end : tile_end;
+    if (end <= begin) return;
+    const uint32_t row_group = blockIdx.x * kQsaScoreRowsPerCta;
+    const uint32_t window_rows = end - begin;
+    if (row_group >= window_rows) return;
+    const uint32_t valid_rows = window_rows - row_group < kQsaScoreRowsPerCta
+        ? window_rows - row_group
+        : kQsaScoreRowsPerCta;
+
+    const uint32_t request_blocks = req.sequence_length / args.compress_ratio;
+    const uint32_t slice_blocks = request_blocks < args.max_blocks
+        ? request_blocks
+        : args.max_blocks;
+    if (slice_blocks <= args.block_begin) return;
+    const uint32_t blocks_here = slice_blocks - args.block_begin < args.block_count
+        ? slice_blocks - args.block_begin
+        : args.block_count;
+    const uint32_t block_tile = args.block_tile == 0u ? kQsaScoreBlocksPerCta : args.block_tile;
+    const uint32_t block_group = blockIdx.y * block_tile;
+    if (block_group >= blocks_here) return;
+    const uint32_t block_here = blocks_here - block_group < block_tile
+        ? blocks_here - block_group
+        : block_tile;
+
+    __shared__ bf16_t q_tile[64][kQsaWmmaPitch];
+    __shared__ bf16_t k_tile[kQsaHeadDim][kQsaWmmaKPitch];
+    __shared__ float score_tile[16][kQsaScoreChunk];
+
+    const uint32_t absolute_row = begin + row_group;
+    const uint32_t slot = args.row_sequence_slots[absolute_row];
+    const bf16_t* pooled = args.pooled_base +
+        static_cast<uint64_t>(slot) * args.pooled_slot_stride +
+        static_cast<uint64_t>(args.state_index) * args.pooled_layer_stride;
+
+    qsa_score_cta_body(
+        args.q + static_cast<uint64_t>(absolute_row) * args.q_row_stride,
+        args.q_row_stride, pooled,
+        args.scores + static_cast<uint64_t>(absolute_row - args.row_tile_begin) *
+                          args.score_row_stride,
+        args.score_row_stride, args.block_begin, block_group, block_here,
+        valid_rows, args.scale, q_tile, k_tile, score_tile);
 }
 
 __device__ __forceinline__ uint32_t qsa_radix_key(float value) {
@@ -613,6 +681,31 @@ hipError_t launch_qsa_score_wmma(const QsaScoreArgs& args, hipStream_t stream) {
     const uint32_t block_tiles = (args.blocks + tile - 1u) / tile;
     const dim3 grid(row_groups, block_tiles);
     qsa_score_wmma_kernel<<<grid, kQsaThreads, 0, stream>>>(args);
+    return hipGetLastError();
+}
+
+hipError_t launch_qsa_score_wmma_batched(const QsaScoreBatchedArgs& args,
+                                         hipStream_t stream) {
+    if (args.q == nullptr || args.pooled_base == nullptr || args.scores == nullptr ||
+        args.row_sequence_slots == nullptr || args.requests == nullptr ||
+        args.request_count == 0u || args.row_tile_rows == 0u || args.block_count == 0u ||
+        args.max_row_groups == 0u || args.max_block_tiles == 0u || args.max_blocks == 0u ||
+        args.n_heads != 4u || args.head_dim != kQsaHeadDim ||
+        args.compress_ratio == 0u || args.max_sequences == 0u ||
+        args.score_row_stride < args.block_count ||
+        args.q_row_stride < 4u * kQsaHeadDim ||
+        args.pooled_slot_stride < args.pooled_layer_stride ||
+        args.pooled_layer_stride <
+            static_cast<uint64_t>(args.max_blocks) * kQsaHeadDim ||
+        args.scale == 0.0f) {
+        return hipErrorInvalidValue;
+    }
+    const uint32_t tile = args.block_tile == 0u ? kQsaScoreBlocksPerCta : args.block_tile;
+    if (tile > kQsaScoreBlockTile || args.max_block_tiles > kQsaScoreBlockTile) {
+        return hipErrorInvalidValue;
+    }
+    const dim3 grid(args.max_row_groups, args.max_block_tiles, args.request_count);
+    qsa_score_slices_kernel<<<grid, kQsaThreads, 0, stream>>>(args);
     return hipGetLastError();
 }
 

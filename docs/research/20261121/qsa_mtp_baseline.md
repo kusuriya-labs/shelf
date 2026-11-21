@@ -148,10 +148,43 @@ safe 経路は target-only 完全一致（9/9 PASS）。fused は 8 request 中 
 | 3 | 10 | 17 | 16 | 17 (11.950) / 18 (11.904) = 0.047 |
 | 7 | 8 | 3855 | 561 | 3855 (12.801) / 561 (12.546) = 0.254 |
 
+### QSA score の multi-request launch 集約（Phase 3）
+
+旧経路は `for(row tile) for(block tile) for(request slice) launch_qsa_score_wmma` で、
+request ごとに score kernel を起動していた。これを `launch_qsa_score_wmma_batched` へ
+置き換え、1 回の launch で row tile × block tile × request slice を処理する。
+
+- CTA は device 側の `DeviceRequestDescriptor`（`row_begin` / `row_count` /
+  `sequence_length`）を引き、行範囲を row tile にクランプする。
+- visible block は `min(max_blocks, sequence_length / compress_ratio)` から求め、
+  `block_begin` 以降の残りだけをスコアする。短い request と padding 行は
+  書き込み前に return し、stale score を読まない。
+- 算術（WMMA の accumulation order、`block_tile` の CTA 粒度）は旧経路と同一で、
+  変わったのは launch のまとめ方だけである。
+- 経路の gate は従来の tiled 条件（`staged_covers_rows`、QSA workspace、
+  heads=4、head_dim=128）のまま。非対応形状は `launch_qsa_select_batch` の旧経路。
+
+テストは `tests/unit/test_qsa_select.cpp` に複数 request・異長 sequence・
+8191/8192/8193 block・同点（equal scores）を追加し、legacy の per-slice 経路と
+batched 経路の score が bit 一致し、top-k と mask も一致することを確認した。
+
+計測（8 request × 8 token、TP=2、warmup + 1 rep、rocprofv3 kernel trace）:
+
+| 指標 | 旧 per-slice | batched | 比 |
+| --- | ---: | ---: | ---: |
+| `qsa_score` dispatch 数 | 1,728 | 672 | 2.57x 削減 |
+| `qsa_score` GPU 時間 | 15.2 ms | 5.9 ms | 2.58x 削減 |
+| 全 dispatch 数 | 435,742 | 434,686 | -1,056 |
+| wall time | 1,104.6 ms | 1,099.8 ms | 非悪化 |
+
+残りは Top-k の全域再走査削減（Phase 4）、attention / key-cache の launch 集約、
+長文コンテキスト測定である。
+
 ## 6. 残課題
 
 - `R=8, K=7` の 64 行 1 forward fused verify は成立した（`max_verify_per_round=1`）。
   safe は target-only 完全一致、fused は near-tie 分岐 2 件のみで、これは許容契約。
 - 行数依存の算術切替は BF16 selector と EXL3 split-K の 2 箇所で解消した。
 - Wavefront 4 request chunk は prompt によって target-only と分岐するため opt-in のまま。
-- QSA score / Top-k / attention / key-cache の launch 集約と長文測定は未着手（Phase 3）。
+- QSA score の multi-request launch 集約は完了（2.57x 削減、score bit 一致）。
+- Top-k の全域再走査削減、attention / key-cache の launch 集約、長文測定は未着手。

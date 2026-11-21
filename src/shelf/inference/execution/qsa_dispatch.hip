@@ -293,41 +293,61 @@ Result<OptimizedLaunchResult> try_launch_qsa_select(
                     ++launches;
                     continue;
                 }
+                const uint32_t block_tile =
+                    args.rows < 64u
+                        ? 64u
+                        : (args.rows < 256u
+                               ? 256u
+                               : ::shelf::kernel::kQsaScoreBlocksPerCta);
+                uint32_t max_row_groups = 0u;
+                for (uint32_t si = 0u; si < slice_count; ++si) {
+                    const uint32_t groups =
+                        (slices[si].count + ::shelf::kernel::kQsaScoreRowsPerCta - 1u) /
+                        ::shelf::kernel::kQsaScoreRowsPerCta;
+                    if (groups > max_row_groups) max_row_groups = groups;
+                }
                 for (uint32_t bt = 0u; bt < max_blocks;
                      bt += ::shelf::kernel::kQsaScoreBlockTile) {
                     const uint32_t tile_blocks =
                         max_blocks - bt < ::shelf::kernel::kQsaScoreBlockTile
                             ? max_blocks - bt
                             : ::shelf::kernel::kQsaScoreBlockTile;
+                    uint32_t max_block_tiles = 0u;
                     for (uint32_t si = 0u; si < slice_count; ++si) {
                         const Slice& slice = slices[si];
                         if (slice.blocks <= bt) continue;
-                        ::shelf::kernel::QsaScoreArgs sa{};
-                        sa.q = args.q + static_cast<uint64_t>(slice.begin) * args.q_row_stride;
-                        sa.pooled_base = args.pooled_base;
-                        sa.scores = ctx.qsa_scores;
-                        sa.row_sequence_slots = args.row_sequence_slots + slice.begin;
-                        sa.rows = slice.count;
-                        sa.row_begin = slice.begin - rc;
-                        sa.block_begin = bt;
-                        sa.blocks = std::min(tile_blocks, slice.blocks - bt);
-                        sa.block_tile = args.rows < 64u
-                                            ? 64u
-                                            : (args.rows < 256u
-                                                   ? 256u
-                                                   : ::shelf::kernel::kQsaScoreBlocksPerCta);
-                        sa.score_row_stride = ::shelf::kernel::kQsaScoreBlockTile;
-                        sa.n_heads = args.n_heads;
-                        sa.head_dim = args.head_dim;
-                        sa.compress_ratio = args.compress_ratio;
-                        sa.state_index = args.state_index;
-                        sa.max_sequences = args.max_sequences;
-                        sa.q_row_stride = args.q_row_stride;
-                        sa.pooled_slot_stride = args.pooled_slot_stride;
-                        sa.pooled_layer_stride = args.pooled_layer_stride;
-                        sa.scale = args.scale;
+                        const uint32_t here = std::min(tile_blocks, slice.blocks - bt);
+                        const uint32_t groups = (here + block_tile - 1u) / block_tile;
+                        if (groups > max_block_tiles) max_block_tiles = groups;
+                    }
+                    if (max_block_tiles != 0u) {
+                        ::shelf::kernel::QsaScoreBatchedArgs ba{};
+                        ba.q = args.q;
+                        ba.pooled_base = args.pooled_base;
+                        ba.scores = ctx.qsa_scores;
+                        ba.row_sequence_slots = args.row_sequence_slots;
+                        ba.requests = reqs;
+                        ba.request_count = req_count;
+                        ba.row_tile_begin = rc;
+                        ba.row_tile_rows = rc_rows;
+                        ba.block_begin = bt;
+                        ba.block_count = tile_blocks;
+                        ba.block_tile = block_tile;
+                        ba.max_row_groups = max_row_groups;
+                        ba.max_block_tiles = max_block_tiles;
+                        ba.max_blocks = args.blocks;
+                        ba.score_row_stride = ::shelf::kernel::kQsaScoreBlockTile;
+                        ba.n_heads = args.n_heads;
+                        ba.head_dim = args.head_dim;
+                        ba.compress_ratio = args.compress_ratio;
+                        ba.state_index = args.state_index;
+                        ba.max_sequences = args.max_sequences;
+                        ba.q_row_stride = args.q_row_stride;
+                        ba.pooled_slot_stride = args.pooled_slot_stride;
+                        ba.pooled_layer_stride = args.pooled_layer_stride;
+                        ba.scale = args.scale;
                         const hipError_t error =
-                            ::shelf::kernel::launch_qsa_score_wmma(sa, stream);
+                            ::shelf::kernel::launch_qsa_score_wmma_batched(ba, stream);
                         if (error != hipSuccess)
                             return Status::hip_error("qsa score launch",
                                                      hipGetErrorString(error), __FILE__,
