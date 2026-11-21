@@ -43,6 +43,11 @@ class ValidateTest(unittest.TestCase):
         self.write()
         self.assertEqual(validator.validate(self.root), 1)
 
+    def test_valid_single_shard_without_index(self):
+        self.write()
+        (self.root / 'model.safetensors.index.json').unlink()
+        self.assertEqual(validator.validate(self.root), 1)
+
     def test_legacy_marker(self):
         self.items['x.mul1'] = ('I32', [], struct.pack('<I', 0x83DCD12D))
         self.rejected()

@@ -81,10 +81,17 @@ def validate(root):
         qc = text.get('quantization_config') if isinstance(text, dict) else None
     if not isinstance(qc, dict) or qc.get('quant_method') != 'exl3':
         raise ValueError('config.json の quant_method が exl3 ではありません')
-    index = read_json(safe_path(root, 'model.safetensors.index.json'))
-    weight_map = index.get('weight_map') if isinstance(index, dict) else None
-    if not isinstance(weight_map, dict) or not weight_map:
-        raise ValueError('weight_map が空か不正です')
+    index_path = root / 'model.safetensors.index.json'
+    if index_path.exists() or index_path.is_symlink():
+        index = read_json(safe_path(root, 'model.safetensors.index.json'))
+        weight_map = index.get('weight_map') if isinstance(index, dict) else None
+        if not isinstance(weight_map, dict) or not weight_map:
+            raise ValueError('weight_map が空か不正です')
+    else:
+        single = shard_tensors(safe_path(root, 'model.safetensors'))
+        weight_map = {name: 'model.safetensors' for name in single}
+        if not weight_map:
+            raise ValueError('tensor がありません')
     for path in root.rglob('*.safetensors'):
         if any(name.endswith('.s0') for name in shard_tensors(safe_path(root, str(path.relative_to(root))))):
             raise ValueError(f'.s0 は使用できません: {path}')

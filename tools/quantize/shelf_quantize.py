@@ -19,6 +19,39 @@ def run(*args, env=None):
     subprocess.run([str(x) for x in args], check=True, env=env)
 
 
+def normalize_gdn_weights(output):
+    import torch
+    from safetensors import safe_open
+    from safetensors.torch import load_file, save_file
+
+    converted = set()
+    for path in sorted(output.glob('*.safetensors')):
+        with safe_open(path, framework='pt', device='cpu') as source:
+            names = [name for name in source.keys()
+                     if name.endswith(('.linear_attn.norm.weight', '.linear_attn.A_log'))
+                     and source.get_slice(name).get_dtype() == 'F32']
+            metadata = source.metadata()
+        if not names:
+            continue
+        tensors = load_file(path, device='cpu')
+        for name in names:
+            tensors[name] = tensors[name].to(torch.bfloat16)
+        with tempfile.TemporaryDirectory(prefix='.shelf-', dir=output) as temp:
+            target = Path(temp) / path.name
+            save_file(tensors, str(target), metadata=metadata)
+            os.replace(target, path)
+        converted.update(names)
+    config_path = output / 'quantization_config.json'
+    if converted and config_path.exists():
+        config = json.loads(config_path.read_text())
+        for module in config.get('tensor_storage', {}).values():
+            for name, tensor in module.get('stored_tensors', {}).items():
+                if name in converted:
+                    tensor['dtype'] = 'torch.bfloat16'
+                    tensor['n_bytes'] //= 2
+        config_path.write_text(json.dumps(config, indent=4) + '\n')
+
+
 def convert(args):
     import torch
     info = verify_extension()
@@ -31,6 +64,7 @@ def convert(args):
         if value is not None:
             cmd.extend([option, value])
     run(*cmd, env=env)
+    normalize_gdn_weights(args.output)
     if args.ngram != 'none':
         with tempfile.TemporaryDirectory(prefix='shelf-ngram-', dir=args.work) as temp:
             target = Path(temp) / 'bundle'
