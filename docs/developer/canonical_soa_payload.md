@@ -262,20 +262,23 @@ round-half-to-even ではない）。0.25 / 1.25 / 2.5 / 5 の境界で code が
 ## 6ter. EXL3 trellis（HF 由来、load-only）
 
 Shelf は EXL3 の canonical artifact を生成しない。HF checkpoint の 4 tensor を
-そのまま payload plane として manifest に載せ、byte 列を変換せず GPU へ転送する。
+そのまま payload plane として manifest に載せる。
 
 | role | tensor | dtype | shape |
 | --- | --- | --- | --- |
-| `codes` | `<prefix>.trellis` | I16 | `[k/16, n/16, 16*ka + (half ? 8 : 0)]` |
+| `codes` | `<prefix>.trellis` | I16 | `[k/16, n/16, 16*ka]` |
 | `suh` | `<prefix>.suh` | F16 | `[k]` |
 | `svh` | `<prefix>.svh` | F16 | `[n]` |
-| `marker` | `<prefix>.mul1` | I32 | scalar |
+| `marker` | `<prefix>.mul1` | I32 | scalar（`0x00DCD12D`） |
 
-- コードブックは mul1 固定。`ka` は 1..8、`half` は 1.5 / 2.5 / 3.5。
+- コードブックは mul24（EXL3-INT8、marker 値 `0x00DCD12D`）固定。`ka` は 1..8 の
+  整数 bit rate のみ受理する（half bit rate は不可）。
 - `k_padded == k`、`k` と `n` は 128 の倍数。
-- `preshuffled == false`。trellis は tile のまま常駐し、kernel が ring と codebook を
-  復号する。Hadamard は kernel 内で行う。
-- marker の値は kernel では使わない。
+- `preshuffled == false`。dense 重みの trellis はロード時に 16×16 タイル単位で
+  `[n/16, k/16]`（n-major）へ並べ替えて常駐し、MoE expert plane は `[k/16, n/16]` の
+  まま常駐する。codebook 復号と Hadamard は kernel 内で行う。
+- marker の値（`0x00DCD12D`）はロード時に検証し、一致しない checkpoint は
+  `Status::unsupported` で拒否する。kernel 自体は marker を参照しない。
 - EXL3 の unquantized tensor は BF16 entry とし、F16 で保存されている場合は load 時に
   BF16 へ widen する。
 

@@ -12,7 +12,7 @@ Shelf の EXL3-INT8 ランタイムおよび `tools/quantize/validate_exl3.py` �
 - **線形層 tensor**: 各 `<prefix>` に `.trellis`（`I16 [k/16, n/16, 16*bits]`、K と N は 128 の倍数）、`.suh`（`F16 [k]`）、`.svh`（`F16 [n]`）、`.mul1`（`I32` scalar、値は **`0x00DCD12D`**）の 4 つを持つ。
 - **非対応・拒否される形式**:
   - `.s0` tensor を含む checkpoint は使用できない（検証・ロードとも拒否）。
-  - 旧 int8grid 形式、`.mcg` codebook、mul1（`0x83DCD12D`）や mul24（`0x00DCD12D`）以外の multiplier、および mul24 での half bit rate（1.5 / 2.5 / 3.5 bpw）は拒否される。
+  - 旧 int8grid 形式、`.mcg` codebook、`0x00DCD12D`（mul24）以外の multiplier、および half bit rate（1.5 / 2.5 / 3.5 bpw）は拒否される。
 - **N-gram table（`Ngram4` / `Ngram5`）**: PLE / N-gram 埋め込みテーブルを持つ対応モデル（Qwen3.8-Flash-Next 等）では、bundle root に `ngram_manifest.json`（`format: "ngram-q"`, `profile: "ngram4" | "ngram5" | "mixed"`）と対応 safetensors shard を同梱できる。仕様の正本は [../developer/ngram_quantization.md](../developer/ngram_quantization.md)。
 
 ## 準備

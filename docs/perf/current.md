@@ -11,7 +11,7 @@
 **現在の build に対する qualified baseline は、2026-11-03 の long-context prefill、
 2026-11-05 の MTP decode（Qwen3.8-27B MXFP4）・MoE decode / prefill / quality・
 MoE MTP decode（Qwen3.6-35B-A3B MXFP4）・MoE tensor parallel prefill（Qwen3.6-35B-A3B MXFP4）・
-MoE pipeline parallel（Qwen3.6-35B-A3B MXFP4）、EXL3 W16A16 decode / prefill、
+MoE pipeline parallel（Qwen3.6-35B-A3B MXFP4）、
 2026-11-04 の 9B BF16 linear allowlist である。**
 2026-11-06 の model load（Flash Next MXFP4 TP4 / 27B FP8 TP2）と、同じ日の
 BF16 GEMM / TP copy（Flash Next MXFP4 TP4）は reference run として下の節に記録する。

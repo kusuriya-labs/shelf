@@ -28,7 +28,7 @@ CMake オプション（`SHELF_ROCM_ROOT` / `SHELF_LIBCXX_LLVM_ROOT` / `SHELF_LO
 | `SHELF_PCIE_GBPS` | `25` | compute / server / bench | 想定する PCIe 帯域 GB/s（`--pcie-gbps` と同等） |
 | `SHELF_NO_WORKSPACE_REUSE` | `0` | runtime | `1` で executor の workspace 再利用を無効にする（メモリ調査用） |
 
-## 3. EXL3 / EXL3-INT8（mul24）経路制御
+## 3. EXL3-INT8（mul24）経路制御
 
 | 変数名 | 既定値 | 対象範囲 | 用途 |
 | --- | --- | --- | --- |
@@ -38,14 +38,7 @@ CMake オプション（`SHELF_ROCM_ROOT` / `SHELF_LIBCXX_LLVM_ROOT` / `SHELF_LO
 | `SHELF_EXL3_INT8_TUNE` | `0` | runtime | `1` で A 経路の hipBLASLt INT8 候補（最大 16 個）を初回実行時に実測選択する（行数ごとに約 0.15 s 増加） |
 | `SHELF_EXL3_INT8_PREFILL_ALGO` | `0` | runtime | `1` で特定形状（`rows=2048` の一部形状・gfx1201）向けの固定 hipBLASLt algorithm index 選択を有効にする |
 | `SHELF_EXL3_INT8_PREFILL_ALGO_LOG` | 未設定 | runtime | 設定すると固定 algorithm 選択時に選ばれた index と workspace サイズを stderr へ出力する |
-| `SHELF_EXL3_INT8_MOE` | `0` | runtime | grouped EXL3（MoE routed experts）の mul24 活性型。`0`（既定）は FP16 活性、`1` は INT8 活性（iu8 WMMA） |
 | `SHELF_EXL3_INT8_ROTATE_F4` | 未設定 | runtime | EXL3-INT8 出力回転の f4 / 列分割経路の上書き制御（設定時は汎用 projection group 統合も無効化される） |
-| `SHELF_EXL3_DENSE` | `256` | runtime | EXL3 W16A16（mul1）で dense recon + hipBLASLt 経路を使う最小行数。`0` で無効 |
-| `SHELF_EXL3_DENSE_TUNE` | `1` | runtime | EXL3 W16A16（mul1）の hipBLASLt 候補実測選択。`0` で先頭候補に固定 |
-| `SHELF_EXL3_PRE` | `1` | runtime | EXL3 W16A16（mul1）の事前入力回転経路。`0` で融合経路へ固定 |
-| `SHELF_EXL3_SPLIT` | `0`（自動） | runtime | EXL3 W16A16（mul1）の K 分割数を強制指定する |
-| `SHELF_EXL3_GROUPS` | `0`（自動） | runtime | EXL3 W16A16（mul1）の row group 数を強制指定する |
-| `SHELF_EXL3_FAST_DECODE` | `1` | runtime | EXL3 の高速 decode 経路（`ka == 4` の 2-word 抽出等）。`0` で汎用復号を使う |
 | `SHELF_EXL3_GROUPED_FUSE` | `2` | runtime | grouped EXL3（MoE）の融合 group 数（1 または 2） |
 | `SHELF_EXL3_GROUPED_NTILES` | `0`（自動） | runtime | grouped EXL3（MoE）の n-tile 数を上書きする（出力幅を割り切れない値はエラー） |
 

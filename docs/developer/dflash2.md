@@ -209,11 +209,10 @@ weight を掛ける。
   - FP8 K128N128: `launch_activation_quantize_fp8_finegrained`（活性は行ごとの
     `peak/448` scale、累算 F32）で activation を e4m3 へ量子化し、block-scaled
     W8A8 WMMA GEMM で F32 logits を作る。
-  - EXL3: mul1 は W16A16 kernel、mul24 は activation の回転・INT8 量子化、
-    INT8 GEMM、出力回転の順に実行する。両形式は codebook と trellis の配置が異なる。
-    mul24 のみ INT8 GEMM の F32 累加 buffer `exl3_lm_head_accum`
+  - EXL3（mul24）: activation の回転・INT8 量子化、INT8 GEMM、出力回転の順に実行する。
+    INT8 GEMM の F32 累加 buffer `exl3_lm_head_accum`
     （`[max_rows, vocab_size]` F32）を `create_dflash2_executor` で確保する。
-    BF16 / FP8 / EXL3 mul1 では確保しない。
+    BF16 / FP8 では確保しない。
 - proposal logits は **F32** で出す（bf16 へ落とさない。top-16 ordering が proposal に
   直結するため）。
 - `create_dflash2_spec_decoder()` が target との shape 一致
@@ -226,9 +225,9 @@ TP>1 では target head を rank ごとの語彙 shard に分割し、drafter �
 - `DFlash2TpProposal` が `DFlash2ProposalDistributor` を実装する。rank 0 が final
   hidden を各 rank に peer store し、各 rank が自分の語彙 shard の logits・局所 top-k・
   行 logsumexp を計算する。rank 0 が候補と分母を merge して selector に渡す。
-- 対応する head encoding は Int8W32 と EXL3。EXL3 mul1 は W16A16 GEMM、mul24 は
-  activation の回転・INT8 量子化・INT8 GEMM・出力回転で計算する。mul24 のみ rank
-  ごとに activation workspace と `[max_rows, local_vocab]` F32 accum を確保する。
+- 対応する head encoding は Int8W32 と EXL3（mul24）。EXL3 は activation の回転・
+  INT8 量子化・INT8 GEMM・出力回転で計算し、rank ごとに activation workspace と
+  `[max_rows, local_vocab]` F32 accum を確保する。
 - `create_proposal_shard_buffers()` は head から必要な workspace を決める。
 - 使用する語彙 shard は target head の `partition`（axis 0）から決まる。
 
@@ -1066,8 +1065,8 @@ serve の既定（`max_concurrent_requests × block_size`）ではこの値が�
 `max_concurrent_requests` を上げると drafter の logits buffer も増える。
 
 `dflash2_draft_scratch_bytes` / `dflash2_footprint` は target lm_head の形式
-（`exl3_mul24_head`）を受け取り、mul24 のときだけ `exl3_lm_head_accum` 分の
-logits buffer を 1 つ加算する。BF16 / FP8 / EXL3 mul1 では `proposal_logits`
+（`exl3_mul24_head`）を受け取り、EXL3（mul24）のときだけ `exl3_lm_head_accum` 分の
+logits buffer を 1 つ加算する。BF16 / FP8 では `proposal_logits`
 1 つ分のみである。呼び出し側は target の `lm_head` の `quant_spec` から
 `exl3_mul24_head` を導く（TP では drafter が実際に借りる head、すなわち
 Qwen4Exp の `weights().lm_head` か rank 0 の `private_lm_head()`）。

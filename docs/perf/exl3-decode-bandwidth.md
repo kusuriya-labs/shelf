@@ -359,7 +359,7 @@ cache 有効、各カテゴリの最初の入力、同じ process 内の 8 reque
 
 json の追加ありは 391.2 / 260.3 ms と変動が大きく、この 2 回だけでは安定値としない。json のみを別 process で追加なし → 追加あり → 追加あり → 追加なしと再測定すると 186.7 / 306.8 / 309.2 / 181.8 ms だった。8 request を連続処理した表とは条件が異なる。prefill の追加費用を decode の token / round 時間へ加算していない。
 
-`SHELF_EXL3_SPLIT` / `SHELF_EXL3_GROUPS` は現行 source では W16A16 の dispatch に渡され、
+`SHELF_EXL3_SPLIT` / `SHELF_EXL3_GROUPS` は測定当時の source では W16A16 の dispatch に渡され、
 EXL3-INT8 の split selector には適用されない。INT8 の候補比較には microbenchmark の
 `--split` を使った。
 

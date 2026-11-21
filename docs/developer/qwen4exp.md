@@ -35,7 +35,7 @@ prefill で non-finite になる既知の問題があり、PP 単体と短いプ
 | attention / GDN | FP8 E4M3 per-channel + F32 `[n]` | 全 rank に複製、preshuffle して WMMA fragment order |
 | PLE table（BF16 shard checkpoint） | HF shard 内の BF16 `[2500012, 160]`。load 時に INT6 W32 FP16 へオンライン変換して CPU RAM に保持 | CPU RAM に 1 個を共有 |
 | PLE table（FP8 shard checkpoint） | FP8 E4M3 per-tensor + BF16 `[1]` | CPU RAM に 1 個を共有 |
-| PLE table（EXL3 checkpoint） | `ngram_embedding.safetensors` の trellis（`mul1`、K は metadata） | CPU RAM に 1 個を共有 |
+| PLE table（Ngram4 / Ngram5） | bundle root の `ngram_manifest.json`（`format: "ngram-q"`）と対応 safetensors shard | CPU RAM に 1 個を共有 |
 | embed / lm_head / hyper / router | BF16 | 全 rank に複製 |
 
 - routed expert は `preshuffle_mxfp4_native` で 16 出力 x 32 K の 256 バイト block に
@@ -60,13 +60,12 @@ prefill で non-finite になる既知の問題があり、PP 単体と短いプ
 - attention / GDN は `preshuffle_fp8_native` で gfx1201 の FP8 WMMA fragment order に
   する。活性は per-token dynamic FP8（`scale = amax / 448`）で、GEMM の epilogue で
   `weight_scale[o] * activation_scale[row]` を 1 回だけ適用する。
-- PLE table は checkpoint の形式で 3 経路ある。`ngram_embedding.safetensors` を持つ
-  EXL3 checkpoint は `pread` で読み、`row = mul1_codebook` の trellis で復号する。
-  HF shard 内の BF16 table は load 時に **INT6 W32 FP16** へオンライン変換する。
+- PLE table は checkpoint の形式で 3 経路ある。bundle root に `ngram_manifest.json` を持つ
+  checkpoint は `Ngram4` / `Ngram5`（`ngram-q`、[ngram_quantization.md](ngram_quantization.md)）
+  としてロードする。HF shard 内の BF16 table は load 時に **INT6 W32 FP16** へオンライン変換する。
   HF shard 内の FP8 E4M3 per-tensor table は E4M3 code × per-tensor scale で復号する
   （`weight_scale` は BF16）。インデックス経路はいずれも 128 シャードを最大 16 worker で
-  読み、EXL3 経路は従来の `pread` のままである。すべて起動時は rank の weight load と
-  並行に prefetch する。
+  読む。すべて起動時は rank の weight load と並行に prefetch する。
 - INT6 W32 FP16 は 32 値ごとに符号付き 6-bit code（-32..31）と FP16 scale を持ち、
   1 group を 24 byte の code と 2 byte の scale で表す。160 値の行は 130 byte
   （6.5 bit/value）になる。scale は group の `max(max_positive / 31,
@@ -83,11 +82,9 @@ prefill で non-finite になる既知の問題があり、PP 単体と短いプ
   上書きする。書き込み失敗は model load を失敗させない。
 - `--ple-hot-cache-gib N` を 0 以外にすると、PLE テーブルを全量 host RAM へ読み込まず、
   mmap のページキャッシュを Cold 側、pinned host のブロックキャッシュを Hot 側として
-  使う。INT6 artifact（`quanted_ple.bin`）と EXL3 の `ngram_embedding.safetensors`
-  のどちらにも適用される。ブロックは 2048 行で、バイト数は行幅に依存する
-  （INT6 は 260 KiB、EXL3 K=5 は 204 KiB）。Hot 側への読み込みは O_DIRECT + pread で
-  行う。safetensors の shard offset は 4096 バイト境界にないため、境界まで
-  読み下ろして整列 buffer へコピーする。行アクセス頻度で 8192 行ごとに入れ替え、
+  使う。INT6 artifact（`quanted_ple.bin`）および `Ngram4` / `Ngram5` に適用される。
+  ブロックは 2048 行で、INT6 artifact の場合は 260 KiB である。INT6 artifact の
+  Hot 側への読み込みは O_DIRECT + pread で行い、行アクセス頻度で 8192 行ごとに入れ替え、
   ピーク頻度が 4096 に達したら減衰させる。Hot キャッシュの実バイトは
   `MEMORY_PLAN host memory` の `PLE table` に表示され、`payload_bytes()` は
   テーブル全体のサイズのままである。`SHELF_PLE_CACHE_LOG_INTERVAL` に 1 以上の
@@ -168,9 +165,9 @@ RMS_NORM -> LINEAR(down) -> SILU(1/hc) -> LINEAR(up) -> HYPER_MIX
 
 ### PLE
 
-`PleTable::decode_row` は checkpoint の形式に応じて 3 経路を復号する。BF16 shard
-checkpoint は INT6 W32 FP16、FP8 shard checkpoint は E4M3 code × per-tensor BF16
-scale、EXL3 checkpoint は `mul1_codebook` の trellis である。INT6 W32 FP16 は
+`PleTable::decode_row` は checkpoint の形式に応じて 3 経路を復号する。`Ngram4` / `Ngram5`
+checkpoint は `ngram-q`、BF16 shard checkpoint は INT6 W32 FP16、FP8 shard checkpoint は
+E4M3 code × per-tensor BF16 scale である。INT6 W32 FP16 は
 BF16 table の不可逆変換であり、PLE 入力の数値 class は BF16 と一致しない。
 `ngram_rows` は 16 head（bigram 8 + trigram 8）の行番号を返し、
 `PleInputRuntime` が sequence ごとの token history から 16 行を gather する。

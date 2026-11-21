@@ -266,7 +266,7 @@ MTP_DRAFT_MS MTP_VERIFY_MS MTP_GDN_RESTORE_MS MTP_COMPACT_REPLAY_MS MTP_ROUND_MS
 
 ## Source map
 
-- `include/shelf/kernels/optimized/linear/exl3.h`（`splitk_tuning_rows`）
+- `include/shelf/kernels/optimized/linear/exl3_family/types.h`（`splitk_tuning_rows`）
 
 - `include/shelf/models/qwen35/runtime/mtp_drafter.h`（`MtpDrafterInput`、`mtp_drafter_rows`）
 - `src/shelf/models/qwen35/runtime/mtp_drafter.cpp`
