@@ -49,6 +49,8 @@ struct ComputeOptions {
     bool dflash2_tree_budget_explicit = false;
     bool mtp = false;
     unsigned long mtp_drafts = 7;
+    unsigned long mtp_window = 0;
+    unsigned long mtp_sink = 64;
     int mtp_stats = 1;
     int prefix_cache_enabled = 1;
     unsigned long prefix_cache_checkpoints = 16;

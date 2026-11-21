@@ -1530,6 +1530,8 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
         state.mtp.drafts = runtime.config().mtp_drafts == 0u ? 4u : runtime.config().mtp_drafts;
         shelf::qwen35::runtime::MtpDrafterConfig mtp_config;
         mtp_config.num_drafts = state.mtp.drafts;
+        mtp_config.window_tokens = static_cast<uint32_t>(runtime.config().mtp_window);
+        mtp_config.sink_tokens = static_cast<uint32_t>(runtime.config().mtp_sink);
         mtp_config.max_seq_len = runtime.config().max_seq_len;
         mtp_config.page_tokens = runtime.config().page_tokens;
         mtp_config.max_batch_rows = std::min(

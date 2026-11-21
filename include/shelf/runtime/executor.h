@@ -234,6 +234,8 @@ struct ExecutorConfig {
     // residual (hc * hidden), so both its hidden input and its returned residual differ
     // from the token-row hidden.
     std::uint32_t external_hidden_width = 0;
+    // Bytes per mask row when the program takes a third external input (drafter window).
+    std::uint32_t external_mask_bytes = 0;
     std::uint32_t normed_token_hidden_width = 0;
     // Largest rotated-domain linear this rank runs, used to size the EXL3 staging planes.
     // An empty shape keeps the model-independent upper bound.
@@ -416,6 +418,8 @@ struct Executor {
 
     gpu::Tensor input_ids;
     gpu::Tensor input_hidden;
+    // Optional per-row block mask for the drafter-wide attention (MTP sliding window).
+    gpu::Tensor input_mask;
 
     gpu::Tensor rope_inv_freq;
     uint32_t rope_table_stride = 0;

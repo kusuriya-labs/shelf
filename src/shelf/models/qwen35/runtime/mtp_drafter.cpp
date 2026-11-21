@@ -244,6 +244,58 @@ Status rewind_sequence(state::PagedSequenceState& sequence, uint32_t position,
     return Status::make_ok();
 }
 
+constexpr uint32_t kDraftWindowBlockTokens = 4u;
+
+uint32_t draft_mask_bytes(uint32_t max_seq_len) noexcept {
+    const uint32_t blocks =
+        (max_seq_len + 1u + kDraftWindowBlockTokens - 1u) / kDraftWindowBlockTokens;
+    return ((blocks + 7u) / 8u + 3u) & ~3u;
+}
+
+Status fill_draft_window_mask(MtpDrafter& drafter, Executor& executor, uint32_t prefix,
+                              uint32_t rows, hipStream_t stream) {
+    if (drafter.mask_bytes == 0u) return Status::make_ok();
+    void* dst = executor.input_mask.data<void>();
+    if (dst == nullptr || rows == 0u) return Status::make_ok();
+    const uint32_t bytes = drafter.mask_bytes;
+    if (drafter.window_tokens == 0u) {
+        const hipError_t err = hipMemsetAsync(
+            dst, 0xFF, static_cast<std::size_t>(rows) * bytes, stream);
+        if (err != hipSuccess) {
+            return Status::hip_error("mtp window mask clear", hipGetErrorString(err),
+                                     __FILE__, __LINE__);
+        }
+        return Status::make_ok();
+    }
+    std::vector<std::uint8_t> host(static_cast<std::size_t>(rows) * bytes, 0u);
+    const uint32_t sink_blocks =
+        (drafter.sink_tokens + kDraftWindowBlockTokens - 1u) / kDraftWindowBlockTokens;
+    for (uint32_t r = 0u; r < rows; ++r) {
+        const uint32_t position = prefix + r;
+        const uint32_t first_token =
+            position + 1u > drafter.window_tokens ? position + 1u - drafter.window_tokens
+                                                  : 0u;
+        const uint32_t first_block = first_token / kDraftWindowBlockTokens;
+        const uint32_t last_block = position / kDraftWindowBlockTokens;
+        std::uint8_t* row = host.data() + static_cast<std::size_t>(r) * bytes;
+        for (uint32_t b = 0u; b < sink_blocks; ++b) {
+            const uint32_t byte = b >> 3u;
+            if (byte < bytes) row[byte] |= static_cast<std::uint8_t>(1u << (b & 7u));
+        }
+        for (uint32_t b = first_block; b <= last_block; ++b) {
+            const uint32_t byte = b >> 3u;
+            if (byte < bytes) row[byte] |= static_cast<std::uint8_t>(1u << (b & 7u));
+        }
+    }
+    const hipError_t err = hipMemcpyAsync(dst, host.data(), host.size(),
+                                          hipMemcpyHostToDevice, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("mtp window mask upload", hipGetErrorString(err),
+                                 __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
 Result<BatchExecutionOutput> run_mtp_forward(MtpDrafter& drafter,
                                              std::vector<int32_t>& tokens,
                                              uint32_t prefix,
@@ -264,6 +316,9 @@ Result<BatchExecutionOutput> run_mtp_forward(MtpDrafter& drafter,
     ScheduledBatch batch = make_batch(
         *drafter.sequence, requests, tokens.data(), rows, prefix, 1u, compute_logits,
         true, execution_class, false, nullptr, 0u);
+    Status mask = fill_draft_window_mask(drafter, draft_executor(drafter), prefix, rows,
+                                         stream);
+    if (!mask.ok()) return mask;
     return execute_batch(draft_executor(drafter), batch, stream);
 }
 
@@ -479,6 +534,7 @@ std::size_t mtp_drafter_reserve_bytes(const shelf::qwen_hybrid::QwenHybridConfig
     executor_config.max_scheduled_requests = 1u;
     executor_config.max_scheduled_output_rows = 1u;
     executor_config.external_hidden_input = true;
+    executor_config.external_mask_bytes = draft_mask_bytes(options.max_seq_len);
     executor_config.exl3_linear_shape = exl3_linear_shape;
     const std::size_t executor = qwen35_executor_reserve_bytes(
         mtp, token_row_intermediate, executor_config, 1u, exl3_linear_workspace) +
@@ -555,10 +611,12 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
         return Status::invalid_argument("mtp drafter input is incomplete", __FILE__,
                                         __LINE__);
     }
-    if (input.lowered.graph.external_inputs.size() != 2u) {
+    if (input.lowered.graph.external_inputs.size() != 2u &&
+        input.lowered.graph.external_inputs.size() != 3u) {
         return Status::invalid_argument(
-            "the drafter graph takes a token id and the previous hidden", __FILE__,
-            __LINE__);
+            "the drafter graph takes a token id, the previous hidden and an optional "
+            "window mask",
+            __FILE__, __LINE__);
     }
     if (options.num_drafts == 0u || options.num_drafts > kMtpMaxDrafts) {
         return Status::invalid_argument("mtp num_drafts is out of range", __FILE__,
@@ -598,6 +656,9 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
     }
     drafter->tp_hook = tp_hook;
     drafter->shared_draft = shared_draft;
+    drafter->window_tokens = options.window_tokens;
+    drafter->sink_tokens = options.sink_tokens;
+    drafter->mask_bytes = draft_mask_bytes(options.max_seq_len);
 
     const uint32_t pages =
         ceil_div_u32(options.max_seq_len + 1u, options.page_tokens) + 1u;
@@ -640,6 +701,7 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
         executor_config.max_scheduled_output_rows = 1u;
         executor_config.external_hidden_input = true;
         executor_config.external_hidden_width = drafter->hidden_width;
+        executor_config.external_mask_bytes = drafter->mask_bytes;
         executor_config.exl3_linear_shape = input.exl3_linear_shape;
         executor_config.emit_normed_token_hidden = drafter->wide_hidden;
         executor_config.normed_token_hidden_width = drafter->hidden_width;
@@ -1539,6 +1601,7 @@ Result<MtpSpecBatchContext> create_mtp_spec_batch_context(
         executor_config.external_hidden_width =
             input.hidden_width != 0u ? input.hidden_width
                                      : static_cast<std::uint32_t>(input.config->hidden_size);
+        executor_config.external_mask_bytes = draft_mask_bytes(options.max_seq_len);
         executor_config.exl3_linear_shape = input.exl3_linear_shape;
         executor_config.emit_normed_token_hidden = input.wide_hidden;
         executor_config.normed_token_hidden_width = executor_config.external_hidden_width;

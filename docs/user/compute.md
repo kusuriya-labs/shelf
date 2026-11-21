@@ -80,6 +80,8 @@ prefill の chunk 境界や prefix cache の有無によって、同じ入力の
 | `--dflash2-max-sessions N` | requests that may speculate at once (serve; default min(--max-concurrent-requests, 8)); the rest decode without speculation |
 | `--dflash2-stats 0\|1` | print speculative decode statistics (default 1) |
 | `--mtp` | enable the checkpoint's MTP block as the drafter |
+| `--mtp-window N` | draft attention window in tokens (0 = full context) |
+| `--mtp-sink N` | attention-sink tokens kept before the window |
 | `--mtp-drafts N` | speculative draft tokens per round (default 7, max 31) |
 | `--mtp-stats 0\|1` | print MTP speculative decode statistics (default 1) |
 | `--prefix-cache 0\|1` | enable prefix cache (default 1) |

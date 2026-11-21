@@ -854,6 +854,8 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
     if (config_.mtp) {
         qwen35::runtime::MtpDrafterConfig mtp_options;
         mtp_options.num_drafts = config_.mtp_drafts == 0u ? 7u : config_.mtp_drafts;
+        mtp_options.window_tokens = static_cast<uint32_t>(config_.mtp_window);
+        mtp_options.sink_tokens = static_cast<uint32_t>(config_.mtp_sink);
         mtp_options.max_seq_len = config_.max_seq_len;
         mtp_options.page_tokens = config_.page_tokens;
         mtp_options.max_batch_rows = std::min(

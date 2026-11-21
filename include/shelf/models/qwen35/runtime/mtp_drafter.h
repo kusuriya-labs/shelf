@@ -34,6 +34,10 @@ struct MtpDrafterConfig {
     uint32_t max_seq_len = 0;
     uint32_t page_tokens = 16;
     uint32_t max_batch_rows = 0;
+    // Draft attention window: the drafter sees the first `sink_tokens` plus the last
+    // `window_tokens` of its own KV. 0 keeps the full context.
+    uint32_t window_tokens = 0;
+    uint32_t sink_tokens = 0;
     kernel::KVCacheDType kv_dtype = kernel::KVCacheDType::BF16;
     EffectiveRopeProfile rope_profile;
     // A batched context shares one history / compact log per rank, so its per-request
@@ -126,6 +130,9 @@ struct MtpDraftShared {
 };
 
 struct MtpDrafter {
+    uint32_t window_tokens = 0u;
+    uint32_t sink_tokens = 0u;
+    uint32_t mask_bytes = 0u;
     shelf::qwen_hybrid::QwenHybridConfig config;
     std::unique_ptr<state::SequenceSlotPool> slot_pool;
     std::unique_ptr<state::GdnStatePool> gdn_pool;

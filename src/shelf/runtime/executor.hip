@@ -121,13 +121,23 @@ Status build_host_execution_context(
         if (i == 0u) {
             ctx.external_input_storage[i] = first_stage ? static_cast<void*>(token_ids)
                                                        : pipeline_in;
-        } else {
+        } else if (i == 1u) {
             void* hidden_in = executor.input_hidden.data<void>();
             if (hidden_in == nullptr) {
                 return Status::invalid_state(
                     "external hidden input has no bound buffer", __FILE__, __LINE__);
             }
             ctx.external_input_storage[i] = hidden_in;
+        } else if (i == 2u) {
+            void* mask_in = executor.input_mask.data<void>();
+            if (mask_in == nullptr) {
+                return Status::invalid_state(
+                    "external mask input has no bound buffer", __FILE__, __LINE__);
+            }
+            ctx.external_input_storage[i] = mask_in;
+        } else {
+            return Status::invalid_state("external input has no bound buffer", __FILE__,
+                                         __LINE__);
         }
     }
     for (uint32_t i = 0; i < program.external_output_count; ++i) {
@@ -1406,6 +1416,7 @@ Executor::Executor(Executor&& other) noexcept
       graph_failed(other.graph_failed),
       input_ids(std::move(other.input_ids)),
       input_hidden(std::move(other.input_hidden)),
+      input_mask(std::move(other.input_mask)),
       rope_inv_freq(std::move(other.rope_inv_freq)),
       rope_table_stride(other.rope_table_stride),
       rope_table_count(other.rope_table_count),
@@ -1473,6 +1484,7 @@ Executor::Executor(Executor&& other) noexcept
     other.batch_context_storage = ::shelf::runtime::DeviceBatchContextStorage{};
     other.input_ids = gpu::Tensor{};
     other.input_hidden = gpu::Tensor{};
+    other.input_mask = gpu::Tensor{};
     other.rope_inv_freq = gpu::Tensor{};
     other.output_hidden = gpu::Tensor{};
     other.logits = gpu::Tensor{};
@@ -1569,6 +1581,7 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         execution_workspace = std::move(other.execution_workspace);
         input_ids = std::move(other.input_ids);
         input_hidden = std::move(other.input_hidden);
+        input_mask = std::move(other.input_mask);
         rope_inv_freq = std::move(other.rope_inv_freq);
         rope_table_stride = other.rope_table_stride;
         rope_table_count = other.rope_table_count;
@@ -1632,6 +1645,7 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         other.batch_context_storage = ::shelf::runtime::DeviceBatchContextStorage{};
         other.input_ids = gpu::Tensor{};
         other.input_hidden = gpu::Tensor{};
+    other.input_mask = gpu::Tensor{};
         other.rope_inv_freq = gpu::Tensor{};
         other.output_hidden = gpu::Tensor{};
         other.logits = gpu::Tensor{};
@@ -1818,6 +1832,7 @@ Status executor_shutdown(Executor& ex) noexcept {
     for (auto& tap : ex.dflash_target_hidden) tap = gpu::Tensor{};
     ex.input_ids = gpu::Tensor{};
     ex.input_hidden = gpu::Tensor{};
+    ex.input_mask = gpu::Tensor{};
     ex.rope_inv_freq = gpu::Tensor{};
     ex.model = RuntimeModelView{};
     ex.sequence_pool = nullptr;
@@ -2158,6 +2173,15 @@ Result<Executor> create_executor(
             config.external_hidden_width != 0u ? config.external_hidden_width : H;
         st = allocate_contiguous_tensor<bf16_t>(arena, {Npad, external_width},
                                                 ex.input_hidden);
+        if (!st.ok()) return st;
+    }
+    if (input.lowered.graph.external_inputs.size() > 2u) {
+        if (config.external_mask_bytes == 0u) {
+            return Status::invalid_argument(
+                "third external input needs external_mask_bytes", __FILE__, __LINE__);
+        }
+        st = allocate_contiguous_tensor<uint8_t>(
+            arena, {Npad, config.external_mask_bytes}, ex.input_mask);
         if (!st.ok()) return st;
     }
     if (config.emit_normed_token_hidden) {

@@ -787,6 +787,19 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_mtp_to_primitives(
     layer.moe_indices = {router, shared_gate, shared_gate_proj, shared_up_proj,
                          shared_down_proj, gate_experts, up_experts, down_experts};
 
+    // The drafter attention reads a sliding window of the draft KV: the mask marks the
+    // attention sink and the recent window, and the drafter rewrites it every step. The
+    // mask is an external input so the drafter owns the buffer.
+    constexpr std::uint32_t kMtpMaskBlockTokens = 4u;
+    const std::uint32_t mtp_mask_blocks =
+        (options.max_context_tokens + kMtpMaskBlockTokens - 1u) / kMtpMaskBlockTokens;
+    const std::uint32_t mtp_mask_bytes = ((mtp_mask_blocks + 7u) / 8u + 3u) & ~3u;
+    const RT::ValueId mtp_mask = em.value(mtp_mask_bytes, RT::ValueDType::U8);
+    pg.external_inputs.push_back(mtp_mask);
+    layer.qsa_indices.attention.has_block_mask = true;
+    layer.qsa_indices.attention.block_mask = mtp_mask;
+    layer.qsa_indices.attention.block_size = kMtpMaskBlockTokens;
+
     auto block_output = emit_qwen4exp_layer(em, layer, hyper, "mtp.block.");
     if (!block_output.ok()) return block_output.status();
 
