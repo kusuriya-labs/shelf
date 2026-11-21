@@ -150,9 +150,13 @@ Result<OptimizedLaunchResult> try_launch_qsa_key_cache(
         args.journal_rows = ctx.spec.qsa_spec_history.rows;
     }
     // Prefill blocks are independent: one CTA per compressed block removes the serial
-    // per-token loop. Speculative snapshots still need the ordered path.
+    // per-token loop. Speculative snapshots still need the ordered path, and the block
+    // kernel needs a compress ratio >= 2 to form a block. Measured on R9700 the block
+    // path (2 launches) beats the serial path from ~64 rows and is flat in rows; below
+    // that the extra launch dominates.
     const bool parallel_blocks = args.partial_history == nullptr &&
-                                 args.actual_rows >= 256u;
+                                 args.compress_ratio >= 2u &&
+                                 args.actual_rows >= 64u;
     const hipError_t error = parallel_blocks
                                  ? ::shelf::kernel::launch_qsa_key_cache_blocks(args, stream)
                                  : ::shelf::kernel::launch_qsa_key_cache_batch(args, stream);

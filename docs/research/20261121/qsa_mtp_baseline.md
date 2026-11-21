@@ -294,6 +294,29 @@ dense 1410 us vs sparse 866 us）。固定 budget 512 block のため sparse 側
 残りは長文 prefill の gather + WMMA 実験（近似 mode は target-only exact の既定を
 変えない）と、長文 end-to-end 測定である。
 
+### QSA key cache の短い prefill 並列化（Phase 6.1）
+
+`shelf-bench qsa-key-cache` で逐次 kernel（`launch_qsa_key_cache_batch`、1 launch・
+request ごとに 1 CTA が行を直列処理）と並列 kernel（`launch_qsa_key_cache_blocks` +
+`counts`、2 launch・圧縮 block ごとに CTA）を同じ入力で比較した。
+
+| rows | requests | compress | 逐次 | 並列 |
+| ---: | ---: | ---: | ---: | ---: |
+| 16 | 1 | 4 | 42 us | 55 us |
+| 32 | 1 | 4 | 49 us | 51 us |
+| 64 | 1 | 4 | 44 us | 11 us |
+| 128 | 1 | 4 | 79 us | 10 us |
+| 256 | 1 | 4 | 143 us | 10 us |
+| 512 | 1 | 4 | 279 us | 10 us |
+| 64 | 8 | 4 | 12 us | 11 us |
+| 256 | 8 | 4 | 24 us | 11 us |
+
+並列経路は行数にほぼ依存せず 10〜12 us で、64 行付近から逐次を上回る。旧条件は
+`actual_rows >= 256` で、64〜255 行の prefill を不必要に直列化していた。
+`compress_ratio >= 2` のガードも追加した（block kernel は `cr < 2` で何も書かないため、
+cr=1 のモデルでは逐次経路を使う必要がある）。`test_qsa_state_pool` /
+`test_qsa_key_path` / `test_qsa_spec_state_replay` は bit 一致のまま PASS。
+
 ## 6. 残課題
 
 - `R=8, K=7` の 64 行 1 forward fused verify は成立した（`max_verify_per_round=1`）。
@@ -303,4 +326,6 @@ dense 1410 us vs sparse 866 us）。固定 budget 512 block のため sparse 側
 - QSA score の multi-request launch 集約は完了（2.57x 削減、score bit 一致）。
 - Top-k の全域再走査削減は完了（262K 相当で 2.99x、top_k=1024 で 7.3x）。
 - QSA sparse attention の K/V 共有は計測の結果不採用、prefill 閾値は 8192 へ再評価した。
-- gather + WMMA prefill 実験、key-cache の launch 集約、長文 end-to-end 測定は未着手。
+- key cache の短い prefill 並列化は 64 行閾値へ更新した。
+- gather + WMMA prefill 実験、長文 end-to-end 測定、per-request dense bypass（6.2）、
+  QSA の graph-safe 化（6.3）は未着手。

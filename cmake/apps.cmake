@@ -80,6 +80,7 @@ if(SHELF_BUILD_BENCHMARKS)
         src/apps/bench/sampling.hip
         src/apps/bench/qsa_select.hip
         src/apps/bench/qsa_attention.hip
+        src/apps/bench/qsa_key_cache.hip
         src/apps/bench/gpu_memory.hip
         src/apps/bench/tp_reduce.cpp
     )
