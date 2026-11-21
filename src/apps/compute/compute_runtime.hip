@@ -895,6 +895,9 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
                 options.local_kv_heads =
                     static_cast<uint32_t>(model.context().local_key_value_heads);
             }
+            const char* fused_env = std::getenv("SHELF_MTP_FUSED_VERIFY");
+            const bool fused_verify =
+                fused_env != nullptr && fused_env[0] != '\0' && fused_env[0] != '0';
             if (model.uses_qsa_state()) {
                 const uint32_t batch_rows = std::max(
                     options.max_batch_rows,
@@ -906,6 +909,14 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
                                                        options.max_seq_len + 1u),
                         model.uses_exl3_linear(),
                         model.mtp_exl3_linear_shape(), cfg.max_requests);
+                if (fused_verify) {
+                    state_bytes =
+                        qwen35::runtime::mtp_batch_rank_state_reserve_bytes(
+                            layout,
+                            qwen35::runtime::mtp_spec_rows(cfg.max_requests,
+                                                           options.num_drafts),
+                            cfg.max_requests);
+                }
             } else if (tp_rank == 0u) {
                 drafter_bytes = qwen35::runtime::mtp_drafter_reserve_bytes(
                     tc, options, model.token_row_ffn_size(),

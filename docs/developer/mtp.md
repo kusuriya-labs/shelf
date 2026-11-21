@@ -75,7 +75,8 @@ target-only と分岐する prompt が残るため既定 off である。dense �
 `SHELF_MTP_FUSED_VERIFY=1` は qwen4exp でも K+1 行の融合 verify を選ぶ比較用の
 フラグである。GDN verify の上限は 8 request / 64 行へ拡張した。1〜2 request の
 fused verify は target-only と一致するが、4 request / 20 行では near-tie 分岐が
-残るため既定 off である。
+残るため既定 off である。TP serve の fused verify は rank ごとに
+`mtp_batch_rank_state_reserve_bytes` を MTP reserve へ加算する。
 
 ## serve-stdio
 

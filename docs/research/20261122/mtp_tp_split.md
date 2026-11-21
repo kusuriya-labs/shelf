@@ -53,6 +53,31 @@ logits の TP combine で全語彙を得る。
 - `max_seq_len=8192`、`mtp-window 4096`、2 request の MTP serve が完走した。
 - ring 有効時の rollback 回帰テストを `test_prefix_cache` に追加した。
 
+## verify 方式と decode
+
+条件: TP=2、`max_seq_len=4096`、`mtp-drafts=3`、`mtp-window=4096`、単一 request、
+同じ prompt・64 token。
+
+| verify | decode | MTP_BATCH |
+| --- | ---: | --- |
+| target-only | 35.4 tok/s | - |
+| safe serial | 33.1 tok/s | `chunks=63 emitted=63` |
+| fused（`SHELF_MTP_FUSED_VERIFY=1`） | 68.0 tok/s | `chunks=23 emitted=63` |
+
+safe serial は `accepted + rounds == emitted == chunks` であり、1 token あたり 1 回の
+target decode になる。MTP の draft 分だけ余計なので target-only を超えない。
+fused は 1 round 1 target forward で、この条件では約 2 倍になった。生成列は
+3 方式で一致した。
+
+fused verify では `create_mtp_spec_batch_context` が rank ごとの GDN history /
+compact log を確保するため、TP serve の MTP reserve に
+`mtp_batch_rank_state_reserve_bytes` を加算する必要がある。加算前は起動時に
+arena が 0.05 GiB 不足した。
+
+`SHELF_MTP_FUSED_VERIFY=1` で `test_compute_mtp_batch.py`（TP=2、window 4096、
+2 request）は 10/10 PASS した。ただし near-tie 分岐の許容契約を含むため、
+target-only との bit 一致を要求する用途では追加検証が必要である。
+
 ## slot 再利用時の不具合
 
 `MTP_SLOTS` の slot 順と `mtp.active` の並びが一致しない状態（短い request が先に
