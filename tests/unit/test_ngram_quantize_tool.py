@@ -15,6 +15,94 @@ import ngram_quantize as tool
 
 
 class QuantizeToolTest(unittest.TestCase):
+    def test_model_family_specs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            layers = [1, 11, 21, 31]
+            config = {'engram_layer_ids': [x + 1 for x in layers],
+                      'engram_layer_head_vocab_sizes': {str(x + 1): [[2] * 8, [3] * 8] for x in layers}}
+            (root / 'config.json').write_text(json.dumps({'text_config': config}))
+            src = {}
+            for layer in layers:
+                name = f'model.layers.{layer}.engram_layer.multi_head_embedding.embedding.weight'
+                src[name] = (root / 'source', 0, {'dtype': 'BF16', 'shape': [40, 96]})
+            specs = tool.automatic_specs(root, src, 'hy4')
+            self.assertEqual(len(specs), 64)
+            self.assertEqual((specs[8]['layer'], specs[8]['ngram_order'], specs[8]['head'], specs[8]['segments'][0][1:]), (1, 3, 8, (16, 3)))
+            self.assertEqual(tool.automatic_specs(root, src, 'auto'), specs)
+            config = {'ple_layer_ids': [2], 'split_ngram_parts': 128, 'heads_per_ngram': 8,
+                      'ngram_size': 3, 'ngram_vocab_size_base': 2,
+                      'make_ngram_vocab_size_divisible_by': 128}
+            (root / 'config.json').write_text(json.dumps({'text_config': config}))
+            src = {}
+            for i in range(128):
+                name = f'model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_{i}.weight'
+                src[name] = (root / 'source', 0, {'dtype': 'BF16', 'shape': [3, 160]})
+            specs = tool.automatic_specs(root, src, 'qwen4exp')
+            self.assertEqual(len(specs), 16)
+            self.assertEqual((specs[8]['layer'], specs[8]['ngram_order'], specs[8]['head']), (1, 3, 8))
+            self.assertEqual(sum(segment[2] for segment in specs[8]['segments']), 23)
+            self.assertGreater(len(specs[8]['segments']), 1)
+            self.assertEqual(tool.automatic_specs(root, src, 'auto'), specs)
+            src.pop(next(iter(src)))
+            with self.assertRaises(ValueError):
+                tool.automatic_specs(root, src, 'qwen4exp')
+
+    def test_rows_cross_shard_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = {}
+            for i in range(2):
+                data = np.arange(i * 12, (i + 1) * 12, dtype='<u2').reshape(4, 3)
+                path = root / str(i)
+                path.write_bytes(data.tobytes())
+                src[str(i)] = (path, 0, {'dtype': 'BF16', 'shape': [4, 3], 'data_offsets': [0, data.nbytes]})
+            rows = tool.source_rows(src, [('0', 2, 2), ('1', 0, 3)], 1, 3)
+            np.testing.assert_array_equal(rows, np.arange(9, 18, dtype='<u2').reshape(3, 3))
+
+    def test_automatic_conversion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rng = np.random.default_rng(17)
+            for family in ('hy4', 'qwen4exp'):
+                source = root / family
+                source.mkdir()
+                arrays = {}
+                if family == 'hy4':
+                    layers = [1, 11, 21, 31]
+                    config = {'engram_layer_ids': [x + 1 for x in layers],
+                              'engram_layer_head_vocab_sizes': {str(x + 1): [[2] * 8, [2] * 8] for x in layers}}
+                    for layer in layers:
+                        arrays[f'model.layers.{layer}.engram_layer.multi_head_embedding.embedding.weight'] = (32, 96)
+                else:
+                    config = {'ple_layer_ids': [2], 'split_ngram_parts': 128, 'heads_per_ngram': 8,
+                              'ngram_size': 3, 'ngram_vocab_size_base': 2,
+                              'make_ngram_vocab_size_divisible_by': 128}
+                    for i in range(128):
+                        arrays[f'model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_{i}.weight'] = (3, 160)
+                (source / 'config.json').write_text(json.dumps({'text_config': config}))
+                header, payload, offset = {}, [], 0
+                for name, shape in arrays.items():
+                    data = (rng.normal(size=shape).astype(np.float32).view(np.uint32) >> 16).astype('<u2').tobytes()
+                    header[name] = {'dtype': 'BF16', 'shape': shape, 'data_offsets': [offset, offset + len(data)]}
+                    payload.append(data)
+                    offset += len(data)
+                raw = json.dumps(header).encode()
+                raw += b' ' * (-len(raw) % 8)
+                with (source / 'model.safetensors').open('wb') as f:
+                    f.write(struct.pack('<Q', len(raw)) + raw)
+                    for data in payload:
+                        f.write(data)
+                output = root / (family + '-out')
+                subprocess.run([sys.executable, str(ROOT / 'tools/quantize/ngram_quantize.py'), 'convert',
+                                str(source), str(output), '--model-family', family, '--max-rows', '2',
+                                '--threads', '1', '--sample-rows', '2'], check=True, capture_output=True)
+                tables = json.loads((output / 'ngram_manifest.json').read_text())['tables']
+                self.assertEqual(len(tables), 64 if family == 'hy4' else 16)
+                for i, table in enumerate(tables):
+                    self.assertEqual((table['head'], table['ngram_order']), (i % 16, 2 + (i % 16) // 8))
+                    self.assertEqual(table['layer'], ([1, 11, 21, 31][i // 16] if family == 'hy4' else 1))
+
     def test_profiles_and_corruption(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

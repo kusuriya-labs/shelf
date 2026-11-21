@@ -110,7 +110,5 @@ loader は使用前に manifest、参照先、全 tensor の内容を検証し�
 
 変換・検査には `tools/quantize/ngram_quantize.py` の `convert` / `verify` を使う。
 `--tensor-spec` は `name`, `layer`, `ngram_order`, `head` を持つオブジェクトの JSON 配列、
-`--bits-map` は tensor 名から bit 幅への JSON オブジェクトを指定する。自動検出では
-layer を名前から取得し、次数と head はそれぞれ 1 と 0 に設定するため、実際の構造を
-識別する必要がある場合は `--tensor-spec` で明示する。Python には NumPy、実行時には
+`--bits-map` は tensor 名から bit 幅への JSON オブジェクトを指定する。`--model-family auto|hy4|qwen4exp` は config と原本 tensor の構造から layer、次数、head を決定する。Hy4 の連結 table と Qwen の shard は head ごとに分割する。ほかの構造は `--tensor-spec` で明示する。Python には NumPy、実行時には
 `shelf_ngram_quant_c` 共有ライブラリが必要である。
