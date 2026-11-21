@@ -206,7 +206,7 @@ inline Result<shelf::quantization::ResolvedQuantSpec> resolve_quant_spec(
         d.scale_type = StorageDType::FP16;
         d.weight_layout = QuantLayout::EXL3_TRELLIS_V1;
         d.scale_layout = QuantLayout::NONE;
-        resolved.spec_id = QuantSpecId::EXL3_W16A16_V1;
+        resolved.spec_id = QuantSpecId::EXL3_MUL24_INT8_V1;
         return resolved;
     }
 

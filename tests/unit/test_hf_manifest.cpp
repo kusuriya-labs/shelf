@@ -543,7 +543,7 @@ static std::string exl3_config_json() {
          + "\"head_bits\":6,\"codebook\":\"mul1\"}}";
 }
 
-static bool build_exl3_dir(const fs::path& dir) {
+static bool build_exl3_dir(const fs::path& dir, bool legacy = false) {
     const std::string shard = "model.safetensors";
     const std::string p0 = "layers.0.mlp.down_proj";
     const std::string p1 = "layers.1.mlp.down_proj";
@@ -553,17 +553,17 @@ static bool build_exl3_dir(const fs::path& dir) {
     const std::vector<uint8_t> suh = pattern_bytes(128u * 2u, 53u);
     const std::vector<uint8_t> svh = pattern_bytes(128u * 2u, 59u);
     const std::vector<uint8_t> f16_matrix = pattern_bytes(128u * 128u * 2u, 61u);
-    const std::vector<uint8_t> mul1_marker = {0x2Du, 0xD1u, 0xDCu, 0x83u};
+    const std::vector<uint8_t> marker = {0x2Du, 0xD1u, 0xDCu, static_cast<uint8_t>(legacy ? 0x83u : 0x00u)};
 
     std::vector<Planned> tensors;
     tensors.push_back({p0 + ".trellis", io::SType::I16, {8, 8, 64}, trellis0});
     tensors.push_back({p0 + ".suh", io::SType::F16, {128}, suh});
     tensors.push_back({p0 + ".svh", io::SType::F16, {128}, svh});
-    tensors.push_back({p0 + ".mul1", io::SType::I32, {}, mul1_marker});
+    tensors.push_back({p0 + ".mul1", io::SType::I32, {}, marker});
     tensors.push_back({p1 + ".trellis", io::SType::I16, {8, 8, 56}, trellis1});
     tensors.push_back({p1 + ".suh", io::SType::F16, {128}, suh});
     tensors.push_back({p1 + ".svh", io::SType::F16, {128}, svh});
-    tensors.push_back({p1 + ".mul1", io::SType::I32, {}, mul1_marker});
+    tensors.push_back({p1 + ".mul1", io::SType::I32, {}, marker});
     tensors.push_back(
         {"layers.0.linear_attn.in_proj_a.weight", io::SType::F16, {128, 128}, f16_matrix});
 
@@ -578,6 +578,13 @@ static bool build_exl3_dir(const fs::path& dir) {
 static void test_exl3_manifest() {
     const fs::path dir = make_case_dir("exl3");
     if (!build_exl3_dir(dir)) return;
+
+    const fs::path legacy_dir = make_case_dir("exl3_legacy");
+    if (!build_exl3_dir(legacy_dir, true)) return;
+    const auto legacy = quantization::bundle::synthesize_hf_quantized_source(
+        legacy_dir.string(), {"layers.0.mlp.down_proj.weight"}, false);
+    check(!legacy.ok() && legacy.status().code() == Status::Code::unsupported,
+          "legacy exl3 codebook rejected");
 
     check(weights::is_quantized_model_dir(dir.string()), "exl3 dir is quantized");
     auto method = quantization::bundle::detect_hf_quant_method(dir.string());

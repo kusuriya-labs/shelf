@@ -3,7 +3,6 @@
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/program_executor.h>
 #include <shelf/kernels/optimized/linear/mxfp4.h>
-#include <shelf/kernels/optimized/linear/exl3_mul1.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
 #include <shelf/kernels/fused/moe/combine.h>
 #include <shelf/kernels/fused/moe/router.h>
@@ -304,9 +303,6 @@ Result<OptimizedLaunchResult> try_launch_moe_grouped_linear(const Program& progr
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
-// Default for mul24 expert activations; SHELF_EXL3_INT8_MOE overrides it.
-constexpr bool kExl3Int8MoeDefault = false;
-
 Result<OptimizedLaunchResult> try_launch_moe_grouped_exl3(const Program& program,
                                                           const DispatchBinding& b,
                                                           HostExecutionContext& ctx,
@@ -320,6 +316,9 @@ Result<OptimizedLaunchResult> try_launch_moe_grouped_exl3(const Program& program
 
     const WeightSlot e = ctx.weights[b.weight_index];
     if (e.encoding != 4u) return bad("moe grouped exl3: encoding != Exl3");
+    if (e.compute_spec != static_cast<uint8_t>(
+            ::shelf::quantization::ComputeSpecId::EXL3_MUL24_INT8_W8A8_F32_BF16))
+        return Status::unsupported("moe grouped exl3 requires mul24 INT8", __FILE__, __LINE__);
     if (e.codes == nullptr || e.exl3_suh == nullptr || e.exl3_svh == nullptr)
         return bad("moe grouped exl3: weight planes missing");
     if (e.experts < 2u) return bad("moe grouped exl3: weight is not an expert plane");
@@ -363,17 +362,6 @@ Result<OptimizedLaunchResult> try_launch_moe_grouped_exl3(const Program& program
     args.output_dtype = out.dtype == ValueDType::BF16 ? 0u : 1u;
     args.ka = e.exl3_ka;
     args.half = e.exl3_half;
-    args.mul24 = e.compute_spec == static_cast<uint8_t>(
-                                       ::shelf::quantization::ComputeSpecId::
-                                           EXL3_MUL24_INT8_W8A8_F32_BF16)
-                     ? 1u
-                     : 0u;
-    // SHELF_EXL3_INT8_MOE=1 runs mul24 experts with INT8 activations (iu8 WMMA); 0 keeps the FP16 GEMM.
-    static const bool int8_act = [] {
-        const char* v = std::getenv("SHELF_EXL3_INT8_MOE");
-        return v != nullptr ? std::atoi(v) != 0 : kExl3Int8MoeDefault;
-    }();
-    args.int8_act = args.mul24 != 0u && int8_act ? 1u : 0u;
     args.trellis_batch_stride = e.codes_batch_stride_bytes;
     args.suh_batch_stride = e.exl3_suh_batch_stride_bytes;
     args.svh_batch_stride = e.exl3_svh_batch_stride_bytes;
@@ -397,7 +385,7 @@ Result<OptimizedLaunchResult> try_launch_moe_grouped_exl3(const Program& program
         a.group_count = group_count;
         a.group_row_base = group_row_base;
         a.expert_group_begin = expert_group_begin;
-        return ::shelf::kernel::launch_gemm_exl3_w16a16_grouped(a, stream);
+        return ::shelf::kernel::launch_gemm_exl3_int8_grouped(a, stream);
     };
 
     const uint32_t* hit_expert_group_begin =

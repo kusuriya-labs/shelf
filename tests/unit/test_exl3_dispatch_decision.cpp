@@ -3,7 +3,6 @@
 
 #include <shelf/inference/execution/exl3_dispatch_decision.h>
 #include <shelf/kernels/optimized/linear/exl3_family/types.h>
-#include <shelf/kernels/optimized/linear/exl3_mul1.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
 
 #include <cstdint>
@@ -41,7 +40,7 @@ int main() {
     shelf::execution::Exl3DispatchDecision d;
     check("default direct", d.backend == shelf::kernel::exl3_detail::Exl3Backend::Direct);
     check("default no reason", d.fallback_reason == nullptr);
-    check("default mul1", d.codebook == shelf::kernel::Exl3Codebook::Mul1);
+    check("default mul24", d.codebook == shelf::kernel::Exl3Codebook::Mul24);
     check("default decode", d.phase == shelf::kernel::Exl3Phase::Decode);
 
     if (g_failures == 0) {

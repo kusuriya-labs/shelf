@@ -103,18 +103,13 @@ shelf_add_test(NAME test_ocp_e4m3_codec SOURCE unit/test_ocp_e4m3_codec.cpp LABE
 shelf_add_test(NAME test_activation_quantize_sensitivity SOURCE unit/test_activation_quantize_sensitivity.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_quant_reference)
 shelf_add_test(NAME test_fp8_payload SOURCE unit/test_fp8_payload.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_quant_reference shelf_quant_format)
 shelf_add_test(NAME test_mxfp4_codec SOURCE unit/test_mxfp4_codec.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES shelf_quant_reference)
-shelf_add_test(NAME test_exl3_mul1_codec SOURCE unit/test_exl3_mul1_codec.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_quant_reference)
 shelf_add_test(NAME test_exl3_mul24_codec_decode SOURCE unit/test_exl3_mul24_codec_decode.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_quant_reference)
 shelf_add_test(NAME test_int6_w32_codec SOURCE unit/test_int6_w32_codec.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_quant_reference)
 shelf_add_test(NAME test_exl3_contracts SOURCE unit/test_exl3_contracts.cpp LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_pcie_budget SOURCE unit/test_pcie_budget.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_core)
 shelf_add_test(NAME test_exl3_mul24_workspace SOURCE unit/test_exl3_mul24_workspace.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_kernels_optimized shelf_gpu)
-shelf_add_test(NAME test_exl3_launch_plan SOURCE unit/test_exl3_launch_plan.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_kernels_optimized shelf_gpu)
-shelf_add_test(NAME test_exl3_verify_policy SOURCE unit/test_exl3_verify_policy.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_exl3_variant SOURCE unit/test_exl3_variant.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_exl3_dispatch_decision SOURCE unit/test_exl3_dispatch_decision.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_inference_execution shelf_kernels_optimized shelf_gpu)
-shelf_add_test(NAME test_exl3_mul1_linear SOURCE unit/test_exl3_mul1_linear.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_optimized shelf_quant_reference shelf_gpu)
-shelf_add_test(NAME test_exl3_mul1_dense SOURCE unit/test_exl3_mul1_dense.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_optimized shelf_quant_reference shelf_gpu)
 shelf_add_test(NAME test_exl3_mul24_linear SOURCE kernels/linear/test_exl3_mul24_linear.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_inference_execution shelf_kernels_optimized shelf_quant_reference shelf_gpu)
 shelf_add_test(NAME test_exl3_mul24_grouped SOURCE kernels/linear/test_exl3_mul24_grouped.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_optimized shelf_quant_reference shelf_gpu)
 shelf_add_test(NAME bench_exl3_mul24_grouped SOURCE kernels/linear/bench_exl3_mul24_grouped.hip LABELS "gpu1;optional;external_files;benchmark" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES shelf_kernels_optimized shelf_gpu)
@@ -123,13 +118,8 @@ set_tests_properties(bench_exl3_mul24_grouped PROPERTIES
     ENVIRONMENT "SHELF_QWEN4EXP_MODEL_DIR=${CMAKE_SOURCE_DIR}/models/kusuriya-labs/Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw")
 shelf_add_test(NAME bench_exl3_mul24_prefill_wmma SOURCE kernels/linear/bench_exl3_mul24_prefill_wmma.hip LABELS "gpu1;optional;benchmark" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES shelf_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_exl3_mul24_tp SOURCE kernels/linear/test_exl3_mul24_tp.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_inference_execution shelf_kernels_optimized shelf_quant_reference shelf_weights shelf_gpu)
-shelf_add_test(NAME test_exl3_mul1_grouped SOURCE unit/test_exl3_mul1_grouped.cpp LABELS "gpu1;optional;external_files" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_optimized shelf_quant_reference shelf_io)
-target_include_directories(test_exl3_mul1_grouped SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
-set_tests_properties(test_exl3_mul1_grouped PROPERTIES
-    ENVIRONMENT "SHELF_QWEN4EXP_MODEL_DIR=${CMAKE_SOURCE_DIR}/models/kusuriya-labs/Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw")
 find_library(SHELF_TEST_HIPBLASLT_LIBRARY NAMES hipblaslt PATHS "${SHELF_ROCM_ROOT}/lib" NO_DEFAULT_PATH)
 if(SHELF_TEST_HIPBLASLT_LIBRARY)
-    target_link_libraries(test_exl3_mul1_dense PRIVATE "${SHELF_TEST_HIPBLASLT_LIBRARY}")
     target_link_libraries(test_exl3_mul24_linear PRIVATE "${SHELF_TEST_HIPBLASLT_LIBRARY}")
     target_link_libraries(test_exl3_mul24_tp PRIVATE "${SHELF_TEST_HIPBLASLT_LIBRARY}")
 endif()
@@ -376,16 +366,11 @@ add_custom_target(
         test_activation_quantize_sensitivity
         test_fp8_payload
         test_mxfp4_codec
-        test_exl3_mul1_codec
         test_exl3_mul24_codec_decode
         test_exl3_contracts
         test_exl3_mul24_workspace
-        test_exl3_launch_plan
-        test_exl3_verify_policy
         test_exl3_variant
         test_exl3_dispatch_decision
-        test_exl3_mul1_linear
-        test_exl3_mul1_dense
         test_exl3_mul24_linear
         test_exl3_mul24_grouped
         test_exl3_mul24_tp

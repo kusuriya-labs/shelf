@@ -16,7 +16,6 @@ enum class QuantKernelKind : uint8_t {
     LinearBf16,
     LinearFp8Finegrained,
     LinearMxfp4Finegrained,
-    LinearExl3W16A16,
     LinearFp8Pertoken,
 };
 
@@ -25,7 +24,6 @@ inline manifest::QuantizedEncoding kernel_weight_encoding(QuantKernelKind kernel
         case QuantKernelKind::LinearBf16: return manifest::QuantizedEncoding::Bf16;
         case QuantKernelKind::LinearFp8Finegrained: return manifest::QuantizedEncoding::Fp8;
         case QuantKernelKind::LinearMxfp4Finegrained: return manifest::QuantizedEncoding::Mxfp4;
-        case QuantKernelKind::LinearExl3W16A16: return manifest::QuantizedEncoding::Exl3;
         case QuantKernelKind::LinearFp8Pertoken: return manifest::QuantizedEncoding::Fp8PerChannel;
     }
     return manifest::QuantizedEncoding::Bf16;

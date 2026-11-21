@@ -921,7 +921,7 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
                     (w.rows & 127u) != 0u)
                     return fail("exl3 grouped linear shape is not 128-aligned");
                 if (!c.open_moe_scratch()) return fail("moe plan scratch has no capacity");
-                DispatchBinding b = base_binding(KernelId::LINEAR_EXL3_W16A16_GROUPED);
+                DispatchBinding b = base_binding(KernelId::LINEAR_EXL3_INT8_GROUPED);
                 b.weight_index = n.weight_index;
                 b.host_weight_index = n.host_weight_index;
                 b.compute_spec = w.compute_spec;
@@ -1116,7 +1116,6 @@ Status finalize_layout(Ctx& c) {
             case KernelId::LINEAR_BF16:
             case KernelId::LINEAR_FP8_FINEGRAINED:
             case KernelId::LINEAR_FP8_PTPC:
-            case KernelId::LINEAR_EXL3_W16A16:
             case KernelId::LINEAR_EXL3_INT8: return "dense_linear";
             default: return "elementwise";
         }

@@ -143,7 +143,7 @@ int main() {
     const ::shelf::runtime::Program trellis_program = [&binding] {
         ::shelf::runtime::Program p;
         p.dispatches.push_back(binding(::shelf::runtime::KernelId::LINEAR_BF16));
-        p.dispatches.push_back(binding(::shelf::runtime::KernelId::LINEAR_EXL3_W16A16));
+        p.dispatches.push_back(binding(::shelf::runtime::KernelId::LINEAR_EXL3_INT8));
         return p;
     }();
     check(shelf::qwen35::program_needs_exl3_workspace(trellis_program),

@@ -109,8 +109,8 @@ TensorPlan make_exl3_matrix(uint64_t rows, uint64_t k, uint32_t ka,
     auto* svh16 = reinterpret_cast<uint16_t*>(svh.data());
     for (std::size_t i = 0; i < rows; ++i) svh16[i] = 0x3C00u;
     std::vector<uint8_t> marker(4u);
-    const uint32_t mul1 = quantization::exl3::kExl3Mul1Multiplier;
-    std::memcpy(marker.data(), &mul1, sizeof(mul1));
+    const uint32_t multiplier = quantization::exl3::kExl3Mul24Multiplier;
+    std::memcpy(marker.data(), &multiplier, sizeof(multiplier));
 
     plan.meta.role = "weight";
     plan.meta.encoding = quantization::manifest::QuantizedEncoding::Exl3;

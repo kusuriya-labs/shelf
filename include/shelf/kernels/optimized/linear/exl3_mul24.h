@@ -1,8 +1,5 @@
 #pragma once
 
-// mul24 (EXL3-INT8 weights) codebook entry points. Shared EXL3 types and contracts live
-// in exl3_family/types.h; mul1 entry points live in exl3_mul1.h.
-
 #include <shelf/kernels/optimized/linear/exl3_family/types.h>
 
 namespace shelf::kernel {
@@ -57,7 +54,6 @@ hipError_t launch_exl3_mul24_rotate_out(
     uint32_t splits,
     hipStream_t stream);
 
-// Prefill path (hipBLASLt int8 GEMM, same structure as the W16A16 dense path):
 //   rotate_quantize -> rowscale -> recon (trellis -> int8 [n][k]) -> int8 GEMM (+ fused per-group GEMM for a few
 //   rows) -> rotate_out_i32.
 // rowscale re-rounds the per-group codes onto one scale per row (the max group scale, rowscale[row]). A row where one

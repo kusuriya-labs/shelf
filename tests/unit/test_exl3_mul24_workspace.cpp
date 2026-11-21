@@ -2,7 +2,6 @@
 // exactly (same offsets, same chunk / scratch rows, same fit decision).
 
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/workspace.h>
-#include <shelf/kernels/optimized/linear/exl3_mul1.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
 
 #include <algorithm>

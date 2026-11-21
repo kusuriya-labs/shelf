@@ -1,12 +1,5 @@
-// Micro benchmark of the grouped mul24 EXL3 kernel: FP16 GEMM vs INT8 activations (iu8 WMMA), on the routed-expert
-// shapes of a model config (default: Qwen3.8-Flash-Next mul24). One layer's gate_proj (k = hidden, n = moe
-// intermediate, token-row gather) and down_proj (k = intermediate, n = hidden, group rows) are timed per row count.
-//   bench_exl3_mul24_grouped [--model-dir DIR] [--bits N] [--skew] [--iters N]
-// The group plan is built on the host from a random top-k routing (uniform, or --skew: expert popularity ~ 1/(i+1)).
-// SHELF_EXL3_GROUPED_FUSE / SHELF_EXL3_GROUPED_NTILES apply as in the runtime.
 #include <shelf/kernels/fused/exl3/decode.h>
 #include <shelf/core/memory/types.h>
-#include <shelf/kernels/optimized/linear/exl3_mul1.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
 
 #include <hip/hip_runtime.h>
@@ -124,7 +117,7 @@ void free_plan(Plan& p) {
 
 // Returns ms per launch.
 double time_launch(const Plane& pl, const Plan& plan, const void* input, uint32_t input_stride, void* output,
-                   uint32_t bits, bool token_rows, uint32_t int8_act, int iters) {
+                   uint32_t bits, bool token_rows, int iters) {
     kernel::Exl3GroupedArgs a;
     a.trellis = pl.trellis;
     a.suh = pl.suh;
@@ -137,8 +130,6 @@ double time_launch(const Plane& pl, const Plan& plan, const void* input, uint32_
     a.output_row_stride = pl.n;
     a.output_dtype = 0;
     a.ka = bits;
-    a.mul24 = 1;
-    a.int8_act = int8_act;
     a.trellis_batch_stride = pl.trellis_bytes;
     a.suh_batch_stride = static_cast<uint64_t>(pl.k) * 2u;
     a.svh_batch_stride = static_cast<uint64_t>(pl.n) * 2u;
@@ -148,13 +139,13 @@ double time_launch(const Plane& pl, const Plan& plan, const void* input, uint32_
     a.expert_group_begin = plan.expert_begin;
     a.row_token = token_rows ? plan.row_token : nullptr;
     a.group_capacity = std::max(plan.groups, 1u);
-    for (int i = 0; i < 3; ++i) HIP_CHECK(kernel::launch_gemm_exl3_w16a16_grouped(a, nullptr));
+    for (int i = 0; i < 3; ++i) HIP_CHECK(kernel::launch_gemm_exl3_int8_grouped(a, nullptr));
     hipEvent_t t0, t1;
     HIP_CHECK(hipEventCreate(&t0));
     HIP_CHECK(hipEventCreate(&t1));
     HIP_CHECK(hipDeviceSynchronize());
     HIP_CHECK(hipEventRecord(t0, nullptr));
-    for (int i = 0; i < iters; ++i) HIP_CHECK(kernel::launch_gemm_exl3_w16a16_grouped(a, nullptr));
+    for (int i = 0; i < iters; ++i) HIP_CHECK(kernel::launch_gemm_exl3_int8_grouped(a, nullptr));
     HIP_CHECK(hipEventRecord(t1, nullptr));
     HIP_CHECK(hipEventSynchronize(t1));
     float ms = 0.f;
@@ -218,19 +209,15 @@ int main(int argc, char** argv) {
         HIP_CHECK(hipMemcpy(d_gin, g.data(), g.size() * 2, hipMemcpyHostToDevice));
     }
 
-    std::printf("%6s %7s %7s %7s | %9s %9s %6s | %9s %9s %6s | %9s %9s %6s\n", "tokens", "experts", "groups", "rows",
-                "gate fp16", "gate i8", "x", "down fp16", "down i8", "x", "sum fp16", "sum i8", "x");
+    std::printf("%6s %7s %7s %7s | %9s %9s %9s\n", "tokens", "experts", "groups", "rows",
+                "gate i8", "down i8", "sum i8");
     const uint32_t token_counts[] = {1, 2, 4, 8, 16, 64, 256, 512, 1024, 2048};
     for (const uint32_t tokens : token_counts) {
         Plan plan = make_plan(tokens, experts, topk, skew, rng);
-        double gf = 0, g8 = 0, df = 0, d8 = 0;
-        gf = time_launch(gate, plan, d_tokens, hidden, d_out, bits, true, 0, iters);
-        g8 = time_launch(gate, plan, d_tokens, hidden, d_out, bits, true, 1, iters);
-        df = time_launch(down, plan, d_gin, inter, d_out, bits, false, 0, iters);
-        d8 = time_launch(down, plan, d_gin, inter, d_out, bits, false, 1, iters);
-        std::printf("%6u %7u %7u %7u | %8.3fms %8.3fms %5.2fx | %8.3fms %8.3fms %5.2fx | %8.3fms %8.3fms %5.2fx\n",
-                    tokens, plan.active_experts, plan.groups, plan.rows, gf, g8, gf / g8, df, d8, df / d8, gf + df,
-                    g8 + d8, (gf + df) / (g8 + d8));
+        const double g8 = time_launch(gate, plan, d_tokens, hidden, d_out, bits, true, iters);
+        const double d8 = time_launch(down, plan, d_gin, inter, d_out, bits, false, iters);
+        std::printf("%6u %7u %7u %7u | %8.3fms %8.3fms %8.3fms\n",
+                    tokens, plan.active_experts, plan.groups, plan.rows, g8, d8, g8 + d8);
         free_plan(plan);
     }
     return 0;

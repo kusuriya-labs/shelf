@@ -1,6 +1,5 @@
-#include <shelf/kernels/optimized/linear/exl3_mul1.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
-#include <shelf/kernels/optimized/linear/exl3_family/mul1/decode.h>
+#include <shelf/kernels/optimized/linear/exl3_family/fwht.h>
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/decode.h>
 #include <shelf/quantization/exl3/exl3_int8.h>
 #include <hip/hip_runtime.h>
@@ -311,7 +310,6 @@ __global__ void __launch_bounds__(256) exl3_mul24_rotate_out_f4_kernel(
 }
 
 
-// Prefill path (structure of the W16A16 dense path): a single hipBLASLt int8 GEMM over the whole K cannot apply
 // per-128-K-group activation scales, so the activations get ONE scale per row (the max group scale) and the
 // per-group codes are re-rounded onto it. A row whose group scales differ a lot (a massive-activation token) would lose
 // most of its resolution that way, so such rows keep their group codes and are computed by the fused per-group

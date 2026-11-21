@@ -2,6 +2,7 @@
 #include <shelf/quantization/bundle/bundle_util.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/quantization/exl3/exl3.h>
+#include <shelf/quantization/exl3/exl3_int8.h>
 #include <shelf/quantization/manifest/crc32.h>
 #include <shelf/quantization/quant_format.h>
 #include <shelf/quantization/manifest/runtime_resolution.h>
@@ -490,7 +491,7 @@ Status synthesize_exl3_tensor(
     const std::string trellis_name = prefix + ".trellis";
     const std::string suh_name = prefix + ".suh";
     const std::string svh_name = prefix + ".svh";
-    const std::string mul1_name = prefix + ".mul1";
+    const std::string marker_name = prefix + ".mul1";
 
     LoadedHfTensor trellis;
     Status st = load_hf_tensor(shards, trellis_name, trellis);
@@ -549,23 +550,29 @@ Status synthesize_exl3_tensor(
             ("hf exl3 svh shape or dtype mismatch: " + svh_name).c_str(), __FILE__, __LINE__);
     }
 
-    if (shards.shard_for_tensor.count(mul1_name) == 0u) {
+    if (shards.shard_for_tensor.count(marker_name) == 0u) {
         if (shards.shard_for_tensor.count(prefix + ".mcg") != 0u) {
             return Status::unsupported(
                 ("hf exl3 mcg codebook is not supported: " + canonical).c_str(), __FILE__,
                 __LINE__);
         }
         return Status::unsupported(
-            ("hf exl3 tensor has no mul1 marker: " + canonical).c_str(), __FILE__, __LINE__);
+            ("hf exl3 tensor has no .mul1 marker: " + canonical).c_str(), __FILE__, __LINE__);
     }
     LoadedHfTensor marker;
-    st = load_hf_tensor(shards, mul1_name, marker);
+    st = load_hf_tensor(shards, marker_name, marker);
     if (!st.ok()) return st;
     if (marker.spec.dtype != shelf::io::SType::I32 || !marker.spec.shape.empty() ||
         marker.bytes != 4u) {
         return Status::unsupported(
-            ("hf exl3 marker must be an I32 scalar: " + mul1_name).c_str(), __FILE__,
+            ("hf exl3 marker must be an I32 scalar: " + marker_name).c_str(), __FILE__,
             __LINE__);
+    }
+
+    uint32_t multiplier = 0;
+    std::memcpy(&multiplier, marker.data, sizeof(multiplier));
+    if (multiplier != shelf::quantization::exl3::kExl3Mul24Multiplier) {
+        return Status::unsupported("hf exl3 codebook is not mul24", __FILE__, __LINE__);
     }
 
     out.role = "weight";
@@ -579,12 +586,12 @@ Status synthesize_exl3_tensor(
         make_ref(trellis_name, "U8", trellis.data, trellis.bytes, with_crc);
     out.suh = make_ref(suh_name, "FP16", suh.data, suh.bytes, with_crc);
     out.svh = make_ref(svh_name, "FP16", svh.data, svh.bytes, with_crc);
-    out.marker = make_ref(mul1_name, "I32", marker.data, marker.bytes, with_crc);
+    out.marker = make_ref(marker_name, "I32", marker.data, marker.bytes, with_crc);
 
     source.shard_for_physical[trellis_name] = shards.shard_for_tensor.at(trellis_name);
     source.shard_for_physical[suh_name] = shards.shard_for_tensor.at(suh_name);
     source.shard_for_physical[svh_name] = shards.shard_for_tensor.at(svh_name);
-    source.shard_for_physical[mul1_name] = shards.shard_for_tensor.at(mul1_name);
+    source.shard_for_physical[marker_name] = shards.shard_for_tensor.at(marker_name);
     return Status::make_ok();
 }
 

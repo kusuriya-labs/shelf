@@ -229,32 +229,9 @@ void verify_ple(const std::string& model_dir, const shelf::qwen4exp::PleTable& t
     check(table.head_count() == 16u, "PLE head count is 16");
     const bool int6 = table.int6_w32_fp16();
     if (int6) {
-        check(table.k_bits() == 0u, "PLE INT6 W32 has no trellis K");
         check(table.row_bytes() == 130u, "PLE INT6 W32 row stride is 130 bytes");
         check(table.shard_count() == 128u, "PLE shard count is 128");
         verify_int6_source_rows(model_dir, table, config);
-    } else {
-        check(table.k_bits() >= 1u && table.k_bits() <= 16u,
-              "PLE trellis K is in range");
-        check(table.row_bytes() == 2u + 20u * table.k_bits(),
-              "PLE trellis row stride matches K");
-        check(table.shard_count() == 128u, "PLE shard count is 128");
-
-        const std::uint64_t rows_to_check[] = {
-            0u, 1u, 123456u, 2500011u, 2500012u, 123456789u, table.rows() - 1u};
-        for (const std::uint64_t row : rows_to_check) {
-            auto source = table.read_source_row(model_dir, row);
-            if (!source.ok()) {
-                std::fprintf(stderr, "PLE source row %llu failed\n",
-                             static_cast<unsigned long long>(row));
-                ++failures;
-                continue;
-            }
-            const std::uint8_t* resident = table.row_ptr(row);
-            check(resident != nullptr && std::memcmp(resident, source.value().data(),
-                                                     table.row_bytes()) == 0,
-                  "PLE packaged row matches source");
-        }
     }
 
     auto row = table.decode_row(0u);

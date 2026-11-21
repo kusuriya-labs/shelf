@@ -114,8 +114,7 @@ static bool make_exl3_head(shelf::gpu::GpuArena& arena, uint32_t vocab, uint32_t
     }
     out = {};
     out.encoding = shelf::weights::MatrixEncoding::Exl3;
-    out.quant_spec = mul24 ? shelf::quantization::QuantSpecId::EXL3_MUL24_INT8_V1
-                           : shelf::quantization::QuantSpecId::EXL3_W16A16_V1;
+    out.quant_spec = shelf::quantization::QuantSpecId::EXL3_MUL24_INT8_V1;
     out.rows = shard_vocab;
     out.cols = k;
     out.k_padded = k;
@@ -398,9 +397,8 @@ int main() {
           "sharded probabilities match the full-vocabulary tree probabilities");
 
     // EXL3 heads: each vocabulary shard must reproduce exactly the columns of the full
-    // head, for both the mul1 W16A16 path and the mul24 INT8 path.
-    for (const bool mul24 : {false, true}) {
-        const std::string tag = mul24 ? "exl3 mul24" : "exl3 mul1";
+    for (const bool mul24 : {true}) {
+        const std::string tag = "exl3 mul24";
         constexpr uint32_t eKa = 4u;
         shelf::weights::MatrixWeight full_head_exl3;
         check(make_exl3_head(arena, vocab, k, eKa, mul24, 0u, vocab, full_head_exl3),

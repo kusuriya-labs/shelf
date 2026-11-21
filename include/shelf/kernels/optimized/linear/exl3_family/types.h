@@ -1,12 +1,5 @@
 #pragma once
 
-// Shared types and I/O contracts for the EXL3 family (mul1 and mul24). Codebook-specific
-// launch declarations live in exl3_mul1.h / exl3_mul24.h.
-//
-// Unless stated otherwise, sizes are in elements (not bytes) and row strides are in
-// elements. Byte strides appear only where the launch signature names them explicitly
-// (code_row_stride_bytes, scale_row_stride_bytes).
-
 #include <shelf/kernels/optimized/linear/exl3_family/config.h>
 
 #include <shelf/core/memory/types.h>
@@ -19,7 +12,6 @@
 namespace shelf::kernel {
 
 // Output element type shared by every EXL3 launch. It is independent of the codebook
-// (mul1 / mul24) and of the activation precision (FP16 / INT8).
 enum class Exl3OutputDType : uint8_t {
     BF16,
     F32,
@@ -28,9 +20,9 @@ enum class Exl3OutputDType : uint8_t {
 // Codebook, execution phase and activation precision are independent axes. They are
 // used at the dispatch boundary; the kernels keep their existing argument fields
 // (ka, half, fast_decode, ...) until the phase-specific orchestration lands.
-enum class Exl3Codebook : uint8_t { Mul1, Mul24 };
+enum class Exl3Codebook : uint8_t { Mul24 };
 enum class Exl3Phase : uint8_t { Prefill, Decode, Verify };
-enum class Exl3ActivationType : uint8_t { FP16, BF16, INT8 };
+enum class Exl3ActivationType : uint8_t { INT8 };
 
 // ---- I/O contracts ----
 //
@@ -136,12 +128,6 @@ struct Exl3GroupedArgs {
     uint32_t output_dtype = 0;
     uint32_t ka = 0;
     uint32_t half = 0;
-    // 0: mul1 codebook (W16A16). 1: mul24 codebook (EXL3-INT8 weights, q * kExl3Int8GridStep) run as an FP16 GEMM.
-    // The trellis stays in the canonical [kt][nt] tile order in both cases. mul24 requires half == 0.
-    uint32_t mul24 = 0;
-    // With mul24: 1 quantizes the (rotated) activation per row and 128-K block to int8 and runs the iu8 WMMA with an
-    // int32 accumulator per block (EXL3-INT8, as the dense decode path); 0 is the FP16 GEMM. Requires mul24.
-    uint32_t int8_act = 0;
     std::uint64_t trellis_batch_stride = 0;
     std::uint64_t suh_batch_stride = 0;
     std::uint64_t svh_batch_stride = 0;
@@ -232,8 +218,8 @@ enum class Exl3Backend : uint8_t { Direct, ReconDense };
 // changing the kernel argument ABI or adding a dynamic branch to any __global__.
 struct Exl3KernelVariant {
     Exl3Phase phase = Exl3Phase::Decode;
-    Exl3Codebook codebook = Exl3Codebook::Mul1;
-    Exl3ActivationType activation_type = Exl3ActivationType::BF16;
+    Exl3Codebook codebook = Exl3Codebook::Mul24;
+    Exl3ActivationType activation_type = Exl3ActivationType::INT8;
     Exl3OutputDType output_type = Exl3OutputDType::BF16;
     Exl3Backend backend = Exl3Backend::Direct;
     bool grouped = false;

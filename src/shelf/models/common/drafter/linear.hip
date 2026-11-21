@@ -2,7 +2,6 @@
 #include <shelf/models/common/drafter/linear.h>
 #include <shelf/inference/execution/selectors/linear_selector.h>
 #include <shelf/kernels/optimized/activation_quantize.h>
-#include <shelf/kernels/optimized/linear/exl3_mul1.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
 #include <shelf/kernels/optimized/linear/fp8.h>
 #include <shelf/runtime/program/int8_activation_workspace.h>

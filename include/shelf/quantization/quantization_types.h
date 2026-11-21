@@ -40,7 +40,6 @@ enum class QuantSpecId : uint8_t {
     BF16_V1 = 0,
     FP8_FINEGRAINED_F32_V1 = 1,
     MXFP4_E8M0_G32_V1 = 2,
-    EXL3_W16A16_V1 = 3,
     FP8_PERTokenChannel_V1 = 4,
     EXL3_MUL24_INT8_V1 = 5,
 };
@@ -49,7 +48,6 @@ enum class ComputeSpecId : uint8_t {
     BF16_F32_BF16 = 0,
     FP8_FINEGRAINED_W8A8_F32_BF16 = 1,
     MXFP4_W4A8_F32_BF16 = 2,
-    EXL3_W16A16_F32_BF16 = 3,
     FP8_PERTokenChannel_W8A8_F32_BF16 = 4,
     EXL3_MUL24_INT8_W8A8_F32_BF16 = 5,
 };
@@ -69,8 +67,6 @@ inline Result<ComputeSpecId> preferred_gemm_compute_spec(QuantSpecId quant_spec)
             return ComputeSpecId::FP8_PERTokenChannel_W8A8_F32_BF16;
         case QuantSpecId::MXFP4_E8M0_G32_V1:
             return ComputeSpecId::MXFP4_W4A8_F32_BF16;
-        case QuantSpecId::EXL3_W16A16_V1:
-            return ComputeSpecId::EXL3_W16A16_F32_BF16;
         case QuantSpecId::EXL3_MUL24_INT8_V1:
             return ComputeSpecId::EXL3_MUL24_INT8_W8A8_F32_BF16;
     }
@@ -89,8 +85,6 @@ inline bool is_gemm_compute_compatible(
             return compute_spec == ComputeSpecId::FP8_PERTokenChannel_W8A8_F32_BF16;
         case QuantSpecId::MXFP4_E8M0_G32_V1:
             return compute_spec == ComputeSpecId::MXFP4_W4A8_F32_BF16;
-        case QuantSpecId::EXL3_W16A16_V1:
-            return compute_spec == ComputeSpecId::EXL3_W16A16_F32_BF16;
         case QuantSpecId::EXL3_MUL24_INT8_V1:
             return compute_spec == ComputeSpecId::EXL3_MUL24_INT8_W8A8_F32_BF16;
     }

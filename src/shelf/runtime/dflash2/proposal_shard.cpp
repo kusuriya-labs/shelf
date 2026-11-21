@@ -64,8 +64,7 @@ bool exl3_head_layout_valid(const shelf::weights::MatrixWeight& head) {
         (head.exl3_half && head.exl3_ka > 3u)) {
         return false;
     }
-    return head.quant_spec == shelf::quantization::QuantSpecId::EXL3_W16A16_V1 ||
-           head.quant_spec == shelf::quantization::QuantSpecId::EXL3_MUL24_INT8_V1;
+    return head.quant_spec == shelf::quantization::QuantSpecId::EXL3_MUL24_INT8_V1;
 }
 
 Status proposal_shard_exl3(
@@ -116,31 +115,7 @@ Status proposal_shard_exl3(
         return Status::make_ok();
     }
 
-    shelf::kernel::Exl3GemmArgs args{};
-    args.trellis = head.codes.data<void>();
-    args.suh = head.exl3_suh.data<void>();
-    args.svh = head.exl3_svh.data<void>();
-    args.input = hidden;
-    args.output = buffers.logits.data<float>();
-    args.rows = rows;
-    args.out_features = head.rows;
-    args.k = head.cols;
-    args.input_row_stride = hidden_stride;
-    args.output_row_stride = buffers.local_vocab;
-    args.output_dtype = 1u;
-    args.ka = head.exl3_ka;
-    args.half = head.exl3_half ? 1u : 0u;
-    args.splitk_scratch = nullptr;
-    args.splitk_floats = 0u;
-    args.splitk_splits = 1u;
-    args.xrot = nullptr;
-    args.groups = 0u;
-    const hipError_t err = shelf::kernel::launch_gemm_exl3_w16a16(args, stream);
-    if (err != hipSuccess) {
-        return Status::hip_error("proposal shard exl3 mul1 launch", hipGetErrorString(err),
-                                 __FILE__, __LINE__);
-    }
-    return Status::make_ok();
+    return Status::unsupported("proposal shard exl3 format unsupported", __FILE__, __LINE__);
 }
 
 }  // namespace

@@ -13,7 +13,6 @@ namespace shelf::quantization::exl3 {
 constexpr float kExl3Int8GridStep = 4.0f * 887.0f / 131072.0f;
 constexpr uint32_t kExl3TileDim = 16;
 // The marker tensor of an EXL3 matrix holds the codebook multiplier, which names the format.
-constexpr uint32_t kExl3Mul1Multiplier = 0x83DCD12Du;
 constexpr uint32_t kExl3Mul24Multiplier = 0xDCD12Du;
 
 // trellis: uint16[kt][nt][16 * bits], little endian, one 16x16 tile per [kt][nt].

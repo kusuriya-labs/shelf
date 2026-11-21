@@ -18,7 +18,6 @@
 #include <shelf/kernels/optimized/embedding.h>
 #include <shelf/kernels/optimized/linear/bf16.h>
 #include <shelf/kernels/optimized/linear/fp8.h>
-#include <shelf/kernels/optimized/linear/exl3_mul1.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
 #include <shelf/runtime/program/int8_activation_workspace.h>
 #include <shelf/models/qwen35/runtime/selector_types.h>
@@ -1081,8 +1080,7 @@ Status lm_head_validate(
             return Status::invalid_argument("dflash2 target lm_head exl3 layout invalid",
                                             __FILE__, __LINE__);
         }
-        if (weight.quant_spec != quantization::QuantSpecId::EXL3_W16A16_V1 &&
-            weight.quant_spec != quantization::QuantSpecId::EXL3_MUL24_INT8_V1) {
+        if (weight.quant_spec != quantization::QuantSpecId::EXL3_MUL24_INT8_V1) {
             return Status::unsupported("dflash2 target lm_head exl3 format unsupported",
                                        __FILE__, __LINE__);
         }
@@ -1168,31 +1166,7 @@ Status lm_head_gemm(
             }
             return Status::make_ok();
         }
-        ::shelf::kernel::Exl3GemmArgs args;
-        args.trellis = weight.codes.data<void>();
-        args.suh = weight.exl3_suh.data<void>();
-        args.svh = weight.exl3_svh.data<void>();
-        args.input = hidden;
-        args.output = logits;
-        args.rows = rows;
-        args.out_features = weight.rows;
-        args.k = weight.cols;
-        args.input_row_stride = weight.cols;
-        args.output_row_stride = logits_row_stride;
-        args.output_dtype = 1u;
-        args.ka = weight.exl3_ka;
-        args.half = weight.exl3_half ? 1u : 0u;
-        args.splitk_scratch = nullptr;
-        args.splitk_floats = 0u;
-        args.splitk_splits = 1u;
-        args.xrot = nullptr;
-        args.groups = 0u;
-        const hipError_t err = ::shelf::kernel::launch_gemm_exl3_w16a16(args, stream);
-        if (err != hipSuccess) {
-            return Status::hip_error("dflash2 target lm_head exl3 gemm launch",
-                                     hipGetErrorString(err), __FILE__, __LINE__);
-        }
-        return Status::make_ok();
+        return Status::unsupported("dflash2 target lm_head exl3 format unsupported", __FILE__, __LINE__);
     }
     if (weight.encoding == shelf::weights::MatrixEncoding::Bf16) {
         const auto config =

@@ -116,6 +116,11 @@ int main() {
         std::ofstream(root / "ngram_manifest.json") << "{";
         check(!PleTable::load(root.string(), config).ok(), "reject corrupt manifest");
     }
+    fs::remove(root / "ngram_manifest.json");
+    std::ofstream(root / "ngram_embedding.safetensors") << "exl3";
+    auto legacy = PleTable::load(root.string(), config);
+    check(!legacy.ok() && legacy.status().code() == shelf::Status::Code::unsupported,
+          "reject EXL3 PLE");
     unsetenv("SHELF_PLE_HOT_CACHE_GIB");
     fs::remove_all(root);
     return failures ? 1 : 0;

@@ -47,6 +47,6 @@ with tempfile.TemporaryDirectory(prefix='plamo-exl3-', dir=build) as tmp:
     tensors[prefix + 'mixer.q_proj.mul1'] = torch.tensor(0x83dcd12d - (1 << 32), dtype=torch.int32)
     save_file(tensors, str(checkpoint))
     bad = subprocess.run(command, capture_output=True, text=True, timeout=180)
-    if bad.returncode == 0 or 'EXL3 requires integer-rate mul24' not in bad.stderr:
+    if bad.returncode == 0 or 'hf exl3 codebook is not mul24' not in bad.stderr:
         raise RuntimeError(f'invalid marker accepted: {bad.stdout}\n{bad.stderr}')
     print('PLaMo EXL3 synthetic prefill/decode and marker rejection passed')

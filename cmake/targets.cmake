@@ -91,15 +91,12 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/linear/fp8_ptpc.hip
     src/shelf/kernels/optimized/linear/lm_head_int8.hip
     src/shelf/kernels/optimized/linear/mxfp4.hip
-    src/shelf/kernels/optimized/linear/exl3_family/mul1/prefill.hip
     src/shelf/kernels/optimized/linear/exl3_family/mul24/decode.hip
     src/shelf/kernels/optimized/linear/exl3_family/mul24/projection.hip
     src/shelf/kernels/optimized/linear/exl3_family/mul24/projection_prefill.hip
     src/shelf/kernels/optimized/linear/exl3_family/mul24/prefill.hip
     src/shelf/kernels/optimized/linear/exl3_family/mul24/prefill_wmma.hip
-    src/shelf/kernels/optimized/linear/exl3_family/mul1/verify.hip
     src/shelf/kernels/optimized/linear/exl3_family/mul24/workspace.cpp
-    src/shelf/kernels/optimized/linear/exl3_family/mul1/launch_plan.cpp
     src/shelf/kernels/optimized/linear/exl3_family/mul24/split_plan.cpp
     src/shelf/kernels/optimized/linear/exl3_family/variant.cpp
     src/shelf/kernels/optimized/attention/paged_decode.hip
@@ -130,7 +127,6 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
 set(SHELF_FUSED_KERNEL_SOURCES
     src/shelf/kernels/fused/attention/octave.hip
     src/shelf/kernels/fused/exl3/decode.hip
-    src/shelf/kernels/fused/exl3/epilogue.hip
     src/shelf/kernels/fused/exl3/group_gemm.hip
     src/shelf/kernels/fused/exl3/grouped.hip
     src/shelf/kernels/fused/exl3/producer_rotate.hip

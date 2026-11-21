@@ -5,6 +5,7 @@
 #include <shelf/quantization/manifest/quantized_manifest.h>
 #include <shelf/quantization/manifest/runtime_resolution.h>
 #include <shelf/quantization/quant_format.h>
+#include <shelf/quantization/exl3/exl3_int8.h>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -741,6 +742,16 @@ Result<QuantizedTensorView> QuantizedModelReader::resolve(const std::string& log
         std::size_t nb = 0;
         auto r = fetch(t.marker->tensor, nb);
         if (!r.ok()) return r.status();
+        if (t.encoding == QuantizedEncoding::Exl3) {
+            uint32_t multiplier = 0;
+            if (nb != sizeof(multiplier)) {
+                return Status::unsupported("exl3 marker must be an I32 scalar", __FILE__, __LINE__);
+            }
+            std::memcpy(&multiplier, r.value(), sizeof(multiplier));
+            if (multiplier != shelf::quantization::exl3::kExl3Mul24Multiplier) {
+                return Status::unsupported("exl3 codebook is not mul24", __FILE__, __LINE__);
+            }
+        }
         view.marker = ByteSpan{r.value(), nb};
     }
     if (t.data) {

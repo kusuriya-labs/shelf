@@ -52,7 +52,7 @@ rt::WeightSlot expert_plane(uint32_t rows, uint32_t cols, bool exl3 = false) {
     if (exl3) {
         s.encoding = static_cast<uint8_t>(shelf::weights::MatrixEncoding::Exl3);
         s.compute_spec = static_cast<uint8_t>(
-            shelf::quantization::ComputeSpecId::EXL3_W16A16_F32_BF16);
+            shelf::quantization::ComputeSpecId::EXL3_MUL24_INT8_W8A8_F32_BF16);
         s.codes = reinterpret_cast<const void*>(0x5000);
         s.scales = nullptr;
         s.row_ref = nullptr;
@@ -60,8 +60,8 @@ rt::WeightSlot expert_plane(uint32_t rows, uint32_t cols, bool exl3 = false) {
         s.exl3_svh = reinterpret_cast<const void*>(0x7000);
         s.exl3_marker = reinterpret_cast<const void*>(0x8000);
         s.exl3_ka = 3u;
-        s.exl3_half = 1u;
-        const uint64_t words = 16u * 3u + 8u;
+        s.exl3_half = 0u;
+        const uint64_t words = 16u * 3u;
         s.codes_row_stride_bytes =
             static_cast<uint32_t>((static_cast<uint64_t>(rows) / 16u) * words * 2u);
         s.codes_batch_stride_bytes = s.codes_row_stride_bytes;
@@ -366,7 +366,7 @@ int main() {
         }
         const std::string want =
             "MOE_ROUTER,MOE_PLAN_SCAN,MOE_PLAN_SCATTER,"
-            "LINEAR_EXL3_W16A16_GROUPED,SWIGLU,LINEAR_EXL3_W16A16_GROUPED,"
+            "LINEAR_EXL3_INT8_GROUPED,SWIGLU,LINEAR_EXL3_INT8_GROUPED,"
             "LINEAR_BF16,LINEAR_BF16,SWIGLU,LINEAR_BF16,LINEAR_BF16,SIGMOID,"
             "MOE_COMBINE,RESIDUAL_ADD";
         const std::string got = kernel_sequence(program, ffn_start);
@@ -397,7 +397,7 @@ int main() {
         if (built.ok()) {
             bool grouped = false;
             for (const auto& d : built.value().dispatches)
-                grouped = grouped || d.kernel_id == rt::KernelId::LINEAR_EXL3_W16A16_GROUPED;
+                grouped = grouped || d.kernel_id == rt::KernelId::LINEAR_EXL3_INT8_GROUPED;
             check(grouped, "the mul24 expert plane dispatches the grouped EXL3 kernel");
         }
     }

@@ -13,7 +13,7 @@ namespace shelf::execution {
 // execution so the whole table can be tested on the CPU; it is not passed to the GPU.
 struct Exl3DispatchDecision {
     ::shelf::kernel::Exl3Phase phase = ::shelf::kernel::Exl3Phase::Decode;
-    ::shelf::kernel::Exl3Codebook codebook = ::shelf::kernel::Exl3Codebook::Mul1;
+    ::shelf::kernel::Exl3Codebook codebook = ::shelf::kernel::Exl3Codebook::Mul24;
     ::shelf::kernel::exl3_detail::Exl3Backend backend =
         ::shelf::kernel::exl3_detail::Exl3Backend::Direct;
     // nullptr when the direct path is used; otherwise why the dense path was not taken.

@@ -2,7 +2,6 @@
 // phase / codebook / activation / grouped combinations are rejected on the host side.
 
 #include <shelf/kernels/optimized/linear/exl3_family/types.h>
-#include <shelf/kernels/optimized/linear/exl3_mul1.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
 
 #include <cstdint>
@@ -27,9 +26,6 @@ int main() {
     using namespace shelf::kernel::exl3_detail;
 
     // Traits agree with the public constants they currently mirror.
-    static_assert(shelf::kernel::exl3_detail::mul1::Traits::kRowTile == kExl3W16A16RowTile);
-    static_assert(shelf::kernel::exl3_detail::mul1::Traits::kOutBlock == kExl3W16A16OutBlock);
-    static_assert(shelf::kernel::exl3_detail::mul1::Traits::kThreads == kExl3W16A16Threads);
     static_assert(shelf::kernel::exl3_detail::mul24::Traits::kRowTile == kExl3W16A16RowTile);
     static_assert(shelf::kernel::exl3_detail::mul24::Traits::kOutBlock == kExl3W16A16OutBlock);
     static_assert(shelf::kernel::exl3_detail::mul24::Traits::kThreads == kExl3W16A16Threads);
@@ -40,25 +36,12 @@ int main() {
     check("policy size", sizeof(Exl3ExecutionPolicy) == 8u);
 
     Exl3KernelVariant v;
-    v.codebook = Exl3Codebook::Mul1;
-    v.activation_type = Exl3ActivationType::FP16;
-    check("mul1 fp16", exl3_variant_supported(v));
-    v.activation_type = Exl3ActivationType::BF16;
-    check("mul1 bf16 input", exl3_variant_supported(v));
-    v.activation_type = Exl3ActivationType::INT8;
-    check("mul1 int8 rejected", !exl3_variant_supported(v));
-
-    v = Exl3KernelVariant{};
-    v.codebook = Exl3Codebook::Mul24;
-    v.activation_type = Exl3ActivationType::FP16;
-    check("mul24 fp16", exl3_variant_supported(v));
-    v.activation_type = Exl3ActivationType::INT8;
     check("mul24 int8", exl3_variant_supported(v));
-    v.activation_type = Exl3ActivationType::BF16;
-    check("mul24 bf16 rejected", !exl3_variant_supported(v));
-
-    v = Exl3KernelVariant{};
+    v.codebook = static_cast<Exl3Codebook>(255u);
+    check("unknown codebook rejected", !exl3_variant_supported(v));
     v.codebook = Exl3Codebook::Mul24;
+    v.activation_type = static_cast<Exl3ActivationType>(255u);
+    check("unknown activation rejected", !exl3_variant_supported(v));
     v.activation_type = Exl3ActivationType::INT8;
     v.grouped = true;
     v.pre_rotated = true;

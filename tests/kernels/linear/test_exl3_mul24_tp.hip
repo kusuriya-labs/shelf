@@ -6,7 +6,6 @@
 #include <shelf/kernels/fused/exl3/rotate_quantize.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/inference/execution/exl3_dense_gemm.h>
-#include <shelf/kernels/optimized/linear/exl3_mul1.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
 #include <shelf/quantization/exl3/exl3_int8.h>
 #include <shelf/weights/canonical_partition.h>

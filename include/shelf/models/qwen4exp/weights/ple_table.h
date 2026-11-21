@@ -25,7 +25,6 @@ class PleTable {
 public:
     // Packaged row layout held in host RAM.
     enum class TableFormat : std::uint8_t {
-        Exl3Trellis = 0,
         Fp8E4M3 = 1,
         Int6W32Fp16 = 2,
         Ngram = 3,
@@ -49,7 +48,6 @@ public:
     [[nodiscard]] bool int6_w32_fp16() const noexcept {
         return format_ == TableFormat::Int6W32Fp16;
     }
-    [[nodiscard]] std::uint32_t k_bits() const noexcept { return k_bits_; }
     [[nodiscard]] std::uint32_t shard_count() const noexcept { return shard_count_; }
     [[nodiscard]] std::uint32_t shard_rows() const noexcept { return shard_rows_; }
     [[nodiscard]] std::uint64_t payload_bytes() const noexcept { return payload_bytes_; }
@@ -102,9 +100,6 @@ public:
         const std::vector<std::int32_t>& prefix_tail,
         std::span<const std::int32_t> tokens) const;
 
-    // Re-read one packaged row from the source file. Validation only.
-    Result<std::vector<std::uint8_t>> read_source_row(const std::string& model_dir,
-                                                      std::uint64_t row) const;
 
 private:
     struct ArtifactSource {
@@ -150,7 +145,7 @@ private:
                                       const PleTable& table);
     std::size_t head_for_row(std::uint64_t row) const noexcept;
 
-    TableFormat format_ = TableFormat::Exl3Trellis;
+    TableFormat format_ = TableFormat::Fp8E4M3;
     float fp8_scale_ = 1.0f;
 
     struct FreeDeleter {
@@ -206,11 +201,9 @@ private:
                                                         std::uint32_t shard_rows);
 
     std::string file_path_;
-    std::uint64_t data_base_ = 0;
     std::uint64_t rows_ = 0;
     std::uint32_t row_width_ = 0;
     std::uint32_t row_bytes_ = 0;
-    std::uint32_t k_bits_ = 0;
     std::uint32_t shard_count_ = 0;
     std::uint32_t shard_rows_ = 0;
     std::uint32_t ngram_size_ = 0;

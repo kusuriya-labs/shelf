@@ -530,8 +530,7 @@ Status execute_program_range(
                           i, ::shelf::runtime::kernel_to_name(binding.kernel_id), domain.rows);
             return Status::unsupported(detail, __FILE__, __LINE__);
         }
-        if (binding.kernel_id == ::shelf::runtime::KernelId::LINEAR_EXL3_W16A16 ||
-            binding.kernel_id == ::shelf::runtime::KernelId::LINEAR_EXL3_INT8) {
+        if (binding.kernel_id == ::shelf::runtime::KernelId::LINEAR_EXL3_INT8) {
             return Status::unsupported(
                 "exl3 linear has no correctness-path kernel", __FILE__, __LINE__);
         }

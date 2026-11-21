@@ -780,9 +780,6 @@ Result<MatrixWeight> load_expert_matrix(const qqb::QuantizedModelReader& reader,
         return Status::make_ok();
     };
 
-    // The marker is the codebook multiplier and names the format (mul1 W16A16 or mul24 EXL3-INT8). One plane
-    // is decoded by one kernel, so every expert of it must carry the same multiplier.
-    std::uint32_t multiplier = 0;
     for (std::uint32_t local = 0; local < local_experts; ++local) {
         const std::uint32_t expert = expert_begin + local;
         const std::string name =
@@ -803,18 +800,9 @@ Result<MatrixWeight> load_expert_matrix(const qqb::QuantizedModelReader& reader,
         }
         std::uint32_t expert_multiplier = 0;
         std::memcpy(&expert_multiplier, value.marker.data, sizeof(expert_multiplier));
-        if (expert_multiplier != shelf::quantization::exl3::kExl3Mul1Multiplier &&
-            expert_multiplier != shelf::quantization::exl3::kExl3Mul24Multiplier) {
+        if (expert_multiplier != shelf::quantization::exl3::kExl3Mul24Multiplier) {
             return Status::unsupported(
-                ("Qwen4Exp expert codebook multiplier is neither mul1 nor mul24: " + name)
-                    .c_str(),
-                __FILE__, __LINE__);
-        }
-        if (local == 0u) multiplier = expert_multiplier;
-        if (expert_multiplier != multiplier) {
-            return Status::invalid_argument(
-                ("Qwen4Exp expert plane mixes mul1 and mul24 experts: " + name).c_str(),
-                __FILE__, __LINE__);
+                ("Qwen4Exp expert codebook is not mul24: " + name).c_str(), __FILE__, __LINE__);
         }
         if (value.codes.size != trellis_bytes || value.suh.size != suh_bytes ||
             value.svh.size != svh_bytes || value.marker.size != 4u) {
@@ -857,20 +845,15 @@ Result<MatrixWeight> load_expert_matrix(const qqb::QuantizedModelReader& reader,
         Status st = allocate_host_planes();
         if (!st.ok()) return st;
     }
-    shelf::weights::apply_default_compute_spec(w);
-    shelf::weights::apply_default_compute_spec(host_plane);
-    if (multiplier == shelf::quantization::exl3::kExl3Mul24Multiplier) {
-        if (half) {
-            return Status::unsupported(
-                ("Qwen4Exp mul24 expert supports integer bit rates only: " + first_name)
-                    .c_str(),
-                __FILE__, __LINE__);
-        }
-        w.quant_spec = shelf::quantization::QuantSpecId::EXL3_MUL24_INT8_V1;
-        w.compute_spec = shelf::quantization::ComputeSpecId::EXL3_MUL24_INT8_W8A8_F32_BF16;
-        host_plane.quant_spec = w.quant_spec;
-        host_plane.compute_spec = w.compute_spec;
+    if (half) {
+        return Status::unsupported(
+            ("Qwen4Exp mul24 expert supports integer bit rates only: " + first_name).c_str(),
+            __FILE__, __LINE__);
     }
+    w.quant_spec = shelf::quantization::QuantSpecId::EXL3_MUL24_INT8_V1;
+    w.compute_spec = shelf::quantization::ComputeSpecId::EXL3_MUL24_INT8_W8A8_F32_BF16;
+    host_plane.quant_spec = w.quant_spec;
+    host_plane.compute_spec = w.compute_spec;
     return w;
 }
 
@@ -923,13 +906,6 @@ Status load_moe(const qqb::QuantizedModelReader& reader, const std::string& pref
                                    stream, out.down_experts_host);
     if (!down.ok()) return down.status();
     out.down_experts = down.release();
-    // gate/up/down of one layer are one format; a mul1/mul24 split would hide a requantization mistake.
-    if (out.gate_experts.compute_spec != out.up_experts.compute_spec ||
-        out.gate_experts.compute_spec != out.down_experts.compute_spec) {
-        return Status::invalid_argument(
-            ("Qwen4Exp layer mixes mul1 and mul24 expert projections: " + prefix).c_str(),
-            __FILE__, __LINE__);
-    }
     return Status::make_ok();
 }
 
@@ -1666,16 +1642,6 @@ Status validate_qwen4exp_rank(const Qwen4ExpRankWeights& weights,
         st = expect_experts(w.mlp.down_experts, w.mlp.down_experts_host, local_experts,
                             hidden, intermediate, "down_experts");
         if (!st.ok()) return st;
-        // The expert planes of a model are one EXL3 format: mul1 and mul24 are not mixed across projections or layers.
-        for (const MatrixWeight* plane :
-             {&w.mlp.gate_experts, &w.mlp.up_experts, &w.mlp.down_experts}) {
-            if (plane->encoding == shelf::weights::MatrixEncoding::Exl3 &&
-                plane->compute_spec != weights.layers[0].mlp.gate_experts.compute_spec) {
-                return Status::invalid_argument(
-                    "Qwen4Exp expert planes mix mul1 and mul24 EXL3", __FILE__, __LINE__);
-            }
-        }
-
         const bool has_ple = config.layer_has_ple(layer);
         if (w.ple.present != has_ple) {
             return Status::invalid_argument("Qwen4Exp PLE presence mismatch", __FILE__,
