@@ -976,6 +976,7 @@ std::uint64_t Qwen4ExpRankWeights::resident_bytes() const noexcept {
     std::uint64_t total = 0;
     (void)add_matrix(total, embed_tokens);
     (void)add_matrix(total, lm_head);
+    (void)add_matrix(total, mtp_lm_head);
     (void)add_hyper(total, mixer);
     if (mtp.present) {
         (void)add_matrix(total, mtp.fc_hidden);
@@ -1169,6 +1170,14 @@ Result<Qwen4ExpRankWeights> load_qwen4exp_rank(const std::string& model_dir,
         st = load_matrix(reader, "model.language_model.lm_head.weight", arena, stream,
                          lm_head_options, out.lm_head);
         if (!st.ok()) return st;
+        if (options.load_mtp && options.tp_size > 1u && options.tp_rank == 0u) {
+            WeightLoadOptions full_head_options = weight_options;
+            full_head_options.partition_plan = nullptr;
+            full_head_options.quantize_int8_w32 = options.quantize_lm_head_int8_w32;
+            st = load_matrix(reader, "model.language_model.lm_head.weight", arena, stream,
+                             full_head_options, out.mtp_lm_head);
+            if (!st.ok()) return st;
+        }
     }
     if (load_final && !options.mtp_only) {
         st = load_mixer(reader, arena, stream, weight_options, out.mixer);

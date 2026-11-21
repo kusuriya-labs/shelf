@@ -4,7 +4,9 @@
 - 2048 token の prose prompt を使い、partial accept を含む条件で 64 token を生成する。
 - 同じ prompt / sampling で `shelf-compute` を 2 回実行する。
 - `--mtp` ありとなしの GENERATED_IDS が完全一致することを要求する。
-- partial accept の compact log replay が実際に走ったことも確認する。
+- partial accept が実際に起きたことも確認する。
+- GDN を巻き戻す融合 verify と、target の 1 行 decode をそのまま使う安全経路の
+  どちらでも成立するよう、partial accept 数または GDN restore 数の一方を要求する。
 - model dir は SHELF_MODEL_DIR_MTP（優先）または SHELF_MODEL_DIR、
   build dir は SHELF_BUILD_DIR で指定する。無い場合は exit 77 で skip する。
 """
@@ -118,15 +120,16 @@ def main() -> int:
             return 1
         rounds = metric(mtp.stdout, "MTP_ROUNDS")
         restores = metric(mtp.stdout, "MTP_GDN_RESTORES")
+        partials = metric(mtp.stdout, "MTP_PARTIAL_ACCEPTS")
         if rounds == 0:
             print("FAIL: MTP did not execute a speculative round", file=sys.stderr)
             return 1
-        if restores == 0:
+        if restores == 0 and partials == 0:
             print("FAIL: MTP test did not exercise partial accept", file=sys.stderr)
             return 1
         print(
             f"MTP_PARITY: PASS ({len(target_ids)} tokens, rounds={rounds}, "
-            f"gdn_restores={restores})"
+            f"partial_accepts={partials}, gdn_restores={restores})"
         )
         return 0
 

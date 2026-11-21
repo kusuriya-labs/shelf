@@ -230,6 +230,7 @@ class ComputeHarness:
                  model_path: Path | str | None = None,
                  working_set_reserve_gib: int | None = None,
                  tp: int = 1,
+                 ep: int = 1,
                  devices: str | None = None,
                  auto_arena: bool = False,
                  prefix_cache_enabled: bool = True,
@@ -260,6 +261,7 @@ class ComputeHarness:
         self.model_path = Path(model_path) if model_path is not None else None
         self.working_set_reserve_gib = working_set_reserve_gib
         self.tp = tp
+        self.ep = ep
         self.devices = devices
         self.proc: subprocess.Popen | None = None
         self.stderr_lines: list[str] = []
@@ -273,7 +275,9 @@ class ComputeHarness:
         self.arena_gib = arena_gib
         if self.tp > 1 and not self.devices:
             raise Failure("devices is required when tp > 1")
-        device_arg = self.devices if self.tp > 1 else str(_test_device(self.device))
+        if self.ep > 1 and not self.devices:
+            raise Failure("devices is required when ep > 1")
+        device_arg = self.devices if self.tp > 1 or self.ep > 1 else str(_test_device(self.device))
         argv = [
             str(binary),
             "--model-dir", str(self.model_path or model_dir()),
@@ -311,6 +315,8 @@ class ComputeHarness:
             argv += ["--rope-factor", self.rope_factor]
         if self.tp > 1:
             argv += ["--tensor-parallel", str(self.tp)]
+        if self.ep > 1:
+            argv += ["--expert-parallel", str(self.ep)]
         reserve = _test_working_set_reserve_gib(self.working_set_reserve_gib)
         if reserve is not None:
             argv += ["--working-set-reserve-gib", str(reserve)]

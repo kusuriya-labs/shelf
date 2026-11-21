@@ -400,7 +400,7 @@ std::size_t LoadedModel::mtp_drafter_reserve_bytes(
     const MtpExecutorTerms terms = mtp_executor_terms(*this, rows);
     shelf::weights::Exl3LinearShape shape;
     if (qwen4exp_ != nullptr) {
-        shape = shelf::qwen4exp::mtp_exl3_linear_shape(qwen4exp_->weights().mtp);
+        shape = shelf::qwen4exp::mtp_exl3_linear_shape(qwen4exp_->weights());
     }
     return shelf::qwen35::runtime::mtp_drafter_reserve_bytes(
         hybrid_config(), options, terms.token_row_intermediate,
@@ -417,7 +417,7 @@ std::size_t LoadedModel::mtp_spec_batch_reserve_bytes(
     per_request.allocate_spec_buffers = false;
     shelf::weights::Exl3LinearShape shape;
     if (qwen4exp_ != nullptr) {
-        shape = shelf::qwen4exp::mtp_exl3_linear_shape(qwen4exp_->weights().mtp);
+        shape = shelf::qwen4exp::mtp_exl3_linear_shape(qwen4exp_->weights());
     }
     const std::size_t drafter = shelf::qwen35::runtime::mtp_drafter_reserve_bytes(
         hybrid_config(), per_request, terms.token_row_intermediate,
@@ -454,7 +454,7 @@ Result<shelf::qwen35::runtime::MtpDrafterInput> LoadedModel::mtp_drafter_input(
         if (!lowered.ok()) return lowered.status();
         input.lowered = lowered.release();
         input.exl3_linear_shape =
-            shelf::qwen4exp::mtp_exl3_linear_shape(qwen4exp_->weights().mtp);
+            shelf::qwen4exp::mtp_exl3_linear_shape(qwen4exp_->weights());
         input.hidden_width = static_cast<std::uint32_t>(
             qwen4exp_->text_config().hc_count * qwen4exp_->text_config().hidden_size);
         input.wide_hidden = true;

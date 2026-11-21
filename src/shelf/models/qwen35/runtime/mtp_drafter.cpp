@@ -123,20 +123,23 @@ Status copy_hidden_to_input(MtpDrafter& drafter, const gpu::Tensor& source,
 }
 
 Status cache_target_hidden(MtpDrafter& drafter, const Executor& target,
-                           uint32_t row_base, uint32_t rows, hipStream_t stream) {
+                           uint32_t row_base, uint32_t rows, uint32_t dst_row,
+                           hipStream_t stream) {
     if (rows == 0u) return Status::make_ok();
     if (drafter.hidden_cache.ndim() == 0) {
         return Status::invalid_state("mtp drafter has no hidden cache", __FILE__,
                                      __LINE__);
     }
-    if (rows > drafter.hidden_cache.dim(0)) {
+    if (rows > drafter.hidden_cache.dim(0) ||
+        dst_row > drafter.hidden_cache.dim(0) - rows) {
         return Status::out_of_range("mtp hidden cache rows exceeded", __FILE__, __LINE__);
     }
     auto scope = shelf::gpu::ScopedDevice::create(drafter.target_device);
     if (!scope.ok()) return scope.status();
     const std::size_t width = drafter.hidden_width;
     const hipError_t err = hipMemcpyAsync(
-        drafter.hidden_cache.data<void>(),
+        static_cast<std::uint8_t*>(drafter.hidden_cache.data<void>()) +
+            static_cast<std::size_t>(dst_row) * width * sizeof(bf16_t),
         static_cast<const std::uint8_t*>(target.normed_token_hidden.data<void>()) +
             static_cast<std::size_t>(row_base) * width * sizeof(bf16_t),
         static_cast<std::size_t>(rows) * width * sizeof(bf16_t),
@@ -464,6 +467,8 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
     drafter->wide_hidden = input.wide_hidden;
     drafter->target_pool = &target_gdn_pool;
     drafter->target_stream = stream;
+    drafter->serial_verify =
+        target->qsa_state_pool != nullptr || target->ple_conv_state_pool != nullptr;
     const hipError_t device_err = hipGetDevice(&drafter->target_device);
     if (device_err != hipSuccess) {
         return Status::hip_error("hipGetDevice", hipGetErrorString(device_err), __FILE__,
@@ -852,7 +857,7 @@ Result<MtpPrefillOutput> mtp_spec_prefill(
                                                   stream);
                 if (!mtp_output.ok()) return mtp_output.status();
             }
-            Status cache = cache_target_hidden(drafter, target, last_row - begin, 1u,
+            Status cache = cache_target_hidden(drafter, target, last_row - begin, 1u, 0u,
                                                stream);
             if (!cache.ok()) return cache;
             drafter.last_tokens.assign(1u, prompt_tokens[last_row]);
@@ -904,7 +909,7 @@ Result<MtpIterationOutput> mtp_decode_only(
     drafter.sample_index += 1u;
     auto sampled = copy_sampled_token(executed.value().sampled_tokens, stream);
     if (!sampled.ok()) return sampled.status();
-    Status cache = cache_target_hidden(drafter, target, 0u, 1u, stream);
+    Status cache = cache_target_hidden(drafter, target, 0u, 1u, 0u, stream);
     if (!cache.ok()) return cache;
     drafter.last_tokens.assign(1u, pending_token);
     drafter.last_position = position;
@@ -915,6 +920,68 @@ Result<MtpIterationOutput> mtp_decode_only(
     output.pending_token = sampled.value();
     output.finished = qwen_hybrid::is_stop_token(target.model.config->stop_tokens,
                                                  sampled.value());
+    return output;
+}
+
+Result<MtpIterationOutput> mtp_verify_serial(
+    MtpDrafter& drafter,
+    Executor& target,
+    state::PagedSequenceState& sequence,
+    int32_t pending_token,
+    uint32_t remaining_tokens,
+    const MtpDraftResult& plan,
+    hipStream_t stream) {
+    const uint32_t drafts = plan.drafts;
+    std::vector<int32_t> verify_tokens(drafts + 1u);
+    verify_tokens[0] = pending_token;
+    for (uint32_t i = 0u; i < drafts; ++i) verify_tokens[i + 1u] = plan.proposals[i];
+
+    MtpIterationOutput output;
+    output.pending_token = pending_token;
+    uint32_t accepted = 0u;
+    uint32_t emitted = 0u;
+    uint32_t committed = 0u;
+    int32_t pending = pending_token;
+    bool finished = false;
+    for (uint32_t i = 0u; i <= drafts; ++i) {
+        std::vector<int32_t> row{verify_tokens[i]};
+        auto step = run_target(
+            drafter, target, sequence, row, plan.position + i, true, true, 1u,
+            ::shelf::runtime::ExecutionClass::DECODE, false, drafter.sampling,
+            drafter.sample_index + i, nullptr, stream);
+        if (!step.ok()) return step.status();
+        Status cache = cache_target_hidden(drafter, target, 0u, 1u, i, stream);
+        if (!cache.ok()) return cache;
+        auto sampled = copy_sampled_token(step.value().sampled_tokens, stream);
+        if (!sampled.ok()) return sampled.status();
+        committed = i + 1u;
+        bool keep_verifying = false;
+        if (i == drafts) {
+            accepted = drafts;
+            output.emitted[emitted++] = sampled.value();
+            pending = sampled.value();
+        } else if (sampled.value() == plan.proposals[i]) {
+            accepted = i + 1u;
+            output.emitted[emitted++] = plan.proposals[i];
+            pending = plan.proposals[i];
+            keep_verifying = true;
+        } else {
+            output.emitted[emitted++] = sampled.value();
+            pending = sampled.value();
+        }
+        finished = qwen_hybrid::is_stop_token(target.model.config->stop_tokens,
+                                              output.emitted[emitted - 1u]);
+        if (!keep_verifying || finished || emitted >= remaining_tokens) break;
+    }
+    output.emitted_count = emitted;
+    output.num_accepted = accepted;
+    output.pending_token = pending;
+    output.finished = finished;
+    drafter.sample_index += committed;
+    drafter.last_tokens.assign(verify_tokens.begin(), verify_tokens.begin() + committed);
+    drafter.last_position = plan.position;
+    drafter.last_hidden_offset = 0u;
+    sequence.position = plan.position + committed;
     return output;
 }
 
@@ -957,7 +1024,7 @@ Result<MtpIterationOutput> accept_verified(
     }
     if (accepted_drafts == drafts) {
         const uint32_t committed = drafts + 1u;
-        Status cache = cache_target_hidden(drafter, target, row_base, committed, stream);
+        Status cache = cache_target_hidden(drafter, target, row_base, committed, 0u, stream);
         if (!cache.ok()) return cache;
         drafter.last_tokens = verify_tokens;
         drafter.last_position = position;
@@ -1018,7 +1085,7 @@ Result<MtpIterationOutput> accept_verified(
             if (!st.ok()) return st;
         }
         const auto compact_done = std::chrono::steady_clock::now();
-        Status cache = cache_target_hidden(drafter, target, row_base, committed, stream);
+        Status cache = cache_target_hidden(drafter, target, row_base, committed, 0u, stream);
         if (!cache.ok()) return cache;
         sequence.position = position + committed;
         const uint32_t required = ceil_div_u32(sequence.position, page_tokens);
@@ -1177,6 +1244,27 @@ Result<MtpIterationOutput> mtp_spec_step(
     }
 
     const auto draft_done = std::chrono::steady_clock::now();
+    if (drafter.serial_verify) {
+        auto output = mtp_verify_serial(drafter, target, target_sequence, pending_token,
+                                        remaining_tokens, plan, stream);
+        if (!output.ok()) return output.status();
+        drafter.timing.rounds += 1u;
+        drafter.timing.accepted_drafts += output.value().num_accepted;
+        drafter.timing.generated_tokens += output.value().emitted_count;
+        drafter.timing.verify_rows += static_cast<uint32_t>(drafter.last_tokens.size());
+        if (output.value().num_accepted == plan.drafts)
+            drafter.timing.full_accepts += 1u;
+        else
+            drafter.timing.partial_accepts += 1u;
+        const auto finished_at = std::chrono::steady_clock::now();
+        drafter.timing.draft_ms +=
+            std::chrono::duration<double, std::milli>(draft_done - started).count();
+        drafter.timing.verify_ms += std::chrono::duration<double, std::milli>(
+            finished_at - draft_done).count();
+        drafter.timing.round_ms += std::chrono::duration<double, std::milli>(
+            finished_at - started).count();
+        return output;
+    }
     std::vector<MtpGdnRankState> rank_states = all_rank_states(drafter);
     std::vector<int32_t> verify_tokens(plan.drafts + 1u);
     verify_tokens[0] = pending_token;
@@ -1399,6 +1487,31 @@ Result<MtpSpecBatchOutput> mtp_spec_step_batch(
         return Status::out_of_range("mtp batch: more slots than the context holds",
                                     __FILE__, __LINE__);
     }
+    const auto serial_started = std::chrono::steady_clock::now();
+    if (slots.front().drafter != nullptr && slots.front().drafter->serial_verify) {
+        MtpSpecBatchOutput out;
+        out.slots.resize(slots.size());
+        for (std::size_t i = 0u; i < slots.size(); ++i) {
+            const MtpSpecBatchSlot& slot = slots[i];
+            if (slot.drafter == nullptr || slot.sequence == nullptr) {
+                return Status::invalid_argument("mtp batch: slot is incomplete", __FILE__,
+                                                __LINE__);
+            }
+            const uint32_t before = slot.drafter->timing.verify_rows;
+            auto single = mtp_spec_step(*slot.drafter, *context.target, *slot.sequence,
+                                        slot.pending_token, slot.remaining_tokens);
+            if (!single.ok()) return single.status();
+            const uint32_t rows = slot.drafter->timing.verify_rows - before;
+            out.slots[i] = single.value();
+            out.verify_chunks += rows;
+            out.total_rows += rows;
+        }
+        out.rounds = 1u;
+        out.round_ms = std::chrono::duration<double, std::milli>(
+                           std::chrono::steady_clock::now() - serial_started)
+                           .count();
+        return out;
+    }
     const auto started = std::chrono::steady_clock::now();
     MtpSpecBatchOutput out;
     out.slots.resize(slots.size());
@@ -1554,6 +1667,7 @@ Result<MtpSpecBatchOutput> mtp_spec_step_batch(
             : execute_batch(*context.target, batch, stream, options[0]);
         if (!executed.ok()) return executed.status();
         const BatchExecutionOutput output = executed.release();
+        ++out.verify_chunks;
         if (output.num_outputs < chunk_rows) {
             return Status::invalid_state("mtp batch verify output rows mismatch", __FILE__,
                                          __LINE__);

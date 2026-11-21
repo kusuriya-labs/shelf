@@ -301,12 +301,14 @@ PagedAttentionPlan plan_paged_attention(
     // The tiled prefill implementation is specialized for head_dim 256.
     // Use the optimized per-row decode kernel for shorter heads as well.
     plan.use_prefill = use_prefill && args.common.head_dim == 256u;
+    const uint32_t split_rows =
+        ctx.splitk_tuning_rows != 0u ? ctx.splitk_tuning_rows : args.common.rows;
     if (qsa_sparse_supported(args, ctx) &&
         (!plan.use_prefill ||
          ctx.spec.max_visible_tokens >= kQsaSparsePrefillMinTokens)) {
         plan.qsa_sparse = true;
         plan.splits = ::shelf::kernel::qsa_sparse_splits(
-            args.common.rows, args.common.kv_heads, ctx.decode_attn_partial_bytes,
+            split_rows, args.common.kv_heads, ctx.decode_attn_partial_bytes,
             args.common.q_heads / args.common.kv_heads);
         return plan;
     }
@@ -335,7 +337,7 @@ PagedAttentionPlan plan_paged_attention(
         uint32_t s = 16u;
         while (s > 1u) {
             const uint64_t need =
-                static_cast<uint64_t>(args.common.rows) * args.common.kv_heads * s
+                static_cast<uint64_t>(split_rows) * args.common.kv_heads * s
                 * q_per_kv * (2u + ::shelf::kernel::kPagedAttentionHeadLimit) * 4u;
             if (need <= ctx.decode_attn_partial_bytes) {
                 plan.splits = s;
@@ -354,7 +356,7 @@ PagedAttentionPlan plan_paged_attention(
         const uint32_t q_per_kv = args.common.q_heads / args.common.kv_heads;
         const uint32_t s = 16u;
         const uint64_t need =
-            static_cast<uint64_t>(args.common.rows) * args.common.kv_heads * s
+            static_cast<uint64_t>(split_rows) * args.common.kv_heads * s
             * q_per_kv * (2u + ::shelf::kernel::kPagedAttentionHeadLimit) * 4u;
         if (need <= ctx.decode_attn_partial_bytes)
             plan.splits = s;

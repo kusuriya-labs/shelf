@@ -168,6 +168,7 @@ struct MtpDrafter {
     uint32_t num_drafts = 0;
     uint32_t hidden_width = 0;
     bool wide_hidden = false;
+    bool serial_verify = false;
     MtpTiming timing;
     bool initialized = false;
 };
@@ -273,6 +274,7 @@ struct MtpSpecBatchSlot {
 struct MtpSpecBatchOutput {
     std::vector<MtpIterationOutput> slots;
     uint32_t total_rows = 0u;
+    uint32_t verify_chunks = 0u;
     uint32_t rounds = 0u;
     double round_ms = 0.0;
 };

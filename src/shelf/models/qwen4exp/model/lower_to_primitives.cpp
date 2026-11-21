@@ -625,7 +625,9 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_mtp_to_primitives(
     };
 
     const std::uint32_t embed_index = add_weight(weights.embed_tokens);
-    const std::uint32_t lm_index = add_weight(weights.lm_head);
+    const shelf::weights::MatrixWeight& head_weights =
+        weights.mtp_lm_head.rows != 0u ? weights.mtp_lm_head : weights.lm_head;
+    const std::uint32_t lm_index = add_weight(head_weights);
     const std::uint32_t fc_hidden_index = add_weight(mtp.fc_hidden);
     const std::uint32_t fc_embedding_index = add_weight(mtp.fc_embedding);
 
@@ -808,7 +810,7 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_mtp_to_primitives(
     head.eps = eps;
     head.final_norm_param = UINT32_MAX;
     head.apply_final_norm = false;
-    head.lm_shape = RT::MatrixwiseShapeKey{weights.lm_head.rows, weights.lm_head.cols};
+    head.lm_shape = RT::MatrixwiseShapeKey{head_weights.rows, head_weights.cols};
     head.lm_weight_index = lm_index;
     head.out_vocab = vocab;
     QH::emit_hybrid_head(em, head, mixed.value().mixed, "mtp.head.");

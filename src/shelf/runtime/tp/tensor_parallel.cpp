@@ -497,6 +497,7 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
         rank_config.rope_profile = config.rope_profile;
         rank_config.build_rank_model = config.build_rank_model;
         rank_config.load_options = config.load_options;
+        rank_config.load_mtp_layers = config.load_mtp_layers;
         rank_config.pipeline_stage = config.pipeline_stage;
         rank_config.mtp_batch = config.mtp_batch;
         loaders.emplace_back(

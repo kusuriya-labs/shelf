@@ -200,12 +200,17 @@ Qwen3.8-27B-DFlash2、同時 request 1 件では追加 scratch は 16.953 MiB。
 `--mtp` を指定すると、checkpoint の MTP block（`mtp.*`）を drafter として使う。
 `--dflash2-model-dir` とは排他的である。
 
-- server の MTP は **1 request ずつ直列**に処理する。`--max-concurrent-requests` を
-  2 以上にしても、生成中の request が完了するまで次を開始しない。
+- server の MTP は複数 request を同時に保持する。dense など QSA / PLE を持たない
+  target は active な request の verify を 4 request / 32 行ずつの chunk にまとめて
+  実行する。qwen4exp は target の 1 行 decode を使う安全経路で request ごとに検証する。
+  `--max-concurrent-requests` が同時に保持する request 数の上限である。
 - tool calling / sampling / cancel は MTP 経路でも利用できる。cancel は prefill 中なら
   次の chunk 境界、生成中なら次の spec round で反映される。
 - 思考 budget（`reasoning_budget_tokens`）は MTP では無視し、通常の生成を行う。
 - `--mtp-drafts` は 4 前後が目安。大きすぎると verify の固定費が増える。
+- qwen4exp の安全経路は target-only と生成列が一致する。融合 verify を使う family では、
+  near-tie が多い checkpoint で target-only と一致しないことがある。詳細は
+  [../developer/mtp.md](../developer/mtp.md) を参照する。
 
 ```bash
 ./build/shelf-server \
