@@ -226,6 +226,17 @@ __global__ void contiguous_offsets(int *offsets, int n, int stride, int pos0, bo
     int first_r = pos + 1 - len;
     offsets[r * stride + t] = t < len ? first_r - base + t : -1;
 }
+__global__ void draft_contiguous_offsets(int *ids, int *offsets, int stride, bool sliding,
+                                         const Hy4StepParams *params) {
+    int r = blockIdx.y, t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= stride)
+        return;
+    int start = params->position;
+    int history = sliding ? min(start, 512) : start;
+    if (!r)
+        ids[t] = t < history + int(gridDim.y) ? start - history + t : -1;
+    offsets[r * stride + t] = t <= history + r ? t : -1;
+}
 __global__ void sparse_clear(int *mask, int mask_count, unsigned *bits, int word_count, int *meta, int *rev,
                              int rev_count) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -238,9 +249,12 @@ __global__ void sparse_clear(int *mask, int mask_count, unsigned *bits, int word
     if (i < rev_count)
         rev[i] = -1;
 }
-__global__ void sort_top(const int *top, int *groups, int *mask, int row_begin, int rows, int width) {
+__global__ void sort_top(const int *top, int *groups, int *mask, int row_begin, int rows, int width,
+                         const Hy4StepParams *draft = nullptr) {
     __shared__ int g[512];
     int r = blockIdx.x, t = threadIdx.x;
+    if (draft)
+        row_begin = draft->draft_last;
     g[t] = t < 511 ? top[(size_t(row_begin + r)) * 511 + t] : INT_MAX;
     __syncthreads();
     for (int k = 2; k <= 512; k <<= 1) {
@@ -436,7 +450,7 @@ Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidd
     Mat out = op.mat(hidden.rows, heads * 256);
     int slots = sliding ? std::min(op.gpu.tokens, size_t(518)) : op.gpu.tokens;
     auto cache = op.gpu.cache[op.rank][layer];
-    bool contiguous = sliding || start + hidden.rows <= 2048;
+    bool contiguous = sliding || (draft ? start <= 2048 : start + hidden.rows <= 2048);
     int begin = std::min(hidden.rows, std::max(0, 2048 - start));
     for (int i = 0; i < hidden.rows;) {
         size_t save = op.arena.cursor;
@@ -450,27 +464,28 @@ Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidd
                 n = std::min(n, 16);
         }
         int stride = 0;
-        for (int r = i; r < i + n; ++r)
+        for (int r = i; r < i + n && !selected.empty(); ++r)
             stride = std::max(stride, int(selected[r].size()));
         bool tiles = n >= 16 && chunk_contiguous && !draft;
-        bool dynamic_sizes = !op.params && chunk_contiguous;
+        bool dynamic_sizes = !op.params && (tiles || (chunk_contiguous && n == 1));
         if (!dynamic_sizes)
             stride = chunk_contiguous ? (sliding ? 512 : 2048) : 2048;
-        int first = chunk_contiguous ? selected[i][0] : 0;
-        int count = chunk_contiguous ? selected[i + n - 1].back() + 1 - first : 0;
+        int first = chunk_contiguous && !selected.empty() ? selected[i][0] : 0;
+        int count = chunk_contiguous && !selected.empty() ? selected[i + n - 1].back() + 1 - first : 0;
         int ids_count = dynamic_sizes ? count
                                       : (chunk_contiguous ? (sliding ? 518 : 2048) : (2044 * n + 4 * n + 8));
         int *ids_gpu = nullptr, *offsets_gpu = nullptr, *groups = nullptr;
         int *mask = nullptr, *meta = nullptr, *rev = nullptr;
         unsigned *bits = nullptr;
-        if (draft && selected[0].size() == 1 && op.gpu.sparse_top[op.rank][layer]) {
+        if (draft && !chunk_contiguous && op.gpu.sparse_top[op.rank][layer]) {
             int last = op.sparse_last_layer[layer], pos = start - 1;
             int tail_len = (pos & 3) + 1, tail_base = pos & ~3;
             int base_len = 2044 + tail_len;
-            stride = base_len + n;
-            int width = (pos + 3) / 4 + 2;
+            stride = (op.params ? 2048 : base_len) + n;
+            int width = op.params ? bucket / 4 + 2 : (pos + 3) / 4 + 2;
             ids_count = std::min(4 * width, 2044) + 4 + n + 8;
-            int words = (start + n + 31) / 32, rev_count = std::max(pos, start + n) + 8;
+            int capacity = op.params ? bucket : start + n;
+            int words = (capacity + 31) / 32, rev_count = capacity + 8;
             groups = static_cast<int *>(op.arena.next(size_t(512) * 4));
             mask = static_cast<int *>(op.arena.next(size_t(width) * 4));
             bits = static_cast<unsigned *>(op.arena.next(size_t(words) * 4));
@@ -480,7 +495,7 @@ Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidd
             offsets_gpu = static_cast<int *>(op.arena.next(size_t(n) * stride * 4));
             sparse_clear<<<(std::max({width, words, rev_count, 516}) + 255) / 256, 256, 0, op.stream>>>(
                 mask, width, bits, words, meta, rev, rev_count);
-            sort_top<<<1, 512, 0, op.stream>>>(op.gpu.sparse_top[op.rank][layer], groups, mask, last, 1, width);
+            sort_top<<<1, 512, 0, op.stream>>>(op.gpu.sparse_top[op.rank][layer], groups, mask, last, 1, width, op.params);
             sparse_group_ids<<<1, 256, 0, op.stream>>>(mask, 1, width, meta, ids_gpu, rev, bits,
                                                                        start, -1, op.params);
             sparse_tail_emit<<<(tail_len + 255) / 256, 256, 0, op.stream>>>(bits, ids_gpu, rev, meta, tail_base,
@@ -489,6 +504,12 @@ Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidd
             draft_extra_ids<<<1, 64, 0, op.stream>>>(start, n, ids_gpu, rev, meta, op.params);
             draft_offsets<<<dim3((std::max(stride, ids_count) + 255) / 256, n), 256, 0, op.stream>>>(
                 offsets_gpu, n, stride, base_len, ids_gpu, meta, ids_count, start, op.params);
+        } else if (draft && op.params) {
+            ids_count = stride = sliding ? 518 : 2054;
+            ids_gpu = static_cast<int *>(op.arena.next(size_t(stride) * sizeof(int)));
+            offsets_gpu = static_cast<int *>(op.arena.next(size_t(n) * stride * sizeof(int)));
+            draft_contiguous_offsets<<<dim3((stride + 255) / 256, n), 256, 0, op.stream>>>(
+                ids_gpu, offsets_gpu, stride, sliding, op.params);
         } else if (draft) {
             stride = 0;
             for (int r = i; r < i + n; ++r)

@@ -94,6 +94,8 @@ Status Residency::reserve() {
     }
     if (*std::min_element(remaining.begin(), remaining.begin() + ranks) < 0)
         return Status::unsupported("要求された配置と予約長は GPU の空き容量に収まりません", __FILE__, __LINE__);
+    graph_room = tp_size == 1 && std::all_of(remaining.begin(), remaining.begin() + ranks,
+                                            [](int64_t bytes) { return bytes >= int64_t(graph_headroom); });
     fprintf(stderr, "rank_counts=%d,%d,%d,%d\n", used[0], used[1], used[2], used[3]);
     for (int r = 0; r < ranks; ++r) {
         check(hipSetDevice(physical[r]));
@@ -206,7 +208,7 @@ void Residency::upload() {
     auto transport = std::getenv("SHELF_HY4_EP_TRANSPORT");
     const std::string_view mode = transport ? transport : "";
     const bool force_host = mode == "host";
-    push = mode != "host" && mode != "peer";
+    push = mode.empty() || mode == "push";
     for (int dst = 0; dst < ranks; ++dst)
         for (int src = 0; src < ranks; ++src) {
             if (src == dst)
@@ -453,6 +455,12 @@ void Residency::shutdown() {
         if (e != hipSuccess)
             errors += std::string(hipGetErrorString(e)) + "\n";
     };
+    for (auto &plan : target_graphs)
+        if (plan.tail)
+            plan.release(*this, errors);
+    for (auto &plan : draft_graphs)
+        if (plan.tail)
+            plan.release(*this, errors);
     for (int r = 0; r < ranks; ++r) {
         if (local_expert[r]) {
             collect(hipSetDevice(physical[r]));

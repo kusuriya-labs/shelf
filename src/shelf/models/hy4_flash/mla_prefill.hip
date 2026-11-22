@@ -23,6 +23,10 @@ __device__ int effective_stride(int stride, bool contiguous, bool sliding, const
     if (!params)
         return stride;
     int position = params->position + row_offset;
+    if (params->draft_last >= 0) {
+        int history = contiguous ? (sliding ? min(512, position) : position) : 2045 + ((position - 1) & 3);
+        return history + chunk_rows;
+    }
     if (contiguous)
         return min(stride, sliding ? min(512, position + chunk_rows) : position + chunk_rows);
     int mod = 0;
@@ -229,7 +233,7 @@ __global__ void recall_scores(const _Float16 *input, const _Float16 *query, cons
     int eff_stride = effective_stride(stride, contiguous, sliding, params, row_offset, chunk_rows);
     int lane = threadIdx.x % 32, lo = lane % 16, hi = lane / 16;
     int kb = blockIdx.x * 64 + (threadIdx.x / 32) * 16, h = blockIdx.y * 16 + lo, r = blockIdx.z;
-    if (kb >= pitch)
+    if (kb >= eff_stride)
         return;
     int token = kb + lo < eff_stride ? ids[r * stride + kb + lo] : -1;
     F8 acc{};

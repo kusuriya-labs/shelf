@@ -19,6 +19,17 @@ int main() {
     };
     check(!Hy4MoePlan::supports(0) && !Hy4MoePlan::supports(7), "decode の行数境界が不正です");
     for (int ranks = 1; ranks <= 4; ++ranks) {
+        std::array<std::array<bool, 4>, 4> peer{};
+        for (auto &row : peer)
+            row.fill(true);
+        check(graph_topology(ranks, 1, true, true, peer), "EP の Graph が無効です");
+        check(!graph_topology(ranks, 2, true, true, peer), "TP の Graph が有効です");
+        check(!graph_topology(ranks, 1, false, true, peer), "push 以外の Graph が有効です");
+        check(!graph_topology(ranks, 1, true, false, peer), "VRAM 不足時の Graph が有効です");
+        if (ranks > 1) {
+            peer[ranks - 1][ranks - 2] = false;
+            check(!graph_topology(ranks, 1, true, true, peer), "peer access 不足時の Graph が有効です");
+        }
         for (int rows = 1; rows <= Hy4MoePlan::max_rows; ++rows) {
             check(Hy4MoePlan::supports(rows), "有効な行数が拒否されました");
             std::vector<Hy4Route> picks;

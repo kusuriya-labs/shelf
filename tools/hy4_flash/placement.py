@@ -5,6 +5,7 @@ from pathlib import Path
 
 EXPERT_BYTES = 3 * (1536 * 1536 // 2 + 2 * 1536 * 2)
 GIB = 1 << 30
+GRAPH_HEADROOM = 256 << 20
 
 
 def cache_bytes(tokens):
@@ -122,7 +123,8 @@ def main():
                  if name.endswith(".self_attn.kv_b_proj.weight"))
     matrix_bytes = 41 * 512 * 3 * 32
     expert_bytes = EXPERT_BYTES // args.tensor_parallel
-    base = [int(w * GIB) + matrix_bytes for w in args.workspace]
+    graph_bytes = GRAPH_HEADROOM if args.tensor_parallel == 1 else 0
+    base = [int(w * GIB) + matrix_bytes + graph_bytes for w in args.workspace]
     if args.tensor_parallel > 1:
         local = fixed // args.tensor_parallel + draft + kv + indexer + folded // args.tensor_parallel
         base = [value + local for value in base]
@@ -133,7 +135,7 @@ def main():
     owners = assign(capacities, [1] * len(capacities), routing_counts(args.work), base, expert_bytes)
     rank_experts = [sum(row.count(r) for row in owners) for r in range(len(capacities))]
     print(json.dumps(dict(fixed_bytes=fixed, draft_bytes=draft, kv_bytes=kv, index_bytes=indexer,
-                          folded_bytes=folded, matrix_bytes=matrix_bytes, safety_gib=args.safety_gib,
+                          folded_bytes=folded, matrix_bytes=matrix_bytes, graph_bytes_per_rank=graph_bytes, safety_gib=args.safety_gib,
                           rank_experts=rank_experts, expert_bytes=expert_bytes,
                           peak_estimate=[b+count*expert_bytes for b,count in zip(base, rank_experts)],
                           free_after=[b-count*expert_bytes for b,count in zip(capacities, rank_experts)])))

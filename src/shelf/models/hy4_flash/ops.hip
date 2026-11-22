@@ -144,8 +144,10 @@ __global__ void element(Mat a, Mat b, Mat y, int mode) {
 }
 __global__ void gather_rows(Mat x, const int *ids, Mat y, int repeat) {
     size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (i < size_t(y.rows) * y.cols)
-        y.p[i] = x.p[size_t(ids[i / (repeat * x.cols)]) * x.cols + i % x.cols];
+    if (i < size_t(y.rows) * y.cols) {
+        int id = ids[i / (repeat * x.cols)];
+        y.p[i] = id >= 0 && id < x.rows ? x.p[size_t(id) * x.cols + i % x.cols] : 0;
+    }
 }
 __global__ void hc_mix(Mat x, Param fn, Param scale, Param base, float *gates, int count) {
     __shared__ float s1[32], s2[32];
@@ -374,15 +376,17 @@ void Ops::copy(void *dst, const void *src, size_t bytes, hipMemcpyKind kind) {
     checked(hipStreamSynchronize(stream));
 }
 Mat Ops::embed(const std::vector<int> &ids, bool expand) {
-    const auto &w = gpu.model.at("model.embed_tokens.weight", rank);
-    if (w.spec.shape != std::vector<size_t>{120832, 3072} || w.spec.dtype != io::SType::BF16)
-        throw std::runtime_error("embedding の形状・型が異なります");
     for (int id : ids)
         if (id < 0 || id >= 120832)
             throw std::runtime_error("token ID が範囲外です");
+    return embed_device(indices(ids), ids.size(), expand);
+}
+Mat Ops::embed_device(const int *list, int rows, bool expand) {
+    const auto &w = gpu.model.at("model.embed_tokens.weight", rank);
+    if (w.spec.shape != std::vector<size_t>{120832, 3072} || w.spec.dtype != io::SType::BF16)
+        throw std::runtime_error("embedding の形状・型が異なります");
     Mat x{static_cast<uint16_t *>(const_cast<void *>(gpu.device(w))), 120832, 3072};
-    Mat y = mat(ids.size(), expand ? 12288 : 3072);
-    int *list = indices(ids);
+    Mat y = mat(rows, expand ? 12288 : 3072);
     gather_rows<<<grid(y), 256, 0, stream>>>(x, list, y, expand ? 4 : 1);
     checked(hipGetLastError());
     return y;

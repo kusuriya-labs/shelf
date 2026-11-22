@@ -12,8 +12,12 @@ expert の転送は peer access を有効にし、送信側 rank の kernel か�
 
 N / K の分割境界は 128 要素単位に揃える。attention は head を TP lane に割り当て、`learnable_sink_param` は lane ごとの head 範囲を使う。row-parallel の出力は TP group 内で bf16 の all-reduce を行い、routed expert の出力は TP group 内の reduce の後に EP group 間で reduce する。TP と EP は別の受信バッファを使う。all-reduce の順序が変わるため、EP 構成との logits 一致は bit 一致ではなく相対誤差で判定する。TP lane は全 rank が attention と KV を持つため、workspace は TP 時に 1 GiB、KV と index は全 rank に確保する。2Mi 予約は TP=2 でも成立するが、`generate` の予約長上限は 1Mi である。
 
+Target の Graph は各 MoE 層で scatter、rank ごとの expert、合流の順に実行する。scatter と expert の完了はホスト側で event を記録し、受信側の stream が待つ。合流後は同じ作業域を次の層で再利用し、最終層では head の正規化結果を DFly2 用の state に保存する。Graph キャッシュのキーには行数、verify、2048 境界までの行数、KV のバケット、作業域の開始位置を含める。単一 DFly2 は受理した行、位置、seed、入力 ID を起動ごとに更新する。サンプリング設定は DFly2 のキャッシュキーに含める。
+
+単一 GPU の `test_hy4_graph` は本体と DFly2 の checkpoint ディレクトリを引数に取る。42 層の計算を VRAM に収めるため、第 1 層の routed expert 重みを各層から参照する。各層の router と共有 expert、Attention、Engram、head、DFly2 は元の重みを使う。4 論理 rank の試験では rank ごとに stream と作業域を用意し、同じ物理 GPU 内で転送と event 同期を実行する。
+
 `tests/unit/test_hy4_flash.py` は CPU の Octave、Engram と expert 配置を検査する。実 checkpoint の層照合では `tools/hy4_flash/check_layer.py` で CPU 基準 fixture を作り、`test_hy4_flash_layer` に渡す。`tools/hy4_flash/check_linear.py` と `check_chain.py` は量子化線形と decoder の CPU 基準照合に使用する。DFly checkpoint の生成には `tools/hy4_flash/quant_dfly.py` を使う。
 
-`generate` は各 forward の開始時に 4 つの Engram 層の行を非同期に先読みする。`SHELF_HY4_ENGRAM_PREFETCH=0` で無効化できる。Engram は既定で populate しない。`SHELF_HY4_ENGRAM_POPULATE=1` を指定すると、生成前に 4 表を populate する。server の既定動作は Engram の mmap に `MADV_POPULATE_READ` を適用し、`mincore` で常駐状態を記録してから request を受け付ける。`SHELF_HY4_ENGRAM_POPULATE=0` では遅延 mmap を使用する。`SHELF_HY4_ENGRAM_MLOCK=1` は全表の memlock 上限を検査し、各 mmap を `mlock` して全ページの常駐を検証する。上限不足、システムコール失敗または固定後の常駐不足は起動を失敗させる。mmap の解除時に固定も解除される。固定なしでは populate 後の常駐は保証されない。起動時間と操作方法は[利用者向け手順](../user/hy4_flash.md)を参照する。
+eager 実行では各 forward の開始時に 4 つの Engram 層の行を非同期に先読みする。`SHELF_HY4_ENGRAM_PREFETCH=0` で無効化できる。Graph 実行では第 0 層を起動した後、ホストで必要な Engram 行を集め、第 1 層の前に同じ stream で転送する。Engram は既定で populate しない。`SHELF_HY4_ENGRAM_POPULATE=1` を指定すると、生成前に 4 表を populate する。server の既定動作は Engram の mmap に `MADV_POPULATE_READ` を適用し、`mincore` で常駐状態を記録してから request を受け付ける。`SHELF_HY4_ENGRAM_POPULATE=0` では遅延 mmap を使用する。`SHELF_HY4_ENGRAM_MLOCK=1` は全表の memlock 上限を検査し、各 mmap を `mlock` して全ページの常駐を検証する。上限不足、システムコール失敗または固定後の常駐不足は起動を失敗させる。mmap の解除時に固定も解除される。固定なしでは populate 後の常駐は保証されない。起動時間と操作方法は[利用者向け手順](../user/hy4_flash.md)を参照する。
 
 `SHELF_HY4_PROFILE_EP=1` では request 前後の Engram 常駐ページとプロセスの page fault 数を記録する。Hy4 server の compute 起動待ちは 900 秒である。

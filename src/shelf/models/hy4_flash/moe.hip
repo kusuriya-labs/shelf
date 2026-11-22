@@ -111,29 +111,57 @@ Mat decode_moe(Ops &op, int layer, const std::string &prefix, Mat x, Mat latent,
                                                    gpu.moe_counts[rank]);
     checked(hipGetLastError());
     std::array<Hy4MoePlan *, 4> received{};
-    std::array<Mat, 4> outputs{};
+    std::array<Mat, 4> outputs{}, returns{};
+    auto capture = op.capture;
+    auto segment = capture ? &capture->plan.layers[layer - 1] : nullptr;
     for (int r = 1; r < groups; ++r) {
         auto &arena = gpu.workspace[r];
         arena.cursor = 0;
         received[r] = static_cast<Hy4MoePlan *>(arena.next(stride));
-        gpu.transfer(received[r], r, packets + r * stride, rank, stride);
+        if (capture) {
+            peer_copy(received[r], packets + r * stride, stride, op.stream);
+            returns[r] = op.mat(x.rows, 1536);
+        } else
+            gpu.transfer(received[r], r, packets + r * stride, rank, stride);
     }
+    if (capture)
+        capture->finish(segment->scatter);
     for (int r = 1; r < groups; ++r) {
+        if (capture)
+            capture->begin(r);
         checked(hipSetDevice(gpu.physical[r]));
         Ops remote(gpu, r);
         Mat input{reinterpret_cast<uint16_t *>(received[r] + 1), x.rows, 1536};
         outputs[r] = decode_experts(remote, layer, input, received[r], remote.stream);
+        if (capture) {
+            peer_copy(returns[r].p, outputs[r].p, outputs[r].bytes(), remote.stream);
+            capture->finish(segment->expert[r]);
+        }
     }
     checked(hipSetDevice(gpu.physical[rank]));
-    checked(hipEventRecord(gpu.local_ready[rank], op.stream));
-    checked(hipStreamWaitEvent(gpu.local_expert[rank], gpu.local_ready[rank], 0));
-    Mat result = decode_experts(op, layer, latent, reinterpret_cast<Hy4MoePlan *>(packets), gpu.local_expert[rank]);
-    checked(hipEventRecord(gpu.local_done[rank], gpu.local_expert[rank]));
+    auto local_stream = gpu.local_expert[rank];
+    if (capture) {
+        capture->begin(rank);
+        local_stream = op.stream;
+    } else {
+        checked(hipEventRecord(gpu.local_ready[rank], op.stream));
+        checked(hipStreamWaitEvent(local_stream, gpu.local_ready[rank], 0));
+    }
+    Mat result = decode_experts(op, layer, latent, reinterpret_cast<Hy4MoePlan *>(packets), local_stream);
+    if (!capture)
+        checked(hipEventRecord(gpu.local_done[rank], local_stream));
     Mat shared = feedforward(op, prefix + "shared_experts", x);
-    checked(hipStreamWaitEvent(op.stream, gpu.local_done[rank], 0));
+    if (capture) {
+        capture->finish(segment->expert[rank]);
+        capture->begin(rank);
+    } else
+        checked(hipStreamWaitEvent(op.stream, gpu.local_done[rank], 0));
     for (int r = 1; r < groups; ++r) {
-        Mat local = op.mat(x.rows, 1536);
-        gpu.transfer(local.p, rank, outputs[r].p, r, local.bytes());
+        Mat local = returns[r];
+        if (!capture) {
+            local = op.mat(x.rows, 1536);
+            gpu.transfer(local.p, rank, outputs[r].p, r, local.bytes());
+        }
         op.add_into(result, local, result);
     }
     if (gpu.tp_size > 1) {

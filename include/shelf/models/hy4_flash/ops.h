@@ -29,6 +29,8 @@ class Ops {
     std::optional<std::array<std::vector<uint8_t>, 4>> engram_data;
     hipStream_t stream = nullptr;
     const Hy4StepParams *params = nullptr;
+    GraphCapture *capture = nullptr;
+    Mat embed_device(const int *ids, int rows, bool expand);
     int max_kv_len = 0;
     explicit Ops(Residency &g, int r = 0) : gpu(g), rank(r), arena(g.workspace.at(r)), stream(g.compute.at(r)) {}
     void prefetch_engram(const std::vector<int> &ids, const std::vector<int> &prior);
