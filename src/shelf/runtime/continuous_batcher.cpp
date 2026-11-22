@@ -1230,6 +1230,12 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
         slot.remaining_tokens = request->max_new_tokens - request->generated_tokens;
         slot.page_tokens =
             request->prefix_capture != 0u ? config_.page_tokens : 0u;
+        if (slot.page_tokens != 0u && slot.decoder->gdn_ranks.size() == 1u &&
+            slot.decoder->tp_hook == nullptr) {
+            const auto& pools = slot.decoder->gdn_ranks.front().spec_pools;
+            if (pools.qsa == nullptr && pools.ple == nullptr)
+                slot.capture_boundary = [this, request] { prefix_capture_after_step(*request); };
+        }
         slot.thinking_allowance = thinking_allowance(*request);
         slot.thinking_close_token = request->thinking.close_token;
         if (request->structured_dflash) {
@@ -1380,6 +1386,7 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
                     position.round_ms += results.round_ms;
                 }
             }
+            prefix_capture_after_step(request);
             if (step.finished) {
                 request.finish_reason = FinishReason::Eos;
             } else if (request.generated_tokens >= request.max_new_tokens) {
@@ -1393,15 +1400,6 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
         }
     }
 
-    if (prefix_cache_ != nullptr) {
-        for (RuntimeRequest* request : active) {
-            if (request->state != RequestState::Active ||
-                request->dflash == nullptr || request->prefix_capture == 0) {
-                continue;
-            }
-            prefix_capture_after_step(*request);
-        }
-    }
     if (host_trace && host_sessions != 0u) {
         clock_gettime(CLOCK_THREAD_CPUTIME_ID, &host_end);
         const double cpu_ms = (host_end.tv_sec - host_start.tv_sec) * 1000.0 +

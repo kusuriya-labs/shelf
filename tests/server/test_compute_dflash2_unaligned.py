@@ -34,6 +34,7 @@ def main():
     extension = PROMPT[:96] + PROMPT[10:18]
     baseline_extension = run_single_shot(extension, 256, device=device,
                                          kv_cache_dtype="bf16", dflash2=False)
+    page_outputs = {}
     for cache_enabled in (False, True):
         harness = ComputeHarness(max_seq_len=512, device=device, auto_arena=True,
                                  dflash2_model_dir=draft,
@@ -62,6 +63,24 @@ def main():
                     checker.check("prefix 再利用も非投機 greedy と完全一致",
                                   generated_ids(ext_done) == baseline_extension,
                                   f"baseline={baseline_extension} actual={generated_ids(ext_done)}")
+            for length in (95, 96, 97):
+                prompt = [1000 + length, *PROMPT[1:length]]
+                for repeat in range(2):
+                    request_id = length * 10 + repeat
+                    harness.send({"op": "generate", "request_id": request_id, "input_ids": prompt,
+                                  "max_new_tokens": 24, "temperature": 0.0})
+                    _, done, errors = collect(harness, request_id)
+                    case = f"{label} 入力 {length}、{repeat + 1} 回目"
+                    checker.check(f"{case} の生成が完了", done is not None and not errors, str(errors))
+                    if done is None:
+                        continue
+                    expected = (length - 1) // 16 * 16 if cache_enabled and repeat else 0
+                    checker.check(f"{case} の復元位置", done["restored_tokens"] == expected,
+                                  str(done["restored_tokens"]))
+                    ids = generated_ids(done)
+                    if not cache_enabled and repeat == 0:
+                        page_outputs[length] = ids
+                    checker.check(f"{case} の生成 ID が一致", page_outputs.get(length) == ids)
         finally:
             harness.close()
     return checker.done()

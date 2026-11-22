@@ -78,6 +78,14 @@ int main() {
     check(config.context_ring_bytes() == context,
           "context state bytes stay aligned to the config accessor");
 
+    DFlash2Config rolling = config;
+    rolling.prefix_tail_rows = 15u;
+    const std::size_t tail_bytes = 2u * config.num_hidden_layers * 15u *
+        config.attention_kv_rows() * sizeof(shelf::bf16_t);
+    check(rolling.ring_capacity() == config.sliding_window + 15u &&
+          dflash2_context_state_bytes(rolling) == context + tail_bytes,
+          "rolling prefix retains a page tail beyond the attention window");
+
     const std::size_t scratch = dflash2_draft_scratch_bytes(config, 8u, 0u);
     check(scratch > 0u, "draft scratch is positive");
     check((scratch % 256u) == 0u, "draft scratch is alignment padded");

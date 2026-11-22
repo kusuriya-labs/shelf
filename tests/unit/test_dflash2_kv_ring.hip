@@ -3,6 +3,7 @@
 #include <shelf/core/memory/tensor.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/kernels/dflash2/kv_ring.h>
+#include <shelf/runtime/dflash2_config.h>
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
@@ -206,6 +207,24 @@ static void run_suite(
     verify_retained(big, base + " overflow");
 }
 
+static void check_prefix_window(shelf::gpu::GpuArena& arena, hipStream_t stream) {
+    shelf::runtime::DFlash2Config config;
+    config.sliding_window = 8u;
+    config.prefix_tail_rows = 3u;
+    Ring ring;
+    ring.capacity = static_cast<uint32_t>(config.ring_capacity());
+    ring.kv_features = 4u;
+    check(alloc_bf16(arena, {ring.capacity, ring.kv_features}, ring.k), "prefix K");
+    check(alloc_bf16(arena, {ring.capacity, ring.kv_features}, ring.v), "prefix V");
+    append(ring, arena, stream, make_src(16u, 0u, 4u, true), make_src(16u, 0u, 4u, false),
+           16u, 0u);
+    append(ring, arena, stream, make_src(3u, 16u, 4u, true), make_src(3u, 16u, 4u, false),
+           3u, 16u);
+    ring.next_position = 16u;
+    ring.length = static_cast<uint32_t>(config.sliding_window);
+    verify_retained(ring, "restored prefix window");
+}
+
 int main() {
     auto arena_result = shelf::gpu::GpuArena::create(0, 256ull * 1024ull * 1024ull);
     if (!arena_result.ok()) {
@@ -222,6 +241,7 @@ int main() {
     run_suite(arena, stream, 8u, 16u);
     run_suite(arena, stream, 3u, 4u);
     run_suite(arena, stream, 2048u, 8u);
+    check_prefix_window(arena, stream);
 
     shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     const shelf::Status shutdown = arena.shutdown();

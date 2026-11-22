@@ -14,7 +14,9 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace shelf::runtime::dflash2 {
@@ -57,7 +59,13 @@ struct DFlash2ExecutorConfig {
     shelf::kernel::EmbeddingShardTable target_embed_shards{};
 };
 
+struct DFlash2GraphDeleter {
+    void operator()(hipGraphExec_t graph) const noexcept;
+};
+
 struct DFlash2Executor {
+    std::unique_ptr<std::remove_pointer_t<hipGraphExec_t>, DFlash2GraphDeleter> proposal_graph;
+    bool proposal_graph_enabled = false;
     const DFlash2Config* config = nullptr;
     const DFlash2Weights* weights = nullptr;
     uint32_t max_rows = 0;

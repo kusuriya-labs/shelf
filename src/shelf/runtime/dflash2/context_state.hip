@@ -49,7 +49,7 @@ Result<DFlash2ContextState> create_dflash2_context_state(
 
     DFlash2ContextState state;
     state.num_layers = static_cast<uint32_t>(config.num_hidden_layers);
-    state.capacity = static_cast<uint32_t>(config.sliding_window);
+    state.capacity = static_cast<uint32_t>(config.ring_capacity());
     state.kv_features = static_cast<uint32_t>(config.attention_kv_rows());
     state.next_position = initial_position;
     state.length = 0;

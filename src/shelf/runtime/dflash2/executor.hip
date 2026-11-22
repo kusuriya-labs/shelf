@@ -2,6 +2,7 @@
 #include <shelf/kernels/fused/exl3/rotate_quantize.h>
 #include <shelf/runtime/dflash2/executor.h>
 #include <shelf/quantization/quant_contract.h>
+#include <shelf/core/gpu/cleanup.h>
 #include <shelf/runtime/dflash2/context_state.h>
 #include <shelf/kernels/dflash2/attention.h>
 #include <shelf/kernels/optimized/linear/lm_head_int8.h>
@@ -508,11 +509,22 @@ Result<DFlash2Executor> create_dflash2_executor(
         if (!st.ok()) return st;
     }
 
+#ifdef SHELF_HIP_GRAPH
+    const char* graph = std::getenv("SHELF_DFLASH2_DRAFT_GRAPH");
+    ex.proposal_graph_enabled = graph == nullptr || (graph[0] != '\0' && graph[0] != '0');
+#endif
     ex.initialized = true;
     return ex;
 }
 
+void DFlash2GraphDeleter::operator()(hipGraphExec_t graph) const noexcept {
+    gpu::discard_cleanup_result(hipGraphExecDestroy(graph));
+}
+
 Status dflash2_executor_shutdown(DFlash2Executor& executor) noexcept {
+    const hipError_t graph_error = executor.proposal_graph
+        ? hipGraphExecDestroy(executor.proposal_graph.release()) : hipSuccess;
+    executor.proposal_graph_enabled = false;
     executor.target_concat = gpu::Tensor{};
     executor.target_fc = gpu::Tensor{};
     executor.target_feature = gpu::Tensor{};
@@ -574,6 +586,8 @@ Status dflash2_executor_shutdown(DFlash2Executor& executor) noexcept {
     executor.weights = nullptr;
     executor.config = nullptr;
     executor.initialized = false;
+    if (graph_error != hipSuccess)
+        return Status::hip_error("hipGraphExecDestroy drafter", hipGetErrorString(graph_error), __FILE__, __LINE__);
     return Status::make_ok();
 }
 
@@ -789,7 +803,7 @@ Status dflash2_context_append(
     }
     if (state.num_layers != executor.config->num_hidden_layers ||
         state.kv_features != executor.config->attention_kv_rows() ||
-        state.capacity != executor.config->sliding_window) {
+        state.capacity != executor.config->ring_capacity()) {
         return Status::invalid_argument("dflash2 context state contract mismatch", __FILE__,
                                         __LINE__);
     }
@@ -803,8 +817,9 @@ Status dflash2_context_append(
 
     const DFlash2Config& config = *executor.config;
     const uint32_t capacity = state.capacity;
-    const uint32_t skip = rows > capacity ? rows - capacity : 0u;
-    const uint32_t effective_rows = rows > capacity ? capacity : rows;
+    const uint32_t window = static_cast<uint32_t>(config.sliding_window);
+    const uint32_t effective_rows = std::min(rows, window);
+    const uint32_t skip = rows - effective_rows;
     if (effective_rows > executor.max_context_rows) {
         return Status::invalid_argument("dflash2 context append exceeds max_context_rows",
                                         __FILE__, __LINE__);
@@ -859,7 +874,7 @@ Status dflash2_context_append(
     }
 
     const uint64_t new_length = static_cast<uint64_t>(state.length) + rows;
-    state.length = new_length > capacity ? capacity : static_cast<uint32_t>(new_length);
+    state.length = static_cast<uint32_t>(std::min<uint64_t>(new_length, window));
     state.next_position = position_start + rows;
     return Status::make_ok();
 }
@@ -1497,11 +1512,11 @@ Status validate_cached_context(
     const DFlash2Config& config = *executor.config;
     if (context.num_layers != config.num_hidden_layers ||
         context.kv_features != config.attention_kv_rows() ||
-        context.capacity != config.sliding_window) {
+        context.capacity != config.ring_capacity()) {
         return Status::invalid_argument("dflash2 context contract mismatch", __FILE__,
                                         __LINE__);
     }
-    if (context.length == 0u || context.length > context.capacity) {
+    if (context.length == 0u || context.length > config.sliding_window) {
         return Status::invalid_argument("dflash2 context length out of range", __FILE__,
                                         __LINE__);
     }
@@ -1759,35 +1774,6 @@ Status dflash2_prepare_noise_embedding(
     return Status::make_ok();
 }
 
-Status dflash2_propose_cached(
-    DFlash2Executor& executor,
-    const DFlash2ContextState& context,
-    int32_t anchor_token,
-    uint32_t num_drafts,
-    int32_t* output_drafts,
-    hipStream_t stream) {
-    if (!executor.initialized) {
-        return Status::invalid_state("dflash2 executor not initialized", __FILE__, __LINE__);
-    }
-    if (!context.initialized) {
-        return Status::invalid_state("dflash2 context state not initialized", __FILE__,
-                                     __LINE__);
-    }
-    if (output_drafts == nullptr) {
-        return Status::invalid_argument("dflash2 proposal output is null", __FILE__, __LINE__);
-    }
-    if (num_drafts == 0u || num_drafts > executor.draft_rows) {
-        return Status::invalid_argument("dflash2 proposal num_drafts out of range", __FILE__,
-                                        __LINE__);
-    }
-    const uint32_t block_rows = num_drafts + 1u;
-    Status st = dflash2_prepare_noise_embedding(executor, anchor_token, block_rows, stream);
-    if (!st.ok()) return st;
-    return dflash2_forward_and_select_cached(
-        executor, context, executor.noise_embedding.data<bf16_t>(), context.next_position,
-        block_rows, anchor_token, output_drafts, stream);
-}
-
 namespace {
 
 struct DFlash2BatchStage {
@@ -1813,7 +1799,7 @@ Status dflash2_forward_layer_cached_batch(
     const uint32_t head_dim = static_cast<uint32_t>(config.head_dim);
     const uint32_t q_heads = static_cast<uint32_t>(config.num_attention_heads);
     const uint32_t kv_heads = static_cast<uint32_t>(config.num_key_value_heads);
-    const uint32_t capacity = static_cast<uint32_t>(config.sliding_window);
+    const uint32_t capacity = static_cast<uint32_t>(config.ring_capacity());
     const uint32_t total_rows = stage.total_rows;
     const float eps = config.rms_norm_eps;
     const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
@@ -1942,8 +1928,10 @@ Status dflash2_select_draft_tokens_batch(
     const bf16_t* final_hidden,
     hipStream_t stream) {
     const DFlash2Config& config = *executor.config;
-    const uint32_t total_rows = stage.total_rows;
+    const bool single = stage.request_count == 1u;
+    const uint32_t total_rows = stage.total_rows - static_cast<uint32_t>(single);
     const uint32_t hidden = static_cast<uint32_t>(config.hidden_size);
+    if (single) final_hidden += hidden;
     const uint32_t rank = static_cast<uint32_t>(config.selector_rank);
     const uint32_t vocab = static_cast<uint32_t>(config.vocab_size);
     const uint32_t local_vocab = executor.local_vocab;
@@ -2017,6 +2005,7 @@ Status dflash2_select_draft_tokens_batch(
     args.rank = rank;
     args.top_k = top_k;
     args.vocab_size = vocab;
+    args.first_draft_row = single ? 0u : 1u;
     args.requests = requests;
     args.request_count = stage.request_count;
     err = shelf::kernel::launch_dflash2_candidate_selector(args, stream);
@@ -2027,7 +2016,146 @@ Status dflash2_select_draft_tokens_batch(
     return Status::make_ok();
 }
 
+Status enqueue_proposal(
+    DFlash2Executor& executor,
+    const shelf::kernel::DFlash2RequestDescriptor* descriptor_ptr,
+    const DFlash2BatchStage& stage,
+    hipStream_t stream) {
+    const DFlash2Config& config = *executor.config;
+    const uint32_t hidden = static_cast<uint32_t>(config.hidden_size);
+    const uint32_t vocab = static_cast<uint32_t>(config.vocab_size);
+    const int32_t mask_token = static_cast<int32_t>(config.mask_token_id);
+    hipError_t err = shelf::kernel::launch_dflash2_noise_token_ids_batch(
+        descriptor_ptr, stage.request_count, stage.max_block_rows, mask_token,
+        executor.noise_token_ids.data<int32_t>(), executor.conv_row_has_prev.data<uint32_t>(),
+        stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 batch noise token launch", hipGetErrorString(err),
+                                 __FILE__, __LINE__);
+    }
+
+    const shelf::weights::MatrixWeight& embed = *executor.target_embed_tokens;
+    if (embed.encoding != shelf::weights::MatrixEncoding::Bf16) {
+        return Status::unsupported("dflash2 target embed_tokens encoding is not supported",
+                                   __FILE__, __LINE__);
+    }
+    if (executor.target_embed_shards.count != 0u) {
+        err = shelf::kernel::launch_embedding_shards_bf16(
+            executor.target_embed_shards, executor.noise_token_ids.data<int32_t>(),
+            executor.noise_embedding.data<bf16_t>(), stage.total_rows, hidden, hidden,
+            stream);
+    } else {
+        err = shelf::kernel::launch_embedding_bf16(
+            static_cast<const bf16_t*>(shelf::weights::matrix_payload(embed)),
+            executor.noise_token_ids.data<int32_t>(),
+            executor.noise_embedding.data<bf16_t>(), stage.total_rows, vocab, hidden, hidden,
+            nullptr, stream);
+    }
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 batch noise embedding launch", hipGetErrorString(err),
+                                 __FILE__, __LINE__);
+    }
+
+    Status st = dflash2_forward_backbone_cached_batch(
+        executor, descriptor_ptr, stage, executor.noise_embedding.data<bf16_t>(),
+        executor.backbone_output.data<bf16_t>(), stream);
+    if (!st.ok()) return st;
+
+    return dflash2_select_draft_tokens_batch(executor, descriptor_ptr, stage,
+                                             executor.backbone_output.data<bf16_t>(), stream);
+}
+
+#ifdef SHELF_HIP_GRAPH
+__global__ void set_proposal_request(shelf::kernel::DFlash2RequestDescriptor* dst,
+                                    shelf::kernel::DFlash2RequestDescriptor request) {
+    *dst = request;
+}
+
+Status propose_graph(DFlash2Executor& executor, const DFlash2ContextState& context,
+                     int32_t anchor, uint32_t drafts, int32_t* output, hipStream_t stream) {
+    const uint32_t rows = drafts + 1u;
+    Status st = validate_cached_context(executor, context, context.next_position, rows);
+    if (!st.ok()) return st;
+    if (anchor < 0 || static_cast<uint32_t>(anchor) >= executor.config->vocab_size)
+        return Status::invalid_argument("drafter anchor out of range", __FILE__, __LINE__);
+    auto* descriptor = reinterpret_cast<shelf::kernel::DFlash2RequestDescriptor*>(
+        executor.batch_descriptors.data<uint8_t>());
+    shelf::kernel::DFlash2RequestDescriptor request{
+        context.k_ring.data<bf16_t>(), context.v_ring.data<bf16_t>(), output,
+        context.length, context.next_position - context.length, context.next_position,
+        rows, 0u, drafts, anchor};
+    set_proposal_request<<<1, 1, 0, stream>>>(descriptor, request);
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess)
+        return Status::hip_error("drafter descriptor upload", hipGetErrorString(err), __FILE__, __LINE__);
+    if (!executor.proposal_graph) {
+        err = hipStreamBeginCapture(stream, hipStreamCaptureModeThreadLocal);
+        if (err == hipSuccess) {
+            const uint32_t window = static_cast<uint32_t>(executor.config->sliding_window);
+            const DFlash2BatchStage stage{1u, rows, rows, window + rows};
+            st = enqueue_proposal(executor, descriptor, stage, stream);
+            hipGraph_t graph = nullptr;
+            err = hipStreamEndCapture(stream, &graph);
+            if (err == hipSuccess && st.ok() && graph != nullptr) {
+                hipGraphExec_t executable = nullptr;
+                err = hipGraphInstantiate(&executable, graph, nullptr, nullptr, 0);
+                if (err == hipSuccess) executor.proposal_graph.reset(executable);
+            }
+            if (graph != nullptr) {
+                const hipError_t cleanup = hipGraphDestroy(graph);
+                if (cleanup != hipSuccess)
+                    return Status::hip_error("hipGraphDestroy drafter", hipGetErrorString(cleanup), __FILE__, __LINE__);
+            }
+        }
+    }
+    if (executor.proposal_graph) {
+        err = hipGraphLaunch(executor.proposal_graph.get(), stream);
+        if (err == hipSuccess) return Status::make_ok();
+    }
+    executor.proposal_graph_enabled = false;
+    return Status::make_ok();
+}
+#endif
+
 }  // namespace
+
+Status dflash2_propose_cached(
+    DFlash2Executor& executor,
+    const DFlash2ContextState& context,
+    int32_t anchor_token,
+    uint32_t num_drafts,
+    int32_t* output_drafts,
+    hipStream_t stream) {
+    if (!executor.initialized) {
+        return Status::invalid_state("dflash2 executor not initialized", __FILE__, __LINE__);
+    }
+    if (!context.initialized) {
+        return Status::invalid_state("dflash2 context state not initialized", __FILE__,
+                                     __LINE__);
+    }
+    if (output_drafts == nullptr) {
+        return Status::invalid_argument("dflash2 proposal output is null", __FILE__, __LINE__);
+    }
+    if (num_drafts == 0u || num_drafts > executor.draft_rows) {
+        return Status::invalid_argument("dflash2 proposal num_drafts out of range", __FILE__,
+                                        __LINE__);
+    }
+    const uint32_t block_rows = num_drafts + 1u;
+#ifdef SHELF_HIP_GRAPH
+    if (executor.proposal_graph_enabled && num_drafts == executor.draft_rows &&
+        executor.proposal_distributor == nullptr && executor.target_embed_tokens != nullptr &&
+        stream != nullptr) {
+        const Status captured = propose_graph(executor, context, anchor_token, num_drafts,
+                                              output_drafts, stream);
+        if (!captured.ok() || executor.proposal_graph_enabled) return captured;
+    }
+#endif
+    Status st = dflash2_prepare_noise_embedding(executor, anchor_token, block_rows, stream);
+    if (!st.ok()) return st;
+    return dflash2_forward_and_select_cached(
+        executor, context, executor.noise_embedding.data<bf16_t>(), context.next_position,
+        block_rows, anchor_token, output_drafts, stream);
+}
 
 Status dflash2_propose_batch(
     DFlash2Executor& executor,
@@ -2064,11 +2192,8 @@ Status dflash2_propose_batch(
     }
 
     const DFlash2Config& config = *executor.config;
-    const uint32_t hidden = static_cast<uint32_t>(config.hidden_size);
-    const uint32_t vocab = static_cast<uint32_t>(config.vocab_size);
-    const uint32_t capacity = static_cast<uint32_t>(config.sliding_window);
+    const uint32_t capacity = static_cast<uint32_t>(config.ring_capacity());
     const uint32_t kv_features = static_cast<uint32_t>(config.attention_kv_rows());
-    const int32_t mask_token = static_cast<int32_t>(config.mask_token_id);
 
     if (request_count > executor.max_rows) {
         return Status::invalid_argument("dflash2 batch proposal request count exceeds max_rows",
@@ -2096,7 +2221,7 @@ Status dflash2_propose_batch(
             return Status::invalid_argument("dflash2 batch proposal context contract mismatch",
                                             __FILE__, __LINE__);
         }
-        if (context->length == 0u || context->length > context->capacity) {
+        if (context->length == 0u || context->length > config.sliding_window) {
             return Status::invalid_argument("dflash2 batch proposal context length out of range",
                                             __FILE__, __LINE__);
         }
@@ -2140,44 +2265,7 @@ Status dflash2_propose_batch(
     const shelf::kernel::DFlash2RequestDescriptor* descriptor_ptr =
         static_cast<const shelf::kernel::DFlash2RequestDescriptor*>(descriptor_device);
 
-    hipError_t err = shelf::kernel::launch_dflash2_noise_token_ids_batch(
-        descriptor_ptr, request_count, max_block_rows, mask_token,
-        executor.noise_token_ids.data<int32_t>(), executor.conv_row_has_prev.data<uint32_t>(),
-        stream);
-    if (err != hipSuccess) {
-        return Status::hip_error("dflash2 batch noise token launch", hipGetErrorString(err),
-                                 __FILE__, __LINE__);
-    }
-
-    const shelf::weights::MatrixWeight& embed = *executor.target_embed_tokens;
-    if (embed.encoding != shelf::weights::MatrixEncoding::Bf16) {
-        return Status::unsupported("dflash2 target embed_tokens encoding is not supported",
-                                   __FILE__, __LINE__);
-    }
-    if (executor.target_embed_shards.count != 0u) {
-        err = shelf::kernel::launch_embedding_shards_bf16(
-            executor.target_embed_shards, executor.noise_token_ids.data<int32_t>(),
-            executor.noise_embedding.data<bf16_t>(), stage.total_rows, hidden, hidden,
-            stream);
-    } else {
-        err = shelf::kernel::launch_embedding_bf16(
-            static_cast<const bf16_t*>(shelf::weights::matrix_payload(embed)),
-            executor.noise_token_ids.data<int32_t>(),
-            executor.noise_embedding.data<bf16_t>(), stage.total_rows, vocab, hidden, hidden,
-            nullptr, stream);
-    }
-    if (err != hipSuccess) {
-        return Status::hip_error("dflash2 batch noise embedding launch", hipGetErrorString(err),
-                                 __FILE__, __LINE__);
-    }
-
-    Status st = dflash2_forward_backbone_cached_batch(
-        executor, descriptor_ptr, stage, executor.noise_embedding.data<bf16_t>(),
-        executor.backbone_output.data<bf16_t>(), stream);
-    if (!st.ok()) return st;
-
-    return dflash2_select_draft_tokens_batch(executor, descriptor_ptr, stage,
-                                             executor.backbone_output.data<bf16_t>(), stream);
+    return enqueue_proposal(executor, descriptor_ptr, stage, stream);
 }
 
 Status dflash2_append_target_taps_batch(
@@ -2204,7 +2292,7 @@ Status dflash2_append_target_taps_batch(
         if (request.context == nullptr || !request.context->initialized ||
             request.context->next_position != request.position ||
             request.context->num_layers != config.num_hidden_layers ||
-            request.context->capacity != config.sliding_window ||
+            request.context->capacity != config.ring_capacity() ||
             request.context->kv_features != kv_features) {
             return Status::invalid_argument("dflash2 batch tap context mismatch", __FILE__, __LINE__);
         }
@@ -2276,7 +2364,7 @@ Status dflash2_append_target_taps_batch(
     }
     for (uint32_t i = 0; i < request_count; ++i) {
         DFlash2ContextState& context = *requests[i].context;
-        context.length = std::min(context.capacity, context.length + 1u);
+        context.length = std::min(static_cast<uint32_t>(config.sliding_window), context.length + 1u);
         ++context.next_position;
     }
     return Status::make_ok();

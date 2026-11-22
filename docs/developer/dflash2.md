@@ -915,6 +915,17 @@ Device source のときの source pointer（`token_device_src`）を保持する
 Host staging への `std::memcpy` を行わず、capture 内で device verify token buffer →
 executor input buffer の D2D をそのまま capture する。
 
+単一要求の 8 行・10 行 verify は、行数と greedy / sampled の組み合わせごとに
+Graph を保持する。radix top-k を使う場合は実際の `top_k` も再利用条件に含める。
+temperature、top-p、min-p、seed、sample index は毎回更新する request descriptor から読む。
+`SHELF_GRAPH_VERIFY=0` で verify を eager 実行できる。
+
+単一要求で全 draft 行を提案する場合、drafter は noise token の展開から selector までを
+1 個の Graph に収める。ring のアドレス・有効長・位置、anchor token、候補の出力先は
+提案ごとに同じ stream 上で device descriptor に書く。語彙射影と top-k は anchor を除く
+draft 行だけを処理する。`SHELF_DFLASH2_DRAFT_GRAPH=0` で提案を eager 実行できる。
+複数要求と分散語彙射影はそれぞれ既存のバッチ経路と分散経路を使う。
+
 ### device buffer
 
 `create_dflash2_spec_decoder()` が arena から以下を確保する。decoder lifetime 中
@@ -1028,7 +1039,8 @@ DFlash2 speculative decoding を有効化する唯一的な経路である。
 - tree budget が draft 数 + 1 より大きい場合は、request ごとの候補木と祖先 mask を
   batch context に置き、GDN chunk verify の compact log から受理経路を replay する。
   verify は既定の lossy chunk を使い、tree 経路の replay は exact decomposition を使う。
-  木の物理行数は残りの sequence 容量で制限し、prefix capture 中は KV page 境界でも制限する。
+  木の物理行数は残りの sequence 容量で制限する。prefix capture の境界処理は
+  [prefix cache の DFlash2 経路](prefix_cache.md#dflash2-経路) に従う。
   この経路の request は greedy sampling を要求し、chunk verify を無効化できない。
 - serve 側に DFlash 専用の admission / prefix cache / KV 容量の自動拡張は無い。
 
@@ -1261,7 +1273,7 @@ DFlash2 有効時の構造化出力付き request は通常 decode へ退避せ�
 - **`need_mask` 抑止**: DFlash2 の構造化出力経路で出力する `token` event には
   `"need_mask": false` を付与する。server は `grammar.accept(token)` で状態のみを進め、
   不要な単一行 `mask` コマンドを送らない。
-- **HIP graph と高速経路**: bitmask 付き verify（greedy・8 / 10 行）は executor の固定
+- **HIP graph と高速経路**: bitmask 付き verify（8 / 10 行）は executor の固定
   device bitmask staging（`graph_token_bitmask_staging`）と `has_token_bitmask` 付きの
   graph cache key により HIP graph capture / replay に対応する（[sampling.md](sampling.md)）。
   制約付き slot では tree verify・device token bridge・`--dflash2-adaptive` による通常 decode
@@ -1271,8 +1283,8 @@ DFlash2 有効時の構造化出力付き request は通常 decode へ退避せ�
 ### 投機の適応制御（実験段階）
 
 `--dflash2-adaptive` は K を細かく変更せず、batch と request の状態から投機の
-有無を選ぶ。既定 K は 7 である。生成上限、系列長、thinking budget、prefix cache の
-ページ境界に近いときだけ、その制約に合わせて検証する draft 数を短くする。
+有無を選ぶ。既定 K は 7 である。生成上限、系列長、thinking budget に応じて検証する draft 数を短くする。
+prefix capture 中の制約は [prefix cache の DFlash2 経路](prefix_cache.md#dflash2-経路) に従う。
 
 - 投機候補と、セッション枠が足りず通常 decode 中の request の合計が
   `SHELF_DFLASH2_POLICY_MAX_SESSIONS`（既定 12）を超える場合、

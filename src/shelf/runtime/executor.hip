@@ -1019,7 +1019,7 @@ Result<PendingBatch> submit_co_batch(
         : verify_graph_env[0] != '\0' && verify_graph_env[0] != '0';
     const bool verify_graph = verify_graph_enabled &&
         exec_role == ::shelf::runtime::ExecutionRole::Verify && R == 1u &&
-        prep.num_stochastic_outputs == 0u &&
+        (dflash_target || prep.num_stochastic_outputs == 0u) &&
         options.qsa_spec_history.partial == nullptr && options.qsa_spec_history.counts == nullptr &&
         options.ple_conv_history.store == nullptr;
     const bool tree_batch =
@@ -1212,13 +1212,16 @@ Result<PendingBatch> submit_co_batch(
     if (graph_active) {
         const int gslot_idx = graph_slot_idx;
         if (gslot_idx >= 0) {
+            const uint32_t sampling_top_k = prep.stochastic_topk_eligible ? prep.stochastic_top_k : 0u;
+            const uint32_t verify_slot = (N == 8u ? 0u : 1u) + (prep.num_stochastic_outputs ? 2u : 0u);
             GraphCacheSlot* gslot = dflash_verify
-                ? &executor.dflash_verify_graph_cache[N == 8u ? 0u : 1u]
+                ? &executor.dflash_verify_graph_cache[verify_slot]
                 : &executor.graph_cache[gslot_idx];
             if (gslot->valid && gslot->token_count == N &&
                 gslot->num_outputs == prep.num_outputs &&
                 gslot->num_sampled == prep.num_sampled_outputs &&
                 gslot->num_stochastic == prep.num_stochastic_outputs &&
+                gslot->sampling_top_k == sampling_top_k &&
                 gslot->attention_plan_key == attention_plan_key &&
                 gslot->exec_role == graph_exec_role &&
                 gslot->has_spec_history == graph_has_spec_history &&
@@ -1293,6 +1296,7 @@ Result<PendingBatch> submit_co_batch(
                             gslot->num_outputs = prep.num_outputs;
                             gslot->num_sampled = prep.num_sampled_outputs;
                             gslot->num_stochastic = prep.num_stochastic_outputs;
+                            gslot->sampling_top_k = sampling_top_k;
                             gslot->attention_plan_key = attention_plan_key;
                             gslot->exec_role = graph_exec_role;
                             gslot->has_spec_history = graph_has_spec_history;

@@ -183,18 +183,19 @@ __global__ void dflash2_candidate_selector_requests_kernel(
     const bf16* successor_codebook,
     const DFlash2RequestDescriptor* requests,
     float* output_scores,
+    uint32_t first_draft_row,
     uint32_t rank,
     uint32_t top_k) {
     __shared__ float partial[kSelectorThreads];
     const DFlash2RequestDescriptor& request = requests[blockIdx.x];
     candidate_selector_body(
-        hidden_proj + static_cast<std::size_t>(request.row_begin + 1u) * rank,
-        topk_ids + static_cast<std::size_t>(request.row_begin + 1u) * top_k,
-        topk_logits + static_cast<std::size_t>(request.row_begin + 1u) * top_k,
+        hidden_proj + static_cast<std::size_t>(request.row_begin + first_draft_row) * rank,
+        topk_ids + static_cast<std::size_t>(request.row_begin + first_draft_row) * top_k,
+        topk_logits + static_cast<std::size_t>(request.row_begin + first_draft_row) * top_k,
         predecessor_codebook, successor_codebook, request.anchor_token, nullptr,
         request.output_drafts,
         output_scores != nullptr
-            ? output_scores + static_cast<std::size_t>(request.row_begin + 1u) * top_k
+            ? output_scores + static_cast<std::size_t>(request.row_begin + first_draft_row) * top_k
             : nullptr,
         request.num_drafts, rank, top_k, partial);
 }
@@ -266,7 +267,7 @@ hipError_t launch_dflash2_candidate_selector(
             reinterpret_cast<const bf16*>(args.hidden_proj), args.topk_ids, args.topk_logits,
             reinterpret_cast<const bf16*>(args.predecessor_codebook),
             reinterpret_cast<const bf16*>(args.successor_codebook), args.requests,
-            args.output_scores, args.rank, args.top_k);
+            args.output_scores, args.first_draft_row, args.rank, args.top_k);
         return hipGetLastError();
     }
     if (args.output_tokens == nullptr) {

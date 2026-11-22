@@ -312,6 +312,7 @@ struct DFlash2SpecBatchSlot {
     uint32_t proposal_drafts = 0u;
     uint32_t remaining_tokens = 0u;
     uint32_t page_tokens = 0u;
+    std::function<void()> capture_boundary;
     uint32_t thinking_allowance = kDFlash2NoThinkingAllowance;
     int32_t thinking_close_token = -1;
     const uint32_t* token_bitmask = nullptr;

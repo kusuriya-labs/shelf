@@ -306,6 +306,7 @@ struct GraphCacheSlot {
     uint32_t num_outputs = 0;
     uint32_t num_sampled = 0;
     uint32_t num_stochastic = 0;
+    uint32_t sampling_top_k = 0;
     uint32_t attention_plan_key = 0;
     uint8_t exec_role = 0;
     uint8_t has_spec_history = 0;
@@ -411,7 +412,7 @@ struct Executor {
     DispatchStagingPool staging_pool;
     std::vector<ProgramStagingMeta> program_staging_meta;
     std::array<GraphCacheSlot, ::shelf::runtime::ProgramSet::kRowBucketCount> graph_cache{};
-    std::array<GraphCacheSlot, 2> dflash_verify_graph_cache{};
+    std::array<GraphCacheSlot, 4> dflash_verify_graph_cache{};
     uint32_t* graph_token_bitmask_staging = nullptr;
     void* host_token_graph_staging = nullptr;
     size_t host_token_graph_staging_bytes = 0;

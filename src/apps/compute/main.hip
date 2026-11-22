@@ -170,6 +170,16 @@ int main(int argc, char** argv) {
                     dflash_config.max_draft_tokens());
             return 2;
         }
+        if (opt.serve_stdio && config.prefix_cache &&
+            config.prefix_cache_strategy == shelf::qwen35::runtime::PrefixCacheStrategy::Radix &&
+            config.max_seq_len > dflash_config.sliding_window) {
+            dflash_config.prefix_tail_rows = std::min<std::size_t>(
+                config.page_tokens - 1u, config.max_seq_len - dflash_config.sliding_window);
+        }
+        if (dflash_config.context_ring_bytes() > UINT32_MAX) {
+            fprintf(stderr, "dflash2 ring exceeds checkpoint size limit\n");
+            return 2;
+        }
         config.prefix_cache_spec_ring_bytes =
             static_cast<uint32_t>(dflash_config.context_ring_bytes());
         config.draft_bytes = shelf::app::safetensors_dir_bytes(opt.dflash2_model_dir);

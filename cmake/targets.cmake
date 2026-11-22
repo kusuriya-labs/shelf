@@ -471,6 +471,7 @@ shelf_set_hip_archs(shelf_qwen35_runtime)
 if(SHELF_HIP_GRAPH)
     set_source_files_properties(
         src/shelf/inference/execution/program_executor.hip
+        src/shelf/runtime/dflash2/executor.hip
         src/shelf/runtime/executor.hip
         PROPERTIES COMPILE_DEFINITIONS "SHELF_HIP_GRAPH")
 endif()

@@ -50,6 +50,7 @@ struct DFlash2CandidateSelectorArgs {
     uint32_t vocab_size = 0;
     const DFlash2RequestDescriptor* requests = nullptr;
     uint32_t request_count = 0;
+    uint32_t first_draft_row = 1u;
 };
 
 hipError_t launch_dflash2_candidate_selector(

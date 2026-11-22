@@ -2011,7 +2011,7 @@ Result<std::vector<int32_t>> dflash2_spec_propose_slot(
         ? std::min(slot.num_drafts, std::min(slot.remaining_tokens - 1u, room - 1u)) : 0u;
     if (slot.thinking_allowance != kDFlash2NoThinkingAllowance)
         drafts = std::min(drafts, slot.thinking_allowance);
-    if (slot.page_tokens != 0u && drafts > 0u)
+    if (slot.page_tokens != 0u && !slot.capture_boundary && drafts > 0u)
         drafts = std::min(drafts, slot.page_tokens - position % slot.page_tokens - 1u);
     std::vector<int32_t> result(drafts);
     if (drafts == 0u) return result;
@@ -2108,7 +2108,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
                 ? std::min(slot.num_drafts, slot.thinking_allowance)
                 : slot.num_drafts;
         uint32_t drafts = std::min(drafts_limit, room_max);
-        if (slot.page_tokens != 0u && drafts > 0u) {
+        if (slot.page_tokens != 0u && !slot.capture_boundary && drafts > 0u) {
             const uint32_t to_boundary =
                 slot.page_tokens - (position % slot.page_tokens);
             if (drafts + 1u > to_boundary) {
@@ -2128,7 +2128,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         plan.remaining = slot.remaining_tokens;
         plan.position = position;
         plan.max_tree_rows = room;
-        if (slot.page_tokens != 0u)
+        if (slot.page_tokens != 0u && !slot.capture_boundary)
             plan.max_tree_rows = std::min(plan.max_tree_rows, slot.page_tokens - position % slot.page_tokens);
         plan.sample_index = decoder->sample_index;
         plan.thinking_allowance = slot.thinking_allowance;
@@ -2573,6 +2573,13 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             continue;
         }
 
+        if (!tree_mode && env_flag_enabled("SHELF_DFLASH2_TREE_TRACE_CHAIN", false)) {
+            std::fprintf(stderr, "DFCAND pos=%u sample_index=%llu ids=", plan.position,
+                         static_cast<unsigned long long>(plan.sample_index));
+            for (uint32_t j = 0u; j < plan.drafts; ++j)
+                std::fprintf(stderr, "%s%d", j == 0u ? "" : ",", drafts[i][j]);
+            std::fprintf(stderr, "\n");
+        }
         SpecVerifyResult verify;
         DFlash2TreeWalk walk;
         if (tree_mode) {
@@ -2742,9 +2749,45 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
                 if (err != hipSuccess)
                     return Status::hip_error("batch tree replay rows upload", hipGetErrorString(err), __FILE__, __LINE__);
             }
+            uint32_t rows = accepted + 1u;
+            if (plan.slot->page_tokens != 0u && plan.slot->capture_boundary) {
+                const uint32_t end = plan.position + rows;
+                const uint32_t boundary = end - end % plan.slot->page_tokens;
+                if (plan.position < boundary && boundary < end) {
+                    const uint32_t prefix = boundary - plan.position;
+                    st = commit_gdn_compact_log(
+                        *state.pool, decoder.sequence->slot, compact, state.commit_request,
+                        prefix, decoder.gdn_key_heads, state.stream, replay,
+                        tree_mode ? total_rows : 0u, tree_mode);
+                    if (!st.ok()) return st;
+                    const auto history_row = [&](uint32_t index) {
+                        return plan.row_begin + (tree_mode ? walk.rows[index] : index);
+                    };
+                    st = restore_gdn_spec_conv(*state.pool, decoder.sequence->slot,
+                        context.history[r], history_row(prefix - 1u), state.stream);
+                    if (!st.ok()) return st;
+                    const uint32_t verify_end = decoder.sequence->position;
+                    decoder.sequence->position = boundary;
+                    plan.slot->capture_boundary();
+                    decoder.sequence->position = verify_end;
+                    st = restore_gdn_spec_conv(*state.pool, decoder.sequence->slot,
+                        context.history[r], history_row(accepted), state.stream);
+                    if (!st.ok()) return st;
+                    if (replay != nullptr) {
+                        replay += prefix;
+                    } else {
+                        const auto& layout = state.pool->layout();
+                        const size_t heads = static_cast<size_t>(prefix) * layout.num_v_heads;
+                        compact.delta += heads * layout.head_v;
+                        compact.k += heads * layout.head_k;
+                        compact.a += heads;
+                    }
+                    rows -= prefix;
+                }
+            }
             st = commit_gdn_compact_log(
                 *state.pool, decoder.sequence->slot, compact, state.commit_request,
-                accepted + 1u, decoder.gdn_key_heads, state.stream, replay,
+                rows, decoder.gdn_key_heads, state.stream, replay,
                 tree_mode ? total_rows : 0u, tree_mode);
             if (!st.ok()) return st;
         }

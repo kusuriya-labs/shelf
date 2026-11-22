@@ -24,6 +24,7 @@ struct DFlash2Config {
     std::size_t head_dim = 0;
 
     std::size_t sliding_window = 0;
+    uint32_t prefix_tail_rows = 0;
     bool is_causal = true;
 
     std::size_t block_size = 0;
@@ -56,8 +57,11 @@ struct DFlash2Config {
     std::size_t attention_kv_rows() const noexcept {
         return num_key_value_heads * head_dim;
     }
+    std::size_t ring_capacity() const noexcept {
+        return sliding_window + prefix_tail_rows;
+    }
     std::size_t context_ring_bytes() const noexcept {
-        return 2u * num_hidden_layers * sliding_window * attention_kv_rows() *
+        return 2u * num_hidden_layers * ring_capacity() * attention_kv_rows() *
                sizeof(bf16_t);
     }
     std::size_t tap_feature_size() const noexcept {

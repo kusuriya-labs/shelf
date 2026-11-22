@@ -220,9 +220,15 @@ restore / save の入力は次のとおりである。
   ring の状態になる。
 - 出力末尾の save（`prefix_finish_capture`）は request の ring を `SpecRingRef` として
   渡す。ring は commit-only であり `sequence.position` と常に一致する。
+- 単一 GPU で追加の QSA / PLE state がない場合、radix の rolling capture は
+  ページをまたいで提案・検証できる。受理経路が境界を通過すると、GDN の compact log を
+  境界まで反映し、その行の conv 履歴と recurrent state を保存してから残りの受理行を反映する。
+  tree verify では受理経路上の行を使う。最終位置が境界と一致した場合は request の終了処理前に
+  その状態を保存する。TP または QSA / PLE state を使う場合は境界までで検証を区切る。
 - output tail の entry は page 揃えした position の prefix である。ring の
   `length` / `next_position` は **entry position へ clamp して** 保存する
-  （final position のまま保存すると entry の KV 範囲と ring の範囲がずれる）。
+  radix 用の物理 ring は、境界後に最大 `page_tokens - 1` 行巻き戻せる容量を持つ。
+  追加行数は系列長が sliding window を超える分までとし、attention の可視長は sliding window に保つ。
 - DFlash2 の prefill は `--max-num-batched-tokens` の chunk で進み、
   `prefix_save_position`（tail）でもう 1 回区切る。chunk 末端の callback が
   `save_input_boundary` を呼ぶため、prompt が 1 chunk に収まる場合も tail が保存される。
@@ -240,7 +246,7 @@ drafter ring の保存先は `PrefixCacheConfig::spec_ring_bytes` で指定す�
 
 - 1 checkpoint slot の ring 領域は `spec_ring_bytes`（K と V の合計）である。
   compute は DFlash2 有効時に `DFlash2Config::context_ring_bytes()`
-  （`2 × num_hidden_layers × sliding_window × attention_kv_rows() × 2` bytes。
+  （`2 × num_hidden_layers × ring_capacity() × attention_kv_rows() × 2` bytes。
   27B では 40 MiB）を渡す。
 - ring 領域は checkpoint slot の host memory に含まれる。ring を保存できなかった
   entry も KV page と family state は保存する。その entry は DFlash2 request からは
