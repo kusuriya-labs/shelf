@@ -137,11 +137,23 @@ hipError_t shelf_hy4_wmma(const int8_t *codes, const float *scales, const uint32
 }
 
 namespace {
-template <bool Mixed>
+template <bool Mixed, bool Decode = false>
 __global__ void expert_batch(const int8_t *codes, const float *scales, const Hy4ExpertProjection *matrices,
                              const Hy4Route *routes, const Hy4ExpertBatch *batches, float *partial, int k,
-                             int n) {
-    auto batch = batches[blockIdx.y];
+                             int n, const int *count = nullptr) {
+    Hy4ExpertBatch batch;
+    if constexpr (Decode) {
+        if (int(blockIdx.y) >= *count)
+            return;
+        batch = {int(blockIdx.y), 1};
+        size_t plane = size_t(blockIdx.z) * gridDim.y;
+        codes += plane * k;
+        scales += plane * (k / 128);
+        partial += plane * n;
+        matrices += blockIdx.z;
+    } else {
+        batch = batches[blockIdx.y];
+    }
     size_t first = batch.first;
     auto matrix = matrices[3 * routes[first].expert];
     auto weight = matrix.trellis;
@@ -164,5 +176,13 @@ hipError_t shelf_hy4_wmma_experts(const int8_t *codes, const float *scales, cons
         expert_batch<true><<<dim3(n / 64, count), 128, 0, stream>>>(codes, scales, matrices, routes, batches, partial, k, n);
     else
         expert_batch<false><<<dim3(n / 64, count), 128, 0, stream>>>(codes, scales, matrices, routes, batches, partial, k, n);
+    return hipGetLastError();
+}
+
+hipError_t shelf_hy4_wmma_decode(const int8_t *codes, const float *scales, const Hy4ExpertProjection *matrices,
+                                 const Hy4Route *routes, const int *count, float *partial, int capacity,
+                                 int k, int n, int projections, hipStream_t stream) {
+    expert_batch<true, true><<<dim3(n / 64, capacity, projections), 128, 0, stream>>>(
+        codes, scales, matrices, routes, nullptr, partial, k, n, count);
     return hipGetLastError();
 }

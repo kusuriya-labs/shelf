@@ -68,6 +68,9 @@ Ready.
 | --- | --- |
 | `-h, --help` | show this help message and exit |
 | `--model-dir MODEL_DIR` | model directory |
+| `--placement PLACEMENT` | Hy4 の expert 配置表 |
+| `--engram-dir ENGRAM_DIR` | Hy4 FP8 Engram のディレクトリ |
+| `--dfly-dir DFLY_DIR` | Hy4 DFly2 のディレクトリ |
 | `--model MODEL` | model name reported by the API |
 | `--host HOST` | listen address (default 127.0.0.1) |
 | `--port PORT` | listen port (default 8000) |

@@ -113,7 +113,7 @@ int run(const Path &dir, int repeats) {
         gpu.index_keys[0][layer] = static_cast<uint16_t *>(memory.next((capacity_tokens / 4 + 12) * 256));
         for (auto &[key, dest] : gpu.folded[0])
             dest = memory.next(size_t(model.shape.at(key)[1]) * 512 * 2);
-        gpu.matrices[0] = static_cast<Hy4ExpertProjection *>(memory.next(gpu.matrix_bytes));
+        gpu.reserve_experts(0, memory);
         if (layer)
             gpu.upload_experts(0, layer);
         gpu.workspace[0] = {static_cast<uint8_t *>(memory.next(work)), work};
@@ -128,6 +128,7 @@ int run(const Path &dir, int repeats) {
             for (int pass = 0; pass < repeats; ++pass) {
                 std::vector<uint16_t> actual(input_size / 2);
                 double seconds = 0;
+                uint64_t initial_routes = gpu.routed_rows[0];
                 std::vector<int> history(start, 120000);
                 if (start) {
                     auto restore = [&](const char *key, void *dest, size_t length) {
@@ -172,6 +173,11 @@ int run(const Path &dir, int repeats) {
                     seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
                     op.copy(actual.data() + size_t(i) * 12288, x.p, x.bytes(), hipMemcpyDeviceToHost);
                     history.insert(history.end(), batch.begin(), batch.end());
+                }
+                if (layer) {
+                    gpu.collect_route_counts(0);
+                    if (gpu.routed_rows[0] - initial_routes != ids.size() * Hy4MoePlan::choices)
+                        throw std::runtime_error("expert の経路数が入力行数と一致しません");
                 }
                 if (pass == 0)
                     compare(actual, expected, chunk);

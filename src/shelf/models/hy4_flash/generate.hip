@@ -152,7 +152,11 @@ struct Target {
             target_probs = static_cast<float *>(op.arena.next(6 * 120832 * 4));
             draft_probs = static_cast<float *>(op.arena.next(5 * 120832 * 4));
         }
-        gpu.routed_rows[rank] = 0;
+        checked(hipMemsetAsync(gpu.moe_counts[rank], 0, 4 * sizeof(uint64_t), op.stream));
+        if (gpu.tp_size == 1)
+            gpu.routed_rows.fill(0);
+        else
+            gpu.routed_rows[rank] = 0;
         gpu.expert_ms[rank] = 0;
         if (rank == 0) {
             gpu.attention_ms = gpu.ffn_ms = gpu.transfer_ms = 0;
@@ -407,6 +411,7 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
                 if (!output.empty())
                     next = output.back();
             }
+            gpu.collect_route_counts(rank);
             auto prefill = now();
             lane[rank].pp_attn = gpu.attention_ms;
             lane[rank].pp_ffn = gpu.ffn_ms;
@@ -472,6 +477,7 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
                         break;
                 }
             }
+            gpu.collect_route_counts(rank);
             stats.generated = std::move(generated);
             stats.head = target.head_ms;
             stats.prefill = std::chrono::duration<double>(prefill - begin).count();

@@ -76,6 +76,7 @@ Status Residency::reserve() {
         const bool attention_rank = tp_size > 1 || r == 0;
         overhead[r] = (tp_size > 1 ? size_t(1) << 30 : (r == 0 ? size_t(2) << 30 : size_t(512) << 20)) + matrix_bytes;
         if (attention_rank) {
+            overhead[r] += align(41 * 512 * sizeof(int)) + 256;
             for (int i = 0; i < 42; ++i) {
                 bool sparse = i == 0 || i % 4 == 1;
                 overhead[r] += align(294 * (sparse ? tokens : std::min(tokens, size_t(518))));
@@ -132,7 +133,7 @@ Status Residency::reserve() {
             tp_recv[r] = buffer.next(max_prefill_chunk * 3072u * 2u);
         if (tp_size > 1 && ep_size > 1)
             ep_recv[r] = buffer.next(max_prefill_chunk * 1536u * 2u);
-        matrices[r] = static_cast<Hy4ExpertProjection *>(buffer.next(matrix_bytes));
+        reserve_experts(r, buffer);
         workspace[r] = {static_cast<uint8_t *>(buffer.next(work)), work};
         check(hipMemGetInfo(&free, &total));
         fprintf(stderr, "rank=%d committed=%zu free_after=%zu\n", r, arenas.back().committed(), free);
@@ -148,6 +149,30 @@ Status Residency::reserve() {
         all_barrier = std::make_unique<SyncBarrier>(ranks);
     return Status::make_ok();
 }
+void Residency::reserve_experts(int r, Region &buffer) {
+    matrices[r] = static_cast<Hy4ExpertProjection *>(buffer.next(matrix_bytes));
+    if (tp_size == 1 && r != 0)
+        return;
+    moe_owners[r] = static_cast<int *>(buffer.next(41 * 512 * sizeof(int)));
+    moe_counts[r] = static_cast<uint64_t *>(buffer.next(4 * sizeof(uint64_t)));
+    check(hipMemset(moe_counts[r], 0, 4 * sizeof(uint64_t)));
+    check(hipStreamCreateWithFlags(&local_expert[r], hipStreamNonBlocking));
+    check(hipEventCreateWithFlags(&local_ready[r], hipEventDisableTiming));
+    check(hipEventCreateWithFlags(&local_done[r], hipEventDisableTiming));
+}
+
+void Residency::collect_route_counts(int rank) {
+    std::array<uint64_t, 4> totals{};
+    check(hipMemcpyAsync(totals.data(), moe_counts[rank], sizeof(totals), hipMemcpyDeviceToHost, compute[rank]));
+    check(hipMemsetAsync(moe_counts[rank], 0, sizeof(totals), compute[rank]));
+    check(hipStreamSynchronize(compute[rank]));
+    if (tp_size > 1)
+        routed_rows[rank] += totals[rank / tp_size];
+    else
+        for (int r = 0; r < ep_size; ++r)
+            routed_rows[r] += totals[r];
+}
+
 void Residency::upload_experts(int r, int layer) {
     std::vector<Hy4ExpertProjection> table(512 * 3);
     const int group = r / tp_size;
@@ -166,6 +191,9 @@ void Residency::upload_experts(int r, int layer) {
                                          shape ? shape->at(0) : 1536, shape ? shape->at(1) : 1536};
             }
         }
+    if (moe_owners[r])
+        check(hipMemcpy(moe_owners[r] + (layer - 1) * 512, model.owners[layer - 1].data(),
+                        512 * sizeof(int), hipMemcpyHostToDevice));
     validate_expert_table(table, model.owners[layer - 1], group);
     check(hipMemcpy(matrices[r] + (layer - 1) * 1536, table.data(), table.size() * sizeof(table[0]),
                     hipMemcpyHostToDevice));
@@ -199,13 +227,16 @@ void Residency::upload() {
             if (src == dst)
                 continue;
             const bool available = push ? peer[src][dst] : peer[dst][src];
-            if (available) {
+            if (!available && tp_size == 1)
+                check(hipHostMalloc(&small_staging[src][dst], Hy4MoePlan::packet_bytes(Hy4MoePlan::max_rows),
+                                    hipHostMallocPortable));
+            if (available || small_staging[src][dst]) {
                 for (int q = 0; q < 2; ++q) {
                     check(hipSetDevice(physical[src]));
                     check(hipEventCreateWithFlags(&ready[src][dst][q],
                                                   hipEventDisableTiming | hipEventReleaseToSystem));
                     check(hipSetDevice(physical[dst]));
-                    check(hipEventCreateWithFlags(&ack[dst][src][q], hipEventDisableTiming));
+                    check(hipEventCreateWithFlags(&ack[dst][src][q], hipEventDisableTiming | hipEventReleaseToSystem));
                 }
             }
             if (!available && !staging)
@@ -279,12 +310,13 @@ void Residency::transfer(void *dst, int destination, const void *src, int source
     std::chrono::steady_clock::time_point begin;
     if (expert_begin[0])
         begin = std::chrono::steady_clock::now();
-    if (push ? peer[source][destination] : peer[destination][source]) {
+    void *host = bytes <= Hy4MoePlan::packet_bytes(Hy4MoePlan::max_rows) ? small_staging[source][destination] : nullptr;
+    if (host || (push ? peer[source][destination] : peer[destination][source])) {
         const int p = parity[source][destination];
         hipEvent_t ready_event = ready[source][destination][p];
         hipEvent_t ack_event = ack[destination][source][p];
         parity[source][destination] = p ^ 1;
-        if (push) {
+        if (!host && push) {
             check(hipSetDevice(physical[destination]));
             check(hipEventRecord(ack_event, compute[destination]));
             check(hipSetDevice(physical[source]));
@@ -295,10 +327,15 @@ void Residency::transfer(void *dst, int destination, const void *src, int source
             check(hipStreamWaitEvent(compute[destination], ready_event, 0));
         } else {
             check(hipSetDevice(physical[source]));
+            if (host)
+                check(hipMemcpyAsync(host, src, bytes, hipMemcpyDeviceToHost, compute[source]));
             check(hipEventRecord(ready_event, compute[source]));
             check(hipSetDevice(physical[destination]));
             check(hipStreamWaitEvent(compute[destination], ready_event, 0));
-            check(hipMemcpyPeerAsync(dst, physical[destination], src, physical[source], bytes, compute[destination]));
+            if (host)
+                check(hipMemcpyAsync(dst, host, bytes, hipMemcpyHostToDevice, compute[destination]));
+            else
+                check(hipMemcpyPeerAsync(dst, physical[destination], src, physical[source], bytes, compute[destination]));
             check(hipEventRecord(ack_event, compute[destination]));
             check(hipSetDevice(physical[source]));
             check(hipStreamWaitEvent(compute[source], ack_event, 0));
@@ -374,15 +411,14 @@ void Residency::reduce_pair(void *data, int rank, size_t bytes, bool ep) {
                 check(hipStreamWaitEvent(compute[destination], ready_events[source][p], 0));
                 check(hipMemcpyPeerAsync(recv[destination], physical[destination], tp_ptr[source], physical[source], bytes, compute[destination]));
             } else {
-                check(hipEventSynchronize(ready_events[source][p]));
-                check(hipEventSynchronize(ready_events[destination][p]));
-                if (recorded[destination][p ^ 1])
-                    check(hipEventSynchronize(consumed_events[destination][p ^ 1]));
                 check(hipSetDevice(physical[source]));
-                check(hipMemcpy(reduce_staging[a], tp_ptr[source], bytes, hipMemcpyDeviceToHost));
+                check(hipMemcpyAsync(reduce_staging[source], tp_ptr[source], bytes, hipMemcpyDeviceToHost,
+                                     compute[source]));
+                check(hipEventRecord(done_events[source][p], compute[source]));
                 check(hipSetDevice(physical[destination]));
-                check(hipMemcpyAsync(recv[destination], reduce_staging[a], bytes, hipMemcpyHostToDevice, compute[destination]));
-                check(hipStreamSynchronize(compute[destination]));
+                check(hipStreamWaitEvent(compute[destination], done_events[source][p], 0));
+                check(hipMemcpyAsync(recv[destination], reduce_staging[source], bytes, hipMemcpyHostToDevice,
+                                     compute[destination]));
             }
             check(hipEventRecord(arrived_events[destination][p], compute[destination]));
         }
@@ -418,6 +454,18 @@ void Residency::shutdown() {
             errors += std::string(hipGetErrorString(e)) + "\n";
     };
     for (int r = 0; r < ranks; ++r) {
+        if (local_expert[r]) {
+            collect(hipSetDevice(physical[r]));
+            collect(hipStreamSynchronize(local_expert[r]));
+            collect(hipStreamDestroy(local_expert[r]));
+            local_expert[r] = nullptr;
+        }
+        for (auto event : {&local_ready[r], &local_done[r]})
+            if (*event) {
+                collect(hipSetDevice(physical[r]));
+                collect(hipEventDestroy(*event));
+                *event = nullptr;
+            }
         if (compute[r]) {
             collect(hipSetDevice(physical[r]));
             collect(hipStreamSynchronize(compute[r]));
@@ -457,6 +505,11 @@ void Residency::shutdown() {
             expert_begin[r] = expert_end[r] = nullptr;
         }
     for (int r = 0; r < ranks; ++r) {
+        for (void *&buffer : small_staging[r])
+            if (buffer) {
+                collect(hipHostFree(buffer));
+                buffer = nullptr;
+            }
         if (route_host[r]) {
             collect(hipHostFree(route_host[r]));
             route_host[r] = nullptr;

@@ -1,7 +1,7 @@
 #pragma once
 
 #include <shelf/core/memory/arena.h>
-#include <shelf/models/hy4_flash/linear.h>
+#include <shelf/models/hy4_flash/moe_graph_plan.h>
 #include <shelf/models/hy4_flash/checkpoint.h>
 #include <shelf/models/hy4_flash/sync.h>
 #include <memory>
@@ -56,6 +56,13 @@ struct Residency {
     void upload();
     void upload_experts(int rank, int layer);
     std::array<Hy4ExpertProjection *, 4> matrices{};
+    std::array<int *, 4> moe_owners{};
+    std::array<uint64_t *, 4> moe_counts{};
+    std::array<hipStream_t, 4> local_expert{};
+    std::array<hipEvent_t, 4> local_ready{}, local_done{};
+    std::array<std::array<void *, 4>, 4> small_staging{};
+    void reserve_experts(int rank, Region &buffer);
+    void collect_route_counts(int rank);
     static constexpr size_t matrix_bytes = 41 * 512 * 3 * sizeof(Hy4ExpertProjection);
     void transfer(void *dst, int destination, const void *src, int source, size_t bytes);
     std::array<std::array<bool, 4>, 4> peer{}, owns_peer{};
