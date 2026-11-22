@@ -1,4 +1,5 @@
 #include <shelf/models/hy4_flash/target.h>
+#include <shelf/models/hy4_flash/generate.h>
 #include <algorithm>
 #include <bit>
 #include <cstdio>
@@ -33,20 +34,26 @@ void logical_ranks(Residency &gpu, int ranks) {
     for (int r = 1; r < ranks; ++r) {
         gpu.physical[r] = 0;
         gpu.matrices[r] = gpu.matrices[0];
-        auto result = gpu::GpuArena::create(0, 16 << 20);
+        auto result = gpu::GpuArena::create(0, 64 << 20);
         if (!result.ok())
             throw std::runtime_error(result.status().message());
         gpu.arenas.push_back(result.release());
-        auto memory = gpu.arenas.back().allocate_aligned(16 << 20, 256);
+        auto memory = gpu.arenas.back().allocate_aligned(64 << 20, 256);
         if (!memory.ok())
             throw std::runtime_error(memory.status().message());
-        gpu.workspace[r] = {static_cast<uint8_t *>(memory.value().data()), 16 << 20};
+        gpu.workspace[r] = {static_cast<uint8_t *>(memory.value().data()), 64 << 20};
         checked(hipStreamCreateWithFlags(&gpu.compute[r], hipStreamNonBlocking));
     }
+    const auto transport = std::getenv("SHELF_HY4_EP_TRANSPORT");
+    const bool host = transport && std::string_view(transport) == "host";
+    if (host && ranks > 1)
+        checked(hipHostMalloc(&gpu.staging, max_prefill_chunk * 3072u * 2u, hipHostMallocPortable));
     for (int r = 0; r < ranks; ++r)
         for (int other = 0; other < ranks; ++other)
             if (other != r) {
-                gpu.peer[r][other] = true;
+                gpu.peer[r][other] = !host;
+                if (host)
+                    checked(hipHostMalloc(&gpu.small_staging[r][other], gpu.transfer_packet_bytes(), hipHostMallocPortable));
                 for (int p = 0; p < 2; ++p) {
                     checked(hipEventCreateWithFlags(&gpu.ready[r][other][p], hipEventDisableTiming));
                     checked(hipEventCreateWithFlags(&gpu.ack[r][other][p], hipEventDisableTiming));
@@ -169,6 +176,76 @@ void compare(const Path &body, const Path &draft, int ranks) {
     printf("ep=%d target=7/7 draft=7/7 target_captures=4 draft_captures=2 capture_fallback=pass\n", ranks);
     gpu.shutdown();
 }
+void compare_batches(const Path &body, const Path &draft, int ranks) {
+    Checkpoint model(body, body, draft, Owners{}, 1, 1);
+    share_expert_weights(model);
+    const std::vector<std::vector<int>> prompts{{802, 15063}, {12286, 859, 444}, {401, 82, 44, 276}, {120000}};
+    constexpr int count = 4;
+    for (auto [speculate, slots] : {std::pair{false, 16}, std::pair{true, 16}, std::pair{true, 4}}) {
+        for (auto &owners : model.owners)
+            owners.fill(0);
+        setenv("SHELF_HY4_BATCH_DFLY", speculate ? "1" : "0", 1);
+        Residency gpu(model, 32, slots);
+        if (gpu.batch_draft != speculate) throw std::runtime_error("バッチ DFly2 の設定が異なります");
+        auto status = gpu.reserve();
+        if (!status.ok()) throw std::runtime_error(status.message());
+        gpu.upload();
+        logical_ranks(gpu, ranks);
+        std::vector<std::vector<int>> baseline;
+        model.has_draft = speculate;
+        for (const auto &prompt : prompts)
+            baseline.push_back(generate_batch(gpu, {prompt}, {count}, {}).front());
+        model.has_draft = true;
+        for (int batch : {2, 4, 8, 16}) {
+            if (slots == 4) break;
+            std::vector<std::vector<int>> inputs;
+            for (int i = 0; i < batch; ++i)
+                inputs.push_back(prompts[i % prompts.size()]);
+            auto results = generate_batch(gpu, inputs, std::vector<int>(batch, count), {});
+            for (int i = 0; i < batch; ++i)
+                if (results.at(i) != baseline[i % prompts.size()])
+                    throw std::runtime_error("バッチ生成が単独実行と異なります: B=" + std::to_string(batch) +
+                                             " slot=" + std::to_string(i));
+            printf("ep=%d draft=%d batch=%d greedy=%d/%d\n", ranks, speculate, batch, batch, batch);
+            fflush(stdout);
+        }
+        if (slots == 4) {
+            std::vector<int> near_end(29, 802);
+            auto tail = generate_batch(gpu, {near_end}, {3}, {}).front();
+            std::array<std::vector<int>, 7> streamed;
+            std::array<std::string, 7> reason;
+            std::vector<int> started;
+            Hy4BatchSession session(gpu, [&](int id, int token) {
+                if (streamed[id].empty()) started.push_back(id);
+                streamed[id].push_back(token);
+            }, [&](int id, const std::vector<int> &ids, const char *finish) {
+                if (ids != streamed[id]) throw std::runtime_error("配信した ID と終了通知が異なります");
+                reason[id] = finish;
+            });
+            for (int id = 0; id < 6; ++id)
+                session.admit({id, id == 5 ? near_end : prompts[id % 4], id == 5 ? 3 : count, {}});
+            session.admit({6, prompts[2], count, {}});
+            session.cancel(6);
+            if (session.active() != 4 || session.queued() != 2)
+                throw std::runtime_error("待機列の件数が異なります");
+            for (int i = 0; i < 5; ++i) session.step();
+            session.cancel(1);
+            for (int i = 0; session.active() || session.queued(); ++i) {
+                if (i > 64) throw std::runtime_error("バッチ処理が完了しません");
+                session.step();
+            }
+            if (started != std::vector<int>{0, 1, 2, 3, 4, 5} || !session.draft_rounds() ||
+                reason[1] != "cancelled" || reason[6] != "cancelled" || streamed[5] != tail)
+                throw std::runtime_error("FIFO、キャンセルまたは KV 残量の検証に失敗しました");
+            for (int id : {0, 2, 3, 4})
+                if (streamed[id] != baseline[id % 4])
+                    throw std::runtime_error("スロット再利用後の生成 ID が異なります");
+            printf("ep=%d session=pass draft_rounds=%zu\n", ranks, session.draft_rounds());
+        }
+        gpu.shutdown();
+    }
+}
+
 }
 extern "C" hipError_t __real_hipGraphInstantiate(hipGraphExec_t *, hipGraph_t, hipGraphNode_t *, char *, size_t);
 extern "C" hipError_t __wrap_hipGraphInstantiate(hipGraphExec_t *exec, hipGraph_t graph, hipGraphNode_t *node,
@@ -178,11 +255,12 @@ extern "C" hipError_t __wrap_hipGraphInstantiate(hipGraphExec_t *exec, hipGraph_
     return __real_hipGraphInstantiate(exec, graph, node, log, length);
 }
 int main(int argc, char **argv) {
-    if (argc != 3)
+    if (argc != 3 && (argc != 4 || std::string_view(argv[3]) != "batch"))
         return 2;
     try {
         for (int ranks : {1, 4})
-            compare(argv[1], argv[2], ranks);
+            if (argc == 4) compare_batches(argv[1], argv[2], ranks);
+            else compare(argv[1], argv[2], ranks);
         return 0;
     } catch (const std::exception &e) {
         fprintf(stderr, "%s\n", e.what());

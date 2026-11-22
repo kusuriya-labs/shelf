@@ -99,8 +99,7 @@ std::vector<uint8_t> gather_engram(const Checkpoint &model, int layer, int rows,
     return packed;
 }
 
-Mat engram(Ops &op, int layer, Mat x, const std::vector<int> &prior, const std::vector<int> &ids) {
-    int g = (layer - 1) / 10;
+static Mat apply_engram(Ops &op, int layer, Mat x, const uint8_t *memory, const std::vector<int> &ids) {
     auto p = "model.layers." + std::to_string(layer) + ".engram_layer.";
     auto bf = [&](const std::string &name) {
         auto v = op.param(p + name);
@@ -108,16 +107,6 @@ Mat engram(Ops &op, int layer, Mat x, const std::vector<int> &prior, const std::
             throw std::runtime_error("Engram パラメーターの型が異なります");
         return static_cast<const uint16_t *>(v.p);
     };
-    uint8_t *memory = nullptr;
-    if (op.capture)
-        memory = op.gpu.graph_input->engram[g];
-    else {
-        auto packed = op.take_engram(g);
-        if (packed.empty())
-            packed = gather_engram(op.gpu.model, layer, x.rows, ids, prior);
-        memory = static_cast<uint8_t *>(op.arena.next(packed.size()));
-        op.copy(memory, packed.data(), packed.size(), hipMemcpyHostToDevice);
-    }
     auto embed = op.mat(x.rows, 1536);
     Norms norms{};
     for (int i = 0; i < 16; ++i)
@@ -137,6 +126,35 @@ Mat engram(Ops &op, int layer, Mat x, const std::vector<int> &prior, const std::
         checked(hipGetLastError());
     }
     return x;
+}
+
+Mat engram(Ops &op, int layer, Mat x, const std::vector<int> &prior, const std::vector<int> &ids) {
+    int g = (layer - 1) / 10;
+    uint8_t *memory = nullptr;
+    if (op.capture)
+        memory = op.gpu.graph_input->engram[g];
+    else {
+        auto packed = op.take_engram(g);
+        if (packed.empty())
+            packed = gather_engram(op.gpu.model, layer, x.rows, ids, prior);
+        memory = static_cast<uint8_t *>(op.arena.next(packed.size()));
+        op.copy(memory, packed.data(), packed.size(), hipMemcpyHostToDevice);
+    }
+    return apply_engram(op, layer, x, memory, ids);
+}
+Mat engram_batch(Ops &op, int layer, Mat x, const std::vector<const std::vector<int> *> &priors,
+                 const std::vector<int> &ids) {
+    const int rows = ids.size() / priors.size();
+    std::vector<uint8_t> packed;
+    packed.reserve(size_t(x.rows) * 16 * 98);
+    for (size_t slot = 0; slot < priors.size(); ++slot) {
+        auto first = ids.begin() + slot * rows;
+        auto lane = gather_engram(op.gpu.model, layer, rows, {first, first + rows}, *priors[slot]);
+        packed.insert(packed.end(), lane.begin(), lane.end());
+    }
+    auto memory = static_cast<uint8_t *>(op.arena.next(packed.size()));
+    op.copy(memory, packed.data(), packed.size(), hipMemcpyHostToDevice);
+    return apply_engram(op, layer, x, memory, ids);
 }
 
 void Ops::prefetch_engram(const std::vector<int> &ids, const std::vector<int> &prior) {

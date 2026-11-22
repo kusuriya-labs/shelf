@@ -24,7 +24,14 @@ void *Region::next(size_t length) {
     cursor = start + length;
     return base + start;
 }
-Residency::Residency(Checkpoint &model, size_t tokens) : model(model), tokens(tokens) {
+Residency::Residency(Checkpoint &model, size_t tokens, int slots)
+    : model(model), tokens(tokens), max_slots(slots), batch_draft(false) {
+    if (slots < 1 || slots > 16)
+        throw std::invalid_argument("スロット数は 1〜16 で指定してください");
+    const char *draft = std::getenv("SHELF_HY4_BATCH_DFLY");
+    batch_draft = slots > 1 && model.has_draft && (!draft || std::string_view(draft) != "0");
+    if (batch_draft)
+        sparse_last.resize(slots);
     ep_size = model.ep;
     tp_size = model.tp;
     for (int r = 0; r < model.ranks; ++r)
@@ -41,7 +48,15 @@ Residency::~Residency() noexcept {
         fprintf(stderr, "Hy4 の解放エラー: %s\n", e.what());
     }
 }
+Status Residency::check_batch_topology(int tp_size, int slots) {
+    if (tp_size > 1 && slots > 1)
+        return Status::unsupported("TP の同時リクエスト数は 1 です", __FILE__, __LINE__);
+    return Status::make_ok();
+}
 Status Residency::reserve() {
+    auto topology = check_batch_topology(tp_size, max_slots);
+    if (!topology.ok())
+        return topology;
     int count = 0;
     check(hipGetDeviceCount(&count));
     if (count < 1 || count > 4)
@@ -79,9 +94,9 @@ Status Residency::reserve() {
             overhead[r] += align(41 * 512 * sizeof(int)) + 256;
             for (int i = 0; i < 42; ++i) {
                 bool sparse = i == 0 || i % 4 == 1;
-                overhead[r] += align(294 * (sparse ? tokens : std::min(tokens, size_t(518))));
+                overhead[r] += align(max_slots * 294 * (sparse ? tokens : std::min(tokens, size_t(518))));
                 if (sparse)
-                    overhead[r] += align((tokens / 4 + 12) * 256);
+                    overhead[r] += align((tokens / 4 + 12) * 256 * max_slots);
             }
             for (const auto &[name, ignored] : folded[r])
                 overhead[r] += size_t(model.shape_of(name, r)->at(1)) * 512 * 2;
@@ -94,7 +109,7 @@ Status Residency::reserve() {
     }
     if (*std::min_element(remaining.begin(), remaining.begin() + ranks) < 0)
         return Status::unsupported("要求された配置と予約長は GPU の空き容量に収まりません", __FILE__, __LINE__);
-    graph_room = tp_size == 1 && std::all_of(remaining.begin(), remaining.begin() + ranks,
+    graph_room = max_slots == 1 && tp_size == 1 && std::all_of(remaining.begin(), remaining.begin() + ranks,
                                             [](int64_t bytes) { return bytes >= int64_t(graph_headroom); });
     fprintf(stderr, "rank_counts=%d,%d,%d,%d\n", used[0], used[1], used[2], used[3]);
     for (int r = 0; r < ranks; ++r) {
@@ -124,9 +139,9 @@ Status Residency::reserve() {
             for (int i = 0; i < 42; ++i) {
                 bool sparse = i == 0 || i % 4 == 1;
                 cache[r][i] = static_cast<uint8_t *>(
-                    buffer.next(294 * (sparse ? tokens : std::min(tokens, size_t(518)))));
+                    buffer.next(max_slots * 294 * (sparse ? tokens : std::min(tokens, size_t(518)))));
                 if (sparse)
-                    index_keys[r][i] = static_cast<uint16_t *>(buffer.next((tokens / 4 + 12) * 256));
+                    index_keys[r][i] = static_cast<uint16_t *>(buffer.next((tokens / 4 + 12) * 256 * max_slots));
             }
             for (auto &[name, ptr] : folded[r])
                 ptr = buffer.next(size_t(model.shape_of(name, r)->at(1)) * 512 * 2);
@@ -230,7 +245,7 @@ void Residency::upload() {
                 continue;
             const bool available = push ? peer[src][dst] : peer[dst][src];
             if (!available && tp_size == 1)
-                check(hipHostMalloc(&small_staging[src][dst], Hy4MoePlan::packet_bytes(Hy4MoePlan::max_rows),
+                check(hipHostMalloc(&small_staging[src][dst], transfer_packet_bytes(),
                                     hipHostMallocPortable));
             if (available || small_staging[src][dst]) {
                 for (int q = 0; q < 2; ++q) {
@@ -312,7 +327,7 @@ void Residency::transfer(void *dst, int destination, const void *src, int source
     std::chrono::steady_clock::time_point begin;
     if (expert_begin[0])
         begin = std::chrono::steady_clock::now();
-    void *host = bytes <= Hy4MoePlan::packet_bytes(Hy4MoePlan::max_rows) ? small_staging[source][destination] : nullptr;
+    void *host = bytes <= transfer_packet_bytes() ? small_staging[source][destination] : nullptr;
     if (host || (push ? peer[source][destination] : peer[destination][source])) {
         const int p = parity[source][destination];
         hipEvent_t ready_event = ready[source][destination][p];

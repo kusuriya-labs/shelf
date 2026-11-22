@@ -101,7 +101,7 @@ __global__ void norm_slice_kernel(Mat x, Param weight, Mat y, float eps, int fir
                                             (weight.p ? read(weight, c) : 1.f));
 }
 __global__ void rotary_from(Mat x, Mat y, int heads, int start, float theta, int first,
-                            const Hy4StepParams *params) {
+                            const Hy4StepParams *params, const int *positions = nullptr) {
     if (params)
         start = params->position;
     size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -114,7 +114,7 @@ __global__ void rotary_from(Mat x, Mat y, int heads, int start, float theta, int
         return;
     }
     int j = c - (width - 64);
-    float phase = (start + row) * powf(theta, -float(j / 2) / 32);
+    float phase = (positions ? positions[row] : start + row) * powf(theta, -float(j / 2) / 32);
     float co = bf16_bits_to_f32(f32_to_bf16_rne_device(cosf(phase)));
     float si = bf16_bits_to_f32(f32_to_bf16_rne_device(sinf(phase)));
     y.p[i] = f32_to_bf16_rne_device(value(x, src) * co + ((j & 1) ? 1.f : -1.f) * value(x, src ^ 1) * si);
@@ -203,7 +203,7 @@ __global__ void hc_expand(Mat x, Mat y, const float *post) {
     x.p[i] = f32_to_bf16_rne_device(
         __fadd_rn(value(x, i), __fmul_rn(post[r * 8 + 4 + h], value(y, size_t(r) * y.cols + i % y.cols))));
 }
-__global__ void rotary(Mat x, Mat y, int heads, int start, float theta, const Hy4StepParams *params) {
+__global__ void rotary(Mat x, Mat y, int heads, int start, float theta, const Hy4StepParams *params, const int *positions = nullptr) {
     if (params)
         start = params->position;
     size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -215,7 +215,7 @@ __global__ void rotary(Mat x, Mat y, int heads, int start, float theta, const Hy
         return;
     }
     int j = c - (width - 64);
-    float phase = (start + row) * powf(theta, -float(j / 2) / 32);
+    float phase = (positions ? positions[row] : start + row) * powf(theta, -float(j / 2) / 32);
     float co = bf16_bits_to_f32(f32_to_bf16_rne_device(cosf(phase)));
     float si = bf16_bits_to_f32(f32_to_bf16_rne_device(sinf(phase)));
     y.p[i] = f32_to_bf16_rne_device(value(x, i) * co + ((j & 1) ? 1.f : -1.f) * value(x, i ^ 1) * si);
@@ -293,7 +293,7 @@ Mat Ops::linear(const std::string &name, Mat x) {
     auto codes = static_cast<int8_t *>(arena.next(size_t(x.rows) * pk));
     auto scales = static_cast<float *>(arena.next(size_t(x.rows) * pk / 128 * 4));
     int splits = 1;
-    if (x.rows <= 16)
+    if (x.rows <= 16 || (batch_decode && gpu.batch_draft))
         while (splits < 16 && (pn / 64) * splits < 128 && (pk / 128) % (2 * splits) == 0)
             splits *= 2;
     auto partial = static_cast<float *>(arena.next(size_t(x.rows) * pn * 4 * splits));
@@ -422,6 +422,18 @@ Mat Ops::expand(Mat x, Mat y, const float *post) {
 void Ops::add_into(Mat a, Mat b, Mat out) {
     element<<<grid(a), 256, 0, stream>>>(a, b, out, 0);
     checked(hipGetLastError());
+}
+Mat Ops::rope_batch(Mat x, int heads, float theta, const int *row_positions) {
+    Mat y = mat(x.rows, x.cols);
+    rotary<<<grid(y), 256, 0, stream>>>(x, y, heads, 0, theta, nullptr, row_positions);
+    checked(hipGetLastError());
+    return y;
+}
+Mat Ops::rope_from_batch(Mat x, int first, int width, int heads, float theta, const int *row_positions) {
+    Mat y = mat(x.rows, width);
+    rotary_from<<<grid(y), 256, 0, stream>>>(x, y, heads, 0, theta, first, nullptr, row_positions);
+    checked(hipGetLastError());
+    return y;
 }
 Mat Ops::rope_from(Mat x, int first, int width, int heads, int start, float theta) {
     Mat y = mat(x.rows, width);

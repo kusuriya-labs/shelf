@@ -99,7 +99,7 @@ class Hy4FlashTests(unittest.TestCase):
                 for rank in range(ranks):
                     fixed = (2 << 30) if not rank else (512 << 20)
                     if not rank:
-                        fixed += (4 << 30) + sum(placement.cache_bytes(2097152))
+                        fixed += (4 << 30) + result["routing_bytes"] + sum(placement.cache_bytes(2097152))
                     count = sum(row.count(rank) for row in layout)
                     peak = fixed + result["matrix_bytes"] + (256 << 20) + count * EXPERT_BYTES
                     self.assertEqual(result["peak_estimate"][rank], peak)

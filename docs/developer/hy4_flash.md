@@ -2,7 +2,7 @@
 
 Hy4 は専用の checkpoint loader と decoder を使用する。MLA・sliding attention・EXL3 線形・WMMA の Hy4 固有実装は `models/hy4_flash` に置く。radix 選択は model 非依存の `kernels/fused/detail` を共有する。checkpoint の model_type、層数、形状、量子化形式を検証してから実行する。attention、KV、head、DFly と shared expert は rank 0 に置き、routed expert を配置表に従って各 rank へ置く。FP8 Engram はホストに保持し、必要行だけを取得する。GPU の一覧は ROCr の可視 device 順を使用し、gfx1201 以外を拒否する。
 
-expert の転送は peer access を有効にし、送信側 rank の kernel から受信側 rank の領域へ書く push を既定とする。宛先バッファの再利用と転送完了は event で順序付ける。peer access を利用できない場合は pinned host buffer を使用する。`SHELF_HY4_EP_TRANSPORT=host` で host 経由、`peer` で従来の受信側 stream による `hipMemcpyPeerAsync` を選べる。各 rank の部分和は rank 0 で合算する。予約時に実空き量を確認し、必要に応じて expert を再配置する。収まらない場合は `Status::unsupported` を返す。配置作成手順は[操作方法](../user/hy4_flash.md)を参照する。
+expert の転送は peer access を有効にし、送信側 rank の kernel から受信側 rank の領域へ書く push を既定とする。宛先バッファの再利用と転送完了は event で順序付ける。peer access を利用できない場合は pinned host buffer を使用する。`SHELF_HY4_EP_TRANSPORT=host` で host 経由、`peer` で従来の受信側 stream による `hipMemcpyPeerAsync` を選べる。各 rank の部分和は rank 0 で合算する。予約時に各 rank の実空き容量と配置表を照合する。収まらない場合は `Status::unsupported` を返す。配置作成手順は[操作方法](../user/hy4_flash.md)を参照する。
 
 `--expert-parallel` と `--tensor-parallel` で EP × TP の構成を選ぶ。rank は `ep * tp_size + tp` の順で並び、配置表の値は expert の所有 EP group を表す。TP では次の matrix axis を分割する。
 
@@ -21,3 +21,15 @@ Target の Graph は各 MoE 層で scatter、rank ごとの expert、合流の�
 eager 実行では各 forward の開始時に 4 つの Engram 層の行を非同期に先読みする。`SHELF_HY4_ENGRAM_PREFETCH=0` で無効化できる。Graph 実行では第 0 層を起動した後、ホストで必要な Engram 行を集め、第 1 層の前に同じ stream で転送する。Engram は既定で populate しない。`SHELF_HY4_ENGRAM_POPULATE=1` を指定すると、生成前に 4 表を populate する。server の既定動作は Engram の mmap に `MADV_POPULATE_READ` を適用し、`mincore` で常駐状態を記録してから request を受け付ける。`SHELF_HY4_ENGRAM_POPULATE=0` では遅延 mmap を使用する。`SHELF_HY4_ENGRAM_MLOCK=1` は全表の memlock 上限を検査し、各 mmap を `mlock` して全ページの常駐を検証する。上限不足、システムコール失敗または固定後の常駐不足は起動を失敗させる。mmap の解除時に固定も解除される。固定なしでは populate 後の常駐は保証されない。起動時間と操作方法は[利用者向け手順](../user/hy4_flash.md)を参照する。
 
 `SHELF_HY4_PROFILE_EP=1` では request 前後の Engram 常駐ページとプロセスの page fault 数を記録する。Hy4 server の compute 起動待ちは 900 秒である。
+
+## 複数リクエストの実行
+
+TP=1、EP=1〜4 では、各スロットが独立した KV、圧縮 index、生成履歴を持つ。DFly2 の隠れ状態と疎な attention の選択行もスロットに対応付ける。単一スロットの Target Graph と DFly2 Graph はそれぞれ `SHELF_HY4_GRAPH=0` と `SHELF_HY4_DRAFT_GRAPH=0` で無効にできる。複数スロットを予約すると eager 経路を使う。TP>1 の予約は同時リクエスト数が 1 を超えると `Status::unsupported` を返す。
+
+`generate_batch` は 1〜16 件を受け付ける。prefill は入力ごとに実行し、decode では処理中のスロットと位置を GPU に渡す。通常の dense・sliding decode は各層で全行のスコア計算、正規化、値の集約を 1 つのカーネルで行い、KV と index を一括更新する。疎な attention の対象になる位置はスロットごとに処理する。
+
+各 EP rank の GPU 計画は所有 expert、入力行、重み、元の加算順を保持する。複数行は expert ごとにまとめ、最大 16 行の `Hy4ExpertBatch` を全 rank で gfx1201 WMMA に渡す。部分和は各入力行の expert 順で計算し、rank 0 が rank 順に加算する。転送には通常経路と同じ方向別の peer 判定と 2 組の event を使用する。
+
+`Hy4BatchSession` は要求を FIFO で空きスロットに割り当てる。1 回の `step()` で prefill の 1 チャンク、または準備が済んだ要求の decode を進める。キャンセルは指定した要求だけを完了させ、解放したスロットに待機中の要求を割り当てる。DFly2 は各スロットの anchor と 5 候補をまとめ、最大 96 行を検証する。受理数と乱数 seed は要求ごとに管理する。いずれかの要求で KV 残量が 6 未満、または生成できる残りが 1 トークンの場合、そのステップは通常の decode を使う。`SHELF_HY4_BATCH_DFLY=0` でバッチ投機を無効にできる。
+
+`test_hy4_graph BODY DRAFT batch` は単一 R9700 上で 1 rank と 4 論理 rank を使い、B=2、4、8、16 の greedy 生成 ID を B=1 と照合する。4 スロットのセッションではキャンセル後の再利用、FIFO、KV 残量が異なる要求を検査する。

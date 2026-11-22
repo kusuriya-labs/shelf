@@ -582,6 +582,8 @@ model 固有の `<tool_call>` 等の markup は client へ漏れない。
 
 ### concurrency と cancel
 
+Hy4-flash は `--max-concurrent-requests` で 1〜16 スロットを予約する。`/v1/meta` の KV 統計では固定スロット 1 個を 1 ページとし、`page_tokens` はスロットの予約長を表す。TP=1 では空きスロットに次の要求を受け入れ、要求ごとに token を配信する。単一スロットの Graph と複数スロットの DFly2 の切り替え、必要な KV 容量、複数 GPU での照合手順は [Hy4-flash の実行](hy4_flash.md)を参照する。
+
 `--max-concurrent-requests N` は最大 in-flight request 数であり、同時に 1 executor step で
 scheduler が扱える最大 request 数でもある。physical KV capacity は起動時に arena の余りから
 確定し、実行中に拡張しない。容量が不足する場合、一部の request は Queued となり、

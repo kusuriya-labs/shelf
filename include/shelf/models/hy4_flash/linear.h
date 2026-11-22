@@ -41,4 +41,5 @@ hipError_t shelf_hy4_head(const uint16_t *x, const uint16_t *suh, const uint16_t
 hipError_t shelf_hy4_expert_decode(const uint16_t *latent, const Hy4ExpertProjection *matrices,
                                    const Hy4Route *routes, const int *count, int capacity, int intermediate,
                                    int8_t *codes, float *scales, float *partial, uint16_t *output,
-                                   hipStream_t stream);
+                                   hipStream_t stream, const Hy4ExpertBatch *batches = nullptr,
+                                   const int *num_batches = nullptr);
