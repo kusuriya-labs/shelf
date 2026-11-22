@@ -1,0 +1,162 @@
+{
+  "version": "real-v1",
+  "files": {
+    "long_16k.txt": "113352dc41ac6f6cfc66a0d6a9c96ad348224051f81b55738806a447f1f298a9",
+    "mid_8k.txt": "c19b94c14df0364e3cddc4637d6f8993cec45b96d02ecbf602f6d5eff8259047",
+    "short_2k.txt": "92486fe85021e469a10019a16dafc8cb04dc409b58799166ec3ddbb27a1e009a",
+    "tasks.json": "2fa95bdb876577cb87c86ffd172cf2830540ab60519698cd95da3faf2438037c"
+  },
+  "cells": [
+    {
+      "domain": "code_edit",
+      "language": "ja",
+      "length_tier": "short_2k"
+    },
+    {
+      "domain": "code_edit",
+      "language": "ja",
+      "length_tier": "mid_8k"
+    },
+    {
+      "domain": "code_edit",
+      "language": "ja",
+      "length_tier": "long_16k"
+    },
+    {
+      "domain": "code_edit",
+      "language": "en",
+      "length_tier": "short_2k"
+    },
+    {
+      "domain": "code_edit",
+      "language": "en",
+      "length_tier": "mid_8k"
+    },
+    {
+      "domain": "code_edit",
+      "language": "en",
+      "length_tier": "long_16k"
+    },
+    {
+      "domain": "code_review",
+      "language": "ja",
+      "length_tier": "short_2k"
+    },
+    {
+      "domain": "code_review",
+      "language": "ja",
+      "length_tier": "mid_8k"
+    },
+    {
+      "domain": "code_review",
+      "language": "ja",
+      "length_tier": "long_16k"
+    },
+    {
+      "domain": "code_review",
+      "language": "en",
+      "length_tier": "short_2k"
+    },
+    {
+      "domain": "code_review",
+      "language": "en",
+      "length_tier": "mid_8k"
+    },
+    {
+      "domain": "code_review",
+      "language": "en",
+      "length_tier": "long_16k"
+    },
+    {
+      "domain": "design_debug",
+      "language": "ja",
+      "length_tier": "short_2k"
+    },
+    {
+      "domain": "design_debug",
+      "language": "ja",
+      "length_tier": "mid_8k"
+    },
+    {
+      "domain": "design_debug",
+      "language": "ja",
+      "length_tier": "long_16k"
+    },
+    {
+      "domain": "design_debug",
+      "language": "en",
+      "length_tier": "short_2k"
+    },
+    {
+      "domain": "design_debug",
+      "language": "en",
+      "length_tier": "mid_8k"
+    },
+    {
+      "domain": "design_debug",
+      "language": "en",
+      "length_tier": "long_16k"
+    },
+    {
+      "domain": "tech_prose",
+      "language": "ja",
+      "length_tier": "short_2k"
+    },
+    {
+      "domain": "tech_prose",
+      "language": "ja",
+      "length_tier": "mid_8k"
+    },
+    {
+      "domain": "tech_prose",
+      "language": "ja",
+      "length_tier": "long_16k"
+    },
+    {
+      "domain": "tech_prose",
+      "language": "en",
+      "length_tier": "short_2k"
+    },
+    {
+      "domain": "tech_prose",
+      "language": "en",
+      "length_tier": "mid_8k"
+    },
+    {
+      "domain": "tech_prose",
+      "language": "en",
+      "length_tier": "long_16k"
+    },
+    {
+      "domain": "multi_turn",
+      "language": "ja",
+      "length_tier": "short_2k"
+    },
+    {
+      "domain": "multi_turn",
+      "language": "ja",
+      "length_tier": "mid_8k"
+    },
+    {
+      "domain": "multi_turn",
+      "language": "ja",
+      "length_tier": "long_16k"
+    },
+    {
+      "domain": "multi_turn",
+      "language": "en",
+      "length_tier": "short_2k"
+    },
+    {
+      "domain": "multi_turn",
+      "language": "en",
+      "length_tier": "mid_8k"
+    },
+    {
+      "domain": "multi_turn",
+      "language": "en",
+      "length_tier": "long_16k"
+    }
+  ],
+  "macro_average": "equal weight for all required cells; null if any cell is missing"
+}

@@ -1,0 +1,572 @@
+[
+  {
+    "id": "code_edit-ja-short_2k",
+    "domain": "code_edit",
+    "language": "ja",
+    "length_tier": "short_2k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "複数ファイルの修正案を実装可能な差分として示し、境界条件とテスト、既存利用者への影響を具体的に説明してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
+    "context_file": "short_2k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "code_edit-ja-mid_8k",
+    "domain": "code_edit",
+    "language": "ja",
+    "length_tier": "mid_8k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "複数ファイルの修正案を実装可能な差分として示し、境界条件とテスト、既存利用者への影響を具体的に説明してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
+    "context_file": "mid_8k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "code_edit-ja-long_16k",
+    "domain": "code_edit",
+    "language": "ja",
+    "length_tier": "long_16k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "複数ファイルの修正案を実装可能な差分として示し、境界条件とテスト、既存利用者への影響を具体的に説明してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
+    "context_file": "long_16k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "code_edit-en-short_2k",
+    "domain": "code_edit",
+    "language": "en",
+    "length_tier": "short_2k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "Propose an implementable multi-file patch, including tests, boundary cases and compatibility implications. Give a substantial, detailed answer with concrete evidence and multiple examples.",
+    "context_file": "short_2k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "code_edit-en-mid_8k",
+    "domain": "code_edit",
+    "language": "en",
+    "length_tier": "mid_8k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "Propose an implementable multi-file patch, including tests, boundary cases and compatibility implications. Give a substantial, detailed answer with concrete evidence and multiple examples.",
+    "context_file": "mid_8k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "code_edit-en-long_16k",
+    "domain": "code_edit",
+    "language": "en",
+    "length_tier": "long_16k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "Propose an implementable multi-file patch, including tests, boundary cases and compatibility implications. Give a substantial, detailed answer with concrete evidence and multiple examples.",
+    "context_file": "long_16k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "code_review-ja-short_2k",
+    "domain": "code_review",
+    "language": "ja",
+    "length_tier": "short_2k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "提示コードをレビューし、再現条件、根拠となる箇所、影響、修正案と回帰テストを優先度順に詳述してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
+    "context_file": "short_2k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "code_review-ja-mid_8k",
+    "domain": "code_review",
+    "language": "ja",
+    "length_tier": "mid_8k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "提示コードをレビューし、再現条件、根拠となる箇所、影響、修正案と回帰テストを優先度順に詳述してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
+    "context_file": "mid_8k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "code_review-ja-long_16k",
+    "domain": "code_review",
+    "language": "ja",
+    "length_tier": "long_16k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "提示コードをレビューし、再現条件、根拠となる箇所、影響、修正案と回帰テストを優先度順に詳述してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
+    "context_file": "long_16k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "code_review-en-short_2k",
+    "domain": "code_review",
+    "language": "en",
+    "length_tier": "short_2k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "Review the code, identify concrete defects with evidence, reproductions, impact, fixes and regression tests in priority order. Give a substantial, detailed answer with concrete evidence and multiple examples.",
+    "context_file": "short_2k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "code_review-en-mid_8k",
+    "domain": "code_review",
+    "language": "en",
+    "length_tier": "mid_8k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "Review the code, identify concrete defects with evidence, reproductions, impact, fixes and regression tests in priority order. Give a substantial, detailed answer with concrete evidence and multiple examples.",
+    "context_file": "mid_8k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "code_review-en-long_16k",
+    "domain": "code_review",
+    "language": "en",
+    "length_tier": "long_16k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "Review the code, identify concrete defects with evidence, reproductions, impact, fixes and regression tests in priority order. Give a substantial, detailed answer with concrete evidence and multiple examples.",
+    "context_file": "long_16k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "design_debug-ja-short_2k",
+    "domain": "design_debug",
+    "language": "ja",
+    "length_tier": "short_2k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "提示コードを基に障害を切り分ける設計を示し、仮説、観測方法、所有権、並行性、復旧手順と検証計画を詳述してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
+    "context_file": "short_2k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "design_debug-ja-mid_8k",
+    "domain": "design_debug",
+    "language": "ja",
+    "length_tier": "mid_8k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "提示コードを基に障害を切り分ける設計を示し、仮説、観測方法、所有権、並行性、復旧手順と検証計画を詳述してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
+    "context_file": "mid_8k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "design_debug-ja-long_16k",
+    "domain": "design_debug",
+    "language": "ja",
+    "length_tier": "long_16k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "提示コードを基に障害を切り分ける設計を示し、仮説、観測方法、所有権、並行性、復旧手順と検証計画を詳述してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
+    "context_file": "long_16k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "design_debug-en-short_2k",
+    "domain": "design_debug",
+    "language": "en",
+    "length_tier": "short_2k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "Develop a debugging and architecture plan covering hypotheses, observations, ownership, concurrency, recovery and verification. Give a substantial, detailed answer with concrete evidence and multiple examples.",
+    "context_file": "short_2k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "design_debug-en-mid_8k",
+    "domain": "design_debug",
+    "language": "en",
+    "length_tier": "mid_8k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "Develop a debugging and architecture plan covering hypotheses, observations, ownership, concurrency, recovery and verification. Give a substantial, detailed answer with concrete evidence and multiple examples.",
+    "context_file": "mid_8k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "design_debug-en-long_16k",
+    "domain": "design_debug",
+    "language": "en",
+    "length_tier": "long_16k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "Develop a debugging and architecture plan covering hypotheses, observations, ownership, concurrency, recovery and verification. Give a substantial, detailed answer with concrete evidence and multiple examples.",
+    "context_file": "long_16k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "tech_prose-ja-short_2k",
+    "domain": "tech_prose",
+    "language": "ja",
+    "length_tier": "short_2k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "提示コードの処理と設計上の制約を読者向けに詳しく解説し、具体例、失敗時の挙動、検証方法と未確認事項を区別してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
+    "context_file": "short_2k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "tech_prose-ja-mid_8k",
+    "domain": "tech_prose",
+    "language": "ja",
+    "length_tier": "mid_8k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "提示コードの処理と設計上の制約を読者向けに詳しく解説し、具体例、失敗時の挙動、検証方法と未確認事項を区別してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
+    "context_file": "mid_8k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "tech_prose-ja-long_16k",
+    "domain": "tech_prose",
+    "language": "ja",
+    "length_tier": "long_16k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "提示コードの処理と設計上の制約を読者向けに詳しく解説し、具体例、失敗時の挙動、検証方法と未確認事項を区別してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
+    "context_file": "long_16k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "tech_prose-en-short_2k",
+    "domain": "tech_prose",
+    "language": "en",
+    "length_tier": "short_2k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "Write a detailed technical explanation of the code, its constraints, concrete examples, failure modes, verification and uncertainties. Give a substantial, detailed answer with concrete evidence and multiple examples.",
+    "context_file": "short_2k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "tech_prose-en-mid_8k",
+    "domain": "tech_prose",
+    "language": "en",
+    "length_tier": "mid_8k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "Write a detailed technical explanation of the code, its constraints, concrete examples, failure modes, verification and uncertainties. Give a substantial, detailed answer with concrete evidence and multiple examples.",
+    "context_file": "mid_8k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "tech_prose-en-long_16k",
+    "domain": "tech_prose",
+    "language": "en",
+    "length_tier": "long_16k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "Write a detailed technical explanation of the code, its constraints, concrete examples, failure modes, verification and uncertainties. Give a substantial, detailed answer with concrete evidence and multiple examples.",
+    "context_file": "long_16k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "multi_turn-ja-short_2k",
+    "domain": "multi_turn",
+    "language": "ja",
+    "length_tier": "short_2k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "継続中の技術対話として、提示コードの理解を整理し、考えられる設計変更を比較し、段階的な実装と検証の提案を詳述してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
+    "context_file": "short_2k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "multi_turn-ja-mid_8k",
+    "domain": "multi_turn",
+    "language": "ja",
+    "length_tier": "mid_8k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "継続中の技術対話として、提示コードの理解を整理し、考えられる設計変更を比較し、段階的な実装と検証の提案を詳述してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
+    "context_file": "mid_8k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "multi_turn-ja-long_16k",
+    "domain": "multi_turn",
+    "language": "ja",
+    "length_tier": "long_16k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "継続中の技術対話として、提示コードの理解を整理し、考えられる設計変更を比較し、段階的な実装と検証の提案を詳述してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
+    "context_file": "long_16k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "multi_turn-en-short_2k",
+    "domain": "multi_turn",
+    "language": "en",
+    "length_tier": "short_2k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "Continue a technical discussion by explaining the code, comparing design alternatives, and proposing staged implementation and validation. Give a substantial, detailed answer with concrete evidence and multiple examples.",
+    "context_file": "short_2k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "multi_turn-en-mid_8k",
+    "domain": "multi_turn",
+    "language": "en",
+    "length_tier": "mid_8k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "Continue a technical discussion by explaining the code, comparing design alternatives, and proposing staged implementation and validation. Give a substantial, detailed answer with concrete evidence and multiple examples.",
+    "context_file": "mid_8k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  },
+  {
+    "id": "multi_turn-en-long_16k",
+    "domain": "multi_turn",
+    "language": "en",
+    "length_tier": "long_16k",
+    "max_tokens": 2048,
+    "min_expected_tokens": 1024,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
+    "prompt": "Continue a technical discussion by explaining the code, comparing design alternatives, and proposing staged implementation and validation. Give a substantial, detailed answer with concrete evidence and multiple examples.",
+    "context_file": "long_16k.txt",
+    "rubric": [
+      "evidence",
+      "correctness",
+      "concrete validation"
+    ]
+  }
+]

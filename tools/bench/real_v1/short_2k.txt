@@ -1,0 +1,238 @@
+
+--- src/shelf/runtime/runtime_request.cpp ---
+#include <shelf/runtime/runtime_request.h>
+#include <shelf/runtime/state_types.h>
+
+namespace shelf {
+namespace runtime {
+
+Status admit_request(
+    RuntimeRequest& request,
+    SequenceSlotPool& seq_pool,
+    GdnStatePool& gdn_pool,
+    PagedKVPool& kv_pool,
+    hipStream_t stream) {
+    if (request.state != RequestState::Queued) {
+        return Status::invalid_state("admit_request requires Queued state", __FILE__, __LINE__);
+    }
+    if (request.sequence.is_allocated()) {
+        return Status::invalid_state("admit_request on allocated sequence", __FILE__, __LINE__);
+    }
+    if (request.max_kv_tokens == 0) {
+        return Status::invalid_argument(
+            "request has no KV capacity metadata", __FILE__, __LINE__);
+    }
+    auto created = create_paged_sequence_state(
+        seq_pool, gdn_pool, kv_pool, request.max_kv_tokens, stream);
+    if (!created.ok()) {
+        return created.status();
+    }
+    runtime_install_sequence_state(request.sequence, created.release());
+    request.state = RequestState::Active;
+    return Status::make_ok();
+}
+
+namespace {
+
+void mark_finished(RuntimeRequest& request, FinishReason reason) {
+    request.state = RequestState::Finished;
+    request.finish_reason = reason;
+    request.pending_decode_token = -1;
+}
+
+}
+
+bool thinking_budget_enabled(const RuntimeRequest& request) noexcept {
+    return request.thinking.tokens != 0 && request.thinking.close_token >= 0;
+}
+
+uint32_t thinking_allowance(const RuntimeRequest& request) noexcept {
+    if (!thinking_budget_enabled(request) || request.thinking_closed) {
+        return kDFlash2NoThinkingAllowance;
+    }
+    return request.generated_tokens >= request.thinking.tokens
+               ? 0u
+               : request.thinking.tokens - request.generated_tokens;
+}
+
+void note_generated_token(RuntimeRequest& request, int32_t token) noexcept {
+    if (!request.thinking_closed && request.thinking.close_token >= 0 &&
+        token == request.thinking.close_token) {
+        request.thinking_closed = true;
+    }
+}
+
+int32_t enforce_thinking_budget(RuntimeRequest& request, int32_t token) noexcept {
+    note_generated_token(request, token);
+    if (request.thinking_closed) return token;
+    if (!thinking_budget_enabled(request)) return token;
+    if (request.generated_tokens >= request.thinking.tokens) {
+        token = request.thinking.close_token;
+        request.thinking_closed = true;
+    }
+    return token;
+}
+
+CommitAction commit_sampled_token(
+    RuntimeRequest& request,
+    int32_t token,
+    const qwen_hybrid::StopTokens& stop_tokens) {
+    token = enforce_thinking_budget(request, token);
+    ++request.generated_tokens;
+    request.generated.push_back(token);
+    if (qwen_hybrid::is_stop_token(stop_tokens, token)) {
+        mark_finished(request, FinishReason::Eos);
+        return CommitAction::Finished;
+    }
+    if (request.generated_tokens >= request.max_new_tokens) {
+        mark_finished(request, FinishReason::MaxNewTokens);
+        return CommitAction::Finished;
+    }
+    request.pending_decode_token = token;
+    return CommitAction::Continue;
+}
+
+CommitAction commit_final_prefill_without_sample(RuntimeRequest& request) {
+    if (request.generated_tokens >= request.max_new_tokens) {
+        mark_finished(request, FinishReason::MaxNewTokens);
+        return CommitAction::Finished;
+    }
+    return CommitAction::Continue;
+}
+
+Status record_sampled_token(RuntimeRequest& request, int32_t token) {
+    if (token < 0) {
+        return Status::invalid_argument("invalid sampled token", __FILE__, __LINE__);
+    }
+    ++request.generated_tokens;
+    request.generated.push_back(token);
+    return Status::make_ok();
+}
+
+}
+}
+
+--- src/shelf/runtime/spec_decode.cpp ---
+#include <shelf/runtime/spec_decode.h>
+
+#include <algorithm>
+#include <cstring>
+
+namespace shelf::runtime {
+
+const char* spec_phase_name(SpecPhase phase) noexcept {
+    switch (phase) {
+        case SpecPhase::IDLE: return "IDLE";
+        case SpecPhase::DRAFTING: return "DRAFTING";
+        case SpecPhase::VERIFYING: return "VERIFYING";
+        case SpecPhase::COMMITTING: return "COMMITTING";
+        case SpecPhase::ROLLING_BACK: return "ROLLING_BACK";
+    }
+    return "UNKNOWN";
+}
+
+Status spec_greedy_accept(
+    const int32_t* drafts,
+    uint32_t num_drafts,
+    const int32_t* target_tokens,
+    bool bonus_token_enabled,
+    SpecVerifyResult& out) {
+
+    if (target_tokens == nullptr) {
+        return Status::invalid_argument("spec_greedy_accept target_tokens is null", __FILE__, __LINE__);
+    }
+    if (num_drafts > 0u && drafts == nullptr) {
+        return Status::invalid_argument("spec_greedy_accept drafts is null", __FILE__, __LINE__);
+    }
+
+    out = SpecVerifyResult{};
+    out.num_drafts = num_drafts;
+
+    if (num_drafts == 0u) {
+        out.first_reject_index = 0u;
+        out.num_committed_target_tokens = 0u;
+        return Status::make_ok();
+    }
+
+    uint32_t accepted = 0u;
+    while (accepted < num_drafts && drafts[accepted] == target_tokens[accepted]) {
+        ++accepted;
+    }
+    out.num_accepted_drafts = accepted;
+
+    if (accepted == num_drafts) {
+        out.first_reject_index = 0xFFFFFFFFu;
+        if (bonus_token_enabled) {
+            out.bonus_token_valid = true;
+            out.bonus_token = target_tokens[num_drafts];
+        }
+    } else {
+        out.first_reject_index = accepted;
+        out.correction_valid = true;
+        out.correction_token = target_tokens[accepted];
+    }
+
+    out.emitted_tokens.reserve(static_cast<std::size_t>(accepted) + 1u);
+    for (uint32_t i = 0u; i < accepted; ++i) {
+        out.emitted_tokens.push_back(drafts[i]);
+    }
+    if (out.correction_valid) {
+        out.emitted_tokens.push_back(out.correction_token);
+    } else if (out.bonus_token_valid) {
+        out.emitted_tokens.push_back(out.bonus_token);
+    }
+    out.num_emitted_tokens = static_cast<uint32_t>(out.emitted_tokens.size());
+    out.num_committed_target_tokens = accepted + 1u;
+    return Status::make_ok();
+}
+
+bool spec_bound_result(SpecVerifyResult& result, uint32_t remaining_tokens,
+                       const qwen_hybrid::StopTokens& stop_tokens) {
+    const uint32_t limit = std::min(remaining_tokens,
+        static_cast<uint32_t>(result.emitted_tokens.size()));
+    uint32_t count = limit;
+    bool stopped = false;
+    for (uint32_t i = 0u; i < limit; ++i) {
+        if (qwen_hybrid::is_stop_token(stop_tokens, result.emitted_tokens[i])) {
+            count = i + 1u;
+            stopped = true;
+            break;
+        }
+    }
+    if (count > 0u && count < result.emitted_tokens.size()) {
+        result.emitted_tokens.resize(count);
+        result.num_accepted_drafts = std::min(result.num_accepted_drafts, count - 1u);
+        result.num_committed_target_tokens = result.num_accepted_drafts + 1u;
+        result.first_reject_index = result.num_accepted_drafts;
+        result.correction_valid = true;
+        result.correction_token = result.emitted_tokens.back();
+        result.bonus_token_valid = false;
+    }
+    result.num_emitted_tokens = count;
+    return stopped;
+}
+
+std::size_t spec_gdn_conv_bytes(const GdnStatePool& pool) noexcept {
+    return static_cast<std::size_t>(pool.device_view().conv_slot_stride) * sizeof(bf16_t);
+}
+
+std::size_t spec_gdn_recurrent_bytes(const GdnStatePool& pool) noexcept {
+    return static_cast<std::size_t>(pool.device_view().recurrent_slot_stride) * sizeof(::shelf::state::GdnStateScalar);
+}
+
+Status spec_gdn_snapshot(
+    const GdnStatePool& pool,
+    SequenceSlotId slot,
+    void* conv_dst,
+    void* recurrent_dst,
+    std::size_t conv_bytes,
+    std::size_t recurrent_bytes,
+    hipStream_t stream) {
+
+    if (conv_dst == nullptr || recurrent_dst == nullptr) {
+        return Status::invalid_argument("spec_gdn_snapshot outputs are null", __FILE__, __LINE__);
+    }
+    if (slot >= pool.max_sequences()) {
+        return Status::out_of_range("spec_gdn_snapshot slot out of range", __FILE__, __LINE__);
+    }
+    if (conv_bytes != s
