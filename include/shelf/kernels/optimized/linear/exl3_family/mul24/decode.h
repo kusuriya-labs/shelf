@@ -54,4 +54,8 @@ __device__ __forceinline__ float bf16_bits_to_f32(uint16_t bits) {
     return __uint_as_float(static_cast<uint32_t>(bits) << 16);
 }
 
+__device__ __forceinline__ float round_bf16(float value) {
+    return bf16_bits_to_f32(f32_to_bf16_rne_device(value));
+}
+
 }  // namespace shelf::kernel::exl3_detail::mul24

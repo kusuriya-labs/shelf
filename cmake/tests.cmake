@@ -91,6 +91,7 @@ endfunction()
 # ---------------------------------------------------------------------------
 
 shelf_add_test(NAME test_safetensors_writer SOURCE unit/test_safetensors_writer.cpp LABELS "cpu;required" LIBRARIES shelf_io)
+shelf_add_test(NAME test_safetensors_population SOURCE unit/test_safetensors_population.cpp LABELS "cpu;required" LIBRARIES shelf_io)
 shelf_add_test(NAME test_expert_slice_fixture SOURCE unit/test_expert_slice_fixture.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES shelf_weights shelf_io)
 shelf_add_test(NAME test_expert_slice_load SOURCE unit/test_expert_slice_load.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_weights shelf_kernels_correctness shelf_qwen35_kernels_optimized)
 shelf_add_test(NAME test_safetensors_partial_read SOURCE unit/test_safetensors_partial_read.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_io shelf_weights)
@@ -354,6 +355,7 @@ add_custom_target(
     shelf-required-tests
     DEPENDS
         test_safetensors_writer
+        test_safetensors_population
         test_expert_slice_fixture
         test_expert_slice_load
         test_safetensors_partial_read
@@ -800,3 +802,23 @@ shelf_add_test(NAME test_token_mask_scheduler SOURCE unit/test_token_mask_schedu
 
 shelf_add_test(NAME test_ngram_quantization SOURCE unit/test_ngram_quantization.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES shelf_quant_ngram)
 shelf_add_test(NAME test_qwen4exp_ngram SOURCE unit/test_qwen4exp_ngram.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES shelf_qwen4exp shelf_quant_ngram)
+shelf_add_test(NAME test_hy4_routes SOURCE unit/test_hy4_routes.cpp LABELS "cpu;required" LIBRARIES shelf_core hip::host)
+
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME test_hy4_flash_cpu
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/unit/test_hy4_flash.py)
+    set_tests_properties(test_hy4_flash_cpu PROPERTIES LABELS "cpu;optional")
+endif()
+
+add_executable(test_hy4_reduce ${CMAKE_SOURCE_DIR}/tests/unit/test_hy4_reduce.cpp)
+target_link_libraries(test_hy4_reduce PRIVATE shelf_hy4_model)
+shelf_set_rocm_rpath(test_hy4_reduce)
+set_property(TARGET test_hy4_reduce APPEND PROPERTY BUILD_RPATH "${SHELF_LIBCXX_LLVM_ROOT}/lib")
+add_test(NAME hy4_reduce COMMAND test_hy4_reduce)
+
+add_executable(test_hy4_flash_layer EXCLUDE_FROM_ALL ${CMAKE_SOURCE_DIR}/tests/kernels/test_hy4_flash_layer.cpp)
+target_link_libraries(test_hy4_flash_layer PRIVATE shelf_hy4_model)
+target_include_directories(test_hy4_flash_layer SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
+shelf_set_rocm_rpath(test_hy4_flash_layer)
+set_property(TARGET test_hy4_flash_layer APPEND PROPERTY BUILD_RPATH "${SHELF_LIBCXX_LLVM_ROOT}/lib")

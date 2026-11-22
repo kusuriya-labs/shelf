@@ -76,6 +76,15 @@ def main() -> int:
     checker.check("default-prefill-chunk-absent",
                   "--prefill-chunk" not in default_argv,
                   repr(value_of(default_argv, "--prefill-chunk")))
+    hy4 = shelf_server.parse_args([
+        "--model-dir", "body", "--placement", "owners.json", "--engram-dir", "fp8",
+        "--dfly-dir", "draft", "--max-seq-len", "2304", "--compute", "shelf-compute",
+    ])
+    checker.check("hy4-ep3", shelf_server.build_compute_argv(hy4) == [
+        "shelf-compute", "hy4", "serve", "--model-dir", "body", "--engram-dir", "fp8",
+        "--placement", "owners.json", "--max-seq-len", "2304", "--chunk", "1024",
+        "--dfly-dir", "draft",
+    ])
     return checker.done()
 
 
