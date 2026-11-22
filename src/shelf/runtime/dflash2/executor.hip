@@ -1207,6 +1207,7 @@ Status lm_head_quantize(
 }
 
 bool use_coarse_head(const DFlash2Executor& executor, uint32_t rows) {
+    static_assert(shelf::kernel::kDflash2TopKScratchPerRow >= shelf::kernel::kDFlash2CoarseMaxBlocks);
     return executor.coarse_head.ndim() && rows <= shelf::kernel::kDFlash2CoarseMaxRows;
 }
 

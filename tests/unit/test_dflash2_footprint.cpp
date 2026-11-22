@@ -64,11 +64,14 @@ int main() {
     unsupported.sliding_window = 255u;
     check(dflash2_prefill_rows(unsupported, 1u, nullptr, rows) && rows == 0u,
           "small sliding window falls back");
-    unsupported = config;
-    unsupported.block_size = 16u;
-    check(dflash2_prefill_rows(unsupported, 1u, nullptr, rows) && rows == 0u,
-          "other block sizes fall back");
-    for (const char* invalid : {"", "0", "9", "257", "-1", " 8", "8x"}) {
+    DFlash2Config wide = config;
+    wide.block_size = 16u;
+    check(dflash2_session_rows(16u, 15u) == 16u, "full verify fits one page");
+    check(dflash2_prefill_rows(wide, 1u, nullptr, rows) && rows == 256u,
+          "wide block defaults to 256 feature rows");
+    check(dflash2_prefill_rows(wide, 1u, "16", rows) && rows == 0u,
+          "wide block accepts native prefill capacity");
+    for (const char* invalid : {"", "0", "9", "16", "257", "-1", " 8", "8x"}) {
         check(!dflash2_prefill_rows(config, 1u, invalid, rows), "invalid value is rejected");
     }
 

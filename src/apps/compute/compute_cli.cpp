@@ -1,5 +1,6 @@
 #include "compute_cli.h"
 #include <shelf/kernels/kv_types.h>
+#include <shelf/runtime/dflash2_config.h>
 
 #include <cerrno>
 #include <cmath>
@@ -381,7 +382,8 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
         } else if (std::strcmp(argv[i], "--dflash2-adaptive") == 0) {
             opt.dflash2_adaptive = true;
         } else if (std::strcmp(argv[i], "--dflash2-drafts") == 0 && i + 1 < argc) {
-            if (!parse_uint(argv[++i], dflash2_drafts) || dflash2_drafts == 0) {
+            if (!parse_uint(argv[++i], dflash2_drafts) || dflash2_drafts == 0 ||
+                dflash2_drafts >= shelf::runtime::kMaxBlockSize) {
                 fprintf(stderr, "bad --dflash2-drafts\n");
                 return kComputeParseError;
             }

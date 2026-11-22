@@ -6,6 +6,7 @@
 namespace shelf::kernel {
 
 inline constexpr uint32_t kDFlash2CoarseMaxRows = 16;
+inline constexpr uint32_t kDFlash2CoarseMaxBlocks = 2048;
 inline constexpr uint32_t kDFlash2CoarseKeep = 128;
 
 hipError_t build_dflash2_coarse_head(const uint16_t* trellis, uint32_t* packed,

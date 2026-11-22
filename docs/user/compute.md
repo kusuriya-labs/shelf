@@ -244,6 +244,9 @@ dense checkpoint を TP=2 で動かす場合:
 `ContinuousBatcher` 経路を変更しない。詳細は
 [../developer/dflash2.md](../developer/dflash2.md) を参照。
 
+block size 16 の `DFlash2DraftModel` は `--dflash2-drafts 15` で最大幅を使う。
+単発 CLI と 1 セッションの stdio では、`--dflash2-prefill-rows 16` で drafter の prefill 幅を 16 行にできる。
+
 併用できない option（いずれも model load 前に exit 2）:
 
 - `--dump-logits`

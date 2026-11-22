@@ -97,7 +97,7 @@ __global__ void coarse_rotate(DFlash2CoarseHeadArgs a) {
 }
 
 __global__ void rank_blocks(DFlash2CoarseHeadArgs a) {
-    constexpr uint32_t capacity = 2048;
+    constexpr uint32_t capacity = kDFlash2CoarseMaxBlocks;
     __shared__ float sorted[capacity];
     const uint32_t groups = a.vocab / 128;
     float* maxima = a.maxima + blockIdx.x * groups;
@@ -168,7 +168,7 @@ hipError_t launch_dflash2_coarse_head(const DFlash2CoarseHeadArgs& a, hipStream_
         !a.accum || !a.logits || !a.maxima || !a.selected || !a.rows ||
         a.rows > kDFlash2CoarseMaxRows || !a.vocab || a.vocab % 128 ||
         !a.hidden || a.hidden % 128 || a.code_stride < a.hidden || a.code_stride % 8 ||
-        a.scale_stride < a.hidden / 128 || a.vocab / 128 > 2048) return hipErrorInvalidValue;
+        a.scale_stride < a.hidden / 128 || a.vocab / 128 > kDFlash2CoarseMaxBlocks) return hipErrorInvalidValue;
     coarse_gemm<<<a.vocab / 64, 128, 0, stream>>>(a);
     coarse_rotate<<<dim3((a.vocab / 128 + 7) / 8, a.rows), 256, 0, stream>>>(a);
     if (a.keep) {

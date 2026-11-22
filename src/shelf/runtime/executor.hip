@@ -1032,7 +1032,7 @@ Result<PendingBatch> submit_co_batch(
          options.tree_committed_end_rows != nullptr &&
          options.tree_row_parent != nullptr && options.rope_positions != nullptr);
     const bool dflash_verify = dflash_target && verify_graph;
-    const bool dflash_verify_rows_supported = !dflash_verify || N == 8u || N == 10u;
+    const bool dflash_verify_rows_supported = !dflash_verify || N == 8u || N == 10u || N == 16u;
     const bool plamo = executor.model.config->declared_model_type == "plamo3";
     const char* plamo_graph_env = std::getenv("SHELF_PLAMO_HIP_GRAPH");
     const bool plamo_graph_enabled = plamo_graph_env == nullptr ||
@@ -1213,7 +1213,8 @@ Result<PendingBatch> submit_co_batch(
         const int gslot_idx = graph_slot_idx;
         if (gslot_idx >= 0) {
             const uint32_t sampling_top_k = prep.stochastic_topk_eligible ? prep.stochastic_top_k : 0u;
-            const uint32_t verify_slot = (N == 8u ? 0u : 1u) + (prep.num_stochastic_outputs ? 2u : 0u);
+            const uint32_t verify_shape = N == 8u ? 0u : N == 10u ? 1u : 2u;
+            const uint32_t verify_slot = 2u * verify_shape + (prep.num_stochastic_outputs != 0u);
             GraphCacheSlot* gslot = dflash_verify
                 ? &executor.dflash_verify_graph_cache[verify_slot]
                 : &executor.graph_cache[gslot_idx];

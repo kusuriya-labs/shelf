@@ -46,9 +46,10 @@ std::size_t dflash2_coarse_head_bytes(const weights::MatrixWeight& head) noexcep
 bool dflash2_prefill_rows(const ::shelf::runtime::DFlash2Config& config, uint32_t tp,
                           const char* value, uint32_t& rows) noexcept {
     if (value != nullptr && std::strcmp(value, "8") != 0 &&
+        (config.block_size != 16u || std::strcmp(value, "16") != 0) &&
         std::strcmp(value, "256") != 0) return false;
     const bool enabled = value == nullptr || std::strcmp(value, "256") == 0;
-    rows = enabled && tp == 1u && config.block_size == 8u &&
+    rows = enabled && tp == 1u && (config.block_size == 8u || config.block_size == 16u) &&
                    config.sliding_window >= 256u ? 256u : 0u;
     return true;
 }

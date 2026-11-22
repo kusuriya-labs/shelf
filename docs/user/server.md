@@ -173,9 +173,9 @@ request 1 個あたりの生成予算（推論予算）は `--inference-budget-t
   生成列が一致しない場合がある。verify 経路切替・`--dflash2-adaptive` の上限上書き・
   `SHELF_DFLASH2_PREFILL_ROWS` などの環境変数は [env_vars.md](env_vars.md#5-dflash2-投機デコード) を参照。
 
-TP=1 で drafter の block size が 8、sliding window が 256 以上の場合、prefill の
+TP=1 で drafter の block size が 8 または 16、sliding window が 256 以上の場合、prefill の
 context 構築は既定で最大 256 行ずつ処理する（`--dflash2-prefill-rows 8` または
-`SHELF_DFLASH2_PREFILL_ROWS=8` で従来の処理に戻せる）。TP>1 または上記の drafter 条件を
+`SHELF_DFLASH2_PREFILL_ROWS=8` で従来の処理に戻せる。block size 16 では `--dflash2-prefill-rows 16` も同じ意味を持つ）。TP>1 または上記の drafter 条件を
 満たさない場合は従来の処理に戻る。
 
 Qwen3.8-27B-DFlash2、同時 request 1 件では追加 scratch は 16.953 MiB。KV の自動予算は

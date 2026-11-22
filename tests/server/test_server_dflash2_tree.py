@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """serve の tree verify と単一 request decoder を比較する。"""
 
+import json
 import os
 import subprocess
 import sys
@@ -13,11 +14,11 @@ from support import ServerHarness, compute_binary, http_json, model_dir, prompt_
 PROMPT = "Write a complete Python module implementing longest common subsequence, with documentation, several algorithms, validation, command-line examples, and many tests."
 
 
-def serve(budget, draft, token_path):
+def serve(budget, draft, token_path, drafts=7):
     token_path.unlink(missing_ok=True)
     server = ServerHarness(max_seq_len=512, arena_gib=31, device=0,
                            max_concurrent_requests=1, dflash2_model_dir=draft,
-                           dflash2_tree_budget=budget,
+                           dflash2_tree_budget=budget, dflash2_drafts=drafts,
                            env={"SHELF_SERVER_TOKEN_LOG": str(token_path)},
                            startup_timeout=420)
     try:
@@ -34,10 +35,11 @@ def serve(budget, draft, token_path):
         server.close()
 
 
-def single_tree(draft, budget=True):
+def single_tree(draft, budget=10, drafts=7):
     cmd = [str(compute_binary()), "--model-dir", str(model_dir()),
            "--dflash2-model-dir", draft,
-           *(["--dflash2-tree-budget", "10"] if budget else []),
+           "--dflash2-drafts", str(drafts),
+           *(["--dflash2-tree-budget", str(budget)] if budget is not None else []),
            "--input-ids-file", "/dev/stdin", "--max-new-tokens", "64",
            "--max-seq-len", "512", "--arena-gib", "auto", "--device",
            os.environ.get("SHELF_TEST_DEVICE", "0"), "--kv-cache-dtype", "bf16"]
@@ -54,12 +56,21 @@ def main():
         raise RuntimeError("SHELF_DFLASH2_MODEL_DIR is required")
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "tokens"
+        config = json.loads((Path(draft) / "config.json").read_text())
+        if config["dflash_config"]["block_size"] == 16:
+            reference = single_tree(draft, budget=0, drafts=15)
+            if len(reference) != 64 or serve(0, draft, path, drafts=15) != reference:
+                raise AssertionError("15 draft の server 出力が単一要求の出力と異なります")
+            if serve(16, draft, path, drafts=15) != reference:
+                raise AssertionError("16 行の tree budget で chain の出力が変化しました")
+            print("PASS: 15 draft の compute と server の生成 ID が一致")
+            return
         chain = serve(0, draft, path)
         chain_tree = serve(8, draft, path)
         tree = serve(10, draft, path)
         automatic = serve(None, draft, path)
         reference = single_tree(draft)
-        default_reference = single_tree(draft, budget=False)
+        default_reference = single_tree(draft, budget=None)
     if len(chain) != 64 or chain_tree != chain:
         raise AssertionError("budget 8 differs from chain")
     if default_reference != reference:

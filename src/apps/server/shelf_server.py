@@ -660,8 +660,11 @@ def parse_args(argv=None):
         parser.error("--prefix-cache-checkpoints must be between 1 and 65535")
     if not 0 <= opts.prefix_cache_save_interval <= 65536:
         parser.error("--prefix-cache-save-interval must be between 0 and 65536")
-    if opts.dflash2_drafts < 1:
-        parser.error("--dflash2-drafts must be >= 1")
+    if not 1 <= opts.dflash2_drafts <= 15:
+        parser.error("--dflash2-drafts must be between 1 and 15")
+    if opts.dflash2_tree_budget not in (0, "auto") and not (
+            opts.dflash2_drafts + 1 <= opts.dflash2_tree_budget <= 32):
+        parser.error("serve tree budget must include all draft positions and be at most 32")
     if opts.dflash2_model_dir and opts.dflash2_tree_budget == "auto" and opts.dflash2_drafts != 7:
         parser.error("--dflash2-tree-budget auto requires 7 drafts")
     if opts.mtp_drafts < 1:

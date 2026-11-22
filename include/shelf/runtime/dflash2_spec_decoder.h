@@ -33,6 +33,11 @@ constexpr uint32_t dflash2_session_rows(std::size_t block_size, uint32_t drafts,
         : (wanted < block_size ? wanted : static_cast<uint32_t>(block_size));
     return tree_budget > chain ? tree_budget : chain;
 }
+constexpr uint32_t dflash2_prefill_tail_position(uint32_t prompt_count, uint32_t page_tokens) noexcept {
+    return page_tokens != 0u && prompt_count > page_tokens
+        ? (prompt_count - 1u) / page_tokens * page_tokens : 0u;
+}
+
 constexpr uint64_t kDFlash2SpecHistoryBytesMax = (9ull * 1024ull * 1024ull * 1024ull) / 4ull;
 constexpr uint32_t kDFlash2NoSessionSlot = 0xFFFFFFFFu;
 

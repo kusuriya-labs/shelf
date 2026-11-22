@@ -961,7 +961,7 @@ Result<OptimizedLaunchResult> try_launch_exl3_projection(
     }();
     const bool use_prefill = is_plamo && prefill_mode != 0u && rows >= prefill_rows &&
         (weight.exl3_ka == 4u || weight.exl3_ka == 5u);
-    if (rows == 0u || (!is_plamo && rows > (grouped_3bit ? 8u : 64u)) || (rows >= 256u && !use_prefill) || input.value().dtype != ValueDType::BF16 ||
+    if (rows == 0u || (!is_plamo && rows > (grouped_3bit ? 16u : 64u)) || (rows >= 256u && !use_prefill) || input.value().dtype != ValueDType::BF16 ||
         output.value().dtype != ValueDType::BF16 ||
         ctx.exl3_xrot == nullptr || ctx.exl3_accum == nullptr)
         return miss;

@@ -209,7 +209,7 @@ hipError_t launch_plamo_exl3_projection(const PlamoExl3ProjectionGroup &args, ui
                                         bool allow_shape_fusion, bool input_rotated) {
     if (launch_count)
         *launch_count = 0u;
-    const bool grouped_3bit = bits == 3u && args.rows <= 8u && !allow_shape_fusion;
+    const bool grouped_3bit = bits == 3u && args.rows <= 16u && !allow_shape_fusion;
     if (args.count == 0u || args.count > 3u || args.rows == 0u || args.rows >= 256u ||
         args.k % 128u != 0u || args.scale_stride_bytes % 4u != 0u || !args.input ||
         args.input_stride < args.k || args.scale_stride_bytes < args.k / 128u * 4u ||

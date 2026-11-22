@@ -173,10 +173,11 @@ external tap と internal layer output の bit 一致を確認する。tap の�
 3. `launch_dflash2_rmsnorm_direct_bf16`: `hidden_norm.weight` で
    `target_feature [rows, 5120]`。
 
-stdio serving の TP=1 では、block size が 8 かつ sliding window が 256 以上の
-場合、prefill の feature projection と context append を最大 256 行ずつ実行する。
-その他の条件、および `SHELF_DFLASH2_PREFILL_ROWS=8` の場合は従来の容量を使う。
+TP=1 で sliding window が 256 以上の場合、block size 16 の単発 CLI と stdio serving は
+prefill の feature projection と context append を最大 256 行ずつ実行する。block size 8
+でも stdio serving は同じ容量を使う。それ以外の構成と `SHELF_DFLASH2_PREFILL_ROWS=8` では従来の容量を使う。block size が 16 の場合は `16` でも同じ容量を選べる。
 バッチ用 executor が複数 request 分を持つ場合、従来の容量は block size より大きい。
+block size 16 の単発 CLI は server と同様に、入力の最後の token を含むページの手前で target prefill を区切る。
 FC の 8 行経路は `ExactRowsDot2`、256 行経路は `WmmaWide` を選ぶため、K/V は
 bit 一致せず 2 ULP を超える差も生じる。原因と測定条件は
 [行数による K/V 差の調査](../research/20261109/dflash2_prefill_rows_kv_diff.md)を参照。
@@ -812,9 +813,8 @@ decoder あたりの GDN 消費（27B geometry、K=7）:
   （約 2.8 MiB）である。recurrent snapshot（約 72 MiB）は全 session で 1 つを共有する。
   共有 buffer を使うのは直列に実行される prefix cache の shadow prefill だけである。
 - arena は bump のみで個別 free が無いため、同時 N session はこの値を N 倍で確保する。
-- create 時に `history bytes > kDFlash2SpecHistoryBytesMax`（2.25 GiB）なら
-  decoder create を FAIL する（FP16 化等で逃げない）。27B geometry
-  （146.8 MiB/row）では rows ≤ 15 が上限である。
+- 15 draft の単発 chain は conv 履歴を 15 行、compact log を 16 行確保する。
+  部分受理では最後に受理した行の conv 履歴を復元し、全受理では verify 後の conv state を使う。
 - `DFlash2SpecDecoderConfig::num_drafts` は `1..max_draft_tokens()` でなければ error。
 - `kDFlash2SpecMaxVerifyRows` は compact log 行数とは独立で、batch verify 行合計
   `Σ(Kᵢ+1)` の上限に使う。per-request の draft 上限は
@@ -915,22 +915,22 @@ Device source のときの source pointer（`token_device_src`）を保持する
 Host staging への `std::memcpy` を行わず、capture 内で device verify token buffer →
 executor input buffer の D2D をそのまま capture する。
 
-単一要求の 8 行・10 行 verify は、行数と greedy / sampled の組み合わせごとに
-Graph を保持する。radix top-k を使う場合は実際の `top_k` も再利用条件に含める。
+単一要求の 8・10・16 行の verify は、行数と greedy / sampled の組み合わせごとに
+Graph を初回の実行時に作成する。capture 中の 3-bit EXL3 射影は、入力を共有する連続した射影を最大 16 行までまとめて計算する。radix top-k を使う場合は実際の `top_k` も再利用条件に含める。
 temperature、top-p、min-p、seed、sample index は毎回更新する request descriptor から読む。
 `SHELF_GRAPH_VERIFY=0` で verify を eager 実行できる。
 
 単一要求で全 draft 行を提案する場合、drafter は noise token の展開から selector までを
 1 個の Graph に収める。ring のアドレス・有効長・位置、anchor token、候補の出力先は
 提案ごとに同じ stream 上で device descriptor に書く。語彙射影と top-k は anchor を除く
-draft 行だけを処理する。`SHELF_DFLASH2_DRAFT_GRAPH=0` で提案を eager 実行できる。
+最大 15 行の draft を処理する。`SHELF_DFLASH2_DRAFT_GRAPH=0` で提案を eager 実行できる。
 複数要求と分散語彙射影はそれぞれ既存のバッチ経路と分散経路を使う。
 
 単一 GPU で target の語彙射影が EXL3 mul24 6-bit（248,320 語、hidden 5,120）の場合、
 起動時に arena に INT3 の提案用重みを構築する。既存の入力回転と 128 要素ごとの
 activation scale を共有し、出力回転後の全語彙を評価する。語彙を 128 行単位の
 1,940 ブロックに分け、各 draft 行で最大 logit が高い上位 128 ブロックを選ぶ。
-境界で同点になったブロックも含めて全行の候補をまとめ、元の 6-bit 重みで再計算する。selector は再計算した logit の上位 16 語を使う。
+境界で同点になったブロックも含めて全行の候補をブロックごとのフラグにまとめ、元の 6-bit 重みで再計算する。selector は再計算した logit の上位 16 語を使う。
 tree の正規化には、選択ブロックの再計算値と残りのブロックの INT3 近似値を使う。
 
 必要な重みは 476,774,400 バイトで、候補選択は top-k の作業領域を再利用する。
@@ -983,7 +983,7 @@ samples を別途 D2H する。
 ### CLI（`shelf-compute`）
 
 - `--dflash2-model-dir PATH`: DFlash2 draft model directory（指定で DFlash mode）
-- `--dflash2-drafts N`: 1 round の DFlash draft 数（default 7、`block_size - 1` 以下）
+- `--dflash2-drafts N`: 1 round の DFlash draft 数（既定は 7、上限は `block_size - 1`。block size 16 では最大 15）
 - `--dflash2-stats 0|1`: speculative decode 統計行の出力（default 1）
 - `--dflash2-tree-budget N|auto`: TP=1・greedy 用の実験的な木検証。
   anchor を含む総行数を指定し、`--dflash2-tree-extra` とは併用できない。
@@ -1000,7 +1000,7 @@ samples を別途 D2H する。
   通常 decode 中や policy により投機を停止中の request も数え、prefill 中と待機中は数えない。
   auto では stochastic request を投機せず通常 decode する。単発の greedy
   生成でも 10 行を使う。明示的な整数指定は同時数に依存しない。
-  他の draft 数や TP で `auto` を指定した場合は chain を使い、server は警告する。
+  他の draft 数で `auto` を指定すると起動時にエラーを返す。
 - `--dflash2-max-sessions N`: serve で同時に投機を行う request 数（default
   `min(--max-concurrent-requests, 8)`）。session pool の容量、batch verify の行数
   （`N × session ごとの verify 行数上限`）、drafter scratch の大きさがこの値で決まる。
@@ -1186,11 +1186,9 @@ target tap は層の完了出力を stream 方向に平均した `[rows, hidden=
 - `--dump-logits` との併用は非対応。
 - `--serve-stdio` と `--kv-cache-dtype fp8|octave:FORMAT` は serve mode と併用できる。
 - target 層数 > 最大 tap、`num_target_layer_ids == 5`、`conv_kernel_size == 2` を要求する。
-- context ring は sliding_window 分しか保持しない。`capacity == sliding_window` を要求する。
+- attention の可視長は `sliding_window` である。radix 用 ring の追加容量は [prefix cache の DFlash2 経路](prefix_cache.md#dflash2-経路) に従う。
 - attention GQA kernel は `q_heads == 4 * kv_heads`、`head_dim == 128` を要求し、それ以外は
   ring 参照実装へフォールバックする（不成立自体はエラーではない）。
-- GDN history は `history bytes > 2.25 GiB` のとき create を FAIL する。
-  27B geometry では `num_drafts <= 15` が上限になる。
 - `--dflash2-drafts` は `block_size - 1` 以下。`block_size <= max_batch_rows` を
   満たす必要がある。
 - batched verify は 1 round の行合計が `max_scheduled_output_rows` と
@@ -1284,7 +1282,7 @@ DFlash2 有効時の構造化出力付き request は通常 decode へ退避せ�
 - **`need_mask` 抑止**: DFlash2 の構造化出力経路で出力する `token` event には
   `"need_mask": false` を付与する。server は `grammar.accept(token)` で状態のみを進め、
   不要な単一行 `mask` コマンドを送らない。
-- **HIP graph と高速経路**: bitmask 付き verify（8 / 10 行）は executor の固定
+- **HIP graph と高速経路**: bitmask 付き verify（8 / 10 / 16 行）は executor の固定
   device bitmask staging（`graph_token_bitmask_staging`）と `has_token_bitmask` 付きの
   graph cache key により HIP graph capture / replay に対応する（[sampling.md](sampling.md)）。
   制約付き slot では tree verify・device token bridge・`--dflash2-adaptive` による通常 decode

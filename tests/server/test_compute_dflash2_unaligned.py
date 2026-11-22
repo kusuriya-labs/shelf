@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import os
 import sys
 from pathlib import Path
@@ -7,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from support import Checker, ComputeHarness, model_dir
 from test_compute_dflash2 import collect, generated_ids, run_single_shot
+from test_compute_dflash2_grammar_protocol import mask
 
 PROMPT = [
     248045, 846, 198, 40, 2688, 8842, 264, 220, 18, 10902, 8151, 310,
@@ -21,14 +23,60 @@ PROMPT = [
 ]
 
 
+def check_full_pages(draft, device):
+    reference = {}
+    for cache in (False, True):
+        h = ComputeHarness(max_seq_len=256, max_concurrent_requests=1, auto_arena=True,
+                           dflash2_model_dir=draft, dflash2_drafts=15, device=device,
+                           prefix_cache_enabled=cache, prefix_cache_checkpoints=4)
+        try:
+            h.start()
+            h.wait_ready()
+            for length in (95, 96, 97):
+                prompt = [800 + length] + [300] * (length - 1)
+                h.send({'op': 'generate', 'request_id': length, 'input_ids': prompt,
+                        'max_new_tokens': 17, 'temperature': 0, 'grammar': True, 'bitmask': mask(100)})
+                expected = [100]
+                while True:
+                    event = h.recv()
+                    assert event['event'] != 'error', event
+                    if event['event'] == 'draft':
+                        proposal = event['draft_tokens']
+                        assert len(expected) == 1 and len(proposal) == 15, event
+                        expected.extend(proposal + [101])
+                        h.send({'op': 'draft_masks', 'request_id': length, 'round_id': event['round_id'],
+                                'valid_prefix': 15, 'bitmasks': [mask(token) for token in expected[1:]]})
+                    if event['event'] == 'done':
+                        assert len(expected) == 17 and expected == event['generated_ids'], event
+                        break
+                boundary = (length + 16) // 16 * 16
+                extension = (prompt + expected)[:boundary] + [191, 123]
+                h.send({'op': 'generate', 'request_id': length + 100, 'input_ids': extension,
+                        'max_new_tokens': 19, 'temperature': 0})
+                _, done, errors = collect(h, length + 100)
+                assert not errors and done is not None, errors
+                assert done['restored_tokens'] == (boundary if cache else 0), done
+                result = (expected, generated_ids(done))
+                if cache:
+                    assert result == reference[length], (length, result, reference[length])
+                else:
+                    reference[length] = result
+        finally:
+            h.close()
+
+
 def main():
-    os.environ["SHELF_GDN_VERIFY_CHUNKED"] = "0"
     draft = os.environ.get("SHELF_DFLASH2_MODEL_DIR")
     if not draft or not model_dir().is_dir():
         print("SKIP: target または DFlash2 model が指定されていない")
         return 77
     checker = Checker("dflash2-unaligned-prefill")
     device = int(os.environ.get("SHELF_TEST_DEVICE", "1"))
+    if json.loads((Path(draft) / "config.json").read_text())["dflash_config"]["block_size"] == 16:
+        check_full_pages(draft, device)
+        print("PASS: 15 draft の全受理と出力ページからの復元")
+        return 0
+    os.environ["SHELF_GDN_VERIFY_CHUNKED"] = "0"
     baseline = run_single_shot(PROMPT, 256, device=device,
                                kv_cache_dtype="bf16", dflash2=False)
     extension = PROMPT[:96] + PROMPT[10:18]

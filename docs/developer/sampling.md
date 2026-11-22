@@ -292,7 +292,7 @@ HIP graph 対応:
   転送したうえで、graph 内の sampling へその固定アドレスと `words` ストライドを渡す。
 - `GraphCacheSlot::has_token_bitmask` で bitmask 有無をキャッシュキーとして分離する。
   非制約 batch は従来のマスクなし graph をそのまま再利用する。
-- これにより、単一行 Decode（`R == 1, N == 1`）および DFlash2 Verify（8 / 10 行）
+- これにより、単一行 Decode（`R == 1, N == 1`）および DFlash2 Verify（8 / 10 / 16 行）
   の bitmask 付き batch で HIP graph capture / replay が有効になる。
 
 ## 構造化出力の mask 待ち

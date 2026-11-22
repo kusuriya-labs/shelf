@@ -24,9 +24,9 @@ bool allocate(shelf::gpu::GpuArena& arena, std::size_t count, shelf::gpu::Tensor
     return true;
 }
 
-template<uint32_t bits, uint32_t n>
+template<uint32_t bits, uint32_t n, uint32_t rows = 3>
 int check_head() {
-    constexpr uint32_t rows = 3, k = 256, stride = n + 16;
+    constexpr uint32_t k = 256, stride = n + 16;
     auto arena_result = shelf::gpu::GpuArena::create(0, 64u * 1024u * 1024u);
     if (!arena_result.ok()) return 1;
     auto arena = arena_result.release();
@@ -89,9 +89,19 @@ int check_head() {
         if (hipMemcpy(mixed.data(), args.logits, mixed.size() * sizeof(float), hipMemcpyDeviceToHost) != hipSuccess ||
             hipMemcpy(ranked.data(), args.accum, ranked.size() * sizeof(float), hipMemcpyDeviceToHost) != hipSuccess ||
             hipMemcpy(selected.data(), args.selected, selected.size() * sizeof(int32_t), hipMemcpyDeviceToHost) != hipSuccess) return 1;
-        int blocks = 0;
-        for (auto flag : selected) blocks += flag;
-        if (blocks < 2 || blocks > 2 * int(rows)) return 1;
+        std::vector<int32_t> expected_blocks(n / 128);
+        for (uint32_t row = 0; row < rows; ++row) {
+            std::vector<float> peaks(n / 128);
+            for (uint32_t group = 0; group < peaks.size(); ++group) {
+                const auto first = coarse.begin() + row * n + group * 128;
+                peaks[group] = *std::max_element(first, first + 128);
+            }
+            auto sorted = peaks;
+            std::sort(sorted.rbegin(), sorted.rend());
+            for (uint32_t group = 0; group < peaks.size(); ++group)
+                expected_blocks[group] |= peaks[group] >= sorted[args.keep - 1];
+        }
+        if (selected != expected_blocks) return 1;
         for (uint32_t row = 0; row < rows; ++row) {
             for (uint32_t col = 0; col < n; ++col) {
                 const auto i = row * n + col;
@@ -157,5 +167,5 @@ int check_head() {
 }
 
 int main() {
-    return check_head<4, 256>() || check_head<6, 4096>();
+    return check_head<4, 256>() || check_head<6, 4096>() || check_head<6, 4096, 15>();
 }

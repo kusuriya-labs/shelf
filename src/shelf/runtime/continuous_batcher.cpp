@@ -1118,9 +1118,7 @@ Status ContinuousBatcher::open_dflash2_session(RuntimeRequest& request) {
         }
         prefix_save_prefill(request);
     };
-    const uint32_t tail_position = prompt_count > page_tokens
-        ? ((prompt_count - 1u) / page_tokens) * page_tokens
-        : 0u;
+    const uint32_t tail_position = dflash2_prefill_tail_position(prompt_count, page_tokens);
     const uint32_t first_checkpoint = request.prefix_save_position;
     const uint32_t second_checkpoint =
         tail_position != first_checkpoint ? tail_position : 0u;
