@@ -200,6 +200,7 @@ shelf_set_hip_archs(shelf_kernels_optimized)
 add_library(shelf_kernels_dflash2 STATIC
     src/shelf/kernels/dflash2/attention.hip
     src/shelf/kernels/dflash2/candidate_selector.hip
+    src/shelf/kernels/dflash2/coarse_head.hip
     src/shelf/kernels/dflash2/feature_concat.hip
     src/shelf/kernels/dflash2/grouped_dynamic_conv.hip
     src/shelf/kernels/dflash2/kv_ring.hip

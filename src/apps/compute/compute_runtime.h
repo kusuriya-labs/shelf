@@ -57,6 +57,7 @@ struct Qwen35RuntimeConfig {
                                                          : (cap < 8u ? cap : 8u);
         return want < cap ? want : cap;
     }
+    std::size_t dflash2_coarse_bytes = 0;
     uint32_t dflash2_prefill_rows = 0;
     bool dflash2_host_token_ids = false;
     bool mtp = false;

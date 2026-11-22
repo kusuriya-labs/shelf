@@ -926,6 +926,17 @@ temperature、top-p、min-p、seed、sample index は毎回更新する request 
 draft 行だけを処理する。`SHELF_DFLASH2_DRAFT_GRAPH=0` で提案を eager 実行できる。
 複数要求と分散語彙射影はそれぞれ既存のバッチ経路と分散経路を使う。
 
+単一 GPU で target の語彙射影が EXL3 mul24 6-bit（248,320 語、hidden 5,120）の場合、
+起動時に arena に INT3 の提案用重みを構築する。既存の入力回転と 128 要素ごとの
+activation scale を共有し、出力回転後の全語彙を評価する。語彙を 128 行単位の
+1,940 ブロックに分け、各 draft 行で最大 logit が高い上位 128 ブロックを選ぶ。
+境界で同点になったブロックも含めて全行の候補をまとめ、元の 6-bit 重みで再計算する。selector は再計算した logit の上位 16 語を使う。
+tree の正規化には、選択ブロックの再計算値と残りのブロックの INT3 近似値を使う。
+
+必要な重みは 476,774,400 バイトで、候補選択は top-k の作業領域を再利用する。
+要求された KV 容量と作業領域を確保できる場合に有効になる。TP、ほかの target head、
+17 行以上の提案、または `SHELF_DFLASH2_COARSE_HEAD=0` の場合は全語彙の元の射影を使う。
+
 ### device buffer
 
 `create_dflash2_spec_decoder()` が arena から以下を確保する。decoder lifetime 中

@@ -57,6 +57,8 @@ struct DFlash2ExecutorConfig {
     // vocabulary, so it looks a token up across every rank's shard. Empty keeps
     // `target_embed_tokens` as the single table.
     shelf::kernel::EmbeddingShardTable target_embed_shards{};
+    std::size_t coarse_head_bytes = 0;
+    hipStream_t init_stream = nullptr;
 };
 
 struct DFlash2GraphDeleter {
@@ -132,6 +134,7 @@ struct DFlash2Executor {
     gpu::Tensor activation_codes;
     gpu::Tensor activation_scales;
     gpu::Tensor exl3_lm_head_accum;
+    gpu::Tensor coarse_head;
 
     gpu::Tensor conv_row_has_prev;
     gpu::Tensor batch_descriptors;

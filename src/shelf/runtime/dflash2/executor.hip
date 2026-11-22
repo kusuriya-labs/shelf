@@ -5,6 +5,8 @@
 #include <shelf/core/gpu/cleanup.h>
 #include <shelf/runtime/dflash2/context_state.h>
 #include <shelf/kernels/dflash2/attention.h>
+#include <shelf/kernels/dflash2/coarse_head.h>
+#include <shelf/runtime/dflash2/dflash2_footprint.h>
 #include <shelf/kernels/optimized/linear/lm_head_int8.h>
 #include <shelf/kernels/dflash2/candidate_selector.h>
 #include <shelf/kernels/dflash2/feature_concat.h>
@@ -26,6 +28,7 @@
 #include <cstdint>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -509,6 +512,28 @@ Result<DFlash2Executor> create_dflash2_executor(
         if (!st.ok()) return st;
     }
 
+    if (exec_config.coarse_head_bytes && !ex.proposal_sharded && ex.target_lm_head &&
+        exec_config.coarse_head_bytes == dflash2_coarse_head_bytes(*ex.target_lm_head) &&
+        ex.target_lm_head->codes.ndim() != 0) {
+        const auto start = std::chrono::steady_clock::now();
+        const auto used = arena.used();
+        st = allocate_contiguous_tensor<uint32_t>(
+            arena, {exec_config.coarse_head_bytes / sizeof(uint32_t)}, ex.coarse_head);
+        if (st.ok()) {
+            hipError_t err = shelf::kernel::build_dflash2_coarse_head(
+                ex.target_lm_head->codes.data<uint16_t>(), ex.coarse_head.data<uint32_t>(),
+                ex.local_vocab, hidden, exec_config.init_stream);
+            if (err == hipSuccess) err = hipStreamSynchronize(exec_config.init_stream);
+            if (err != hipSuccess)
+                return Status::hip_error("build drafter coarse head", hipGetErrorString(err), __FILE__, __LINE__);
+            std::fprintf(stderr, "DFLASH2_COARSE bytes=%zu build_ms=%.3f\n",
+                arena.used() - used,
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+        } else {
+            std::fprintf(stderr, "DFLASH2 coarse head allocation failed, using full head: %s\n",
+                         st.message().c_str());
+        }
+    }
 #ifdef SHELF_HIP_GRAPH
     const char* graph = std::getenv("SHELF_DFLASH2_DRAFT_GRAPH");
     ex.proposal_graph_enabled = graph == nullptr || (graph[0] != '\0' && graph[0] != '0');
@@ -579,6 +604,7 @@ Status dflash2_executor_shutdown(DFlash2Executor& executor) noexcept {
     executor.activation_codes = gpu::Tensor{};
     executor.activation_scales = gpu::Tensor{};
     executor.exl3_lm_head_accum = gpu::Tensor{};
+    executor.coarse_head = gpu::Tensor{};
     executor.conv_row_has_prev = gpu::Tensor{};
     executor.batch_descriptors = gpu::Tensor{};
     executor.max_rows = 0;
@@ -1180,6 +1206,10 @@ Status lm_head_quantize(
     return Status::make_ok();
 }
 
+bool use_coarse_head(const DFlash2Executor& executor, uint32_t rows) {
+    return executor.coarse_head.ndim() && rows <= shelf::kernel::kDFlash2CoarseMaxRows;
+}
+
 Status lm_head_gemm(
     DFlash2Executor& executor,
     const shelf::weights::MatrixWeight& weight,
@@ -1187,7 +1217,7 @@ Status lm_head_gemm(
     uint32_t rows,
     float* logits,
     uint32_t logits_row_stride,
-    hipStream_t stream) {
+    hipStream_t stream, bool proposal = false) {
     if (weight.encoding == shelf::weights::MatrixEncoding::Int8W32) {
         const hipError_t err = shelf::kernel::launch_lm_head_int8_w32(
             hidden, weight.cols, weight.codes.data<uint8_t>(),
@@ -1209,6 +1239,18 @@ Status lm_head_gemm(
             hipError_t err = shelf::kernel::launch_exl3_mul24_rotate_quantize(
                 hidden, weight.cols, weight.exl3_suh.data<uint16_t>(), codes, scales, rows,
                 weight.cols, layout.code_row_stride_bytes, layout.scale_row_stride_bytes, stream);
+            if (err == hipSuccess && proposal && use_coarse_head(executor, rows)) {
+                shelf::kernel::DFlash2CoarseHeadArgs args{
+                    executor.coarse_head.data<uint32_t>(), weight.codes.data<uint16_t>(),
+                    weight.exl3_svh.data<uint16_t>(), codes, scales, accum, logits,
+                    executor.topk_scratch_logits.data<float>(), executor.topk_scratch_ids.data<int32_t>(),
+                    rows, weight.rows, weight.cols, layout.code_row_stride_bytes,
+                    layout.scale_row_stride_bytes / 4, shelf::kernel::kDFlash2CoarseKeep};
+                err = shelf::kernel::launch_dflash2_coarse_head(args, stream);
+                if (err != hipSuccess)
+                    return Status::hip_error("drafter coarse head", hipGetErrorString(err), __FILE__, __LINE__);
+                return Status::make_ok();
+            }
             if (err == hipSuccess) {
                 err = shelf::kernel::launch_exl3_mul24_gemm(
                     codes, scales, layout.code_row_stride_bytes, layout.scale_row_stride_bytes,
@@ -1278,6 +1320,38 @@ Status lm_head_gemm(
                                __LINE__);
 }
 
+Status draft_topk(DFlash2Executor& executor, uint32_t rows, hipStream_t stream) {
+    const uint32_t vocab = executor.local_vocab;
+    const uint32_t top_k = executor.config->selector_top_k;
+    const auto vocab_offset = static_cast<int32_t>(executor.vocab_offset);
+    const float* logits = use_coarse_head(executor, rows)
+        ? executor.exl3_lm_head_accum.data<float>() : executor.proposal_logits.data<float>();
+    hipError_t err;
+    const bool use_reference =
+        topk_reference_enabled() || top_k != shelf::kernel::kDflash2TopKMaxK;
+    if (use_reference) {
+        err = shelf::kernel::launch_dflash2_topk_f32(
+            logits, rows, vocab, vocab, top_k,
+            executor.proposal_topk_ids.data<int32_t>(),
+            executor.proposal_topk_logits.data<float>(),
+            executor.topk_scratch_ids.data<int32_t>(),
+            executor.topk_scratch_logits.data<float>(), vocab_offset, stream);
+    } else {
+        err = shelf::kernel::launch_dflash2_topk_f32_optimized(
+            logits, rows, vocab, vocab, top_k,
+            executor.proposal_topk_ids.data<int32_t>(),
+            executor.proposal_topk_logits.data<float>(),
+            executor.topk_scratch_ids.data<int32_t>(),
+            executor.topk_scratch_logits.data<float>(), vocab_offset, topk_plan(), stream);
+    }
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 topk launch", hipGetErrorString(err),
+                                 __FILE__, __LINE__);
+    }
+
+    return Status::make_ok();
+}
+
 Status lm_head_logits(
     DFlash2Executor& executor,
     const shelf::weights::MatrixWeight& weight,
@@ -1285,14 +1359,14 @@ Status lm_head_logits(
     uint32_t rows,
     float* logits,
     uint32_t logits_row_stride,
-    hipStream_t stream) {
+    hipStream_t stream, bool proposal = false) {
     Status st = lm_head_validate(executor, weight, rows);
     if (!st.ok())
         return st;
     st = lm_head_quantize(executor, weight, hidden, rows, stream);
     if (!st.ok())
         return st;
-    return lm_head_gemm(executor, weight, hidden, rows, logits, logits_row_stride, stream);
+    return lm_head_gemm(executor, weight, hidden, rows, logits, logits_row_stride, stream, proposal);
 }
 
 }  // namespace
@@ -1400,8 +1474,6 @@ Status dflash2_select_draft_tokens(
     const uint32_t rank = executor.config->selector_rank;
     const shelf::weights::MatrixWeight& draft_head = *executor.target_lm_head;
     const uint32_t vocab = executor.local_vocab;
-    const int32_t vocab_offset = static_cast<int32_t>(executor.vocab_offset);
-    const uint32_t top_k = executor.config->selector_top_k;
     const bf16_t* draft_hidden = final_hidden + hidden;
 
     const shelf::weights::MatrixWeight& projection =
@@ -1438,31 +1510,11 @@ Status dflash2_select_draft_tokens(
             output_draft_tokens, stream);
     }
     st = lm_head_logits(executor, draft_head, draft_hidden, draft,
-                        executor.proposal_logits.data<float>(), vocab, stream);
+                        executor.proposal_logits.data<float>(), vocab, stream, true);
     if (!st.ok()) return st;
 
-    const bool use_reference =
-        topk_reference_enabled() || top_k != shelf::kernel::kDflash2TopKMaxK;
-    if (use_reference) {
-        err = shelf::kernel::launch_dflash2_topk_f32(
-            executor.proposal_logits.data<float>(), draft, vocab, vocab, top_k,
-            executor.proposal_topk_ids.data<int32_t>(),
-            executor.proposal_topk_logits.data<float>(),
-            executor.topk_scratch_ids.data<int32_t>(),
-            executor.topk_scratch_logits.data<float>(), vocab_offset, stream);
-    } else {
-        err = shelf::kernel::launch_dflash2_topk_f32_optimized(
-            executor.proposal_logits.data<float>(), draft, vocab, vocab, top_k,
-            executor.proposal_topk_ids.data<int32_t>(),
-            executor.proposal_topk_logits.data<float>(),
-            executor.topk_scratch_ids.data<int32_t>(),
-            executor.topk_scratch_logits.data<float>(), vocab_offset, topk_plan(), stream);
-    }
-    if (err != hipSuccess) {
-        return Status::hip_error("dflash2 topk launch", hipGetErrorString(err),
-                                 __FILE__, __LINE__);
-    }
-
+    st = draft_topk(executor, draft, stream);
+    if (!st.ok()) return st;
     return dflash2_run_candidate_selector(
         executor, executor.selector_hidden_proj.data<bf16_t>(),
         executor.proposal_topk_ids.data<int32_t>(),
@@ -1935,7 +1987,6 @@ Status dflash2_select_draft_tokens_batch(
     const uint32_t rank = static_cast<uint32_t>(config.selector_rank);
     const uint32_t vocab = static_cast<uint32_t>(config.vocab_size);
     const uint32_t local_vocab = executor.local_vocab;
-    const int32_t vocab_offset = static_cast<int32_t>(executor.vocab_offset);
     const uint32_t top_k = static_cast<uint32_t>(config.selector_top_k);
     const shelf::weights::MatrixWeight& projection = executor.weights->selector.hidden_projection;
 
@@ -1969,31 +2020,12 @@ Status dflash2_select_draft_tokens_batch(
         if (!st.ok()) return st;
     } else {
         st = lm_head_logits(executor, *executor.target_lm_head, final_hidden, total_rows,
-                            executor.proposal_logits.data<float>(), local_vocab, stream);
+                            executor.proposal_logits.data<float>(), local_vocab, stream, true);
         if (!st.ok()) return st;
     }
 
-    const bool use_reference =
-        topk_reference_enabled() || top_k != shelf::kernel::kDflash2TopKMaxK;
-    if (use_reference) {
-        err = shelf::kernel::launch_dflash2_topk_f32(
-            executor.proposal_logits.data<float>(), total_rows, local_vocab, local_vocab, top_k,
-            executor.proposal_topk_ids.data<int32_t>(),
-            executor.proposal_topk_logits.data<float>(),
-            executor.topk_scratch_ids.data<int32_t>(),
-            executor.topk_scratch_logits.data<float>(), vocab_offset, stream);
-    } else {
-        err = shelf::kernel::launch_dflash2_topk_f32_optimized(
-            executor.proposal_logits.data<float>(), total_rows, local_vocab, local_vocab, top_k,
-            executor.proposal_topk_ids.data<int32_t>(),
-            executor.proposal_topk_logits.data<float>(),
-            executor.topk_scratch_ids.data<int32_t>(),
-            executor.topk_scratch_logits.data<float>(), vocab_offset, topk_plan(), stream);
-    }
-    if (err != hipSuccess) {
-        return Status::hip_error("dflash2 batch topk launch", hipGetErrorString(err),
-                                 __FILE__, __LINE__);
-    }
+    st = draft_topk(executor, total_rows, stream);
+    if (!st.ok()) return st;
 
     shelf::kernel::DFlash2CandidateSelectorArgs args;
     args.hidden_proj = executor.selector_hidden_proj.data<bf16_t>();

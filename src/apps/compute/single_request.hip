@@ -653,6 +653,8 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
         }
     }
     ::shelf::runtime::dflash2::DFlash2ExecutorConfig draft_config;
+    draft_config.coarse_head_bytes = runtime.config().dflash2_coarse_bytes;
+    draft_config.init_stream = runtime.stream();
     draft_config.max_rows = static_cast<uint32_t>(dflash_config.block_size);
     draft_config.max_context_rows = static_cast<uint32_t>(dflash_config.sliding_window);
     draft_config.proposal_distributor = tp_proposal.get();

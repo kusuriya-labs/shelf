@@ -1692,6 +1692,8 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
             }
         }
         ::shelf::runtime::dflash2::DFlash2ExecutorConfig draft_config;
+        draft_config.coarse_head_bytes = runtime.config().dflash2_coarse_bytes;
+        draft_config.init_stream = runtime.stream();
         draft_config.max_rows = static_cast<uint32_t>(dflash.config.block_size);
         draft_config.max_batch_rows = batch_max_rows;
         draft_config.max_context_rows = static_cast<uint32_t>(dflash.config.sliding_window);

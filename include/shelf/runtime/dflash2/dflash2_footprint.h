@@ -5,6 +5,7 @@
 #include <shelf/inference/state/gdn_state_pool.h>
 #include <shelf/runtime/dflash2_reserve.h>
 
+#include <shelf/weights/matrix_weight.h>
 #include <cstddef>
 #include <cstdint>
 
@@ -12,6 +13,8 @@ namespace shelf {
 namespace runtime {
 
 using ::shelf::runtime::DFlash2Footprint;
+
+std::size_t dflash2_coarse_head_bytes(const weights::MatrixWeight& head) noexcept;
 
 bool dflash2_prefill_rows(const ::shelf::runtime::DFlash2Config& config, uint32_t tp,
                           const char* value, uint32_t& rows) noexcept;

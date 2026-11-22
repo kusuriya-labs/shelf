@@ -18,6 +18,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <utility>
@@ -364,7 +366,7 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
 
     apply_auto_working_set_reserve();
     const std::size_t drafter_total_bytes = drafter_reserve_bytes(*gdn_pool_);
-    const std::size_t drafter_runtime_bytes = drafter_total_bytes > config_.draft_bytes
+    std::size_t drafter_runtime_bytes = drafter_total_bytes > config_.draft_bytes
         ? drafter_total_bytes - config_.draft_bytes
         : 0u;
 
@@ -469,9 +471,19 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
                 : nullptr);
     }
 
-    const std::size_t reserved_bytes = prefix_bytes.total() + prefix_capture_bytes +
-        drafter_total_bytes;
     const std::size_t arena_free = arena_->capacity() - arena_->used();
+    const std::size_t base_reserve =
+        prefix_bytes.total() + prefix_capture_bytes + drafter_total_bytes;
+    const char* coarse = std::getenv("SHELF_DFLASH2_COARSE_HEAD");
+    if (config_.draft_config_ready && config_.tp == 1 &&
+        (coarse == nullptr || std::strcmp(coarse, "0") != 0)) {
+        const auto bytes = runtime::dflash2_coarse_head_bytes(model_->lm_head());
+        if (arena_free >= base_reserve + kv_required_bytes + bytes) {
+            config_.dflash2_coarse_bytes = bytes;
+            drafter_runtime_bytes += bytes;
+        }
+    }
+    const std::size_t reserved_bytes = base_reserve + config_.dflash2_coarse_bytes;
     if (arena_free <= reserved_bytes) {
         print_memory_plan(make_plan(kv_required_bytes, max_seq + 1u));
         return Status::insufficient_memory(

@@ -34,6 +34,15 @@ std::size_t rows_for(const ::shelf::runtime::DFlash2Config& config, uint32_t dra
 
 }  // namespace
 
+std::size_t dflash2_coarse_head_bytes(const weights::MatrixWeight& head) noexcept {
+    if (head.encoding != weights::MatrixEncoding::Exl3 ||
+        head.quant_spec != quantization::QuantSpecId::EXL3_MUL24_INT8_V1 ||
+        head.exl3_ka != 6 || head.exl3_half || head.partition || head.preshuffled ||
+        head.cols != 5120 || head.k_padded != head.cols || head.rows != 248320)
+        return 0;
+    return size_t(head.rows) * head.cols * 3 / 8;
+}
+
 bool dflash2_prefill_rows(const ::shelf::runtime::DFlash2Config& config, uint32_t tp,
                           const char* value, uint32_t& rows) noexcept {
     if (value != nullptr && std::strcmp(value, "8") != 0 &&

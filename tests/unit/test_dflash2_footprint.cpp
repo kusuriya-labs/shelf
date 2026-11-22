@@ -72,6 +72,18 @@ int main() {
         check(!dflash2_prefill_rows(config, 1u, invalid, rows), "invalid value is rejected");
     }
 
+    shelf::weights::MatrixWeight head;
+    head.encoding = shelf::weights::MatrixEncoding::Exl3;
+    head.quant_spec = shelf::quantization::QuantSpecId::EXL3_MUL24_INT8_V1;
+    head.rows = config.vocab_size;
+    head.k_padded = head.cols = config.hidden_size;
+    head.exl3_ka = 6;
+    check(shelf::runtime::dflash2_coarse_head_bytes(head) == 476774400u,
+          "packed three-bit head covers every vocabulary row");
+    head.exl3_ka = 4;
+    check(shelf::runtime::dflash2_coarse_head_bytes(head) == 0u,
+          "unsupported trellis uses the full head");
+
     const std::size_t context = dflash2_context_state_bytes(config);
     check(context == 2u * 5u * 2048u * (8u * 128u) * sizeof(shelf::bf16_t),
           "context state bytes match the ring geometry");
