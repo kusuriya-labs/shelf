@@ -38,18 +38,27 @@ void GraphCapture::cancel(std::string &errors) {
 
 void GraphPlan::launch(Residency &gpu) const {
     auto root = gpu.compute[0];
+    if (!layers.front().scatter) {
+        checked(hipGraphLaunch(tail, root));
+        return;
+    }
     for (const auto &layer : layers) {
         checked(hipGraphLaunch(layer.scatter, root));
-        for (int r = 1; r < gpu.ep_size; ++r)
-            checked(hipEventRecord(gpu.ready[0][r][0], root));
+        if (gpu.ep_size > 1) checked(hipEventRecord(gpu.ready[0][1][0], root));
+        if (layer.local) {
+            checked(hipStreamWaitEvent(gpu.local_expert[0], gpu.ready[0][1][0], 0));
+            checked(hipGraphLaunch(layer.local, gpu.local_expert[0]));
+            checked(hipEventRecord(gpu.local_done[0], gpu.local_expert[0]));
+        }
         for (int r = 1; r < gpu.ep_size; ++r) {
             checked(hipSetDevice(gpu.physical[r]));
-            checked(hipStreamWaitEvent(gpu.compute[r], gpu.ready[0][r][0], 0));
+            checked(hipStreamWaitEvent(gpu.compute[r], gpu.ready[0][1][0], 0));
             checked(hipGraphLaunch(layer.expert[r], gpu.compute[r]));
             checked(hipEventRecord(gpu.ready[r][0][0], gpu.compute[r]));
         }
         checked(hipSetDevice(gpu.physical[0]));
         checked(hipGraphLaunch(layer.expert[0], root));
+        if (layer.local) checked(hipStreamWaitEvent(root, gpu.local_done[0], 0));
         for (int r = 1; r < gpu.ep_size; ++r)
             checked(hipStreamWaitEvent(root, gpu.ready[r][0][0], 0));
     }
@@ -67,8 +76,10 @@ void GraphPlan::release(Residency &gpu, std::string &errors) {
         collect(errors, hipSetDevice(gpu.physical[r]));
         for (auto &layer : layers) {
             destroy(layer.expert[r]);
-            if (!r)
+            if (!r) {
                 destroy(layer.scatter);
+                destroy(layer.local);
+            }
         }
         if (!r) {
             destroy(tail);

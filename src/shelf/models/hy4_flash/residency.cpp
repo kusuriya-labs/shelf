@@ -109,7 +109,7 @@ Status Residency::reserve() {
     }
     if (*std::min_element(remaining.begin(), remaining.begin() + ranks) < 0)
         return Status::unsupported("要求された配置と予約長は GPU の空き容量に収まりません", __FILE__, __LINE__);
-    graph_room = max_slots == 1 && tp_size == 1 && std::all_of(remaining.begin(), remaining.begin() + ranks,
+    graph_room = tp_size == 1 && std::all_of(remaining.begin(), remaining.begin() + ranks,
                                             [](int64_t bytes) { return bytes >= int64_t(graph_headroom); });
     fprintf(stderr, "rank_counts=%d,%d,%d,%d\n", used[0], used[1], used[2], used[3]);
     for (int r = 0; r < ranks; ++r) {

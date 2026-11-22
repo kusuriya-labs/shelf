@@ -28,6 +28,17 @@ struct GraphInput {
     uint8_t engram[4][6 * 16 * 98];
 };
 
+struct BatchGraphParams {
+    Hy4StepParams lanes[16];
+    int ids[96], anchors[16];
+};
+
+struct BatchGraphInput {
+    BatchGraphParams step;
+    int candidates[80];
+    uint8_t engram[96 * 4 * 16 * 98];
+};
+
 struct Region {
     uint8_t *base = nullptr;
     size_t size = 0;
@@ -91,6 +102,7 @@ struct Residency {
     std::array<GraphPlan, 2> draft_graphs{};
     size_t target_victim = 0, draft_victim = 0;
     GraphInput *graph_input = nullptr;
+    BatchGraphInput *batch_input = nullptr;
     uint64_t target_replays = 0, draft_replays = 0;
     void *staging = nullptr;
     std::array<std::array<std::array<hipEvent_t, 2>, 4>, 4> ready{}, ack{};
