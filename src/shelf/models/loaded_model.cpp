@@ -386,7 +386,6 @@ MtpExecutorTerms mtp_executor_terms(const LoadedModel& model, std::size_t rows) 
 
 bool LoadedModel::has_mtp_block() const noexcept {
     if (qwen4exp_ != nullptr) return qwen4exp_->weights().mtp.present;
-    if (moe_ != nullptr) return moe_->weights().mtp.present;
     // Speculative decode is not wired for the sparse family yet: its state pool has to be
     // rolled back with the KV cache when drafts are rejected.
     if (qsa_ != nullptr) return false;
@@ -464,15 +463,6 @@ Result<shelf::qwen35::runtime::MtpDrafterInput> LoadedModel::mtp_drafter_input(
         input.wide_hidden = true;
         return input;
     }
-    if (moe_ != nullptr) {
-        auto lowered = shelf::qwen35moe::lower_qwen35_moe_mtp_to_primitives(
-            moe_->text_config(), moe_->weights(),
-            static_cast<float>(options.rope_profile.attention_factor));
-        if (!lowered.ok()) return lowered.status();
-        input.lowered = lowered.release();
-        return input;
-    }
-
     auto lowered = shelf::qwen35::lower_qwen35_mtp_to_primitives(
         dense_->text_config(), dense_->weights(), options.rope_profile,
         lm_head_override);

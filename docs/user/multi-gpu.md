@@ -52,8 +52,8 @@ K128 一括セットを要求する量子化方式（例: EXL3 INT8 3.05bpw）�
   （EP を増やしても高速化しない）。
 - QSA family は TP=2 までで、PP にも対応する（`qwen35qsa.md` 参照）。
   ただし QSA checkpoint がリポジトリに無いため実機検証は未実施。
-- MTP は PP と併用できず、grouped expert（MoE）との TP 併用も拒否される
-  （`mtp.md` 参照）。
+- MTP は PP と併用できない。Qwen3.5 MoE の MTP block は routed expert の online
+  MXFP4 再量子化を無効化したため未対応である（`mtp.md` 参照）。
 
 ## 制約
 

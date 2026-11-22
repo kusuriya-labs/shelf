@@ -18,21 +18,18 @@ namespace shelf {
 namespace qwen4exp {
 
 // Host-resident PLE n-gram table. Shards are shared by the tensor-parallel rank threads,
-// which live in the same process. The EXL3 file path reads with pread; the HF shard path
-// maps the checkpoint tensors and copies or converts them into host RAM. The artifact
-// loader can place shards in pinned host memory and read them with O_DIRECT.
+// which live in the same process. The HF shard path maps the checkpoint tensors and
+// copies them into host RAM.
 class PleTable {
 public:
     // Packaged row layout held in host RAM.
     enum class TableFormat : std::uint8_t {
         Fp8E4M3 = 1,
-        Int6W32Fp16 = 2,
         Ngram = 3,
     };
 
     static Result<PleTable> load(const std::string& model_dir,
-                                 const Qwen4ExpTextConfig& config,
-                                 bool fadvise_dontneed = true);
+                                 const Qwen4ExpTextConfig& config);
 
     PleTable() = default;
     PleTable(PleTable&&) noexcept = default;
@@ -45,13 +42,10 @@ public:
     [[nodiscard]] std::uint32_t row_width() const noexcept { return row_width_; }
     [[nodiscard]] std::uint32_t row_bytes() const noexcept { return row_bytes_; }
     [[nodiscard]] TableFormat format() const noexcept { return format_; }
-    [[nodiscard]] bool int6_w32_fp16() const noexcept {
-        return format_ == TableFormat::Int6W32Fp16;
-    }
     [[nodiscard]] std::uint32_t shard_count() const noexcept { return shard_count_; }
     [[nodiscard]] std::uint32_t shard_rows() const noexcept { return shard_rows_; }
     [[nodiscard]] std::uint64_t payload_bytes() const noexcept { return payload_bytes_; }
-    // Bytes actually held in host RAM. Smaller than payload_bytes in tiered mode.
+    // Bytes actually held in host RAM.
     [[nodiscard]] std::uint64_t host_bytes() const noexcept;
     // Number of block slots currently filled in the pinned hot cache.
     [[nodiscard]] std::size_t cached_blocks() const noexcept;
@@ -69,7 +63,7 @@ public:
     }
 
     // One packaged row. Returns nullptr for an out-of-range row. The row layout depends
-    // on `format()`: EXL3 trellis, FP8 E4M3, or INT6 W32 FP16.
+    // on `format()`: FP8 E4M3 or the n-gram codebook form.
     [[nodiscard]] const std::uint8_t* row_ptr(std::uint64_t row) const noexcept;
 
     // CPU reference decode of one row: 160 f32 values. Used by load validation and by
@@ -102,13 +96,6 @@ public:
 
 
 private:
-    struct ArtifactSource {
-        std::uint32_t id = 0;
-        std::uint64_t size = 0;
-        std::int64_t mtime_sec = 0;
-        std::int64_t mtime_nsec = 0;
-    };
-
     struct NgramHead {
         std::unique_ptr<io::SafetensorsReader> reader;
         const std::uint8_t* codes = nullptr;
@@ -134,15 +121,7 @@ private:
     static Result<PleTable> load_ngram(const std::string& root,
                                        const Qwen4ExpTextConfig& config);
     static Result<PleTable> load_index_shards(const std::string& model_dir,
-                                              const Qwen4ExpTextConfig& config,
-                                              bool fadvise_dontneed);
-    static Result<bool> load_int6_artifact(
-        const std::string& model_dir, const Qwen4ExpTextConfig& config,
-        const std::vector<ArtifactSource>& sources, PleTable& out,
-        std::uint64_t hot_cache_bytes);
-    static Status write_int6_artifact(const std::string& model_dir,
-                                      const std::vector<ArtifactSource>& sources,
-                                      const PleTable& table);
+                                              const Qwen4ExpTextConfig& config);
     std::size_t head_for_row(std::uint64_t row) const noexcept;
 
     TableFormat format_ = TableFormat::Fp8E4M3;
@@ -154,53 +133,8 @@ private:
     struct Shard {
         std::unique_ptr<std::uint8_t, FreeDeleter> data;
         std::size_t bytes = 0;
-        std::uint64_t file_offset = 0;
     };
 
-    struct MappedDeleter {
-        std::size_t bytes = 0;
-        void operator()(const std::uint8_t* p) const noexcept;
-    };
-    struct PinnedDeleter {
-        void operator()(std::uint8_t* p) const noexcept;
-    };
-    struct FdDeleter {
-        void operator()(int* p) const noexcept;
-    };
-
-    struct TieredState {
-        std::shared_ptr<const std::uint8_t> mapped;
-        std::size_t mapped_bytes = 0;
-        std::shared_ptr<int> direct_fd;
-        std::shared_ptr<std::uint8_t> hot;
-        std::unique_ptr<std::uint8_t, FreeDeleter> scratch;
-        std::uint64_t hot_bytes = 0;
-        std::size_t hot_slots = 0;
-        std::vector<std::uint64_t> shard_offsets;
-        std::uint32_t block_rows = 0;
-        std::uint64_t block_bytes = 0;
-        std::uint32_t blocks_per_shard = 0;
-        std::vector<std::int64_t> slot_block;
-        std::unordered_map<std::uint64_t, std::uint32_t> block_slot;
-        std::vector<std::uint32_t> freq;
-        std::uint64_t accesses = 0;
-        std::uint64_t hot_hits = 0;
-        std::uint64_t cold_reads = 0;
-        std::uint32_t log_interval = 0;
-        std::mutex mutex;
-    };
-    std::shared_ptr<TieredState> tiered_;
-
-    static Status setup_tiered(PleTable& table, int fd,
-                               std::vector<std::uint64_t> shard_offsets,
-                               std::uint32_t shard_rows, std::size_t hot_bytes);
-    static void rebalance_tiered(TieredState& state, std::uint32_t shard_rows);
-    static void fill_tiered_block(TieredState& state, std::size_t slot, std::uint64_t block);
-    static std::vector<std::uint64_t> tiered_candidates(const TieredState& state,
-                                                        std::size_t count,
-                                                        std::uint32_t shard_rows);
-
-    std::string file_path_;
     std::uint64_t rows_ = 0;
     std::uint32_t row_width_ = 0;
     std::uint32_t row_bytes_ = 0;

@@ -91,11 +91,8 @@ CMake オプション（`SHELF_ROCM_ROOT` / `SHELF_LIBCXX_LLVM_ROOT` / `SHELF_LO
 | `SHELF_MOE_CACHE_DECAY` | `4096` | compute / bench / runtime | expert 頻度を半減する回数（`--moe-cache-decay`） |
 | `SHELF_MOE_CACHE_LOG_INTERVAL` | `64` | compute / bench / runtime | expert キャッシュ hit 率のログ間隔（`--moe-cache-log-interval`） |
 | `SHELF_MOE_CACHE_ORACLE` | `0` | compute / bench / runtime | `1` でキャッシュ oracle 判定をログ出力する（`--moe-cache-oracle`） |
-| `SHELF_PLE_ARTIFACT` | `1` | compute / bench / runtime | `1` で `<model_dir>/quanted_ple.bin` を読み書きする（`--ple-artifact`） |
-| `SHELF_PLE_STREAM_IO` | `mmap` | compute / bench / runtime | PLE table の読み込み方式（`pread` / `mmap` / `direct`、`--ple-stream-io`） |
 | `SHELF_PLE_HOT_CACHE_GIB` | `0`（全量常駐） | compute / server / bench / runtime | PLE 用 pinned host ブロックキャッシュ容量 GiB（`--ple-hot-cache-gib`） |
 | `SHELF_PLE_PREFETCH` | `1` | compute / server / bench / runtime | `1` で prefill 中に次の PLE 行を先読みする（`--ple-prefetch`） |
-| `SHELF_PLE_CACHE_LOG_INTERVAL` | 未設定 | runtime | PLE キャッシュ統計の出力間隔 |
 
 ## 7. Server・量子化ツール・テスト
 

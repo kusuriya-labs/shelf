@@ -13,8 +13,8 @@ N-gram / Engram / PLE table 向けの別形式の契約は
 同形式（`ngram-q`）を直接ロードする。
 
 実行時ランタイムは量子化 artifact の読込専用であり、HF の FP8 / Quark MXFP4 / EXL3 checkpoint および
-self-contained quantized safetensors を直接ロードする（load 時の BF16 → INT6 W32 FP16 変換や
-`lm_head` の INT8 W32 変換を除く）。EXL3-INT8（mul24）および Ngram4 / Ngram5 のオフライン変換・検査ツールは
+self-contained quantized safetensors を直接ロードする（load 時の `lm_head` の INT8 W32 変換を除く）。
+EXL3-INT8（mul24）および Ngram4 / Ngram5 のオフライン変換・検査ツールは
 `tools/quantize/shelf_quantize.py`・`tools/quantize/ngram_quantize.py` として提供する
 （利用手順は [../user/quantize.md](../user/quantize.md) を参照）。
 
@@ -29,12 +29,6 @@ self-contained quantized safetensors を直接ロードする（load 時の BF16
   `manifest/quantized_manifest.h` の `QuantizedEncoding` が唯一の on-disk encoding enum である。
   各formatの canonical stream、metadata、preshuffle は
   [canonical_soa_payload.md](canonical_soa_payload.md) を参照。
-- PLE n-gram table の INT6 W32 FP16 は manifest を持たない load 時変換である。
-  HF shard の BF16 table を 32 値ごとに符号付き 6-bit code（-32..31）と FP16 scale
-  へ変換し、code 24 byte + scale 2 byte の 26 byte/group で保持する。scale は
-  `max(max_positive / 31, -min_negative / 32)` である。詳細は
-  [qwen4exp.md](qwen4exp.md) を参照。
-  codec は `shelf_quant_reference` の `shelf/quantization/int6/int6_w32.h` にある。
 - self-contained quantized safetensors — `shelf_quantization.json` manifest 付きの
   quantized safetensors。`shelf-compute` が直接ロード可能。
   各tensorに `QuantSpecId` / `ComputeSpecId` / CRC32 payloadを保持する。

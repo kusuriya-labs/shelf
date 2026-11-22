@@ -535,7 +535,6 @@ add_library(shelf_quant_reference STATIC
     src/shelf/quantization/mxfp4/mxfp4_native.cpp
     src/shelf/quantization/exl3/exl3.cpp
     src/shelf/quantization/exl3/exl3_int8.cpp
-    src/shelf/quantization/int6/int6_w32.cpp
 )
 set_source_files_properties(
     src/shelf/quantization/fp8/fp8.cpp

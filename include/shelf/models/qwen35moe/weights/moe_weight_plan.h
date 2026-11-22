@@ -77,13 +77,6 @@ struct MoeExpertGroupPlan {
     uint32_t w13_row_ref_bytes_per_expert = 0;
     uint32_t w2_row_ref_bytes_per_expert = 0;
 
-    // A checkpoint that stores the routed experts as one fused rank-3 tensor per plane
-    // ([experts][rows][cols], gate rows first) has no per-expert logical names. The plane
-    // names replace sources, and the payload is in the checkpoint's own dtype.
-    bool fused_rank3 = false;
-    std::string w13_name;
-    std::string w2_name;
-
     // Sources in checkpoint file order (expert-major, down_proj then gate_proj then
     // up_proj). One source is one logical tensor: its codes plane and its E8M0 scale
     // plane. A layer's 6 physical tensors per expert are one contiguous run on disk.
@@ -130,12 +123,5 @@ Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig
                                                         uint32_t ep_rank,
                                                         uint32_t tp_size,
                                                         uint32_t tp_rank);
-
-// The MTP block's routed experts: the same geometry as a transformer layer, stored fused
-// and in the checkpoint's own dtype, so the load requantizes them.
-Result<MoeExpertGroupPlan> build_moe_mtp_expert_group_plan(const Qwen35MoeTextConfig& config);
-Result<MoeExpertGroupPlan> build_moe_mtp_expert_group_plan(const Qwen35MoeTextConfig& config,
-                                                           uint32_t tp_size,
-                                                           uint32_t tp_rank);
 
 }  // namespace shelf::qwen35moe

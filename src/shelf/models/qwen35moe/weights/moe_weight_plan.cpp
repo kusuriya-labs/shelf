@@ -173,27 +173,4 @@ Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig
     return build_moe_expert_group_plan(config, layer, 1u, 0u, 1u, 0u);
 }
 
-Result<MoeExpertGroupPlan> build_moe_mtp_expert_group_plan(const Qwen35MoeTextConfig& config,
-                                                            uint32_t tp_size,
-                                                            uint32_t tp_rank) {
-    if (config.num_hidden_layers == 0u)
-        return Status::invalid_argument(
-            "build_moe_mtp_expert_group_plan: the config has no layer geometry", __FILE__,
-            __LINE__);
-    auto plan = build_moe_expert_group_plan(config, 0u, tp_size, tp_rank);
-    if (!plan.ok()) return plan;
-    MoeExpertGroupPlan& out = plan.value();
-    out.layer = 0u;
-    out.fused_rank3 = true;
-    out.mlp_prefix = moe_mtp_mlp_prefix();
-    out.w13_name = out.mlp_prefix + "experts.gate_up_proj";
-    out.w2_name = out.mlp_prefix + "experts.down_proj";
-    out.sources.clear();
-    return plan;
-}
-
-Result<MoeExpertGroupPlan> build_moe_mtp_expert_group_plan(const Qwen35MoeTextConfig& config) {
-    return build_moe_mtp_expert_group_plan(config, 1u, 0u);
-}
-
 }  // namespace shelf::qwen35moe

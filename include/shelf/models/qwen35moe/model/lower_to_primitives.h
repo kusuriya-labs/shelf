@@ -50,13 +50,4 @@ Result<shelf::qwen_hybrid::HybridLoweredPrimitives> lower_qwen35_moe_to_primitiv
     const Qwen35MoeModelWeights& weights,
     const Qwen35MoeLowerOptions& options = {});
 
-// The checkpoint's MTP block as its own graph: the block's norms and fc over the token
-// embedding and the previous hidden, one full-attention hybrid block with this family's
-// MoE FFN, then the model's lm_head and sampling. Its external inputs are the token ids
-// and the previous hidden; its state is the block's KV cache only.
-Result<shelf::qwen_hybrid::HybridLoweredPrimitives> lower_qwen35_moe_mtp_to_primitives(
-    const Qwen35MoeTextConfig& config,
-    const Qwen35MoeModelWeights& weights,
-    float rope_attention_factor = 1.0f);
-
 }  // namespace shelf::qwen35moe

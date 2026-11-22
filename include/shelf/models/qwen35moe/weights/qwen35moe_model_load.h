@@ -26,34 +26,17 @@ struct Qwen35MoeLayerWeights : shelf::qwen_hybrid::HybridLayerWeights {
     MoeFfnWeights ffn;
 };
 
-// A loaded MoE model: the shared model-level weights, one MoE layer per transformer
-// layer, and the checkpoint's MTP block when it was asked for.
-struct Qwen35MoeMtpWeights {
-    bool present = false;
-
-    shelf::gpu::Tensor pre_fc_norm_embedding_weight;
-    shelf::gpu::Tensor pre_fc_norm_hidden_weight;
-    shelf::gpu::Tensor final_norm_weight;
-
-    shelf::weights::MatrixWeight fc;
-    Qwen35MoeLayerWeights layer;
-};
-
+// A loaded MoE model: the shared model-level weights and one MoE layer per transformer
+// layer.
 struct Qwen35MoeModelWeights : shelf::qwen_hybrid::HybridModelLevelWeights {
     std::vector<Qwen35MoeLayerWeights> layers;
-    Qwen35MoeMtpWeights mtp;
 };
 
 // True when any linear of this weight set is carried in the rotated-domain trellis form,
-// including the LM head and the MTP block. The memory plan uses it to decide whether the
-// executor workspace must hold that form's staging planes.
+// including the LM head. The memory plan uses it to decide whether the executor workspace
+// must hold that form's staging planes.
 inline bool uses_exl3_linear(const Qwen35MoeModelWeights& weights) noexcept {
     if (weights.lm_head.encoding == shelf::weights::MatrixEncoding::Exl3) return true;
-    if (weights.mtp.present &&
-        (weights.mtp.fc.encoding == shelf::weights::MatrixEncoding::Exl3 ||
-         shelf::qwen_hybrid::layer_uses_exl3_linear(weights.mtp.layer) ||
-         ffn_uses_exl3_linear(weights.mtp.layer.ffn)))
-        return true;
     for (const Qwen35MoeLayerWeights& layer : weights.layers) {
         if (shelf::qwen_hybrid::layer_uses_exl3_linear(layer) ||
             ffn_uses_exl3_linear(layer.ffn))
@@ -144,13 +127,6 @@ Status validate_qwen35moe_weights(const Qwen35MoeModelWeights& weights,
                                  std::uint32_t tp_size,
                                  std::uint32_t tp_rank,
                                  const shelf::qwen_hybrid::PipelineStage& stage = {});
-
-// The MTP block's own invariants: fc is [hidden, 2 * hidden], the three block norms are
-// [hidden], its layer is a full-attention body, and its FFN matches the MTP plan (the
-// checkpoint keeps those experts fused, so their planes are requantized on load).
-Status validate_qwen35moe_mtp_weights(const Qwen35MoeMtpWeights& mtp,
-                                      const MoeExpertGroupPlan& plan,
-                                      const Qwen35MoeTextConfig& config);
 
 // Loads a MoE checkpoint: the hybrid backbone through the shared loader, then each
 // layer's routed experts as rank-3 native SoA planes plus its router and shared expert.

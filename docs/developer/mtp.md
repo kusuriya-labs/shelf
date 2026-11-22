@@ -3,21 +3,16 @@
 checkpoint の MTP block（`mtp.*`）を drafter として使う compute / serve 経路である。
 DFlash2 とは排他的で、`--mtp` を指定したときだけ有効になる。
 
-MTP block は checkpoint が `mtp.*` として持つ tensor から作り、dense / grouped expert
-（MoE）のどちらの model でも load / lower / 実行できる。MTP block を持たない checkpoint で
-`--mtp` を指定すると `LoadedModel::mtp_drafter_input` が `unsupported` を返す。
-dense model は `--tensor-parallel 2` と併用できる。`--pipeline-parallel 2` と
-`--dump-logits` との併用は起動時に拒否する。
+MTP block は checkpoint が `mtp.*` として持つ tensor から作り、dense model と Qwen4Exp で
+load / lower / 実行できる。MTP block を持たない checkpoint で `--mtp` を指定すると
+`LoadedModel::mtp_drafter_input` が `unsupported` を返す。dense model は
+`--tensor-parallel 2` と併用できる。`--pipeline-parallel 2` と `--dump-logits` との併用は
+起動時に拒否する。
 
-grouped expert を使う model の MTP block は、routed expert を checkpoint で fused rank-3 の
-BF16（`mtp.layers.0.mlp.experts.gate_up_proj` / `experts.down_proj`）として保持する。
-load 時に MXFP4 へ再量子化して transformer layer と同じ native plane に落とす
+Qwen3.5 MoE の MTP block は routed expert を fused rank-3 の BF16 として保持し、以前は
+load 時に MXFP4 へ再量子化していた。この online quantization は現在無効であり、
+`load_mtp_layers` を指定した MoE load は `Status::unsupported` で拒否する
 （[qwen35moe.md](qwen35moe.md) の MTP block 節）。
-MoE の MTP decode は verify の multi-row forward を使うが、greedy 列は target-only と一致する
-（verify の前提である forward の batch 行数非依存は `test_qwen35moe_rows_parity` で固定）。
-実測で target-only より速い（`--mtp-drafts 4` で 1.88 倍）。draft 受理率は dense より低い
-（35 % に対し 98 %）が break-even は超える。数値は `docs/perf/current.md`、経緯は
-[../research/20261105/moe_mtp.md](../research/20261105/moe_mtp.md)。
 
 ## Tensor parallel
 
@@ -47,8 +42,8 @@ MTP block 自身の `mtp_exl3_linear_shape` で staging plane を見積もる。
 各 drafter が全 rank の local layout に 1 面ずつ確保するため、rank ごとに
 `max_requests` 面を計上する。
 
-grouped expert（MoE）の TP load は MTP block を分割しないため、MTP との併用を
-`build_moe_tp_rank_model` が拒否する。qwen4exp は TP=2 を qualified とし、TP=4 は未計測である。
+Qwen3.5 MoE の MTP block は routed expert の online MXFP4 再量子化が無効なため
+load できない。qwen4exp は TP=2 を qualified とし、TP=4 は未計測である。
 
 qwen4exp の `--serve-stdio --mtp` は、TP > 1 のとき MTP block を全 rank に load して
 TP 軸で分割する。`TpRankRuntimeConfig::mtp_split` が立つと MTP attention の Q/K/V/O は
@@ -325,8 +320,8 @@ draft が depth 単位で batch 化されるため、`draft_forwards` は round 
 
 ## 制約
 
-- MTP block を持たない checkpoint では使えない。dense / MoE のどちらの family でも
-  block があれば load される。
+- MTP block を持たない checkpoint では使えない。dense model と Qwen4Exp は block が
+  あれば load される。Qwen3.5 MoE の MTP block は未対応である。
 - `--pipeline-parallel 2` / `--dump-logits` は未対応である。
 - prefix cache は MTP 経路でも使う。target state に加えて、drafter の KV ring、
   hidden cache、last token / position を同じ checkpoint に保存し、復元後は suffix の
@@ -362,7 +357,6 @@ draft が depth 単位で batch 化されるため、`draft_forwards` は round 
 - `src/shelf/models/qwen35/runtime/mtp_drafter.cpp`
 - `include/shelf/models/qwen35/model/lower_to_primitives.h`（`emit_normed_token_hidden`）
 - `src/shelf/models/qwen35/model/lower_to_primitives.cpp`
-- `include/shelf/models/qwen35moe/model/lower_to_primitives.h`（`lower_qwen35_moe_mtp_to_primitives`）
 - `include/shelf/models/loaded_model.h`（`has_mtp_block` / `mtp_drafter_input` / `mtp_drafter_reserve_bytes`）
 - `include/shelf/models/qwen4exp/weights/qwen4exp_weights.h`（`mtp_exl3_linear_shape`）
 - `src/shelf/runtime/tp/tensor_parallel.cpp`（`load_mtp_layers` / `mtp_split` の rank 伝播、`on_execute_aux`）
@@ -386,10 +380,8 @@ required test:
 optional external test:
 
 - `test_mtp_parity`（`SHELF_MODEL_DIR_MTP` または `SHELF_MODEL_DIR`）
-  - dense / grouped expert のどちらの checkpoint へ向けても成立する（MoE でも `--mtp` の
-    `GENERATED_IDS` が target-only greedy と一致し、partial accept の GDN compact log replay
-    が走る）。grouped expert model の forward は batch 行数に依存しないことを
-    `test_qwen35moe_rows_parity` が別に固定する（[qwen35moe.md](qwen35moe.md) §7）
+  - dense と Qwen4Exp の checkpoint へ向けて成立する（`--mtp` の `GENERATED_IDS` が
+    target-only greedy と一致し、partial accept の GDN compact log replay が走る）。
 
 MTP の verify は出力可能な残り token 数と停止 token の最初の位置で受理結果を
 制限してから target の状態を確定する。停止 token 自体は出力し、その後の行は確定しない。round の入力 `pending_token` が停止 token の場合は、

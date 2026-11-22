@@ -125,8 +125,6 @@ void compute_usage(const char* prog) {
     printf("  --moe-cache-decay N     halve expert frequency at this count (default 4096)\n");
     printf("  --moe-cache-log-interval N  expert cache hit-rate log interval (default 64)\n");
     printf("  --moe-cache-oracle 0|1  log cache oracle decisions (default 0)\n");
-    printf("  --ple-artifact 0|1      write/read <model_dir>/quanted_ple.bin (default 1)\n");
-    printf("  --ple-stream-io MODE    pread | mmap | direct (default mmap)\n");
     printf("  --ple-hot-cache-gib N   pinned host block cache for PLE; 0 = full resident (default 0)\n");
     printf("  --lm-head-int8 0|1      quantize the BF16 lm head to INT8 W32 on load (default 1)\n");
     printf("  --pcie-frac F           share of PCIe the runtime may use (default 0.25)\n");
@@ -537,21 +535,6 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
                 return kComputeParseError;
             }
             apply_env_u32("SHELF_MOE_CACHE_LOG_INTERVAL", value);
-        } else if (std::strcmp(argv[i], "--ple-artifact") == 0 && i + 1 < argc) {
-            unsigned long value = 0;
-            if (!parse_uint(argv[++i], value) || value > 1u) {
-                fprintf(stderr, "bad --ple-artifact (expected 0 or 1)\n");
-                return kComputeParseError;
-            }
-            apply_env_u32("SHELF_PLE_ARTIFACT", value);
-        } else if (std::strcmp(argv[i], "--ple-stream-io") == 0 && i + 1 < argc) {
-            const char* value = argv[++i];
-            if (std::strcmp(value, "pread") != 0 && std::strcmp(value, "mmap") != 0 &&
-                std::strcmp(value, "direct") != 0) {
-                fprintf(stderr, "bad --ple-stream-io (expected pread, mmap or direct)\n");
-                return kComputeParseError;
-            }
-            apply_env_string("SHELF_PLE_STREAM_IO", value);
         } else if (std::strcmp(argv[i], "--ple-hot-cache-gib") == 0 && i + 1 < argc) {
             unsigned long value = 0;
             if (!parse_uint(argv[++i], value)) {

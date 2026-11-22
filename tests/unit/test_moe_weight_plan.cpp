@@ -184,18 +184,6 @@ int main() {
         check(!build_moe_expert_group_plan(cfg, 0, 2, 2).ok(), "tp_rank >= tp_size is rejected");
     }
     {
-        auto mtp = build_moe_mtp_expert_group_plan(cfg, 2, 1);
-        check(mtp.ok(), "the MTP block's fused planes split too");
-        if (mtp.ok()) {
-            check(mtp.value().fused_rank3 && mtp.value().experts == 128u &&
-                      mtp.value().expert_begin == 128u && mtp.value().sources.empty(),
-                  "the MTP split keeps the fused plane names and the rank's expert range");
-            check(mtp.value().w13_name == "mtp.layers.0.mlp.experts.gate_up_proj" &&
-                      mtp.value().w2_name == "mtp.layers.0.mlp.experts.down_proj",
-                  "the MTP fused plane names are unchanged by the split");
-        }
-    }
-    {
         check(!build_moe_expert_group_plan(cfg, cfg.num_hidden_layers).ok(),
               "layer out of range is rejected");
         Qwen35MoeTextConfig odd = moe_config();

@@ -35,13 +35,6 @@ void check(bool condition, const char* what) {
     }
 }
 
-float from_bf16_bits(std::uint16_t bits) {
-    const std::uint32_t wide = static_cast<std::uint32_t>(bits) << 16u;
-    float value = 0.0f;
-    std::memcpy(&value, &wide, sizeof(value));
-    return value;
-}
-
 std::string shard_for_tensor(const std::string& model_dir, const std::string& tensor) {
     std::ifstream file(model_dir + "/model.safetensors.index.json");
     if (!file.is_open()) return {};
@@ -161,78 +154,11 @@ void verify_expert_sample(const std::string& model_dir, const shelf::qwen4exp::Q
     }
 }
 
-void verify_int6_source_rows(const std::string& model_dir,
-                             const shelf::qwen4exp::PleTable& table,
-                             const shelf::qwen4exp::Qwen4ExpTextConfig& config) {
-    const std::uint64_t rows_to_check[] = {
-        0u, 1u, 123456u, 2500011u, 2500012u, table.rows() - 1u};
-    const std::vector<std::size_t> ple_layers = config.ple_layers();
-    if (ple_layers.size() != 1u) return;
-    for (const std::uint64_t row : rows_to_check) {
-        const std::uint64_t shard = row / table.shard_rows();
-        const std::string name =
-            "model.language_model.layers." + std::to_string(ple_layers[0]) +
-            ".ple.ple_embedding.ngram_embedding.shard_" + std::to_string(shard) +
-            ".weight";
-        const std::string file = shard_for_tensor(model_dir, name);
-        if (file.empty()) {
-            std::fprintf(stderr, "missing PLE shard index entry: %s\n", name.c_str());
-            ++failures;
-            continue;
-        }
-        auto reader = shelf::io::SafetensorsReader::open(model_dir + "/" + file);
-        if (!reader.ok()) {
-            std::fprintf(stderr, "cannot open PLE shard %s\n", name.c_str());
-            ++failures;
-            continue;
-        }
-        std::size_t bytes = 0;
-        auto data = reader.value().tensor_data(name, bytes);
-        if (!data.ok() ||
-            bytes != static_cast<std::size_t>(table.shard_rows()) * 160u * 2u) {
-            std::fprintf(stderr, "cannot read PLE shard %s\n", name.c_str());
-            ++failures;
-            continue;
-        }
-        const auto* source = static_cast<const shelf::bf16_t*>(data.value()) +
-                             (row % table.shard_rows()) * 160u;
-        auto decoded = table.decode_row(row, false);
-        if (!decoded.ok() || decoded.value().size() != 160u) {
-            std::fprintf(stderr, "PLE INT6 decode failed for row %llu\n",
-                         static_cast<unsigned long long>(row));
-            ++failures;
-            continue;
-        }
-        bool bounded = true;
-        for (std::uint32_t group = 0; group < 5u; ++group) {
-            float amax = 0.0f;
-            for (std::uint32_t i = 0; i < 32u; ++i) {
-                amax = std::max(amax, std::fabs(from_bf16_bits(
-                    source[group * 32u + i].data)));
-            }
-            for (std::uint32_t i = 0; i < 32u; ++i) {
-                const float expected =
-                    from_bf16_bits(source[group * 32u + i].data);
-                const float error =
-                    std::fabs(decoded.value()[group * 32u + i] - expected);
-                bounded = bounded && error <= amax / 62.0f + amax / 1000.0f + 1e-6f;
-            }
-        }
-        check(bounded, "PLE INT6 decode stays within the W32 error bound");
-    }
-}
-
-void verify_ple(const std::string& model_dir, const shelf::qwen4exp::PleTable& table,
+void verify_ple(const shelf::qwen4exp::PleTable& table,
                 const shelf::qwen4exp::Qwen4ExpTextConfig& config) {
     check(table.rows() == 320001536u, "PLE row count is 320001536");
     check(table.row_width() == 160u, "PLE row width is 160");
     check(table.head_count() == 16u, "PLE head count is 16");
-    const bool int6 = table.int6_w32_fp16();
-    if (int6) {
-        check(table.row_bytes() == 130u, "PLE INT6 W32 row stride is 130 bytes");
-        check(table.shard_count() == 128u, "PLE shard count is 128");
-        verify_int6_source_rows(model_dir, table, config);
-    }
 
     auto row = table.decode_row(0u);
     check(row.ok() && row.value().size() == 160u, "PLE row decodes to 160 values");
@@ -271,9 +197,6 @@ void verify_ple(const std::string& model_dir, const shelf::qwen4exp::PleTable& t
 }  // namespace
 
 int main(int argc, char** argv) {
-#ifdef SHELF_PLE_TIERED_TEST
-    ::setenv("SHELF_PLE_HOT_CACHE_GIB", "1", 1);
-#endif
 #ifdef SHELF_REPO_DIR
     std::string model_dir = std::string(SHELF_REPO_DIR) +
         "/models/kusuriya-labs/Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw";
@@ -288,11 +211,7 @@ int main(int argc, char** argv) {
         if (::access(candidate.c_str(), R_OK) == 0) model_dir = candidate;
     }
     bool skip_ple = false;
-#ifdef SHELF_PLE_TIERED_TEST
-    bool skip_gpu = true;
-#else
     bool skip_gpu = false;
-#endif
     int single_rank = -1;
     int single_device = -1;
     std::uint32_t arena_gib = 29;
@@ -325,7 +244,7 @@ int main(int argc, char** argv) {
 
     shelf::qwen4exp::PleTable ple;
     if (!skip_ple) {
-        auto ple_result = shelf::qwen4exp::PleTable::load(model_dir, config, true);
+        auto ple_result = shelf::qwen4exp::PleTable::load(model_dir, config);
         if (!ple_result.ok()) {
             std::fprintf(stderr, "PLE load: %s\n", ple_result.status().message().c_str());
             return 1;
@@ -333,20 +252,7 @@ int main(int argc, char** argv) {
         ple = ple_result.release();
         std::fprintf(stderr, "PLE resident: %.3f GiB\n",
                      static_cast<double>(ple.payload_bytes()) / 1073741824.0);
-        verify_ple(model_dir, ple, config);
-#ifdef SHELF_PLE_TIERED_TEST
-        for (std::uint64_t index = 0; index < 20000u; ++index) {
-            const std::uint64_t row = (index * 12347u) % ple.rows();
-            auto decoded = ple.decode_row(row, false);
-            if (!decoded.ok()) {
-                std::fprintf(stderr, "tiered decode failed at row %llu\n",
-                             static_cast<unsigned long long>(row));
-                return 1;
-            }
-        }
-        check(ple.cached_blocks() != 0u, "PLE tiered hot cache holds blocks");
-        check(ple.host_bytes() < ple.payload_bytes(), "PLE tiered host bytes are bounded");
-#endif
+        verify_ple(ple, config);
     }
 
     if (skip_gpu) {

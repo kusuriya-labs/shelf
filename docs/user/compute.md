@@ -64,8 +64,6 @@ prefill の chunk 境界や prefix cache の有無によって、同じ入力の
 | `--moe-cache-decay N` | halve expert frequency at this count (default 4096) |
 | `--moe-cache-log-interval N` | expert cache hit-rate log interval (default 64) |
 | `--moe-cache-oracle 0\|1` | log cache oracle decisions (default 0) |
-| `--ple-artifact 0\|1` | write/read <model_dir>/quanted_ple.bin (default 1) |
-| `--ple-stream-io MODE` | pread \| mmap \| direct (default mmap) |
 | `--ple-hot-cache-gib N` | pinned host block cache for PLE; 0 = full resident (default 0) |
 | `--lm-head-int8 0\|1` | quantize the BF16 lm head to INT8 W32 on load (default 1) |
 | `--pcie-frac F` | share of PCIe the runtime may use (default 0.25) |
@@ -228,13 +226,13 @@ dense checkpoint を TP=2 で動かす場合:
 - `--mtp --serve-stdio` でも、prefill / decode 中は 3 秒ごとに `prefill_tok_s` /
   `decode_tok_s` を出し、done 時に prefill / TTFT / decode の総括を stderr に出す。
   serve の終了時には `MTP_BATCH ... chunks=... max_active=...` を出す。
-- grouped expert（MoE）checkpoint でも MTP block は load / 実行される。qwen4exp は
-  QSA / PLE を持つため、MTP draft を深さ単位で batch 化し、verify は request ごとの
-  1 行 DECODE を使う。生成列は target-only と一致する。融合 verify を使う family では
-  near-tie により target-only と一致しないことがある。実測値は
+- Qwen4Exp は QSA / PLE を持つため、MTP draft を深さ単位で batch 化し、verify は
+  request ごとの 1 行 DECODE を使う。生成列は target-only と一致する。融合 verify を
+  使う family では near-tie により target-only と一致しないことがある。実測値は
   [../perf/current.md](../perf/current.md)、
-  経緯は [../research/20261105/moe_mtp.md](../research/20261105/moe_mtp.md) と
-  [../research/20261121/mtp_multi_request_verify.md](../research/20261121/mtp_multi_request_verify.md)。
+  経緯は [../research/20261121/mtp_multi_request_verify.md](../research/20261121/mtp_multi_request_verify.md)。
+- Qwen3.5 MoE checkpoint の MTP block は routed expert の online MXFP4 再量子化を
+  無効化したため load できない。`--mtp` を指定すると起動時に `unsupported` になる。
 
 詳細な round 契約は [../developer/mtp.md](../developer/mtp.md) を参照。
 

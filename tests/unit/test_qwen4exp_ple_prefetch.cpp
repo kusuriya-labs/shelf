@@ -166,7 +166,7 @@ int main(int argc, char** argv) {
     const int32_t eos = config.ple.eos_token_id;
     const int32_t vocab = static_cast<int32_t>(config.vocab_size);
 
-    auto ple_result = PleTable::load(model_dir, config, true);
+    auto ple_result = PleTable::load(model_dir, config);
     if (!ple_result.ok()) {
         std::fprintf(stderr, "SKIP: PLE table not loadable at %s: %s\n", model_dir.c_str(),
                      ple_result.status().message().c_str());

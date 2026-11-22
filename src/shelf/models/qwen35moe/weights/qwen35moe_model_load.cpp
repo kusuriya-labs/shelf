@@ -80,97 +80,7 @@ Status check_plane(const MatrixWeight& w, uint32_t experts, uint32_t rows, uint3
     return Status::make_ok();
 }
 
-Status load_moe_mtp(gpu::GpuArena& arena, hipStream_t stream,
-                    const qqb::QuantizedModelReader& reader,
-                    const Qwen35MoeTextConfig& config,
-                    const qhy::HybridLoadOptions& options,
-                    Qwen35MoeMtpWeights& m) {
-    auto plan = build_moe_mtp_expert_group_plan(
-        config, options.weights.partition_plan ? options.weights.partition_plan->tp_size : 1u,
-        options.weights.partition_plan ? options.weights.partition_plan->tp_rank : 0u);
-    if (!plan.ok()) return plan.status();
-    const MoeExpertGroupPlan& group = plan.value();
-
-    auto fc = shelf::weights::load_quantized_matrix(reader, "mtp.fc.weight", arena, stream,
-                                                    options.weights);
-    if (!fc.ok()) return fc.status();
-    m.fc = fc.release();
-
-    auto pre_embedding = shelf::weights::load_quantized_small(
-        reader, "mtp.pre_fc_norm_embedding.weight", arena, stream);
-    if (!pre_embedding.ok()) return pre_embedding.status();
-    m.pre_fc_norm_embedding_weight = pre_embedding.release();
-
-    auto pre_hidden = shelf::weights::load_quantized_small(
-        reader, "mtp.pre_fc_norm_hidden.weight", arena, stream);
-    if (!pre_hidden.ok()) return pre_hidden.status();
-    m.pre_fc_norm_hidden_weight = pre_hidden.release();
-
-    auto tail_norm = shelf::weights::load_quantized_small(reader, "mtp.norm.weight", arena,
-                                                          stream);
-    if (!tail_norm.ok()) return tail_norm.status();
-    m.final_norm_weight = tail_norm.release();
-
-    Status st = qhy::load_hybrid_layer_body_quantized_at(arena, stream, reader,
-                                                         moe_mtp_layer_prefix(), false,
-                                                         options, m.layer);
-    if (!st.ok()) return st;
-
-    auto planes = load_moe_expert_group(reader, group, arena, stream);
-    if (!planes.ok()) return planes.status();
-    m.layer.ffn.expert_w13 = planes.value().w13;
-    m.layer.ffn.expert_w2 = planes.value().w2;
-
-    st = load_aux_matrix(reader, group.mlp_prefix, kRouter, arena, stream, options.weights,
-                         m.layer.ffn.router);
-    if (!st.ok()) return st;
-    st = load_aux_matrix(reader, group.mlp_prefix, kSharedGate, arena, stream, options.weights,
-                         m.layer.ffn.shared_gate);
-    if (!st.ok()) return st;
-    st = load_aux_matrix(reader, group.mlp_prefix, kSharedGateProj, arena, stream,
-                         options.weights, m.layer.ffn.shared_gate_proj);
-    if (!st.ok()) return st;
-    st = load_aux_matrix(reader, group.mlp_prefix, kSharedUpProj, arena, stream, options.weights,
-                         m.layer.ffn.shared_up_proj);
-    if (!st.ok()) return st;
-    st = load_aux_matrix(reader, group.mlp_prefix, kSharedDownProj, arena, stream,
-                         options.weights, m.layer.ffn.shared_down_proj);
-    if (!st.ok()) return st;
-
-    m.present = true;
-    return moe_ffn_weights_match(m.layer.ffn, group, config.ffn);
-}
-
 }  // namespace
-
-Status validate_qwen35moe_mtp_weights(const Qwen35MoeMtpWeights& mtp,
-                                      const MoeExpertGroupPlan& plan,
-                                      const Qwen35MoeTextConfig& config) {
-    if (!mtp.present)
-        return Status::invalid_argument("qwen35moe mtp: the block is not loaded", __FILE__,
-                                        __LINE__);
-
-    const uint32_t hidden = static_cast<uint32_t>(config.hidden_size);
-    if (mtp.fc.rows == 0u || mtp.fc.cols == 0u)
-        return Status::invalid_argument("qwen35moe mtp: fc is not loaded", __FILE__, __LINE__);
-    if (mtp.fc.rows != hidden || mtp.fc.cols != 2u * hidden)
-        return Status::invalid_argument("qwen35moe mtp: fc is not [hidden, 2 * hidden]",
-                                        __FILE__, __LINE__);
-
-    const shelf::gpu::Tensor block_norms[] = {
-        mtp.pre_fc_norm_embedding_weight, mtp.pre_fc_norm_hidden_weight,
-        mtp.final_norm_weight};
-    for (const shelf::gpu::Tensor& norm : block_norms) {
-        if (norm.ndim() != 1u || static_cast<uint32_t>(norm.dim(0)) != hidden)
-            return Status::invalid_argument("qwen35moe mtp: a block norm is not [hidden]",
-                                            __FILE__, __LINE__);
-    }
-
-    Status st = qhy::validate_hybrid_layer_body(mtp.layer, hidden, false,
-                                                "qwen35moe mtp layer");
-    if (!st.ok()) return st;
-    return moe_ffn_weights_match(mtp.layer.ffn, plan, config.ffn);
-}
 
 std::vector<std::string> moe_aux_tensor_names(const std::string& mlp) {
     std::vector<std::string> names;
@@ -185,11 +95,6 @@ std::vector<std::string> moe_aux_tensor_names(std::size_t layer) {
 
 std::vector<std::string> moe_layer_logical_names(const MoeExpertGroupPlan& plan) {
     std::vector<std::string> names = moe_aux_tensor_names(plan.mlp_prefix);
-    if (plan.fused_rank3) {
-        names.push_back(plan.w13_name);
-        names.push_back(plan.w2_name);
-        return names;
-    }
     names.reserve(names.size() + plan.sources.size());
     for (const auto& src : plan.sources) names.push_back(src.name);
     return names;
@@ -290,15 +195,7 @@ Status validate_qwen35moe_weights(const Qwen35MoeModelWeights& weights,
         if (!st.ok()) return st;
     }
 
-    if (stage.enabled && weights.mtp.present) {
-        return Status::unsupported(
-            "pipeline stage weight load does not accept an MTP block",
-            __FILE__, __LINE__);
-    }
-    if (!weights.mtp.present) return Status::make_ok();
-    auto mtp_plan = build_moe_mtp_expert_group_plan(config, tp_size, tp_rank);
-    if (!mtp_plan.ok()) return mtp_plan.status();
-    return validate_qwen35moe_mtp_weights(weights.mtp, mtp_plan.value(), config);
+    return Status::make_ok();
 }
 
 Status validate_qwen35moe_weights(const Qwen35MoeModelWeights& weights,
@@ -355,6 +252,12 @@ Result<Qwen35MoeModelWeights> load_qwen35moe_weights(
     auto config_result = read_qwen35_moe_text_config(model_dir);
     if (!config_result.ok()) return config_result.status();
     const Qwen35MoeTextConfig& config = config_result.value();
+    if (options.load_mtp_layers) {
+        return Status::unsupported(
+            "Qwen3.5 MoE MTP routed experts require load-time MXFP4 requantization, "
+            "which is disabled",
+            __FILE__, __LINE__);
+    }
 
     const bool stage_load = options.stage.enabled;
     const std::size_t num_layers = config.num_hidden_layers;
@@ -387,20 +290,6 @@ Result<Qwen35MoeModelWeights> load_qwen35moe_weights(
         const std::vector<std::string> layer_names = moe_layer_logical_names(plan.value());
         names.insert(names.end(), layer_names.begin(), layer_names.end());
         plans[l] = plan.release();
-    }
-
-    if (options.load_mtp_layers && !stage_load) {
-        auto mtp_plan = build_moe_mtp_expert_group_plan(config, tp_size, tp_rank);
-        if (!mtp_plan.ok()) return mtp_plan.status();
-        const std::vector<std::string> ffn_names = moe_layer_logical_names(mtp_plan.value());
-        names.insert(names.end(), ffn_names.begin(), ffn_names.end());
-        const std::vector<std::string> body_names =
-            qhy::hf_layer_body_names(moe_mtp_layer_prefix(), false);
-        names.insert(names.end(), body_names.begin(), body_names.end());
-        names.push_back("mtp.fc.weight");
-        names.push_back("mtp.norm.weight");
-        names.push_back("mtp.pre_fc_norm_embedding.weight");
-        names.push_back("mtp.pre_fc_norm_hidden.weight");
     }
 
     auto reader_result =
@@ -455,11 +344,6 @@ Result<Qwen35MoeModelWeights> load_qwen35moe_weights(
 
         st = moe_ffn_weights_match(layer.ffn, plan, config.ffn);
         if (!st.ok()) return st;
-    }
-
-    if (options.load_mtp_layers) {
-        Status mtp = load_moe_mtp(arena, stream, reader, config, options, out.mtp);
-        if (!mtp.ok()) return mtp;
     }
 
     hipError_t sync_err = hipStreamSynchronize(stream);
