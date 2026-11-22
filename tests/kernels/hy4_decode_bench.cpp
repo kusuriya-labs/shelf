@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <bit>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 
 namespace shelf::hy4 {
@@ -84,6 +85,141 @@ void expert_projections(Ops &op, int rows) {
     });
     print_hash(op, output);
 }
+}
+
+void benchmark_hy4_index(Residency &gpu) {
+    constexpr int rows = 16;
+    Ops op(gpu);
+    unsigned seed = 97;
+    auto data = [&](int count, int cols) {
+        std::vector<uint16_t> values(size_t(count) * cols);
+        for (auto &value : values) {
+            seed = seed * 1664525u + 1013904223u;
+            value = std::bit_cast<uint32_t>(float(int(seed >> 16) - 32768) / 32768.f) >> 16;
+        }
+        return Mat{upload(op, values), count, cols};
+    };
+    Mat q = data(rows, 2048), w = data(rows, 16), keys = data(32772, 128);
+    auto mark = op.arena.cursor;
+    for (const auto [start, cancellation] : std::array<std::pair<int, bool>, 6>{
+             {{2045, false}, {4096, false}, {8192, false}, {32768, false}, {131072, false}, {8192, true}}}) {
+        if (cancellation) {
+            std::vector<uint16_t> weights(size_t(rows) * 16);
+            for (int row = 0; row < rows; ++row) {
+                auto query = q.p + size_t(row) * 2048;
+                checked(hipMemcpyAsync(query + 1024, query, 1024 * sizeof(uint16_t), hipMemcpyDeviceToDevice, op.stream));
+                for (int h = 0; h < 16; ++h)
+                    weights[row * 16 + h] = h < 8 ? 0x3f80u : 0xbf80u;
+            }
+            op.copy(w.p, weights.data(), w.bytes(), hipMemcpyHostToDevice);
+        }
+        int stride = (start + rows - 1) / 4 + 1;
+        op.arena.cursor = mark;
+        auto scores = static_cast<float *>(op.arena.next(index_workspace_floats(rows, stride) * sizeof(float)));
+        auto top = static_cast<int *>(op.arena.next(rows * 511 * sizeof(int)));
+        std::array<std::vector<double>, 2> times;
+        std::array<std::vector<float>, 2> values;
+        std::array<std::vector<int>, 2> ids;
+        for (int trial = 0; trial < 5; ++trial)
+            for (int order = 0; order < 2; ++order) {
+                int mode = (trial + order) % 2;
+                auto run = [&] {
+                    index_select(q, w, keys.p, 0, rows, start, stride, scores, top, nullptr, mode, op.stream);
+                };
+                checked(hipMemsetAsync(scores, 0, size_t(rows) * stride * sizeof(float), op.stream));
+                run();
+                checked(hipStreamSynchronize(op.stream));
+                auto begin = std::chrono::steady_clock::now();
+                for (int i = 0; i < 12; ++i) run();
+                checked(hipStreamSynchronize(op.stream));
+                times[mode].push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count() / 12);
+                if (!trial) {
+                    values[mode].resize(rows * stride);
+                    ids[mode].resize(rows * 511);
+                    op.copy(values[mode].data(), scores, values[mode].size() * sizeof(float), hipMemcpyDeviceToHost);
+                    op.copy(ids[mode].data(), top, ids[mode].size() * sizeof(int), hipMemcpyDeviceToHost);
+                }
+            }
+        double error = 0;
+        int matching = 0;
+        for (int row = 0; row < rows; ++row) {
+            int count = (start + row) / 4;
+            for (int mode = 0; mode < 2; ++mode) {
+                auto first = ids[mode].begin() + row * 511;
+                std::sort(first, first + 511);
+                if (*first < 0 || first[510] >= count || std::adjacent_find(first, first + 511) != first + 511)
+                    throw std::runtime_error("Indexer が選択したグループが範囲外または重複しています");
+            }
+            auto first = ids[1].begin() + row * 511;
+            for (int j = 0; j < 511; ++j)
+                matching += std::binary_search(first, first + 511, ids[0][row * 511 + j]);
+            for (int j = 0; j < stride; ++j) {
+                auto i = row * stride + j;
+                if (!std::isfinite(values[1][i]) || (j >= count && values[1][i] != 0))
+                    throw std::runtime_error("Indexer のスコアが不正です");
+                error = std::max(error, std::abs(double(values[1][i]) - values[0][i]));
+            }
+        }
+        for (auto &samples : times) std::sort(samples.begin(), samples.end());
+        printf("index start=%d rows=%d cancellation=%d scalar_ms=%.6f wmma_ms=%.6f match=%d/%d max_error=%.9g\n",
+               start, rows, cancellation, times[0][2], times[1][2], matching, rows * 511, error);
+        if (error > 0.001 || matching != rows * 511)
+            throw std::runtime_error("Indexer のスコアまたは選択集合が許容誤差を超えました");
+    }
+}
+
+void check_hy4_prefill_capacity(Residency &gpu, int rows) {
+    Ops op(gpu);
+    Mat x = input(op, rows, 3072);
+    auto mark = op.arena.cursor;
+    std::vector<uint16_t> reference;
+    for (int owner : {0, gpu.ranks - 1}) {
+        gpu.model.owners[0].fill(owner);
+        op.copy(gpu.moe_owners[0], gpu.model.owners[0].data(), 512 * sizeof(int), hipMemcpyHostToDevice);
+        op.arena.cursor = mark;
+        Mat out = moe(op, 1, x);
+        std::vector<uint16_t> values(out.bytes() / sizeof(uint16_t));
+        op.copy(values.data(), out.p, out.bytes(), hipMemcpyDeviceToHost);
+        gpu.collect_route_counts(0);
+        for (int r = 0; r < gpu.ranks; ++r) {
+            if (gpu.routed_rows[r] != uint64_t(r == owner ? rows * 16 : 0))
+                throw std::runtime_error("経路が集中した rank の件数が不正です");
+            gpu.routed_rows[r] = 0;
+        }
+        if (reference.empty())
+            reference = std::move(values);
+        else if (reference != values)
+            throw std::runtime_error("全 expert の配置先によって prefill 出力が変化しました");
+    }
+    printf("ep=%d rows=%d choices=%d concentrated=pass\n", gpu.ranks, rows, rows * 16);
+}
+
+void benchmark_hy4_prefill(Residency &gpu, int rows) {
+    Ops op(gpu);
+    Mat x = input(op, rows, 3072);
+    auto mark = op.arena.cursor;
+    for (bool routed : {false, true}) {
+        std::vector<double> times;
+        Mat output{};
+        for (int i = 0; i < 7; ++i) {
+            op.arena.cursor = mark;
+            auto start = std::chrono::steady_clock::now();
+            output = routed ? moe(op, 1, x) : feedforward(op, "model.layers.1.mlp.shared_experts", x);
+            checked(hipDeviceSynchronize());
+            if (i >= 2)
+                times.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+        }
+        std::sort(times.begin(), times.end());
+        printf("%s rows=%d ms=%.5f ", routed ? "moe" : "fixed_ffn", rows, times[2]);
+        print_hash(op, output);
+        if (routed) {
+            gpu.collect_route_counts(0);
+            for (int r = 1; r < gpu.ranks; ++r)
+                printf("peer=%d send_bytes=%llu return_bytes=%llu\n", r,
+                       static_cast<unsigned long long>(gpu.transfer_bytes[0][r] / 7),
+                       static_cast<unsigned long long>(gpu.transfer_bytes[r][0] / 7));
+        }
+    }
 }
 
 void benchmark_hy4_decode(Residency &gpu) {

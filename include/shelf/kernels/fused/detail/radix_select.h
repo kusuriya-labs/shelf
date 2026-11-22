@@ -9,16 +9,13 @@ __device__ __forceinline__ uint32_t float_radix_key(float value) {
     return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
 }
 
-template <unsigned IndexBytes>
-__device__ __forceinline__ void radix_select(const float *scores, uint32_t usable, uint32_t k, uint32_t *hist,
-                                             uint32_t *state, std::int32_t *out, float *out_scores,
-                                             uint32_t index_base) {
+template <unsigned Passes>
+__device__ __forceinline__ uint32_t radix_score_prefix(const float *scores, uint32_t usable, uint32_t &rank,
+                                                       uint32_t *hist, uint32_t *state) {
     const uint32_t t = threadIdx.x;
     const uint32_t stride = blockDim.x;
-    uint32_t rank = k;
     uint32_t prefix = 0u;
-    uint32_t above = 0u;
-    for (uint32_t pass = 0u; pass < 4u; ++pass) {
+    for (uint32_t pass = 0u; pass < Passes; ++pass) {
         const uint32_t shift = 24u - 8u * pass;
         for (uint32_t i = t; i < 256u; i += stride)
             hist[i] = 0u;
@@ -41,17 +38,26 @@ __device__ __forceinline__ void radix_select(const float *scores, uint32_t usabl
                 acc += count;
             }
             state[0] = bucket;
-            state[1] = acc;
             state[2] = rank - acc;
         }
         __syncthreads();
-        above += state[1];
         rank = state[2];
         prefix |= state[0] << shift;
         __syncthreads();
     }
 
-    uint32_t need = k - above;
+    return prefix;
+}
+
+template <unsigned IndexBytes>
+__device__ __forceinline__ void radix_select(const float *scores, uint32_t usable, uint32_t k, uint32_t *hist,
+                                             uint32_t *state, std::int32_t *out, float *out_scores,
+                                             uint32_t index_base) {
+    const uint32_t t = threadIdx.x;
+    const uint32_t stride = blockDim.x;
+    uint32_t rank = k;
+    const uint32_t prefix = radix_score_prefix<4>(scores, usable, rank, hist, state);
+    uint32_t need = rank;
     uint32_t index_prefix = 0u;
     for (uint32_t pass = 0u; pass < IndexBytes && need != 0u; ++pass) {
         const uint32_t shift = 8u * (IndexBytes - 1u - pass);

@@ -11,6 +11,9 @@
 namespace shelf::hy4 {
 void verify_hy4_upload(Residency &gpu);
 void benchmark_hy4_decode(Residency &gpu);
+void benchmark_hy4_index(Residency &gpu);
+void check_hy4_prefill_capacity(Residency &gpu, int rows);
+void benchmark_hy4_prefill(Residency &gpu, int rows);
 void benchmark_hy4_moe(Residency &gpu);
 void benchmark_hy4_steps(Residency &gpu);
 void verify_hy4_layers(Residency &gpu, const Path &input, const Path &dump);
@@ -47,20 +50,18 @@ void logical_ranks(Residency &gpu, int ranks) {
     for (int r = 1; r < ranks; ++r) {
         gpu.physical[r] = 0;
         gpu.matrices[r] = gpu.matrices[0];
-        auto result = gpu::GpuArena::create(0, 64 << 20);
+        auto result = gpu::GpuArena::create(0, 512 << 20);
         if (!result.ok())
             throw std::runtime_error(result.status().message());
         gpu.arenas.push_back(result.release());
-        auto memory = gpu.arenas.back().allocate_aligned(64 << 20, 256);
+        auto memory = gpu.arenas.back().allocate_aligned(512 << 20, 256);
         if (!memory.ok())
             throw std::runtime_error(memory.status().message());
-        gpu.workspace[r] = {static_cast<uint8_t *>(memory.value().data()), 64 << 20};
+        gpu.workspace[r] = {static_cast<uint8_t *>(memory.value().data()), 512 << 20};
         checked(hipStreamCreateWithFlags(&gpu.compute[r], hipStreamNonBlocking));
     }
     const auto transport = std::getenv("SHELF_HY4_EP_TRANSPORT");
     const bool host = transport && std::string_view(transport) == "host";
-    if (host && ranks > 1)
-        checked(hipHostMalloc(&gpu.staging, max_prefill_chunk * 3072u * 2u, hipHostMallocPortable));
     for (int r = 0; r < ranks; ++r)
         for (int other = 0; other < ranks; ++other)
             if (other != r) {
@@ -481,6 +482,31 @@ int main(int argc, char **argv) {
         bool micro = argc == 3 && std::string_view(argv[2]) == "microbench";
         bool moe = argc == 3 && std::string_view(argv[2]) == "moebench";
         bool steps = (argc == 5 || argc == 6) && std::string_view(argv[3]) == "stepbench";
+        if (argc == 7 && std::string_view(argv[2]) == "prefillbench") {
+            int length = std::stoi(argv[3]), chunk = std::stoi(argv[4]), ranks = std::stoi(argv[5]);
+            if (length < 1 || length > 131072 || chunk < 1 || chunk > max_prefill_chunk || ranks < 1 || ranks > 4)
+                throw std::invalid_argument("prefill 計測の引数が範囲外です");
+            Checkpoint model(argv[1], argv[1], {}, Owners{}, 1, 1);
+            share_expert_weights(model);
+            Residency gpu(model, length + 1);
+            auto status = gpu.reserve();
+            if (!status.ok()) throw std::runtime_error(status.message());
+            gpu.upload();
+            logical_ranks(gpu, ranks);
+            if (std::string_view(argv[6]) == "index") {
+                benchmark_hy4_index(gpu);
+            } else if (std::string_view(argv[6]) == "capacity") {
+                check_hy4_prefill_capacity(gpu, chunk);
+            } else if (std::string_view(argv[6]) == "moe") {
+                benchmark_hy4_prefill(gpu, chunk);
+            } else {
+                std::vector<int> ids(length);
+                for (int i = 0; i < length; ++i) ids[i] = 100 + i * 37 % 128;
+                generate(gpu, ids, 1, chunk, 0.f, 0, argv[6]);
+            }
+            gpu.shutdown();
+            return 0;
+        }
         if (micro || moe || steps) {
             Path draft = steps && std::string_view(argv[2]) != "-" ? Path(argv[2]) : Path{};
             Checkpoint model(argv[1], argv[1], draft, Owners{}, 1, 1);

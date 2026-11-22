@@ -5,15 +5,25 @@
 #include <shelf/models/hy4_flash/checkpoint.h>
 #include <shelf/models/hy4_flash/sync.h>
 #include <shelf/models/hy4_flash/graph.h>
+#include <algorithm>
 #include <memory>
 #include <string_view>
 
 namespace shelf::hy4 {
-inline constexpr int max_prefill_chunk = 1024;
+inline constexpr int max_prefill_chunk = 4096;
+inline constexpr int tp_prefill_rows = 1024;
 
 inline bool multi_gpu_vmm_allowed(int ranks, std::string_view vmm) {
     return ranks <= 1 || vmm != "1";
 }
+
+struct alignas(16) PrefillRoutes {
+    struct Choice { int expert; float weight; };
+    Choice choices[16];
+    unsigned masks[4];
+};
+
+void peer_prefill_packet(void *dst, const void *src, int rows, int group, hipStream_t stream);
 
 struct Hy4StepParams {
     int32_t rows;
@@ -51,9 +61,11 @@ struct Residency {
     size_t tokens;
     int max_slots;
     bool batch_draft;
+    bool index_wmma = true;
     std::vector<std::array<int, 42>> sparse_last;
+    size_t prefill_rows() const { return std::min(tokens, size_t(tp_size > 1 ? tp_prefill_rows : max_prefill_chunk)); }
     int *sparse_top_slot(int layer, int slot) const {
-        return sparse_top[0][layer] + (max_prefill_chunk + slot * 6) * 511;
+        return sparse_top[0][layer] + (prefill_rows() + slot * 6) * 511;
     }
     int ranks = 0;
     int ep_size = 1;
@@ -90,10 +102,13 @@ struct Residency {
     void collect_route_counts(int rank);
     static constexpr size_t matrix_bytes = 41 * 512 * 3 * sizeof(Hy4ExpertProjection);
     size_t transfer_packet_bytes() const {
-        return max_slots == 1 ? Hy4MoePlan::packet_bytes(Hy4MoePlan::max_rows)
-                              : Hy4GroupedPlan::packet_bytes(max_slots * (batch_draft ? 6 : 1));
+        size_t rows = std::min(tokens, size_t(expert_tile_rows));
+        size_t prefill = rows * (1536 * sizeof(uint16_t) + sizeof(PrefillRoutes));
+        size_t decode = max_slots == 1 ? Hy4MoePlan::packet_bytes(Hy4MoePlan::max_rows)
+                                     : Hy4GroupedPlan::packet_bytes(max_slots * (batch_draft ? 6 : 1));
+        return std::max(prefill, decode);
     }
-    void transfer(void *dst, int destination, const void *src, int source, size_t bytes);
+    void transfer(void *dst, int destination, const void *src, int source, size_t bytes, int prefill_rows = 0);
     std::array<std::array<bool, 4>, 4> peer{}, owns_peer{};
     bool push = false;
     bool graph_room = false;
@@ -104,10 +119,8 @@ struct Residency {
     GraphInput *graph_input = nullptr;
     BatchGraphInput *batch_input = nullptr;
     uint64_t target_replays = 0, draft_replays = 0;
-    void *staging = nullptr;
     std::array<std::array<std::array<hipEvent_t, 2>, 4>, 4> ready{}, ack{};
     std::array<std::array<int, 4>, 4> parity{};
-    std::array<void *, 4> route_host{};
     std::array<void *, 4> tp_recv{};
     std::array<void *, 4> ep_recv{};
     std::array<void *, 4> tp_ptr{};
@@ -124,7 +137,6 @@ struct Residency {
     void reduce_pair(void *data, int rank, size_t bytes, bool ep);
     void tp_sum(void *data, int rank, size_t bytes);
     void ep_reduce(void *data, int rank, size_t bytes);
-    void *route_buffer(int rank, size_t bytes);
     void shutdown();
     const void *device(const Weight &w) const;
 };

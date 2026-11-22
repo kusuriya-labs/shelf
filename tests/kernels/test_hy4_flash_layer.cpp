@@ -2,6 +2,8 @@
 #include <shelf/models/hy4_flash/decoder.h>
 #include <shelf/models/hy4_flash/generate.h>
 #include <nlohmann/json.hpp>
+#include <algorithm>
+#include <array>
 #include <bit>
 #include <chrono>
 #include <cmath>
@@ -29,6 +31,50 @@ void compare(const std::vector<uint16_t> &output, const uint16_t *expected, int 
     printf("chunk=%d relative_l2=%.8f\n", chunk, error);
     if (!(error < 0.04))
         throw std::runtime_error("CPU の層出力との誤差が大きすぎます");
+}
+void check_index(Ops &op, const uint16_t *input, int start, int rows) {
+    op.arena.cursor = 0;
+    Mat x = op.mat(rows, 12288);
+    op.copy(x.p, input, x.bytes(), hipMemcpyHostToDevice);
+    std::string layer = "model.layers.0.", attn = layer + "self_attn.", index = attn + "compressed_indexer.";
+    float *post;
+    Mat hidden = op.collapse_norm(x, layer + "hc_attn_layer.hc_pre.hc_", post, layer + "input_layernorm.weight");
+    Mat qres = op.norm(op.linear(attn + "q_a_proj", hidden), attn + "q_a_layernorm.weight");
+    Mat q = op.rope(op.linear(index + "query_projection", qres), 16, start, 1e7f);
+    Mat w = op.linear(index + "head_weight_projection", hidden);
+    int first = std::max(0, 2048 - start), selected_rows = rows - first;
+    int stride = (start + rows - 1) / 4;
+    auto scores = static_cast<float *>(op.arena.next(index_workspace_floats(selected_rows, stride) * sizeof(float)));
+    auto top = static_cast<int *>(op.arena.next(size_t(selected_rows) * 511 * sizeof(int)));
+    std::array<std::vector<int>, 2> groups;
+    std::array<std::vector<float>, 2> values;
+    for (int mode = 0; mode < 2; ++mode) {
+        index_select(q, w, op.gpu.index_keys[0][0], first, selected_rows, start, stride, scores, top, nullptr, mode, op.stream);
+        groups[mode].resize(size_t(selected_rows) * 511);
+        values[mode].resize(size_t(selected_rows) * stride);
+        op.copy(groups[mode].data(), top, groups[mode].size() * sizeof(int), hipMemcpyDeviceToHost);
+        op.copy(values[mode].data(), scores, values[mode].size() * sizeof(float), hipMemcpyDeviceToHost);
+        for (int r = 0; r < selected_rows; ++r) {
+            auto begin = groups[mode].begin() + r * 511;
+            std::sort(begin, begin + 511);
+        }
+    }
+    double error = 0, peak = 0;
+    int tokens = 0;
+    for (int r = 0; r < selected_rows; ++r) {
+        int pos = start + first + r;
+        tokens += 2045 + pos % 4;
+        for (int i = 0; i < pos / 4; ++i) {
+            size_t j = size_t(r) * stride + i;
+            double ref = values[0][j], val = values[1][j];
+            if (!std::isfinite(ref) || !std::isfinite(val)) throw std::runtime_error("Indexer のスコアが非有限です");
+            peak = std::max(peak, std::abs(ref));
+            error = std::max(error, std::abs(ref - val));
+        }
+    }
+    if (groups[0] != groups[1] || error > 2e-5 * std::max(1.0, peak))
+        throw std::runtime_error("Indexer の選択集合またはスコアが基準と異なります");
+    printf("index_start=%d selected_tokens=%d/%d max_score_error=%.10g\n", start + first, tokens, tokens, error);
 }
 void check_rejection(Ops &op) {
     std::vector<int> proposals{11, 22, 33, 44, 55};
@@ -60,7 +106,7 @@ int run(const Path &dir, int repeats) {
     int layer = fixture.at("layer");
     int start = fixture.value("start", 0);
     auto ids = fixture.at("ids").get<std::vector<int>>();
-    if (layer < 0 || layer >= 42 || ids.empty() || ids.size() > 128)
+    if (layer < 0 || layer >= 42 || ids.empty() || ids.size() > max_prefill_chunk)
         throw std::runtime_error("fixture の範囲が不正です");
     model.shape = fixture.at("shapes").get<decltype(model.shape)>();
     model.local_shape[0] = model.shape;
@@ -99,7 +145,7 @@ int run(const Path &dir, int repeats) {
     size_t slots = (layer == 0 || layer % 4 == 1) ? capacity_tokens : std::min(size_t(518), capacity_tokens);
     Residency gpu(model, capacity_tokens);
     gpu.ranks = 1;
-    constexpr size_t work = 512ull << 20;
+    const size_t work = ids.size() > 128 ? 2ull << 30 : 512ull << 20;
     size_t capacity = model.bytes[0] + work + 64ull * 1024 * 1024;
     gpu.arenas.push_back(take(gpu::GpuArena::create(0, capacity)));
     try {
@@ -123,7 +169,10 @@ int run(const Path &dir, int repeats) {
         Ops op(gpu);
         if (!layer)
             check_rejection(op);
-        for (int chunk : {int(ids.size()), 1}) {
+        auto chunks = ids.size() > 1024 ? std::vector<int>{1024, 2048, 4096}
+                                        : std::vector<int>{int(ids.size()), 1};
+        std::vector<std::vector<int>> expected_positions(ids.size());
+        for (int chunk : chunks) {
             std::vector<double> samples;
             for (int pass = 0; pass < repeats; ++pass) {
                 std::vector<uint16_t> actual(input_size / 2);
@@ -168,10 +217,18 @@ int run(const Path &dir, int repeats) {
                         if (positions.empty() || positions.back() != start + i + j || positions.size() > 2048 ||
                             std::adjacent_find(positions.begin(), positions.end()) != positions.end())
                             throw std::runtime_error("選択した位置が causal 条件に違反しています");
+                        if (pass == 0) {
+                            if (chunk == chunks.front())
+                                expected_positions[i + j] = std::move(positions);
+                            else if (expected_positions[i + j] != positions)
+                                throw std::runtime_error("チャンク長によって選択位置が変化しました");
+                        }
                     }
                     checked(hipDeviceSynchronize());
                     seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
                     op.copy(actual.data() + size_t(i) * 12288, x.p, x.bytes(), hipMemcpyDeviceToHost);
+                    if (!pass && !layer && count > 1 && count <= 16 && start + i + count > 2048)
+                        check_index(op, input + size_t(i) * 12288, start + i, count);
                     history.insert(history.end(), batch.begin(), batch.end());
                 }
                 if (layer) {

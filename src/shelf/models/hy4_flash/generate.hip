@@ -191,7 +191,7 @@ Target::Target(Residency &gpu, float temp, uint64_t rng, int k, float p, int ran
         target_probs = static_cast<float *>(op.arena.next(6 * 120832 * 4));
         draft_probs = static_cast<float *>(op.arena.next(5 * 120832 * 4));
     }
-    checked(hipMemsetAsync(gpu.moe_counts[rank], 0, 4 * sizeof(uint64_t), op.stream));
+    checked(hipMemsetAsync(gpu.moe_counts[rank], 0, 12 * sizeof(uint64_t), op.stream));
     if (gpu.tp_size == 1)
         gpu.routed_rows.fill(0);
     else
@@ -218,7 +218,7 @@ Target::Target(Residency &gpu, float temp, uint64_t rng, int k, float p, int ran
             for (int layer = 0; layer < 42; ++layer)
                 if (gpu.index_keys[0][layer] && !gpu.sparse_top[0][layer])
                     gpu.sparse_top[0][layer] = static_cast<int *>(op.reserve_persistent(
-                        size_t(max_prefill_chunk + (gpu.batch_draft ? gpu.max_slots * 6 : 0)) * 511 * sizeof(int)));
+                        size_t(gpu.prefill_rows() + (gpu.batch_draft ? gpu.max_slots * 6 : 0)) * 511 * sizeof(int)));
     }
 }
 float *Target::head_logits(Mat hidden) {
@@ -514,6 +514,7 @@ void decoder_layer(Ops &op, int layer, int start, Mat x, const std::vector<int> 
         else
             prior = history;
         engram(op, layer, x, prior, ids);
+        if (x.rows > Hy4GroupedPlan::max_rows) op.arena.cursor = save;
     }
     float *post;
     Mat a = op.collapse_norm(x, p + "hc_attn_layer.hc_pre.hc_", post, p + "input_layernorm.weight");
@@ -543,6 +544,8 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
     if (ids.empty() || !count || ids.size() + count > gpu.tokens || gpu.tokens > 1048576 || chunk < 1 ||
         chunk > max_prefill_chunk)
         throw std::runtime_error("入力・出力長または prefill chunk が範囲外です");
+    if (gpu.tp_size > 1)
+        chunk = std::min(chunk, tp_prefill_rows);
     if (top_k < 0 || top_k > 64 || !(top_p > 0 && top_p <= 1) || (temperature > 0 && top_p < 1 && !top_k))
         throw std::invalid_argument("top_k は 0〜64、top_p を使う場合は top_k が必要です");
     struct Lane {

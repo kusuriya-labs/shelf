@@ -50,10 +50,13 @@ def prefix_cache(cache, start):
     cache.end = start
     cache.kv.zero_()
     count = min(cache.slots,start)
-    latent = torch.randn(count,512,generator=gen).bfloat16()
-    rope = torch.randn(count,64,generator=gen).bfloat16()
-    packed = torch.cat((encode(latent,256,29).reshape(count,260),encode(rope,64,11)),dim=1)
-    cache.kv[torch.arange(start-count,start)%cache.slots] = packed
+    for first in range(0, count, 4096):
+        rows = min(count - first, 4096)
+        latent = torch.randn(rows, 512, generator=gen).bfloat16()
+        rope = torch.randn(rows, 64, generator=gen).bfloat16()
+        packed = torch.cat((encode(latent, 256, 29).reshape(rows, 260), encode(rope, 64, 11)), dim=1)
+        positions = torch.arange(start - count + first, start - count + first + rows)
+        cache.kv[positions % cache.slots] = packed
     state = {"kv":cache.kv.clone()}
     if not cache.sliding:
         cache.groups.zero_()
@@ -76,7 +79,7 @@ def main():
     torch.set_num_threads(1)
     i, n = args.layer, args.tokens
     w = Weights(args.model, args.engram, args.work)
-    if not 0 <= i < 42 or not 0 < n <= 128 or not 0 <= args.start <= 4096:
+    if not 0 <= i < 42 or not 0 < n <= 4096 or not 0 <= args.start <= 131072:
         raise ValueError("層番号または token 数が範囲外です")
     base = args.work / f"layer-{i:02d}"
     with safe_open(base / "capture/next.safetensors", framework="pt") as f:
@@ -87,15 +90,27 @@ def main():
     else:
         with safe_open(args.work / f"layer-{i-1:02d}/capture/next.safetensors", framework="pt") as f:
             x = f.get_slice("hidden")[0, :n]
+    captured = len(ids)
+    if n > captured:
+        copies = (n + captured - 1) // captured
+        ids = (ids * copies)[:n]
+        x = x.repeat(copies, 1, 1)[:n]
     layer = DecoderLayer(w, i, args.start + n)
     cache = prefix_cache(layer.cache,args.start)
-    result = layer(x, [120000]*args.start, ids).float()
+    history = [120000] * args.start
+    outputs = []
+    step = min(n, 512) if layer.sliding else n
+    for first in range(0, n, step):
+        block = ids[first:first + step]
+        outputs.append(layer(x[first:first + step], history, block).float())
+        history.extend(block)
+    result = torch.cat(outputs)
+    if not result.isfinite().all():
+        raise ValueError("CPU 基準の層出力が非有限です")
     if args.fixture:
         fixture(args.fixture,w,i,ids,x,result,args.start,cache)
-    if args.start:
-        if not result.isfinite().all():
-            raise ValueError("合成 KV 履歴の出力が非有限です")
-        print("合成履歴の CPU 基準を生成",i,args.start,n)
+    if args.start or n > captured:
+        print("層照合の CPU 基準を生成", i, args.start, n)
         return
     error = (result - expected).norm() / expected.norm()
     print(f"層 {i} token 数 {len(ids)} 相対 L2 {error.item():.6f}", flush=True)

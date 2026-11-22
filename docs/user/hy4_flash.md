@@ -16,6 +16,12 @@ build/shelf-compute hy4 reserve --model-dir /path/to/model --engram-dir /path/to
 
 予約に必要な容量が不足する場合はエラーで停止する。予約長を 1Mi に変更する場合は、配置表も `--tokens 1048576` で再生成する。静的容量と前提は[調査記録](../research/20261119/hy4_r9700_capacity.md)を参照。
 
+## Prefill のチャンク長
+
+EP で長い入力を処理する場合、compute では `--chunk 2048` または `--chunk 4096`、server では `--prefill-chunk 2048` または `--prefill-chunk 4096` を指定できる。Hy4 server の既定値は 1024 で、指定できる範囲は 1〜4096 である。チャンク長だけを変更する場合は同じ配置表を使える。TP を併用すると、実行時に最大 1024 行ずつ処理する。
+
+長文の Indexer を従来の scalar 演算と照合する場合は `SHELF_HY4_INDEX_WMMA=0` を指定する。
+
 ## HIP Graph の切り替え
 
 TP=1、EP=1〜4 で push 転送を使用し、すべての GPU 間で peer access が有効な場合、バッチ decode と verify に層ごとの HIP Graph を使用する。DFly2 は最大 16 スロットの候補を 1 回の Graph 起動で生成し、Target がスロットごとに最大 6 行を検証する。初回のバッチ形状では Graph を作成し、同じ形状と対応するコンテキスト長では再利用する。Target は `SHELF_HY4_GRAPH=0`、DFly2 は `SHELF_HY4_DRAFT_GRAPH=0` で個別に eager 実行へ切り替えられる。

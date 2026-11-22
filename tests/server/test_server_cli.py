@@ -85,6 +85,9 @@ def main() -> int:
         "--placement", "owners.json", "--max-seq-len", "2304", "--chunk", "1024",
         "--max-concurrent-requests", "4", "--dfly-dir", "draft",
     ])
+    for chunk in (2048, 4096):
+        opts = shelf_server.parse_args(["--model-dir", "body", "--placement", "owners.json", "--prefill-chunk", str(chunk)])
+        checker.check("hy4-chunk", value_of(shelf_server.build_compute_argv(opts), "--chunk") == str(chunk))
     for ep, tp, slots in ((3, 1, 16), (4, 1, 4), (2, 2, 1)):
         opts = shelf_server.parse_args([
             "--model-dir", "body", "--placement", "owners.json", "--expert-parallel", str(ep),

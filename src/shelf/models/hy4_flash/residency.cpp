@@ -28,6 +28,8 @@ Residency::Residency(Checkpoint &model, size_t tokens, int slots)
     : model(model), tokens(tokens), max_slots(slots), batch_draft(false) {
     if (slots < 1 || slots > 16)
         throw std::invalid_argument("スロット数は 1〜16 で指定してください");
+    const char *wmma = std::getenv("SHELF_HY4_INDEX_WMMA");
+    index_wmma = !wmma || std::string_view(wmma) != "0";
     const char *draft = std::getenv("SHELF_HY4_BATCH_DFLY");
     batch_draft = slots > 1 && model.has_draft && (!draft || std::string_view(draft) != "0");
     if (batch_draft)
@@ -102,9 +104,9 @@ Status Residency::reserve() {
                 overhead[r] += size_t(model.shape_of(name, r)->at(1)) * 512 * 2;
         }
         if (tp_size > 1)
-            overhead[r] += max_prefill_chunk * 3072u * 2u;
+            overhead[r] += tp_prefill_rows * 3072u * 2u;
         if (tp_size > 1 && ep_size > 1)
-            overhead[r] += max_prefill_chunk * 1536u * 2u;
+            overhead[r] += tp_prefill_rows * 1536u * 2u;
         remaining[r] = int64_t(available[r]) - int64_t(align(model.bytes[r]) + overhead[r]);
     }
     if (*std::min_element(remaining.begin(), remaining.begin() + ranks) < 0)
@@ -147,9 +149,9 @@ Status Residency::reserve() {
                 ptr = buffer.next(size_t(model.shape_of(name, r)->at(1)) * 512 * 2);
         }
         if (tp_size > 1)
-            tp_recv[r] = buffer.next(max_prefill_chunk * 3072u * 2u);
+            tp_recv[r] = buffer.next(tp_prefill_rows * 3072u * 2u);
         if (tp_size > 1 && ep_size > 1)
-            ep_recv[r] = buffer.next(max_prefill_chunk * 1536u * 2u);
+            ep_recv[r] = buffer.next(tp_prefill_rows * 1536u * 2u);
         reserve_experts(r, buffer);
         workspace[r] = {static_cast<uint8_t *>(buffer.next(work)), work};
         check(hipMemGetInfo(&free, &total));
@@ -171,23 +173,26 @@ void Residency::reserve_experts(int r, Region &buffer) {
     if (tp_size == 1 && r != 0)
         return;
     moe_owners[r] = static_cast<int *>(buffer.next(41 * 512 * sizeof(int)));
-    moe_counts[r] = static_cast<uint64_t *>(buffer.next(4 * sizeof(uint64_t)));
-    check(hipMemset(moe_counts[r], 0, 4 * sizeof(uint64_t)));
+    moe_counts[r] = static_cast<uint64_t *>(buffer.next(12 * sizeof(uint64_t)));
+    check(hipMemset(moe_counts[r], 0, 12 * sizeof(uint64_t)));
     check(hipStreamCreateWithFlags(&local_expert[r], hipStreamNonBlocking));
     check(hipEventCreateWithFlags(&local_ready[r], hipEventDisableTiming));
     check(hipEventCreateWithFlags(&local_done[r], hipEventDisableTiming));
 }
 
 void Residency::collect_route_counts(int rank) {
-    std::array<uint64_t, 4> totals{};
+    std::array<uint64_t, 12> totals{};
     check(hipMemcpyAsync(totals.data(), moe_counts[rank], sizeof(totals), hipMemcpyDeviceToHost, compute[rank]));
     check(hipMemsetAsync(moe_counts[rank], 0, sizeof(totals), compute[rank]));
     check(hipStreamSynchronize(compute[rank]));
     if (tp_size > 1)
         routed_rows[rank] += totals[rank / tp_size];
     else
-        for (int r = 0; r < ep_size; ++r)
+        for (int r = 0; r < ep_size; ++r) {
             routed_rows[r] += totals[r];
+            if (push ? peer[0][r] : peer[r][0]) transfer_bytes[0][r] -= totals[4 + r];
+            if (push ? peer[r][0] : peer[0][r]) transfer_bytes[r][0] -= totals[8 + r];
+        }
 }
 
 void Residency::upload_experts(int r, int layer) {
@@ -223,6 +228,7 @@ void Residency::upload() {
     auto transport = std::getenv("SHELF_HY4_EP_TRANSPORT");
     const std::string_view mode = transport ? transport : "";
     const bool force_host = mode == "host";
+    bool host_reduce = false;
     push = mode.empty() || mode == "push";
     for (int dst = 0; dst < ranks; ++dst)
         for (int src = 0; src < ranks; ++src) {
@@ -256,8 +262,7 @@ void Residency::upload() {
                     check(hipEventCreateWithFlags(&ack[dst][src][q], hipEventDisableTiming | hipEventReleaseToSystem));
                 }
             }
-            if (!available && !staging)
-                check(hipHostMalloc(&staging, max_prefill_chunk * 3072u * 2u, hipHostMallocPortable));
+            host_reduce |= !available && tp_size > 1;
             fprintf(stderr, "transfer=%d->%d method=%s\n", src, dst,
                     available ? (push ? "push" : "peer") : "host");
         }
@@ -313,8 +318,8 @@ void Residency::upload() {
                     for (auto events : {&ep_ready, &ep_done, &ep_arrived, &ep_consumed})
                         check(hipEventCreateWithFlags(&(*events)[r][p], hipEventDisableTiming | hipEventReleaseToSystem));
             }
-            if (staging)
-                check(hipHostMalloc(&reduce_staging[r], max_prefill_chunk * 3072u * 2u, hipHostMallocPortable));
+            if (host_reduce)
+                check(hipHostMalloc(&reduce_staging[r], tp_prefill_rows * 3072u * 2u, hipHostMallocPortable));
         }
         for (int layer = 1; layer < 42; ++layer)
             upload_experts(r, layer);
@@ -322,51 +327,48 @@ void Residency::upload() {
     }
     check(hipSetDevice(physical[0]));
 }
-void Residency::transfer(void *dst, int destination, const void *src, int source, size_t bytes) {
+void Residency::transfer(void *dst, int destination, const void *src, int source, size_t bytes, int prefill_rows) {
     transfer_bytes[source][destination] += bytes;
     std::chrono::steady_clock::time_point begin;
     if (expert_begin[0])
         begin = std::chrono::steady_clock::now();
     void *host = bytes <= transfer_packet_bytes() ? small_staging[source][destination] : nullptr;
-    if (host || (push ? peer[source][destination] : peer[destination][source])) {
-        const int p = parity[source][destination];
-        hipEvent_t ready_event = ready[source][destination][p];
-        hipEvent_t ack_event = ack[destination][source][p];
-        parity[source][destination] = p ^ 1;
-        if (!host && push) {
-            check(hipSetDevice(physical[destination]));
-            check(hipEventRecord(ack_event, compute[destination]));
-            check(hipSetDevice(physical[source]));
-            check(hipStreamWaitEvent(compute[source], ack_event, 0));
-            peer_copy(dst, src, bytes, compute[source]);
-            check(hipEventRecord(ready_event, compute[source]));
-            check(hipSetDevice(physical[destination]));
-            check(hipStreamWaitEvent(compute[destination], ready_event, 0));
-        } else {
-            check(hipSetDevice(physical[source]));
-            if (host)
-                check(hipMemcpyAsync(host, src, bytes, hipMemcpyDeviceToHost, compute[source]));
-            check(hipEventRecord(ready_event, compute[source]));
-            check(hipSetDevice(physical[destination]));
-            check(hipStreamWaitEvent(compute[destination], ready_event, 0));
-            if (host)
-                check(hipMemcpyAsync(dst, host, bytes, hipMemcpyHostToDevice, compute[destination]));
-            else
-                peer_copy(dst, src, bytes, compute[destination]);
-            check(hipEventRecord(ack_event, compute[destination]));
-            check(hipSetDevice(physical[source]));
-            check(hipStreamWaitEvent(compute[source], ack_event, 0));
-            check(hipSetDevice(physical[destination]));
-        }
-    } else {
-        if (!staging || bytes > max_prefill_chunk * 3072u * 2u)
-            throw std::runtime_error("転送作業域の範囲外です");
-        check(hipSetDevice(physical[source]));
-        check(hipMemcpyAsync(staging, src, bytes, hipMemcpyDeviceToHost, compute[source]));
-        check(hipStreamSynchronize(compute[source]));
+    auto copy = [&](hipStream_t stream) {
+        if (prefill_rows)
+            peer_prefill_packet(dst, src, prefill_rows, destination, stream);
+        else
+            peer_copy(dst, src, bytes, stream);
+    };
+    if (!host && !(push ? peer[source][destination] : peer[destination][source]))
+        throw std::runtime_error("転送作業域の範囲外です");
+    const int p = parity[source][destination];
+    hipEvent_t ready_event = ready[source][destination][p];
+    hipEvent_t ack_event = ack[destination][source][p];
+    parity[source][destination] = p ^ 1;
+    if (!host && push) {
         check(hipSetDevice(physical[destination]));
-        check(hipMemcpyAsync(dst, staging, bytes, hipMemcpyHostToDevice, compute[destination]));
-        check(hipStreamSynchronize(compute[destination]));
+        check(hipEventRecord(ack_event, compute[destination]));
+        check(hipSetDevice(physical[source]));
+        check(hipStreamWaitEvent(compute[source], ack_event, 0));
+        copy(compute[source]);
+        check(hipEventRecord(ready_event, compute[source]));
+        check(hipSetDevice(physical[destination]));
+        check(hipStreamWaitEvent(compute[destination], ready_event, 0));
+    } else {
+        check(hipSetDevice(physical[source]));
+        if (host)
+            check(hipMemcpyAsync(host, src, bytes, hipMemcpyDeviceToHost, compute[source]));
+        check(hipEventRecord(ready_event, compute[source]));
+        check(hipSetDevice(physical[destination]));
+        check(hipStreamWaitEvent(compute[destination], ready_event, 0));
+        if (host)
+            check(hipMemcpyAsync(dst, host, bytes, hipMemcpyHostToDevice, compute[destination]));
+        else
+            copy(compute[destination]);
+        check(hipEventRecord(ack_event, compute[destination]));
+        check(hipSetDevice(physical[source]));
+        check(hipStreamWaitEvent(compute[source], ack_event, 0));
+        check(hipSetDevice(physical[destination]));
     }
     if (expert_begin[0])
         transfer_ms +=
@@ -409,7 +411,7 @@ void Residency::reduce_pair(void *data, int rank, size_t bytes, bool ep) {
     check(hipEventRecord(ready_events[rank][p], compute[rank]));
     barrier->arrive_and_wait();
     if (rank == a) {
-        if (tp_bytes[a] != tp_bytes[b] || bytes > max_prefill_chunk * (ep ? 1536u : 3072u) * 2u)
+        if (tp_bytes[a] != tp_bytes[b] || bytes > tp_prefill_rows * (ep ? 1536u : 3072u) * 2u)
             throw std::runtime_error("collective の転送サイズが一致しません");
         for (int source : {a, b}) {
             const int destination = source == a ? b : a;
@@ -451,18 +453,6 @@ void Residency::reduce_pair(void *data, int rank, size_t bytes, bool ep) {
     }
     barrier->arrive_and_wait();
     check(hipSetDevice(physical[rank]));
-}
-void *Residency::route_buffer(int rank, size_t bytes) {
-    constexpr size_t capacity =
-        max_prefill_chunk * (16 * (sizeof(Hy4Route) + sizeof(Hy4ExpertBatch) + sizeof(int)) + sizeof(int)) +
-        sizeof(int);
-    if (bytes > capacity)
-        throw std::runtime_error("routing 情報が作業域の上限を超えました");
-    if (!route_host[rank]) {
-        check(hipHostMalloc(&route_host[rank], capacity, hipHostMallocPortable));
-        std::memset(route_host[rank], 0, capacity);
-    }
-    return route_host[rank];
 }
 void Residency::shutdown() {
     std::string errors;
@@ -533,10 +523,6 @@ void Residency::shutdown() {
                 collect(hipHostFree(buffer));
                 buffer = nullptr;
             }
-        if (route_host[r]) {
-            collect(hipHostFree(route_host[r]));
-            route_host[r] = nullptr;
-        }
         for (auto &row : ready[r])
             for (auto &event : row)
                 if (event) {
@@ -555,10 +541,6 @@ void Residency::shutdown() {
                         collect(hipEventDestroy(event));
                     event = nullptr;
                 }
-    }
-    if (staging) {
-        collect(hipHostFree(staging));
-        staging = nullptr;
     }
     for (int dst = 0; dst < ranks; ++dst)
         for (int src = 0; src < ranks; ++src)
