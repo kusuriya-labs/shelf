@@ -591,7 +591,7 @@ static bool attention_plan_key_for(
     const ::shelf::runtime::Program& program,
     uint32_t actual_rows,
     uint32_t max_visible_tokens,
-    bool use_prefill,
+    bool use_prefill, bool linear_verify,
     uint32_t& out_key) {
     size_t attention_index = program.dispatches.size();
     for (size_t i = 0; i < program.dispatches.size(); ++i) {
@@ -661,6 +661,8 @@ static bool attention_plan_key_for(
     ctx.decode_attn_partials = executor.execution_workspace.data<uint8_t>();
     ctx.decode_attn_partial_bytes = static_cast<uint32_t>(runtime::kDecodeAttnPartialBytes);
     ctx.actual_rows = actual_rows;
+    ctx.num_requests = 1u;
+    ctx.num_verify_requests = linear_verify ? 1u : 0u;
     ctx.spec.max_visible_tokens = max_visible_tokens;
     ctx.batch_context = executor.batch_context;
     auto sig = runtime::paged_attention_plan_signature(
@@ -1078,6 +1080,7 @@ Result<PendingBatch> submit_co_batch(
             N >= runtime::kPagedAttentionPrefillMinRows;
         if (!attention_plan_key_for(
                 executor, *program, N, max_visible_tokens, attn_use_prefill,
+                verify_graph && !tree_batch,
                 attention_plan_key))
             graph_active = false;
     }

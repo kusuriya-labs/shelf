@@ -67,7 +67,9 @@ Shelfが対象とするのは `gfx1201`（AMD Radeon AI PRO R9700）のみであ
 cmake -S . -B build -DSHELF_HIP_GRAPH=OFF
 ```
 
-実行時に verify graph や PLaMo 3 の graph のみを無効化する環境変数（`SHELF_GRAPH_VERIFY=0`、`SHELF_PLAMO_HIP_GRAPH=0`）は [env_vars.md](env_vars.md#4-hip-graphgdnoctave-kvplamo-3-制御) を参照する。Qwen3.5 系の DFlash2 target では、条件を満たす単一 request の 8 行または 10 行の greedy verify（tree verify を含む）を既定で graph 実行する。複数 request、stochastic verify、QSA / PLE history、TP schedule、および対応する metadata が揃わない tree verify は通常経路へ戻る。Octave KV cache の append と decode / verify attention も同じ graph に capture される。
+実行時に verify Graph を無効にするには `SHELF_GRAPH_VERIFY=0`、PLaMo 3 の Graph を無効にするには `SHELF_PLAMO_HIP_GRAPH=0` を指定する。[環境変数の一覧](env_vars.md#4-hip-graphgdnoctave-kvplamo-3-制御)
+
+Qwen3.5 系の DFlash2 target は条件を満たす単一要求で greedy・sampled の両方に verify Graph を使う。Octave KV の append と attention も capture の対象になる。[DFlash2 の Graph 再利用条件](../developer/dflash2.md#graph-cache)
 
 ## ROCm バージョンごとの注意とトラブルシュート
 

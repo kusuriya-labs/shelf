@@ -265,6 +265,18 @@ gfx1201 では両側に `global_inv scope:SCOPE_SE` が emit される。これ�
 
 ## paged attention の不変条件
 
+単一要求の直列 verify で、2〜16 行が同じページ表を共有し、可視位置が行順に増える場合、
+24 query head・4 KV head・head dimension 256・16 token/page・F32 出力の長文経路は
+`paged_verify.hip` を使う。対象は可視長 2048 以上で、tree と block mask はそれぞれの
+専用経路を使う。BF16・FP8・Octave のどの形式でも 1 workgroup が 1 KV head と 1 split を担当し、
+各 wave は query 行と GQA head の組み合わせを 16 個ずつ処理する。各ページの K/V は
+workgroup 内で共有する。各行が device 側の位置で causal mask を適用する。
+
+部分結果は `[行][query head][split]` ごとに最大値・指数和・256 次元の未正規化出力を持つ。
+Octave は同じ一時領域の末尾に回転済みの Q を置き、split 間で再利用する。縮約後に出力を
+逆回転する。planner は実際の行数で一時領域の容量を確認し、タイルの選択を Graph の
+再利用条件に含める。
+
 `paged_decode.hip` / `paged_prefill.hip` は次を満たす。
 
 - split-KV decode kernel（bf16 split / bf16 split reduce / fp8 split）が起動するのは、

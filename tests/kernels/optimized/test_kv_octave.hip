@@ -4,6 +4,7 @@
 #include <shelf/kernels/fused/kv_append_octave.h>
 #include <shelf/kernels/optimized/kv_append.h>
 #include <shelf/kernels/optimized/attention/paged_attention.h>
+#include <shelf/kernels/optimized/attention/paged_verify.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
@@ -417,13 +418,41 @@ double normalized_mse(uint32_t bits, const std::vector<float>& levels) {
     return error / reference;
 }
 
+template <typename Launch>
+bool measure_verify(Launch launch, uint32_t tokens, uint32_t rows,
+                    shelf::kernel::KVCacheDType dtype, uint32_t run, bool tiled) {
+    hipEvent_t start{}, stop{};
+    bool ok = hip_ok(hipEventCreate(&start), "verify 計測開始") &&
+              hip_ok(hipEventCreate(&stop), "verify 計測終了");
+    for (unsigned i = 0; ok && i < 8; ++i) ok = hip_ok(launch(), "verify 暖機");
+    std::vector<float> samples;
+    for (unsigned i = 0; ok && i < 9; ++i) {
+        ok = hip_ok(hipEventRecord(start), "verify 計測開始");
+        for (unsigned j = 0; ok && j < 4; ++j) ok = hip_ok(launch(), "verify 計測");
+        float ms = 0.0f;
+        ok = ok && hip_ok(hipEventRecord(stop), "verify 計測終了") &&
+             hip_ok(hipEventSynchronize(stop), "verify 同期") &&
+             hip_ok(hipEventElapsedTime(&ms, start, stop), "verify 経過時間");
+        if (ok) samples.push_back(ms * 250.0f);
+    }
+    if (start) ok = hip_ok(hipEventDestroy(start), "verify イベント解放") && ok;
+    if (stop) ok = hip_ok(hipEventDestroy(stop), "verify イベント解放") && ok;
+    if (ok) {
+        std::sort(samples.begin(), samples.end());
+        std::printf("VERIFY_BENCH tokens=%u rows=%u dtype=%u run=%u tiled=%u p50_us=%.3f\n",
+                    tokens, rows, static_cast<unsigned>(dtype), run, unsigned(tiled), samples[4]);
+    }
+    return ok;
+}
+
 void run_attention_parity(OctaveKVCacheFormat format, uint32_t query_rows,
                           bool tree_visibility, const char* name,
                           const std::vector<float>& levels,
                           bool prefill = false, uint32_t prefix = 0u,
                           uint32_t decode_tokens = 64u,
                           bool microbench = false, bool masked = false,
-                          uint32_t q_heads = 24u, uint32_t kv_heads = 4u) {
+                          uint32_t q_heads = 24u, uint32_t kv_heads = 4u,
+                          bool verify_tile = false, bool measure = false) {
     const uint32_t tokens = prefill ? prefix + query_rows : decode_tokens;
     constexpr uint32_t page_tokens = 16u;
     const uint32_t pages = (tokens + page_tokens - 1u) / page_tokens;
@@ -446,6 +475,7 @@ void run_attention_parity(OctaveKVCacheFormat format, uint32_t query_rows,
     for (uint32_t i = 0u; i < tokens; ++i) append_positions[i] = i;
     std::vector<uint32_t> table(pages);
     for (uint32_t i = 0u; i < pages; ++i) table[i] = i;
+    if (verify_tile) std::reverse(table.begin(), table.end());
     std::vector<uint32_t> query_slots(query_rows, 0u), query_positions(query_rows);
     for (uint32_t row = 0u; row < query_rows; ++row)
         query_positions[row] = prefill ? prefix + row : tokens - query_rows + row;
@@ -504,7 +534,7 @@ void run_attention_parity(OctaveKVCacheFormat format, uint32_t query_rows,
     void* d_prefill_scratch = nullptr;
     const std::size_t vectors = static_cast<std::size_t>(pages) * page_tokens * kv_heads;
     const std::size_t scratch_elems = vectors * head_dim;
-    const uint32_t splits = tree_visibility ? 1u : 4u;
+    const uint32_t splits = verify_tile ? shelf::kernel::kPagedVerifySplits : tree_visibility ? 1u : 4u;
     const std::size_t partial_elems = static_cast<std::size_t>(query_rows) *
         kv_heads * splits * (q_heads / kv_heads) * 258u;
     const uint64_t prefill_scratch_bytes =
@@ -533,7 +563,10 @@ void run_attention_parity(OctaveKVCacheFormat format, uint32_t query_rows,
                                     q.size() * sizeof(float))) &&
               (!prefill || allocate(&d_prefill_scratch,
                                     prefill_scratch_bytes)) &&
-              allocate(reinterpret_cast<void**>(&d_partials), partial_elems * sizeof(float));
+              allocate(reinterpret_cast<void**>(&d_partials), verify_tile
+                  ? shelf::kernel::paged_verify_workspace_bytes(query_rows, q_heads, splits,
+                                                               shelf::kernel::KVCacheDType::OCTAVE)
+                  : partial_elems * sizeof(float));
     if (ok) {
         ok = hip_ok(hipMemcpy(d_k, k.data(), k.size() * sizeof(shelf::bf16_t), hipMemcpyHostToDevice), name) &&
              hip_ok(hipMemcpy(d_v, v.data(), v.size() * sizeof(shelf::bf16_t), hipMemcpyHostToDevice), name) &&
@@ -700,14 +733,100 @@ void run_attention_parity(OctaveKVCacheFormat format, uint32_t query_rows,
             check(new_legacy_maximum < 0.025f, name);
         }
     }
+    if (ok && verify_tile) {
+        using namespace shelf::kernel;
+        uint8_t* fp8_k = nullptr;
+        uint8_t* fp8_v = nullptr;
+        float* k_scale = nullptr;
+        float* v_scale = nullptr;
+        ok = allocate(reinterpret_cast<void**>(&fp8_k), scratch_elems) &&
+             allocate(reinterpret_cast<void**>(&fp8_v), scratch_elems) &&
+             allocate(reinterpret_cast<void**>(&k_scale), vectors * sizeof(float)) &&
+             allocate(reinterpret_cast<void**>(&v_scale), vectors * sizeof(float)) &&
+             hip_ok(launch_kv_append_fp8_e4m3(append, fp8_k, fp8_v, k_scale, v_scale, nullptr), name);
+        for (const auto dtype : {KVCacheDType::BF16, KVCacheDType::FP8_E4M3, KVCacheDType::OCTAVE}) {
+            if (!ok) break;
+            PagedVerifyCache cache{d_k_scratch, d_v_scratch, nullptr, nullptr, d_levels, format};
+            attention.output = d_reference;
+            if (dtype == KVCacheDType::FP8_E4M3) {
+                cache = {fp8_k, fp8_v, k_scale, v_scale, nullptr, {}};
+                ok = hip_ok(launch_attention_paged_fp8_e4m3(attention, fp8_k, fp8_v,
+                                                            k_scale, v_scale, nullptr), name);
+            } else {
+                ok = hip_ok(launch_attention_paged_bf16(attention, d_k_scratch, d_v_scratch, nullptr), name);
+                if (dtype == KVCacheDType::OCTAVE) {
+                    cache.k = d_k_pool;
+                    cache.v = d_v_pool;
+                }
+            }
+            attention.output = d_fused;
+            auto launch = [&](bool tiled) {
+                if (tiled && query_rows > 1u) {
+                    auto err = launch_paged_verify_split(attention, dtype, cache, d_partials, splits, nullptr);
+                    if (err != hipSuccess) return err;
+                    return launch_paged_verify_reduce(attention, dtype, d_partials, splits, nullptr);
+                }
+                constexpr uint32_t incumbent_splits = 16u;
+                if (dtype == KVCacheDType::OCTAVE) {
+                    auto err = launch_attention_paged_octave_split(attention, d_k_pool, d_v_pool,
+                        d_levels, format, d_partials, incumbent_splits, nullptr);
+                    if (err != hipSuccess) return err;
+                    return launch_attention_paged_octave_reduce(attention, d_partials, incumbent_splits, nullptr);
+                }
+                auto err = dtype == KVCacheDType::BF16
+                    ? launch_attention_paged_bf16_split(attention, d_k_scratch, d_v_scratch, d_partials,
+                                                        incumbent_splits, nullptr)
+                    : launch_attention_paged_fp8_split(attention, fp8_k, fp8_v, k_scale, v_scale,
+                                                       d_partials, incumbent_splits, nullptr);
+                if (err != hipSuccess) return err;
+                return launch_attention_paged_bf16_split_reduce(attention, d_partials, incumbent_splits, nullptr);
+            };
+            if (measure) {
+                for (unsigned run = 0; ok && run < 5; ++run) {
+                    for (unsigned order = 0; ok && order < 2; ++order) {
+                        const bool tiled = (run + order) % 2 != 0;
+                        ok = measure_verify([&] { return launch(tiled); }, tokens,
+                                            query_rows, dtype, run, tiled);
+                    }
+                }
+            }
+            ok = ok && hip_ok(launch(true), name) &&
+                 hip_ok(hipMemcpy(reference.data(), d_reference, q.size() * sizeof(float), hipMemcpyDeviceToHost), name) &&
+                 hip_ok(hipMemcpy(fused.data(), d_fused, q.size() * sizeof(float), hipMemcpyDeviceToHost), name);
+            if (!ok) break;
+            double max_abs = 0.0, squared_error = 0.0, norm = 0.0;
+            for (size_t i = 0; i < q.size(); ++i) {
+                const double error = static_cast<double>(fused[i]) - reference[i];
+                max_abs = std::max(max_abs, std::abs(error));
+                squared_error += error * error;
+                norm += static_cast<double>(reference[i]) * reference[i];
+            }
+            const double relative_l2 = std::sqrt(squared_error / norm);
+            std::printf("verify rows=%u dtype=%u max_abs=%.8g relative_l2=%.8g\n",
+                        query_rows, static_cast<unsigned>(dtype), max_abs, relative_l2);
+            const bool packed = dtype == KVCacheDType::OCTAVE;
+            check(max_abs < (packed ? 0.025 : 0.0001) &&
+                  relative_l2 < (packed ? 0.1 : 0.001), name);
+        }
+    }
     for (void* pointer : allocations) shelf::gpu::discard_cleanup_result(hipFree(pointer));
 }
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     run_wmma_layout_test();
     const std::vector<float> levels = make_levels();
+    if (argc >= 2 && std::strcmp(argv[1], "--verify-bench") == 0) {
+        OctaveKVCacheFormat format{OctaveKMode::Compact, 5u, 5u, 5u};
+        if (argc > 3 || (argc == 3 && !shelf::kernel::parse_octave_kv_cache_format(argv[2], format)))
+            return 1;
+        for (uint32_t tokens : {2048u, 8192u, 16384u, 32768u})
+            for (uint32_t rows : {1u, 8u, 16u})
+                run_attention_parity(format, rows, false,
+                    "長文 verify", levels, false, 0u, tokens, false, false, 24u, 4u, true, true);
+        return failures != 0;
+    }
     run_gpu_case({OctaveKMode::Compact, 3u, 3u, 3u}, "Octave c3v3", levels);
     run_gpu_case({OctaveKMode::Compact, 4u, 4u, 4u}, "Octave c4v4", levels);
     run_gpu_case({OctaveKMode::Compact, 5u, 5u, 5u}, "Octave c5v5", levels);
@@ -760,6 +879,16 @@ int main() {
     run_attention_parity({OctaveKMode::Compact, 4u, 4u, 4u}, 32u, false,
                          "Octave FlashNext TP2 masked decode parity", levels,
                          false, 0u, 64u, false, true, 12u, 1u);
+    run_attention_parity({OctaveKMode::Compact, 5u, 5u, 4u}, 8u, false,
+                         "非対称 bit 幅での GQA 12 ヘッド", levels,
+                         false, 0u, 64u, false, false, 24u, 2u);
+    for (uint32_t rows = 2u; rows <= 16u; ++rows) {
+        const auto format = rows % 2u == 0u
+            ? OctaveKVCacheFormat{OctaveKMode::Compact, 5u, 5u, 5u}
+            : OctaveKVCacheFormat{OctaveKMode::Block, 4u, 3u, 3u};
+        run_attention_parity(format, rows, false, "複数行の verify", levels,
+                             false, 0u, 1025u, false, false, 24u, 4u, true);
+    }
     const char* long_bench = std::getenv("SHELF_OCTAVE_LONG_BENCH");
     if (long_bench != nullptr && long_bench[0] == '1' && long_bench[1] == '\0')
         run_attention_parity({OctaveKMode::Compact, 4u, 4u, 4u}, 4u, false,

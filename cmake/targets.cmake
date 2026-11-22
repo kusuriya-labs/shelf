@@ -100,6 +100,7 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/linear/exl3_family/mul24/split_plan.cpp
     src/shelf/kernels/optimized/linear/exl3_family/variant.cpp
     src/shelf/kernels/optimized/attention/paged_decode.hip
+    src/shelf/kernels/optimized/attention/paged_verify.hip
     src/shelf/kernels/optimized/attention/paged_prefill.hip
     src/shelf/kernels/optimized/attention/qsa_sparse.hip
     src/shelf/kernels/optimized/attention/octave.hip

@@ -444,24 +444,6 @@ __device__ __forceinline__ uint32_t octave_lut4x4_biased(uint32_t codes) {
     return ((hi & mask) | (lo & ~mask)) ^ 0x80808080u;
 }
 
-__device__ __forceinline__ uint32_t octave_byte_mask(uint32_t bits,
-                                                      uint32_t shift) {
-    return (bits << (8u - shift)) - (bits >> shift);
-}
-
-__device__ __forceinline__ uint32_t octave_lut5x4_biased(uint32_t codes) {
-    const uint32_t selector = codes & 0x07070707u;
-    const uint32_t v0 = __builtin_amdgcn_perm(0xd1cac3bau, 0xb1a69781u, selector);
-    const uint32_t v1 = __builtin_amdgcn_perm(0xfdf8f3eeu, 0xe8e3ddd7u, selector);
-    const uint32_t v2 = __builtin_amdgcn_perm(0x29231d18u, 0x120d0803u, selector);
-    const uint32_t v3 = __builtin_amdgcn_perm(0x7f695a4fu, 0x463d362fu, selector);
-    const uint32_t m3 = octave_byte_mask(codes & 0x08080808u, 3u);
-    const uint32_t m4 = octave_byte_mask(codes & 0x10101010u, 4u);
-    const uint32_t lo = (v1 & m3) | (v0 & ~m3);
-    const uint32_t hi = (v3 & m3) | (v2 & ~m3);
-    return ((hi & m4) | (lo & ~m4)) ^ 0x80808080u;
-}
-
 __device__ __forceinline__ uint32_t octave_lut6x4_biased(uint32_t codes) {
     const uint32_t selector = codes & 0x07070707u;
     const uint32_t v0 = __builtin_amdgcn_perm(0xbcb7b2acu, 0xa59d9281u, selector);
@@ -995,7 +977,7 @@ hipError_t launch_octave_split_impl(
     }();
     const bool use_legacy = legacy && !kQsa;
     const uint32_t q_per_kv = common.q_heads / common.kv_heads;
-    const uint32_t q_group = use_legacy ? kOctaveQPerKv : kOctaveWmmaQueries;
+    uint32_t q_group = use_legacy ? kOctaveQPerKv : kOctaveWmmaQueries;
     for (uint32_t q_base = 0u; q_base < q_per_kv; q_base += q_group) {
         if (use_legacy) {
             octave_split_legacy<<<static_cast<uint32_t>(grid), kOctaveThreads, 0u, stream>>>(
@@ -1040,6 +1022,7 @@ hipError_t launch_octave_split_impl(
                     q_per_kv);
         } else {
             if constexpr (kQsa) return hipErrorNotSupported;
+            q_group = kOctaveQPerKv;
             // Uncommon mixed bit-width descriptors keep the exact scalar path;
             // the production descriptors above use the gfx12 WMMA path.
             octave_split_legacy<<<static_cast<uint32_t>(grid), kOctaveThreads, 0u, stream>>>(

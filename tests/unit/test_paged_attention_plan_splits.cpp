@@ -1,6 +1,7 @@
 #include <shelf/inference/execution/paged_attention_dispatch.h>
 #include <shelf/inference/execution/program_executor.h>
 #include <shelf/kernels/optimized/attention/paged_attention.h>
+#include <shelf/kernels/optimized/attention/paged_verify.h>
 
 #include <cstdio>
 #include <initializer_list>
@@ -74,6 +75,40 @@ PagedAttentionPlan masked_plan(bool prefill_intent, uint32_t rows = 1u,
 }  // namespace
 
 int main() {
+    for (auto dtype : {KVCacheDType::BF16, KVCacheDType::FP8_E4M3, KVCacheDType::OCTAVE}) {
+        PagedAttentionResolvedArgs args{};
+        args.kv_dtype = dtype;
+        args.output_dtype = ValueDType::F32;
+        auto& c = args.common;
+        c.output_dtype = shelf::kernel::PagedAttentionOutputDType::F32;
+        c.rows = 16; c.q_heads = 24; c.kv_heads = 4; c.head_dim = 256; c.page_tokens = 16;
+        HostExecutionContext ctx{};
+        ctx.num_requests = 1;
+        ctx.num_verify_requests = 1;
+        ctx.spec.max_visible_tokens = 2048;
+        ctx.decode_attn_partials = kPartials;
+        ctx.decode_attn_partial_bytes = shelf::kernel::paged_verify_workspace_bytes(
+            c.rows, c.q_heads, shelf::kernel::kPagedVerifySplits, dtype);
+        auto plan = [&] { return shelf::execution::plan_paged_attention(args, ctx, false); };
+        const auto tiled = plan();
+        check(tiled.verify_tile && tiled.splits == shelf::kernel::kPagedVerifySplits,
+              "単一要求の長文 verify");
+        --ctx.decode_attn_partial_bytes;
+        check(!plan().verify_tile, "一時領域の容量境界");
+        ++ctx.decode_attn_partial_bytes;
+        ctx.num_requests = 2;
+        check(!plan().verify_tile, "複数要求のページ表を分離する");
+        ctx.num_requests = 1;
+        ctx.spec.max_visible_tokens = 2047;
+        check(!plan().verify_tile && shelf::execution::make_paged_attention_plan_key(plan()) !=
+              shelf::execution::make_paged_attention_plan_key(tiled), "長文境界の Graph 再選択");
+        ctx.spec.max_visible_tokens = 2048;
+        c.tree_anc_offsets = kTreeAnc;
+        check(!plan().verify_tile, "木の可視性を維持する");
+        c.tree_anc_offsets = nullptr;
+        c.block_mask = kBlockMask;
+        check(!plan().verify_tile, "ブロックマスクを維持する");
+    }
     for (uint32_t rows : {1u, 23u}) {
         PagedAttentionResolvedArgs a;
         a.kv_dtype = KVCacheDType::BF16;

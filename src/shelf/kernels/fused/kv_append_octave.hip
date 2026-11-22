@@ -6,7 +6,6 @@
 #include <hip/hip_bf16.h>
 #include <hip/hip_runtime.h>
 
-#include <cfloat>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -30,11 +29,15 @@ __device__ __forceinline__ float sign_of(uint32_t index, uint32_t salt) {
 __device__ __forceinline__ float segmented_sum(float value, float* shared,
                                                 uint32_t segment) {
     const uint32_t tid = static_cast<uint32_t>(threadIdx.x);
-    shared[tid] = value;
-    for (uint32_t half = segment >> 1u; half != 0u; half >>= 1u) {
+    for (uint32_t half = segment >> 1u; half >= 32u; half >>= 1u) {
+        shared[tid] = value;
         __syncthreads();
-        if ((tid & (segment - 1u)) < half) shared[tid] += shared[tid + half];
+        if ((tid & (segment - 1u)) < half) value += shared[tid + half];
+        __syncthreads();
     }
+    for (uint32_t half = 16u; half != 0u; half >>= 1u)
+        value += __shfl_xor(value, half);
+    if ((tid & (segment - 1u)) == 0u) shared[tid] = value;
     __syncthreads();
     const float result = shared[tid & ~(segment - 1u)];
     __syncthreads();
@@ -44,7 +47,11 @@ __device__ __forceinline__ float segmented_sum(float value, float* shared,
 __device__ __forceinline__ void wht(float& value, float* shared,
                                     uint32_t segment) {
     const uint32_t tid = static_cast<uint32_t>(threadIdx.x);
-    for (uint32_t half = 1u; half < segment; half <<= 1u) {
+    for (uint32_t half = 1u; half < 32u; half <<= 1u) {
+        const float other = __shfl_xor(value, half);
+        value = (tid & half) != 0u ? other - value : value + other;
+    }
+    for (uint32_t half = 32u; half < segment; half <<= 1u) {
         shared[tid] = value;
         __syncthreads();
         const float other = shared[tid ^ half];
@@ -58,16 +65,13 @@ __device__ __forceinline__ uint32_t nearest_code(float value, const float* level
                                                  uint32_t bits) {
     const uint32_t count = 1u << bits;
     const float* table = levels + bits * 64u;
-    float best = FLT_MAX;
-    uint32_t code = 0u;
-    for (uint32_t i = 0u; i < count; ++i) {
-        const float distance = fabsf(value - table[i]);
-        if (distance < best) {
-            best = distance;
-            code = i;
-        }
+    uint32_t lower = 0u;
+    for (uint32_t step = count >> 1u; step != 0u; step >>= 1u) {
+        const uint32_t mid = lower + step;
+        if (table[mid] < value) lower = mid;
     }
-    return code;
+    const uint32_t upper = min(lower + 1u, count - 1u);
+    return fabsf(value - table[upper]) < fabsf(value - table[lower]) ? upper : lower;
 }
 
 __device__ __forceinline__ void pack_plane(const uint8_t* codes, uint8_t* dst,

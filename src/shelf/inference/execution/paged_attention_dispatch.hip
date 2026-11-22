@@ -1,3 +1,4 @@
+#include <shelf/kernels/optimized/attention/paged_verify.h>
 #include <shelf/inference/execution/paged_attention_dispatch.h>
 #include <shelf/inference/execution/program_executor.h>
 #include <shelf/kernels/correctness/model_dispatch_correctness.h>
@@ -377,6 +378,19 @@ PagedAttentionPlan plan_paged_attention(
         plan.splits = 1u;
         return plan;
     }
+    const auto& c = args.common;
+    if (!plan.use_prefill && ctx.num_requests == 1u && ctx.num_verify_requests == 1u &&
+        ::shelf::kernel::paged_verify_geometry(c) &&
+        ctx.spec.max_visible_tokens >= kPagedAttentionSplitMinVisible &&
+        ctx.decode_attn_partials != nullptr) {
+        constexpr uint32_t splits = ::shelf::kernel::kPagedVerifySplits;
+        if (::shelf::kernel::paged_verify_workspace_bytes(c.rows, c.q_heads, splits, args.kv_dtype) <=
+            ctx.decode_attn_partial_bytes) {
+            plan.verify_tile = true;
+            plan.splits = splits;
+            return plan;
+        }
+    }
     if (!plan.use_prefill
         && args.kv_dtype == ::shelf::kernel::KVCacheDType::OCTAVE
         && args.common.tree_anc_offsets == nullptr
@@ -740,6 +754,24 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
         out.use_prefill = plan.use_prefill;
         out.kv_dtype = a.kv_dtype;
         out.splits = plan.splits;
+        if (plan.verify_tile) {
+            auto& split = out.kernels[out.physical_count++];
+            split.common = a.common;
+            fill_prefill_pools(a, split);
+            split.variant = PhysicalPagedAttentionVariant::VerifySplit;
+            split.partials = reinterpret_cast<uint64_t>(ctx.decode_attn_partials);
+            split.splits = plan.splits;
+            split.grid = a.common.kv_heads * plan.splits;
+            split.workgroup = a.common.rows > 8u ? 192u : 96u;
+            auto& reduce = out.kernels[out.physical_count++];
+            reduce.variant = PhysicalPagedAttentionVariant::VerifyReduce;
+            reduce.common = a.common;
+            reduce.partials = split.partials;
+            reduce.splits = split.splits;
+            reduce.grid = a.common.rows * a.common.q_heads;
+            reduce.workgroup = 256u;
+            return PhysicalResolveStatus::Applicable;
+        }
         if (plan.qsa_sparse) {
             if (append_qsa_region(a, a.common, ctx, out, plan.splits) !=
                 PhysicalResolveStatus::Applicable)
@@ -860,6 +892,21 @@ hipError_t launch_paged_attention_physical(const PhysicalPagedAttentionPlan& pla
     for (uint32_t i = 0u; i < plan.physical_count; ++i) {
         const PhysicalPagedAttentionKernel& k = plan.kernels[i];
         switch (k.variant) {
+            case PhysicalPagedAttentionVariant::VerifySplit:
+                herr = ::shelf::kernel::launch_paged_verify_split(
+                    k.common, plan.kv_dtype,
+                    {reinterpret_cast<const void*>(k.k_pool),
+                     reinterpret_cast<const void*>(k.v_pool),
+                     reinterpret_cast<const float*>(k.k_scale_pool),
+                     reinterpret_cast<const float*>(k.v_scale_pool),
+                     reinterpret_cast<const float*>(k.k_extra_pool), k.octave_format},
+                    reinterpret_cast<float*>(k.partials), k.splits, stream);
+                break;
+            case PhysicalPagedAttentionVariant::VerifyReduce:
+                herr = ::shelf::kernel::launch_paged_verify_reduce(
+                    k.common, plan.kv_dtype, reinterpret_cast<const float*>(k.partials),
+                    k.splits, stream);
+                break;
             case PhysicalPagedAttentionVariant::OctaveSplit:
                 herr = ::shelf::kernel::launch_attention_paged_octave_split(
                     k.common, reinterpret_cast<const uint8_t*>(k.k_pool),
@@ -983,7 +1030,8 @@ uint32_t make_paged_attention_plan_key(const PagedAttentionPlan& plan) {
     uint32_t key = plan.optimized ? 1u : 0u;
     key |= plan.use_prefill ? 2u : 0u;
     key |= plan.qsa_sparse ? 4u : 0u;
-    key |= (plan.splits & 0x7FFFu) << 3;
+    key |= plan.verify_tile ? (1u << 17) : 0u;
+    key |= (plan.splits & 0x3FFFu) << 3;
     key |= (plan.prefill_kv_blocks & 0x3FFFu) << 18;
     return key;
 }

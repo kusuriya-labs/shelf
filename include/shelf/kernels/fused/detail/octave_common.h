@@ -6,6 +6,24 @@
 
 namespace shelf::kernel::detail::octave {
 
+__device__ __forceinline__ uint32_t octave_byte_mask(uint32_t bits,
+                                                      uint32_t shift) {
+    return (bits << (8u - shift)) - (bits >> shift);
+}
+
+__device__ __forceinline__ uint32_t octave_lut5x4_biased(uint32_t codes) {
+    const uint32_t selector = codes & 0x07070707u;
+    const uint32_t v0 = __builtin_amdgcn_perm(0xd1cac3bau, 0xb1a69781u, selector);
+    const uint32_t v1 = __builtin_amdgcn_perm(0xfdf8f3eeu, 0xe8e3ddd7u, selector);
+    const uint32_t v2 = __builtin_amdgcn_perm(0x29231d18u, 0x120d0803u, selector);
+    const uint32_t v3 = __builtin_amdgcn_perm(0x7f695a4fu, 0x463d362fu, selector);
+    const uint32_t m3 = octave_byte_mask(codes & 0x08080808u, 3u);
+    const uint32_t m4 = octave_byte_mask(codes & 0x10101010u, 4u);
+    const uint32_t lo = (v1 & m3) | (v0 & ~m3);
+    const uint32_t hi = (v3 & m3) | (v2 & ~m3);
+    return ((hi & m4) | (lo & ~m4)) ^ 0x80808080u;
+}
+
 template <uint32_t kBits>
 __device__ __forceinline__ int32_t codebook_int8(uint32_t code) {
     uint32_t value = 0u;

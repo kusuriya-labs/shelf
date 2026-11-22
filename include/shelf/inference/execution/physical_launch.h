@@ -337,6 +337,8 @@ enum class PhysicalPagedAttentionVariant : uint8_t {
     QsaReduce = 21,
     QsaSparseFp8 = 22,
     QsaSparseOctave = 23,
+    VerifySplit = 24,
+    VerifyReduce = 25,
     Unsupported = 255,
 };
 
