@@ -349,3 +349,73 @@ greedy argmax sampling。
 `--split` を省略すると `--scratch-rows` で指定した容量を使って本番の分割数を選ぶ。
 容量が実モデルと異なれば選択結果も異なる。GPU の分離と比較手順は
 [計測方法](../perf/methodology.md) を参照。
+
+## 統一ベンチマークスイート（`tools/bench/shelf_bench_suite.py`）
+
+E2E 基礎性能・BetterBench 互換・凍結実タスク（`tools/bench/real_v1/`）・サービング同時計測をまとめて実行し、Markdown レポートへ整形するラッパーである。4 トラックの定義・使い分け・JSON 契約は [../perf/methodology.md](../perf/methodology.md#9-統一-4-トラック体系と-shelf_bench_suitepy) を参照。
+
+```text
+サブコマンド:
+  track-a   基礎性能（shelf-bench pp/tg/batch）と投機固定チェック（1,024+ token、AB/BA 対応）
+  track-b   BetterBench 互換（既定 20 pass/category・3 warmup、--quick は smoke 専用）
+  track-c   凍結実タスクコーパス real-v1（5 領域 × 日英 × 3 入力長、全 30 課題）
+  track-d   HTTP streaming closed-loop サービング計測（同時 1/4/8/16、steady / mix）
+  render    トラック別 JSON を C -> B -> A -> D の順で Markdown レポートへ整形
+```
+
+共通オプション（サブコマンドの前後に配置可能）:
+
+- `--lock-file PATH`: 実行全体に `flock` の排他ロックを取得する
+- `--output PATH`: 結果の保存先（省略時は標準出力）
+- `--dry-run` / `--list`: 実測せずに実行計画または課題一覧を JSON で表示する
+
+```bash
+# 実行計画と課題一覧の確認
+python3 tools/bench/shelf_bench_suite.py track-c --list
+
+# Track A: 非投機 pp/tg/batch + 投機固定チェック
+ROCR_VISIBLE_DEVICES=GPU-a8e9ddefa2d60f55 \
+python3 tools/bench/shelf_bench_suite.py track-a \
+  --lock-file /tmp/r9700.lock \
+  --shelf-bench ./build/shelf-bench \
+  --model-dir models/Qwen3.8-27B-FP8 \
+  --tokens-file /tmp/corpus.psktok \
+  --spec-endpoint http://127.0.0.1:8080/v1 \
+  --model Qwen3.8-27B-FP8 \
+  --spec-max-tokens 1024 \
+  --output /tmp/track_a.json
+
+# Track B: BetterBench 互換 full（20 pass/category・3 warmup）
+python3 tools/bench/shelf_bench_suite.py track-b \
+  --lock-file /tmp/r9700.lock \
+  --endpoint http://127.0.0.1:8080/v1 \
+  --model Qwen3.8-27B-FP8 \
+  --conditions /tmp/conditions.json \
+  --output /tmp/track_b.json
+
+# Track C: 凍結 real-v1（全 30 課題）
+python3 tools/bench/shelf_bench_suite.py track-c \
+  --lock-file /tmp/r9700.lock \
+  --endpoint http://127.0.0.1:8080/v1 \
+  --model Qwen3.8-27B-FP8 \
+  --output /tmp/track_c.json
+
+# Track D: サービング同時計測（steady / mix）
+python3 tools/bench/shelf_bench_suite.py track-d \
+  --lock-file /tmp/r9700.lock \
+  --endpoint http://127.0.0.1:8080/v1 \
+  --model Qwen3.8-27B-FP8 \
+  --concurrency 1,4,8,16 \
+  --mode both \
+  --max-tokens 2048 \
+  --output /tmp/track_d.json
+
+# Markdown レポート生成（省略したトラックや欠測値は「未測定」と表示）
+python3 tools/bench/shelf_bench_suite.py render \
+  /tmp/track_a.json /tmp/track_b.json /tmp/track_c.json /tmp/track_d.json \
+  --compare-b /tmp/other_track_b.json \
+  --reviews /tmp/real_v1_reviews.json \
+  --output /tmp/report.md
+```
+
+各サブコマンドの全オプションは `python3 tools/bench/shelf_bench_suite.py <サブコマンド> --help` を参照。

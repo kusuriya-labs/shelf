@@ -3,15 +3,16 @@
 このdirectoryは **現在の性能値・再現条件・測定方法** のみを置く。
 
 - [current.md](current.md) — 現在再現可能な performance baseline（未計測の場合はその状態を書く）
-- [methodology.md](methodology.md) — 今後も使う測定原則・GPU 排他（`/tmp/*.lock`）・品質比較手順
+- [methodology.md](methodology.md) — 今後も使う測定原則・4 トラック統一ベンチマーク仕様（A/B/C/D）・GPU 排他（`/tmp/*.lock`）・品質比較手順
 - [exl3-int8-prefill-quality.md](exl3-int8-prefill-quality.md) — EXL3-INT8 mul24 prefill A/B の品質と速度
 - [quality-bf16/README.md](quality-bf16/README.md) — Qwen3.8-27B の BF16 基準品質測定と [結果一覧](quality-bf16/results.md)
 - [kv-octave.md](kv-octave.md) — Octave KV cache の容量・decode / prefill 性能
 - [qwen-embed-host.md](qwen-embed-host.md) — 16 GiB VRAM での Qwen3.8-27B 3.05bpw / 128Ki 実測
 - [prefill-chunk-reference.md](prefill-chunk-reference.md) — prefill chunk の参考測定
 
+統一ベンチマークスイート（`tools/bench/shelf_bench_suite.py`）と凍結実タスクコーパス（`tools/bench/real_v1/`）の仕様・トラック別契約は [methodology.md](methodology.md#9-統一-4-トラック体系と-shelf_bench_suitepy) を正本とする。
 実験の経緯・採否判断・棄却根拠の正本は [../research/README.md](../research/README.md) を参照する。
-`shelf-bench` の使い方は [../user/bench.md](../user/bench.md) を参照する。
+`shelf-bench` および統一ベンチマークスイートの使い方は [../user/bench.md](../user/bench.md) を参照する。
 
 ## ルール
 
