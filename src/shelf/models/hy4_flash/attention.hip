@@ -132,6 +132,45 @@ __global__ void unpack(const uint8_t *cache, const uint8_t *fresh, const int *id
     float value = wht(levels[code] * scale, scratch, Width) * sign_of(c, Salt);
     out.p[size_t(row) * out.cols + sub * Width + c] = f32_to_bf16_rne_device(value);
 }
+template <int Width, int Salt>
+__global__ void unpack_batch(const uint8_t *cache, const uint8_t *fresh, const int *slots,
+                             const int *positions, int cache_slots, int stride, Mat out, int offset, bool sliding, int block_rows) {
+    __shared__ float scratch[Width];
+    int c = threadIdx.x, sub = blockIdx.x, t = blockIdx.y, block = blockIdx.z;
+    int row = block * block_rows, start = positions[row];
+    int first = sliding ? max(0, start - 511) : 0;
+    int id = first + t;
+    if (id >= start + block_rows) {
+        out.p[(size_t(block) * stride + t) * out.cols + sub * Width + c] = 0;
+        return;
+    }
+    const uint8_t *rec = id >= start ? fresh + size_t(row + id - start) * 294
+        : cache + (size_t(slots[row]) * cache_slots + id % cache_slots) * 294;
+    const uint8_t *src = rec + offset + sub * (Width / 2 + 2);
+    int code = (src[c / 2] >> (4 * (c % 2))) & 15;
+    float scale = __half2float(__ushort_as_half(src[Width / 2] | (src[Width / 2 + 1] << 8)));
+    float value = wht(levels[code] * scale, scratch, Width) * sign_of(c, Salt);
+    out.p[(size_t(block) * stride + t) * out.cols + sub * Width + c] = f32_to_bf16_rne_device(value);
+}
+__global__ void batch_offsets(int *offsets, const int *positions, int stride, bool sliding, int block_rows) {
+    int row = blockIdx.y, t = blockIdx.x * blockDim.x + threadIdx.x;
+    int len = sliding ? min(positions[row] + 1, 512) : positions[row] + 1;
+    int base = 0;
+    if (block_rows > 1) {
+        int block = row / block_rows;
+        base = block * stride;
+        if (sliding) base += max(0, positions[row] - 511) - max(0, positions[block * block_rows] - 511);
+    }
+    if (t < stride) offsets[size_t(row) * stride + t] = t < len ? base + t : -1;
+}
+__global__ void save_records_batch(uint8_t *cache, const uint8_t *fresh, const int *slots,
+                                   const int *positions, int cache_slots, int rows) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < rows * 294) {
+        int row = i / 294;
+        cache[(size_t(slots[row]) * cache_slots + positions[row] % cache_slots) * 294 + i % 294] = fresh[i];
+    }
+}
 __global__ void save_records(uint8_t *cache, const uint8_t *fresh, int rows, int start, int slots,
                              const Hy4StepParams *params) {
     start = step_at(start, params);
@@ -178,6 +217,54 @@ __global__ void pool(Mat keys, uint16_t *history, int first, int start, Param va
         out = out * co + pooled[c ^ 1] * ((c & 1) ? si : -si);
     }
     history[size_t(group) * 128 + c] = f32_to_bf16_rne_device(out);
+}
+__global__ void pool_batch(Mat keys, uint16_t *all_history, int tokens, const int *slots, const int *positions,
+                           Param values, Param gates, Param ape, Param norm, int block_rows) {
+    __shared__ float pooled[128], scratch[128];
+    int row = blockIdx.x, start = positions[row];
+    if ((start & 3) != 3) return;
+    auto history = all_history + size_t(slots[row]) * (tokens / 4 + 12) * 128;
+    auto pending = history + (tokens / 4) * 128;
+    int c = threadIdx.x, group = start / 4;
+    start -= row % block_rows;
+    keys.p += size_t(row - row % block_rows) * keys.cols;
+    float v[4], g[4], peak = -INFINITY;
+    for (int i = 0; i < 4; ++i) {
+        int pos = 4 * group + i;
+        auto x = pos >= start ? keys.p + size_t(pos - start) * 128 : pending + size_t(pos % 12) * 128;
+        v[i] = 0;
+        g[i] = read(ape, i * 128 + c);
+        for (int j = 0; j < 128; ++j) {
+            float a = bf16_bits_to_f32(x[j]);
+            v[i] += a * read(values, c * 128 + j);
+            g[i] += a * read(gates, c * 128 + j);
+        }
+        peak = fmaxf(peak, g[i]);
+    }
+    float sum = 0, total = 0;
+    for (int i = 0; i < 4; ++i) {
+        float p = expf(g[i] - peak);
+        sum += p * v[i];
+        total += p;
+    }
+    float out = sum / total;
+    float inv = rsqrtf(reduce<false>(out * out, scratch, 128) / 128 + 1e-5f);
+    pooled[c] = bf16_bits_to_f32(f32_to_bf16_rne_device(out * inv * read(norm, c)));
+    __syncthreads();
+    out = pooled[c];
+    if (c >= 64) {
+        float phase = group * 4 * powf(1e7f, -float((c - 64) / 2) / 32);
+        float co = bf16_bits_to_f32(f32_to_bf16_rne_device(cosf(phase)));
+        float si = bf16_bits_to_f32(f32_to_bf16_rne_device(sinf(phase)));
+        out = out * co + pooled[c ^ 1] * ((c & 1) ? si : -si);
+    }
+    history[size_t(group) * 128 + c] = f32_to_bf16_rne_device(out);
+}
+__global__ void save_pending_batch(Mat keys, uint16_t *all_history, int tokens, const int *slots,
+                                   const int *positions) {
+    int row = blockIdx.x;
+    auto pending = all_history + (size_t(slots[row]) * (tokens / 4 + 12) + tokens / 4) * 128;
+    pending[(positions[row] % 12) * 128 + threadIdx.x] = keys.p[size_t(row) * 128 + threadIdx.x];
 }
 __global__ void save_pending(Mat k, int start, uint16_t *pending, const Hy4StepParams *params) {
     start = step_at(start, params);
@@ -369,36 +456,39 @@ __global__ void draft_offsets(int *offsets, int rows, int stride, int base_len, 
         return;
     offsets[r * stride + t] = t < base_len + r + 1 ? t : -1;
 }
-Selection select(Ops &op, const std::string &p, int layer, int start, Mat x, Mat qres) {
+Selection select(Ops &op, const std::string &p, int layer, int start, Mat x, Mat qres, bool index_ready) {
     int end = start + x.rows;
     int bucket = op.max_kv_len > 0 ? op.max_kv_len : std::max(2048, (end + 63) / 64 * 64);
     Selection selected(x.rows);
     bool sliding = layer != 0 && layer % 4 != 1;
     int begin = sliding ? x.rows : std::min(x.rows, std::max(0, 2048 - start));
     if (!sliding) {
-        Mat k = op.norm(op.linear(p + "token_key_projection", x), p + "token_key_norm.weight");
-        auto groups = op.gpu.index_keys[op.rank][layer];
-        auto pending = groups + (op.gpu.tokens / 4) * 128;
-        int first = start / 4, ng = end / 4 - first;
-        int pool_blocks = op.params ? 2 : ng;
-        if (pool_blocks) {
-            pool<<<pool_blocks, 128, 0, op.stream>>>(k, groups, first, start, op.param(p + "key_value_projection.weight"),
-                                            op.param(p + "key_gate_projection.weight"),
-                                            op.param(p + "intra_group_ape"), op.param(p + "key_norm.weight"),
-                                            pending, op.params, x.rows);
+        auto groups = op.gpu.index_keys[op.rank][layer] + op.slot * (op.gpu.tokens / 4 + 12) * 128;
+        if (!index_ready) {
+            Mat k = op.norm(op.linear(p + "token_key_projection", x), p + "token_key_norm.weight");
+            auto pending = groups + (op.gpu.tokens / 4) * 128;
+            int first = start / 4, ng = end / 4 - first;
+            int pool_blocks = op.params ? 2 : ng;
+            if (pool_blocks) {
+                pool<<<pool_blocks, 128, 0, op.stream>>>(k, groups, first, start, op.param(p + "key_value_projection.weight"),
+                                                op.param(p + "key_gate_projection.weight"),
+                                                op.param(p + "intra_group_ape"), op.param(p + "key_norm.weight"),
+                                                pending, op.params, x.rows);
+                checked(hipGetLastError());
+            }
+            save_pending<<<std::min(k.rows, 12), 128, 0, op.stream>>>(k, start, pending, op.params);
             checked(hipGetLastError());
         }
-        save_pending<<<std::min(k.rows, 12), 128, 0, op.stream>>>(k, start, pending, op.params);
-        checked(hipGetLastError());
         if (end > 2048) {
             Mat q = op.rope(op.linear(p + "query_projection", qres), 16, start, 1e7f);
             Mat w = op.linear(p + "head_weight_projection", x);
             int stride = std::max(512, (bucket - 1) / 4);
             int batch = std::min(16, x.rows - begin);
             auto buffer = static_cast<float *>(op.arena.next(size_t(stride) * batch * 4));
-            if (!op.gpu.sparse_top[op.rank][layer])
-                op.gpu.sparse_top[op.rank][layer] =
-                    static_cast<int *>(op.reserve_persistent(size_t(max_prefill_chunk) * 511 * 4));
+            if (!op.gpu.sparse_top[op.rank][layer]) {
+                size_t rows = max_prefill_chunk + (op.gpu.batch_draft ? 6 * op.gpu.max_slots : 0);
+                op.gpu.sparse_top[op.rank][layer] = static_cast<int *>(op.reserve_persistent(rows * 511 * sizeof(int)));
+            }
             auto top = op.gpu.sparse_top[op.rank][layer];
             op.sparse_last_layer[layer] = x.rows - 1;
             for (int row = begin; row < x.rows; row += batch) {
@@ -420,21 +510,9 @@ Selection select(Ops &op, const std::string &p, int layer, int start, Mat x, Mat
     return selected;
 }
 }
-Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidden, Selection &selected,
-              bool draft) {
-    std::string p = prefix + "self_attn.";
-    int bucket = op.max_kv_len > 0 ? op.max_kv_len
-                                   : std::max(2048, (start + hidden.rows + 63) / 64 * 64);
-    bool sliding = layer != 0 && layer % 4 != 1;
-    const auto *projection = op.gpu.model.shape_of(p + "q_b_proj", op.rank);
-    int heads = projection ? projection->at(1) / 256 : (sliding ? 64 : 32);
-    float theta = sliding ? 1e4f : 1e7f;
-    Mat qres = op.norm(op.linear(p + "q_a_proj", hidden), p + "q_a_layernorm.weight");
-    Mat q = op.rope(op.linear(p + "q_b_proj", qres), heads, start, theta);
-    Mat ka = op.linear(p + "kv_a_proj_with_mqa", hidden);
-    Mat lat = op.norm_from(ka, 0, 512, p + "kv_a_layernorm.weight");
-    Mat rot = op.rope_from(ka, 512, 64, 1, start, theta);
-    Mat gate = op.linear(p + "linear_gate", hidden);
+Mat attention_inner(Ops &op, const std::string &p, int layer, int start, Mat hidden, Mat qres, Mat q, Mat lat,
+                    Mat rot, Mat gate, Selection &selected, bool draft, int heads, bool sliding, bool index_ready = false) {
+    int bucket = op.max_kv_len > 0 ? op.max_kv_len : std::max(2048, (start + hidden.rows + 63) / 64 * 64);
     Param sinks = op.param(p + "learnable_sink_param");
     if (op.gpu.tp_size > 1 && !draft) {
         const int first = (op.rank % op.gpu.tp_size) * heads;
@@ -446,10 +524,10 @@ Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidd
     pack_kv_combined<<<dim3(3, hidden.rows), 256, 0, op.stream>>>(lat, rot, fresh);
     checked(hipGetLastError());
     if (!draft)
-        selected = select(op, p + "compressed_indexer.", layer, start, hidden, qres);
+        selected = select(op, p + "compressed_indexer.", layer, start, hidden, qres, index_ready);
     Mat out = op.mat(hidden.rows, heads * 256);
     int slots = sliding ? std::min(op.gpu.tokens, size_t(518)) : op.gpu.tokens;
-    auto cache = op.gpu.cache[op.rank][layer];
+    auto cache = op.gpu.cache[op.rank][layer] + size_t(op.slot) * slots * 294;
     bool contiguous = sliding || (draft ? start <= 2048 : start + hidden.rows <= 2048);
     int begin = std::min(hidden.rows, std::max(0, 2048 - start));
     for (int i = 0; i < hidden.rows;) {
@@ -478,7 +556,8 @@ Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidd
         int *mask = nullptr, *meta = nullptr, *rev = nullptr;
         unsigned *bits = nullptr;
         if (draft && !chunk_contiguous && op.gpu.sparse_top[op.rank][layer]) {
-            int last = op.sparse_last_layer[layer], pos = start - 1;
+            int last = op.slot_draft ? op.gpu.sparse_last[op.slot][layer] : op.sparse_last_layer[layer];
+            int pos = start - 1;
             int tail_len = (pos & 3) + 1, tail_base = pos & ~3;
             int base_len = 2044 + tail_len;
             stride = (op.params ? 2048 : base_len) + n;
@@ -495,7 +574,8 @@ Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidd
             offsets_gpu = static_cast<int *>(op.arena.next(size_t(n) * stride * 4));
             sparse_clear<<<(std::max({width, words, rev_count, 516}) + 255) / 256, 256, 0, op.stream>>>(
                 mask, width, bits, words, meta, rev, rev_count);
-            sort_top<<<1, 512, 0, op.stream>>>(op.gpu.sparse_top[op.rank][layer], groups, mask, last, 1, width, op.params);
+            auto top = op.slot_draft ? op.gpu.sparse_top_slot(layer, op.slot) : op.gpu.sparse_top[op.rank][layer];
+            sort_top<<<1, 512, 0, op.stream>>>(top, groups, mask, last, 1, width, op.params);
             sparse_group_ids<<<1, 256, 0, op.stream>>>(mask, 1, width, meta, ids_gpu, rev, bits,
                                                                        start, -1, op.params);
             sparse_tail_emit<<<(tail_len + 255) / 256, 256, 0, op.stream>>>(bits, ids_gpu, rev, meta, tail_base,
@@ -579,6 +659,113 @@ Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidd
             cache, fresh, hidden.rows, start, slots, op.params);
         checked(hipGetLastError());
     }
+    return out;
+}
+Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidden, Selection &selected,
+              bool draft) {
+    std::string p = prefix + "self_attn.";
+    bool sliding = layer != 0 && layer % 4 != 1;
+    const auto *projection = op.gpu.model.shape_of(p + "q_b_proj", op.rank);
+    int heads = projection ? projection->at(1) / 256 : (sliding ? 64 : 32);
+    float theta = sliding ? 1e4f : 1e7f;
+    Mat qres = op.norm(op.linear(p + "q_a_proj", hidden), p + "q_a_layernorm.weight");
+    Mat q = op.rope(op.linear(p + "q_b_proj", qres), heads, start, theta);
+    Mat ka = op.linear(p + "kv_a_proj_with_mqa", hidden);
+    Mat lat = op.norm_from(ka, 0, 512, p + "kv_a_layernorm.weight");
+    Mat rot = op.rope_from(ka, 512, 64, 1, start, theta);
+    Mat gate = op.linear(p + "linear_gate", hidden);
+    Mat out = attention_inner(op, p, layer, start, hidden, qres, q, lat, rot, gate, selected, draft, heads, sliding);
+    return op.norm(op.linear(p + "o_proj", out), p + "post_proj_norm.weight");
+}
+Mat attention_batch(Ops &op, const std::string &prefix, int layer, const std::vector<int> &slots,
+                    const std::vector<int> &positions, const int *device_slots,
+                    const int *device_positions, Mat hidden, int block_rows, bool draft) {
+    if (slots.size() != size_t(hidden.rows) || positions.size() != slots.size())
+        throw std::invalid_argument("attention のバッチ長が不正です");
+    std::string p = prefix + "self_attn.";
+    bool sliding = layer != 0 && layer % 4 != 1;
+    int heads = sliding ? 64 : 32;
+    float theta = sliding ? 1e4f : 1e7f;
+    Mat qres = op.norm(op.linear(p + "q_a_proj", hidden), p + "q_a_layernorm.weight");
+    Mat raw = op.linear(p + "q_b_proj", qres);
+    Mat ka = op.linear(p + "kv_a_proj_with_mqa", hidden);
+    Mat lat = op.norm_from(ka, 0, 512, p + "kv_a_layernorm.weight");
+    Mat gate = op.linear(p + "linear_gate", hidden);
+    Mat q = op.rope_batch(raw, heads, theta, device_positions);
+    Mat rot = op.rope_from_batch(ka, 512, 64, 1, theta, device_positions);
+    auto fresh = static_cast<uint8_t *>(op.arena.next(size_t(hidden.rows) * 294));
+    pack_kv_combined<<<dim3(3, hidden.rows), 256, 0, op.stream>>>(lat, rot, fresh);
+    checked(hipGetLastError());
+    if (!sliding && !draft) {
+        std::string ip = p + "compressed_indexer.";
+        Mat k = op.norm(op.linear(ip + "token_key_projection", hidden), ip + "token_key_norm.weight");
+        pool_batch<<<hidden.rows, 128, 0, op.stream>>>(k, op.gpu.index_keys[op.rank][layer], op.gpu.tokens,
+            device_slots, device_positions, op.param(ip + "key_value_projection.weight"),
+            op.param(ip + "key_gate_projection.weight"), op.param(ip + "intra_group_ape"),
+            op.param(ip + "key_norm.weight"), block_rows);
+        checked(hipGetLastError());
+        save_pending_batch<<<hidden.rows, 128, 0, op.stream>>>(k, op.gpu.index_keys[op.rank][layer], op.gpu.tokens,
+                                                               device_slots, device_positions);
+        checked(hipGetLastError());
+    }
+    Mat out = op.mat(hidden.rows, heads * 256);
+    size_t mark = op.arena.cursor;
+    int cache_slots = sliding ? std::min(op.gpu.tokens, size_t(518)) : op.gpu.tokens;
+    for (int first = 0; first < hidden.rows;) {
+        auto sparse = [&](int row) {
+            return !sliding && (draft ? positions[row] > 2048 : positions[row] + block_rows > 2048);
+        };
+        if (sparse(first)) {
+            op.slot = slots[first];
+            Selection selected;
+            Mat row = attention_inner(op, p, layer, positions[first], hidden.row(first, block_rows),
+                                      qres.row(first, block_rows), q.row(first, block_rows), lat.row(first, block_rows),
+                                      rot.row(first, block_rows), gate.row(first, block_rows), selected, draft, heads,
+                                      false, true);
+            checked(hipMemcpyAsync(out.row(first).p, row.p, row.bytes(), hipMemcpyDeviceToDevice, op.stream));
+            if (!draft && op.gpu.batch_draft && layer >= 25) {
+                checked(hipMemcpyAsync(op.gpu.sparse_top_slot(layer, op.slot), op.gpu.sparse_top[op.rank][layer],
+                                       size_t(block_rows) * 511 * sizeof(int), hipMemcpyDeviceToDevice, op.stream));
+            }
+            op.arena.cursor = mark;
+            first += block_rows;
+            continue;
+        }
+        int last = first + block_rows;
+        while (last < hidden.rows && !sparse(last)) last += block_rows;
+        int rows = last - first;
+        int stride = *std::max_element(positions.begin() + first, positions.begin() + last) + 1;
+        if (sliding) stride = std::min(stride, 511 + block_rows);
+        int blocks = rows / block_rows;
+        Mat a = op.mat(blocks * stride, 512), b = op.mat(blocks * stride, 64);
+        unpack_batch<256, 29><<<dim3(2, stride, blocks), 256, 0, op.stream>>>(
+            op.gpu.cache[op.rank][layer], fresh + size_t(first) * 294, device_slots + first, device_positions + first,
+            cache_slots, stride, a, 0, sliding, block_rows);
+        checked(hipGetLastError());
+        unpack_batch<64, 11><<<dim3(1, stride, blocks), 64, 0, op.stream>>>(
+            op.gpu.cache[op.rank][layer], fresh + size_t(first) * 294, device_slots + first, device_positions + first,
+            cache_slots, stride, b, 260, sliding, block_rows);
+        checked(hipGetLastError());
+        auto offsets = static_cast<int *>(op.arena.next(size_t(rows) * stride * sizeof(int)));
+        batch_offsets<<<dim3((stride + 255) / 256, rows), 256, 0, op.stream>>>(
+            offsets, device_positions + first, stride, sliding, block_rows);
+        checked(hipGetLastError());
+        if (block_rows > 1)
+            attend_absorbed(op, p + "kv_b_proj", a, b, q.row(first, rows), gate.row(first, rows), offsets, stride,
+                            op.param(p + "learnable_sink_param"), out.row(first, rows));
+        else
+            attend_absorbed_batch(op, p + "kv_b_proj", a, b, q.row(first, rows), gate.row(first, rows), offsets,
+                                  stride, device_positions + first, op.param(p + "learnable_sink_param"),
+                                  out.row(first, rows), sliding);
+        op.arena.cursor = mark;
+        first = last;
+    }
+    if (!draft) {
+        save_records_batch<<<(hidden.rows * 294 + 255) / 256, 256, 0, op.stream>>>(
+            op.gpu.cache[op.rank][layer], fresh, device_slots, device_positions, cache_slots, hidden.rows);
+        checked(hipGetLastError());
+    }
+    op.slot = 0;
     return op.norm(op.linear(p + "o_proj", out), p + "post_proj_norm.weight");
 }
 }

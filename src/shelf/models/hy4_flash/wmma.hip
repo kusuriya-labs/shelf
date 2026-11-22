@@ -140,13 +140,13 @@ namespace {
 template <bool Mixed, bool Decode = false>
 __global__ void expert_batch(const int8_t *codes, const float *scales, const Hy4ExpertProjection *matrices,
                              const Hy4Route *routes, const Hy4ExpertBatch *batches, float *partial, int k,
-                             int n, const int *count = nullptr) {
+                             int n, const int *count = nullptr, int capacity = 0) {
     Hy4ExpertBatch batch;
     if constexpr (Decode) {
         if (int(blockIdx.y) >= *count)
             return;
-        batch = {int(blockIdx.y), 1};
-        size_t plane = size_t(blockIdx.z) * gridDim.y;
+        batch = batches ? batches[blockIdx.y] : Hy4ExpertBatch{int(blockIdx.y), 1};
+        size_t plane = size_t(blockIdx.z) * capacity;
         codes += plane * k;
         scales += plane * (k / 128);
         partial += plane * n;
@@ -181,8 +181,9 @@ hipError_t shelf_hy4_wmma_experts(const int8_t *codes, const float *scales, cons
 
 hipError_t shelf_hy4_wmma_decode(const int8_t *codes, const float *scales, const Hy4ExpertProjection *matrices,
                                  const Hy4Route *routes, const int *count, float *partial, int capacity,
-                                 int k, int n, int projections, hipStream_t stream) {
-    expert_batch<true, true><<<dim3(n / 64, capacity, projections), 128, 0, stream>>>(
-        codes, scales, matrices, routes, nullptr, partial, k, n, count);
+                                 int k, int n, int projections, hipStream_t stream, const Hy4ExpertBatch *batches, const int *num_batches) {
+    const int groups = batches ? std::min(capacity, 512 + capacity / 16) : capacity;
+    expert_batch<true, true><<<dim3(n / 64, groups, projections), 128, 0, stream>>>(
+        codes, scales, matrices, routes, batches, partial, k, n, batches ? num_batches : count, capacity);
     return hipGetLastError();
 }

@@ -85,7 +85,12 @@ def build_compute_argv(opts) -> list[str]:
     if getattr(opts, "placement", None):
         argv = [opts.compute, "hy4", "serve", "--model-dir", opts.model_dir,
                 "--engram-dir", opts.engram_dir or opts.model_dir, "--placement", opts.placement,
-                "--max-seq-len", str(opts.max_seq_len), "--chunk", "1024"]
+                "--max-seq-len", str(opts.max_seq_len), "--chunk", "1024",
+                "--max-concurrent-requests", str(opts.max_concurrent_requests)]
+        if opts.expert_parallel > 1 or opts.tensor_parallel > 1:
+            argv += ["--expert-parallel", str(opts.expert_parallel)]
+        if opts.tensor_parallel > 1:
+            argv += ["--tensor-parallel", str(opts.tensor_parallel)]
         if opts.dfly_dir:
             argv += ["--dfly-dir", opts.dfly_dir]
         return argv
@@ -551,7 +556,7 @@ def parse_args(argv=None):
                              "count must match --tensor-parallel (default 0)")
     parser.add_argument("--tensor-parallel", type=int, default=1, choices=(1, 2),
                         help="tensor parallel size forwarded to compute (default 1)")
-    parser.add_argument("--expert-parallel", type=int, default=1, choices=(1, 2, 4),
+    parser.add_argument("--expert-parallel", type=int, default=1, choices=(1, 2, 3, 4),
                         help="expert parallel size forwarded to compute (default 1)")
     parser.add_argument("--pipeline-parallel", type=int, default=1, choices=(1, 2, 4),
                         help="pipeline parallel size forwarded to compute "
@@ -627,6 +632,8 @@ def parse_args(argv=None):
         parser.error(f"bad --device: {opts.device}")
     parallel_width = (opts.pipeline_parallel * opts.expert_parallel *
                       opts.tensor_parallel)
+    if opts.expert_parallel == 3 and not opts.placement:
+        parser.error("EP=3 には Hy4 の配置表が必要です")
     if len(devices) != parallel_width:
         parser.error(f"--device expects {parallel_width} entries for "
                      f"--pipeline-parallel {opts.pipeline_parallel} * "
@@ -704,9 +711,10 @@ async def _serve(opts) -> int:
     if is_hy4 != bool(opts.placement) or (not is_hy4 and (opts.dfly_dir or opts.engram_dir)):
         raise SystemExit("Hy4-flash には --placement と FP8 Engram が必要です")
     if is_hy4:
-        if opts.mtp or opts.dflash2_model_dir or opts.tensor_parallel != 1:
+        if opts.mtp or opts.dflash2_model_dir or opts.pipeline_parallel != 1:
             raise SystemExit("Hy4-flash は --dfly-dir に対応します")
-        opts.max_concurrent_requests = 1
+        if opts.max_concurrent_requests > 16:
+            raise SystemExit("Hy4-flash の同時リクエスト数は 16 以下にしてください")
         opts.max_num_batched_tokens = 1024
         opts.kv_cache_dtype = "octave"
         opts.prefix_cache = 0
@@ -797,7 +805,7 @@ async def _serve(opts) -> int:
         else:
             _log(f"PLaMo EXL3 chat warmup: {time.monotonic() - started:.2f}s")
 
-    if opts.dfly_dir:
+    if opts.dfly_dir and (opts.max_concurrent_requests == 1 or os.environ.get("SHELF_HY4_BATCH_DFLY") != "0"):
         speculative = {"method": "dfly2", "drafts": 5}
     elif opts.dflash2_model_dir:
         speculative = {"method": "dflash2", "drafts": opts.dflash2_drafts}
@@ -893,7 +901,7 @@ async def _serve(opts) -> int:
         _log(_banner("Reasoning:", "disabled"))
     _log("")
     if is_hy4:
-        _log(_banner("Hy4-flash:", f"DFly2={bool(opts.dfly_dir)}, SSE"))
+        _log(_banner("Hy4-flash:", f"DFly2={bool(speculative)}, SSE"))
     elif is_plamo:
         _log(_banner("Supported:",
                      "Chat Completions, Responses, SSE, translation, sampling, "

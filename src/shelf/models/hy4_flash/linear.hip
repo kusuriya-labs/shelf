@@ -9,7 +9,7 @@ hipError_t shelf_hy4_wmma_experts(const int8_t *, const float *, const Hy4Expert
                                   const Hy4ExpertBatch *, int, float *, bool, int, int, hipStream_t);
 hipError_t shelf_hy4_wmma_decode(const int8_t *codes, const float *scales, const Hy4ExpertProjection *matrices,
                                  const Hy4Route *routes, const int *count, float *partial, int capacity,
-                                 int k, int n, int projections, hipStream_t stream);
+                                 int k, int n, int projections, hipStream_t stream, const Hy4ExpertBatch *batches, const int *num_batches);
 namespace {
 using namespace shelf::kernel::exl3_detail;
 using namespace shelf::kernel::exl3_detail::mul24;
@@ -213,7 +213,7 @@ extern "C" hipError_t shelf_hy4_expert_linear(const uint16_t *x, const Hy4Expert
 
 hipError_t shelf_hy4_head(const uint16_t *x, const uint16_t *suh, const uint16_t *svh, const uint32_t *trellis,
                           int8_t *codes, float *scales, float *partial, float *logits, int rows, hipStream_t stream) {
-    if (!x || !suh || !svh || !trellis || !codes || !scales || !partial || !logits || rows < 1 || rows > 6)
+    if (!x || !suh || !svh || !trellis || !codes || !scales || !partial || !logits || rows < 1 || rows > 96)
         return hipErrorInvalidValue;
     rotate_input<<<dim3(24, rows), 32, 0, stream>>>(x, suh, codes, scales, 3072, 3072);
     auto status = hipGetLastError();
@@ -229,9 +229,9 @@ hipError_t shelf_hy4_head(const uint16_t *x, const uint16_t *suh, const uint16_t
 hipError_t shelf_hy4_expert_decode(const uint16_t *latent, const Hy4ExpertProjection *matrices,
                                    const Hy4Route *routes, const int *count, int capacity, int intermediate,
                                    int8_t *codes, float *scales, float *partial, uint16_t *output,
-                                   hipStream_t stream) {
+                                   hipStream_t stream, const Hy4ExpertBatch *batches, const int *num_batches) {
     if (!latent || !matrices || !routes || !count || !codes || !scales || !partial || !output ||
-        capacity < 1 || capacity > shelf::hy4::Hy4MoePlan::capacity(shelf::hy4::Hy4MoePlan::max_rows) ||
+        capacity < 1 || capacity > 16 * shelf::hy4::Hy4GroupedPlan::max_rows ||
         (intermediate != 768 && intermediate != 1536))
         return hipErrorInvalidValue;
     constexpr int width = 1536;
@@ -244,7 +244,7 @@ hipError_t shelf_hy4_expert_decode(const uint16_t *latent, const Hy4ExpertProjec
     if (status != hipSuccess)
         return status;
     status = shelf_hy4_wmma_decode(codes, scales, matrices, routes, count, partial, capacity,
-                                   width, intermediate, 2, stream);
+                                   width, intermediate, 2, stream, batches, num_batches);
     if (status != hipSuccess)
         return status;
     rotate_output_swiglu_quant<<<dim3(intermediate / 128, capacity), 32, 0, stream>>>(
@@ -253,7 +253,7 @@ hipError_t shelf_hy4_expert_decode(const uint16_t *latent, const Hy4ExpertProjec
     if (status != hipSuccess)
         return status;
     status = shelf_hy4_wmma_decode(codes, scales, matrices + 2, routes, count, partial, capacity,
-                                   intermediate, width, 1, stream);
+                                   intermediate, width, 1, stream, batches, num_batches);
     if (status != hipSuccess)
         return status;
     rotate_output<<<dim3(width / 128, capacity), 32, 0, stream>>>(

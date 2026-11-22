@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <shelf/io/token_ids.h>
 #include <cstdlib>
+#include <cerrno>
 #include <fstream>
 #include <sstream>
 #include <cmath>
@@ -22,6 +23,16 @@ using Json = nlohmann::json;
 
 void reply(const Json &event) {
     std::cout << event.dump() << std::endl;
+}
+
+void reply_stats(const Residency &gpu, size_t active, size_t queued, size_t draft_rounds) {
+    size_t free_slots = gpu.max_slots - active;
+    reply({{"event", "stats"}, {"max_concurrent_requests", gpu.max_slots}, {"slot_tokens", gpu.tokens},
+           {"active_requests", active}, {"queued_requests", queued}, {"batch_draft_rounds", draft_rounds},
+           {"kv", {{"page_tokens", gpu.tokens}, {"total_pages", gpu.max_slots}, {"used_pages", active},
+                   {"free_pages", free_slots}, {"capacity_tokens", gpu.max_slots * gpu.tokens},
+                   {"free_tokens", free_slots * gpu.tokens}, {"active_requests", active},
+                   {"queued_requests", queued}, {"banker_safe", true}, {"overcommit_pages", 0}}}});
 }
 
 std::array<unsigned long long, 2> page_faults() {
@@ -51,7 +62,7 @@ void serve(Residency &gpu, int chunk) {
         if (op == "ping")
             reply({{"event", "pong"}});
         else if (op == "stats")
-            reply({{"event", "stats"}});
+            reply_stats(gpu, active >= 0, 0, 0);
         else if (op == "shutdown") {
             stopping = true;
             reply({{"event", "shutdown"}});
@@ -119,6 +130,69 @@ void serve(Residency &gpu, int chunk) {
         }
     }
 }
+void serve_batch(Residency &gpu, int chunk) {
+    bool stopping = false, eof = false;
+    std::string pending;
+    Hy4BatchSession session(gpu,
+        [](int id, int token) { reply({{"event", "token"}, {"request_id", id}, {"token_id", token}}); },
+        [](int id, const std::vector<int> &ids, const char *reason) {
+            reply({{"event", "done"}, {"request_id", id}, {"generated_ids", ids}, {"finish_reason", reason}});
+        });
+    auto handle = [&](const std::string &line) {
+        int id = -1;
+        try {
+            auto request = Json::parse(line);
+            auto op = request.at("op").get<std::string>();
+            if (op == "ping") reply({{"event", "pong"}});
+            else if (op == "stats")
+                reply_stats(gpu, session.active(), session.queued(), session.draft_rounds());
+            else if (op == "shutdown") { stopping = true; reply({{"event", "shutdown"}}); }
+            else if (op == "cancel") session.cancel(request.at("request_id").get<int>());
+            else {
+                id = request.at("request_id").get<int>();
+                if (op != "generate" || request.value("grammar", false) || request.value("reasoning_budget_tokens", 0) ||
+                    request.value("min_p", 0.f) != 0)
+                    throw std::invalid_argument("Hy4 の生成経路が対応していない指定です");
+                Hy4Request item{id, request.at("input_ids").get<std::vector<int>>(),
+                    request.at("max_new_tokens").get<int>(),
+                    {chunk, request.value("temperature", 0.f), request.value("seed", uint64_t{}),
+                     request.value("top_k", 0), request.value("top_p", 1.f)}};
+                session.admit(std::move(item));
+            }
+        } catch (const std::invalid_argument &e) {
+            reply({{"event", "error"}, {"request_id", id}, {"code", "invalid_argument"}, {"message", e.what()}});
+        } catch (const Json::exception &e) {
+            reply({{"event", "error"}, {"request_id", id}, {"code", "invalid_argument"}, {"message", e.what()}});
+        }
+    };
+    while (!stopping && !eof) {
+        pollfd input{STDIN_FILENO, POLLIN, 0};
+        int ready = poll(&input, 1, session.active() || session.queued() ? 0 : -1);
+        if (ready < 0) {
+            if (errno == EINTR) continue;
+            throw std::runtime_error("標準入力の監視に失敗しました");
+        }
+        if (ready && (input.revents & (POLLIN | POLLHUP))) {
+            char buffer[16384];
+            auto count = read(STDIN_FILENO, buffer, sizeof(buffer));
+            if (count < 0) {
+                if (errno == EINTR) continue;
+                throw std::runtime_error("標準入力を読み取れません");
+            }
+            if (!count) eof = true;
+            else pending.append(buffer, size_t(count));
+            size_t end;
+            while ((end = pending.find('\n')) != std::string::npos) {
+                auto line = pending.substr(0, end);
+                pending.erase(0, end + 1);
+                handle(line);
+                if (stopping) break;
+            }
+        }
+        if (!stopping && !eof && (session.active() || session.queued())) session.step();
+    }
+}
+
 }
 int compute(int argc, char **argv) {
     try {
@@ -127,7 +201,8 @@ int compute(int argc, char **argv) {
                 "shelf-compute [hy4] [inspect|reserve|generate|serve] --model-dir PATH --engram-dir PATH --placement "
                 "PATH [--dfly-dir PATH] [--max-seq-len N] [--input-ids-file PATH] [--max-new-tokens N] "
                 "[--chunk N] [--temperature T] [--seed N] [--dump-logits PATH] [--repeats N] "
-                "[--expert-parallel N] [--tensor-parallel N]");
+                "[--expert-parallel N] [--tensor-parallel N] [--max-concurrent-requests N] [--batch-size N] "
+                "[--batch-input-files PATH1,PATH2,...] [--batch-max-new-tokens N1,N2,...]");
             return 0;
         }
         bool implicit = std::string_view(argv[1]).starts_with("--");
@@ -135,7 +210,8 @@ int compute(int argc, char **argv) {
         Path model, engram, draft, placement;
         size_t tokens = mode == "reserve" ? 2097152 : 4096;
         Path input, logits_file;
-        int count = 32, chunk = 64, repeats = 1, ep = 0, tp = 1;
+        int count = 32, chunk = 64, repeats = 1, ep = 0, tp = 1, batch_size = 1, max_concurrent = 1;
+        std::string batch_files, batch_counts;
         float temperature = 0;
         uint64_t seed = 0;
         for (int i = implicit ? 1 : 2; i < argc; i += 2) {
@@ -159,6 +235,10 @@ int compute(int argc, char **argv) {
                     throw std::runtime_error("乱数 seed が不正です");
             } else if (key == "--dump-logits")
                 logits_file = value;
+            else if (key == "--batch-input-files")
+                batch_files = value;
+            else if (key == "--batch-max-new-tokens")
+                batch_counts = value;
             else if (key == "--input-ids-file")
                 input = value;
             else if (key == "--expert-parallel" || key == "--tensor-parallel") {
@@ -166,8 +246,9 @@ int compute(int argc, char **argv) {
                 auto [p, err] = std::from_chars(value.data(), value.data() + value.size(), dest);
                 if (p != value.data() + value.size() || err != std::errc{} || dest < 1 || dest > 4)
                     throw std::runtime_error("EP / TP の値が不正です");
-            } else if (key == "--max-new-tokens" || key == "--chunk" || key == "--repeats") {
-                auto &dest = key == "--chunk" ? chunk : key == "--repeats" ? repeats : count;
+            } else if (key == "--max-new-tokens" || key == "--chunk" || key == "--repeats" || key == "--batch-size" || key == "--max-concurrent-requests") {
+                auto &dest = key == "--chunk" ? chunk : key == "--repeats" ? repeats :
+                             key == "--batch-size" ? batch_size : key == "--max-concurrent-requests" ? max_concurrent : count;
                 auto [p, err] = std::from_chars(value.data(), value.data() + value.size(), dest);
                 if (p != value.data() + value.size() || err != std::errc{} || dest <= 0)
                     throw std::runtime_error("長さが不正です");
@@ -185,6 +266,12 @@ int compute(int argc, char **argv) {
             throw std::runtime_error("未知の動作です");
         if (model.empty() || engram.empty() || placement.empty())
             throw std::runtime_error("重みと配置表が必要です");
+        if (batch_size > 16 || max_concurrent > 16 || (max_concurrent != 1 && mode != "serve" && mode != "reserve"))
+            throw std::invalid_argument("スロット数または動作の指定が不正です");
+        const int slots = mode == "generate" ? batch_size : max_concurrent;
+        auto topology = Residency::check_batch_topology(tp, slots);
+        if (!topology.ok())
+            throw std::runtime_error(topology.message());
         int visible = 0;
         if (hipGetDeviceCount(&visible) != hipSuccess || visible < 1 || visible > 4)
             throw std::runtime_error("R9700 を 1〜4 台指定してください");
@@ -204,16 +291,50 @@ int compute(int argc, char **argv) {
             if (populate && std::string_view(populate) == "1")
                 checkpoint.populate_engram(false);
         }
-        std::vector<int> ids;
+        std::vector<std::vector<int>> prompts;
+        std::vector<int> counts;
+        auto split = [](const std::string &value) {
+            std::vector<std::string> parts;
+            std::istringstream stream(value);
+            std::string part;
+            while (std::getline(stream, part, ',')) {
+                if (part.empty()) throw std::invalid_argument("バッチ指定に空の項目があります");
+                parts.push_back(part);
+            }
+            if (!value.empty() && value.back() == ',') throw std::invalid_argument("バッチ指定に空の項目があります");
+            return parts;
+        };
         if (mode == "generate") {
-            ids = io::read_input_ids(input.string());
-            if (std::any_of(ids.begin(), ids.end(), [](int id) { return id < 0 || id >= 120832; }))
-                throw std::runtime_error("入力 ID が範囲外です");
-            if (ids.empty() || ids.size() + count > tokens || tokens > 2097152 || chunk > max_prefill_chunk)
-                throw std::runtime_error("入力列または生成長が不正です");
-        }
+            if (!batch_files.empty()) {
+                for (const auto &file : split(batch_files)) prompts.push_back(io::read_input_ids(file));
+                if (batch_size != 1 && size_t(batch_size) != prompts.size())
+                    throw std::invalid_argument("バッチサイズと入力ファイル数が一致しません");
+                batch_size = int(prompts.size());
+                if (batch_size > 16) throw std::invalid_argument("バッチの上限は 16 です");
+            } else {
+                prompts.assign(batch_size, io::read_input_ids(input.string()));
+            }
+            counts.assign(batch_size, count);
+            if (!batch_counts.empty()) {
+                auto parts = split(batch_counts);
+                if (parts.size() != counts.size()) throw std::invalid_argument("バッチの生成長数が一致しません");
+                for (size_t i = 0; i < parts.size(); ++i) {
+                    auto [p, err] = std::from_chars(parts[i].data(), parts[i].data() + parts[i].size(), counts[i]);
+                    if (err != std::errc{} || p != parts[i].data() + parts[i].size() || counts[i] <= 0)
+                        throw std::invalid_argument("バッチの生成長が不正です");
+                }
+            }
+            if (batch_size > 1 && !logits_file.empty())
+                throw std::invalid_argument("バッチ生成では logits 出力を使用できません");
+            for (size_t i = 0; i < prompts.size(); ++i)
+                if (prompts[i].empty() || prompts[i].size() + counts[i] > tokens || tokens > 1048576 ||
+                    chunk > max_prefill_chunk || std::any_of(prompts[i].begin(), prompts[i].end(),
+                    [](int id) { return id < 0 || id >= 120832; }))
+                    throw std::runtime_error("入力列または生成長が不正です");
+        } else if (batch_size != 1 || !batch_files.empty() || !batch_counts.empty())
+            throw std::invalid_argument("バッチ指定は generate 専用です");
         for (;;) {
-            Residency gpu(checkpoint, tokens);
+            Residency gpu(checkpoint, tokens, mode == "generate" ? batch_size : max_concurrent);
             try {
                 auto status = gpu.reserve();
                 if (!status.ok())
@@ -230,11 +351,22 @@ int compute(int argc, char **argv) {
                     if (auto profile = std::getenv("SHELF_HY4_PROFILE_EP");
                         profile && std::string_view(profile) == "1")
                         checkpoint.report_engram_residency("ready");
-                    serve(gpu, chunk);
+                    if (max_concurrent == 1) serve(gpu, chunk);
+                    else serve_batch(gpu, chunk);
                 } else if (mode == "generate") {
                     gpu.upload();
                     for (int pass = 0; pass < repeats; ++pass) {
-                        auto result = generate(gpu, ids, count, chunk, temperature, seed, pass ? Path{} : logits_file);
+                        if (batch_size > 1) {
+                            auto results = generate_batch(gpu, prompts, counts, {chunk, temperature, seed});
+                            for (size_t slot = 0; slot < results.size(); ++slot) {
+                                printf("GENERATED_IDS[%zu]=", slot);
+                                for (size_t i = 0; i < results[slot].size(); ++i)
+                                    printf("%s%d", i ? "," : "", results[slot][i]);
+                                puts("");
+                            }
+                            continue;
+                        }
+                        auto result = generate(gpu, prompts.front(), counts.front(), chunk, temperature, seed, pass ? Path{} : logits_file);
                         printf("GENERATED_IDS=");
                         for (size_t i = 0; i < result.size(); ++i)
                             printf("%s%d", i ? "," : "", result[i]);

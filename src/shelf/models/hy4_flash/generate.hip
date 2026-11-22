@@ -12,6 +12,7 @@
 #include <numeric>
 #include <shelf/models/hy4_flash/target.h>
 #include <exception>
+#include <deque>
 
 namespace shelf::hy4 {
 namespace {
@@ -198,7 +199,7 @@ Target::Target(Residency &gpu, float temp, uint64_t rng, int k, float p, int ran
         gpu.attention_ms = gpu.ffn_ms = gpu.transfer_ms = 0;
         gpu.transfer_bytes = {};
     }
-    state = op.mat(6, 3072);
+    state = op.mat(gpu.batch_draft ? 6 * gpu.max_slots : 6, 3072);
     base = op.arena.cursor;
     bool room = gpu.graph_room && !gpu.expert_begin[rank];
     target_graph = graph_topology(gpu.ep_size, gpu.tp_size, gpu.push, room, gpu.peer) && graph_enabled("SHELF_HY4_GRAPH");
@@ -275,6 +276,12 @@ Mat Target::layers(const std::vector<int> &ids, bool verify, bool need_head) {
         }
         auto it = std::find(sources.begin(), sources.end(), layer);
         if (!op.capture && it != sources.end()) {
+            if (op.slot_draft && need_head && start + ids.size() > 2048) {
+                checked(hipMemcpyAsync(op.gpu.sparse_top_slot(layer, op.slot),
+                                       op.gpu.sparse_top[op.rank][layer] + (ids.size() - 1) * 511,
+                                       511 * sizeof(int), hipMemcpyDeviceToDevice, op.stream));
+                op.gpu.sparse_last[op.slot][layer] = 0;
+            }
             if (!verify)
                 selection = Selection{std::move(selection.back())};
             tapped[it - sources.begin()] = std::move(selection);
@@ -286,7 +293,7 @@ Mat Target::layers(const std::vector<int> &ids, bool verify, bool need_head) {
         x = x.row(x.rows - 1);
     float *head_post;
     Mat h = op.collapse_norm(x, "model.hc_head.hc_head_", head_post, "model.norm.weight");
-    checked(hipMemcpyAsync(state.p, h.p, h.bytes(), hipMemcpyDeviceToDevice, op.stream));
+    checked(hipMemcpyAsync(state.row(op.gpu.batch_draft ? 6 * op.slot : 0).p, h.p, h.bytes(), hipMemcpyDeviceToDevice, op.stream));
     return h;
 }
 std::vector<int> Target::forward(const std::vector<int> &ids, bool verify, bool need_head, const Path &dump) {
@@ -691,4 +698,399 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
                 gpu.transfer_ms - stats.pp_transfer, stats.head - stats.pp_head, stats.draft);
     return lane[0].generated;
 }
+namespace {
+struct BatchLane {
+    int slot, id, limit;
+    std::vector<int> &history;
+    std::vector<int> &generated;
+    const Hy4BatchOptions &options;
+    float *target_probs = nullptr;
+    float *draft_probs = nullptr;
+};
+struct BatchStats {
+    size_t rounds = 0, accepted = 0, tokens = 0;
+};
+struct BatchLayout {
+    std::vector<int> slots, positions;
+    int *device_slots, *device_positions;
+    BatchLayout(Ops &op, const std::vector<BatchLane> &lanes, int rows) {
+        for (auto &lane : lanes)
+            for (int i = 0; i < rows; ++i) {
+                slots.push_back(lane.slot);
+                positions.push_back(int(lane.history.size()) + i);
+            }
+        device_slots = op.indices(slots);
+        device_positions = op.indices(positions);
+    }
+};
+__global__ void gather_block_rows(Mat src, Mat out, const int *slots, int offset) {
+    int r = blockIdx.y, c = blockIdx.x * 256 + threadIdx.x;
+    int block = slots ? slots[r * 6] : r;
+    out.p[r * 3072 + c] = src.p[(block * 6 + offset) * 3072 + c];
+}
+__global__ void fuse_block_anchors(Mat x, Mat fusion, const uint16_t *gate) {
+    int r = blockIdx.y, c = blockIdx.x * 256 + threadIdx.x;
+    auto &value = x.p[r * 6 * 3072 + c];
+    value = f32_to_bf16_rne_device(bf16_bits_to_f32(value) +
+                                   bf16_bits_to_f32(fusion.p[r * 3072 + c]) * bf16_bits_to_f32(gate[c]));
+}
+void sample_batch(Ops &op, const std::vector<BatchLane> &lanes, float *logits, int *ids, int rows, int stage) {
+    if (std::all_of(lanes.begin(), lanes.end(), [](const BatchLane &lane) { return lane.options.temperature == 0; })) {
+        best_ids<<<lanes.size() * rows, 256, 0, op.stream>>>(logits, ids, 0, 0, 0);
+        checked(hipGetLastError());
+        return;
+    }
+    for (size_t r = 0; r < lanes.size(); ++r) {
+        const auto &lane = lanes[r];
+        const auto &o = lane.options;
+        float *row = logits + r * rows * 120832;
+        if (o.temperature > 0 && o.top_k) {
+            truncate_logits<<<rows, 256, 0, op.stream>>>(row, o.top_k, o.top_p, o.temperature);
+            checked(hipGetLastError());
+        }
+        if (lane.target_probs) {
+            auto probs = stage ? lane.draft_probs + (stage - 1) * 120832 : lane.target_probs;
+            probabilities<<<rows, 256, 0, op.stream>>>(row, probs, o.temperature);
+            checked(hipGetLastError());
+        }
+        best_ids<<<rows, 256, 0, op.stream>>>(row, ids + r * rows, int(lane.history.size()) + (stage ? stage : 1),
+                                             o.seed ^ (stage ? 0x735a7ec51b09ull : 0), o.temperature);
+        checked(hipGetLastError());
+    }
+}
+std::vector<int> propose_batch(Target &target, const std::vector<BatchLane> &lanes, const BatchLayout &layout) {
+    Ops &op = target.op;
+    const int batch = lanes.size();
+    std::vector<int> ids(batch * 6, 120009), anchors;
+    for (int r = 0; r < batch; ++r) {
+        ids[r * 6] = lanes[r].generated.back();
+        anchors.push_back(ids[r * 6]);
+    }
+    Mat x = op.embed(ids, false);
+    const std::string p = "model.dfly_layers.";
+    auto gather = [&](Mat src, const int *slots, int offset) {
+        Mat out = op.mat(batch, 3072);
+        gather_block_rows<<<dim3(12, batch), 256, 0, op.stream>>>(src, out, slots, offset);
+        checked(hipGetLastError());
+        return out;
+    };
+    size_t mark = op.arena.cursor;
+    Mat e = op.norm(gather(x, nullptr, 0), p + "mtp_fusion.enorm.weight");
+    Mat h = op.norm(gather(target.state, layout.device_slots, 0), p + "mtp_fusion.hnorm.weight");
+    Mat fused = op.linear(p + "mtp_fusion.eh_proj", op.join(e, h));
+    fuse_block_anchors<<<dim3(12, batch), 256, 0, op.stream>>>(
+        x, fused, static_cast<const uint16_t *>(op.param(p + "mtp_fusion.gate").p));
+    checked(hipGetLastError());
+    op.arena.cursor = mark;
+    for (int i = 0; i < 5; ++i) {
+        std::string prefix = p + std::to_string(i) + ".";
+        Mat a = op.norm(x, prefix + "input_layernorm.weight");
+        Mat y = op.add(x, attention_batch(op, prefix, sources[i], layout.slots, layout.positions,
+                                         layout.device_slots, layout.device_positions, a, 6, true));
+        Mat f = feedforward(op, prefix + "mlp", op.norm(y, prefix + "post_attention_layernorm.weight"));
+        op.add_into(y, f, x);
+        op.arena.cursor = mark;
+    }
+    x = op.norm(x, p + "final_norm.weight");
+    const std::string correction = p + "hidden_correction";
+    auto device = static_cast<int *>(op.arena.next(5 * batch * sizeof(int)));
+    int *previous = op.indices(anchors);
+    mark = op.arena.cursor;
+    for (int i = 1; i <= 5; ++i) {
+        Mat hidden = gather(x, nullptr, i);
+        Mat q = op.norm(hidden, correction + ".hidden_norm.weight");
+        Mat embedding = op.embed_device(previous, batch, false);
+        Mat k = op.norm(embedding, correction + ".embed_norm.weight");
+        Mat corrected = op.add(hidden, feedforward(op, correction, op.join(q, k)));
+        previous = device + (i - 1) * batch;
+        sample_batch(op, lanes, target.head_logits(corrected), previous, 1, i);
+        op.arena.cursor = mark;
+    }
+    std::vector<int> candidates(5 * batch);
+    op.copy(candidates.data(), device, candidates.size() * sizeof(int), hipMemcpyDeviceToHost);
+    if (std::find(candidates.begin(), candidates.end(), -1) != candidates.end())
+        throw std::runtime_error("DFly2 に有効な出力 logit がありません");
+    for (int r = 0; r < batch; ++r)
+        for (int i = 0; i < 5; ++i)
+            ids[r * 6 + i + 1] = candidates[i * batch + r];
+    return ids;
+}
+Mat verify_batch(Target &target, const std::vector<BatchLane> &lanes, const BatchLayout &layout,
+                 const std::vector<int> &ids, int rows) {
+    Ops &op = target.op;
+    auto &gpu = op.gpu;
+    auto now = std::chrono::steady_clock::now;
+    const auto &[slots, positions, device_slots, device_positions] = layout;
+    std::vector<const std::vector<int> *> priors;
+    for (auto &lane : lanes) priors.push_back(&lane.history);
+    Mat x = op.embed(ids, true);
+    size_t mark = op.arena.cursor;
+    for (int layer = 0; layer < 42; ++layer) {
+        auto start = now();
+        if (gpu.expert_begin[0]) checked(hipStreamSynchronize(op.stream));
+        auto p = "model.layers." + std::to_string(layer) + ".";
+        if (layer % 10 == 1 && layer <= 31) engram_batch(op, layer, x, priors, ids);
+        float *post;
+        Mat a = op.collapse_norm(x, p + "hc_attn_layer.hc_pre.hc_", post, p + "input_layernorm.weight");
+        a = attention_batch(op, p, layer, slots, positions, device_slots, device_positions, a, rows);
+        op.expand(x, a, post);
+        op.arena.cursor = mark;
+        if (gpu.expert_begin[0]) {
+            checked(hipStreamSynchronize(op.stream));
+            auto end = now();
+            gpu.attention_ms += std::chrono::duration<double, std::milli>(end - start).count();
+            start = end;
+        }
+        Mat f = op.collapse_norm(x, p + "hc_mlp_layer.hc_pre.hc_", post, p + "post_attention_layernorm.weight");
+        f = layer == 0 ? op.norm(feedforward(op, p + "mlp", f), p + "mlp.post_fc2_norm.weight")
+                       : moe(op, layer, f);
+        op.expand(x, f, post);
+        op.arena.cursor = mark;
+        if (gpu.expert_begin[0]) {
+            checked(hipStreamSynchronize(op.stream));
+            gpu.ffn_ms += std::chrono::duration<double, std::milli>(now() - start).count();
+        }
+    }
+    float *post;
+    return op.collapse_norm(x, "model.hc_head.hc_head_", post, "model.norm.weight");
+}
+void decode_batch(Target &target, std::vector<BatchLane> &lanes, BatchStats &stats,
+                  const std::function<void(int, int)> &emit) {
+    Ops &op = target.op;
+    auto &gpu = op.gpu;
+    op.batch_decode = true;
+    op.arena.cursor = target.base;
+    bool speculative = gpu.batch_draft && lanes.size() <= Hy4GroupedPlan::max_rows / 6 &&
+        std::all_of(lanes.begin(), lanes.end(), [&](const BatchLane &lane) {
+            return lane.history.size() + 6 <= gpu.tokens && lane.generated.size() + 1 < size_t(lane.limit);
+        });
+    int rows = speculative ? 6 : 1;
+    BatchLayout layout(op, lanes, rows);
+    std::vector<int> ids;
+    if (speculative) {
+        for (auto &lane : lanes)
+            if (lane.options.temperature > 0) {
+                lane.target_probs = static_cast<float *>(op.arena.next(6 * 120832 * sizeof(float)));
+                lane.draft_probs = static_cast<float *>(op.arena.next(5 * 120832 * sizeof(float)));
+            }
+        size_t mark = op.arena.cursor;
+        ids = propose_batch(target, lanes, layout);
+        op.arena.cursor = mark;
+    } else {
+        for (auto &lane : lanes) ids.push_back(lane.generated.back());
+    }
+    Mat h = verify_batch(target, lanes, layout, ids, rows);
+    auto device = static_cast<int *>(op.arena.next(ids.size() * sizeof(int)));
+    sample_batch(op, lanes, target.head_logits(h), device, rows, 0);
+    std::vector<int> next(ids.size());
+    op.copy(next.data(), device, next.size() * sizeof(int), hipMemcpyDeviceToHost);
+    if (std::find(next.begin(), next.end(), -1) != next.end())
+        throw std::runtime_error("有効な出力 logit がありません");
+    for (size_t r = 0; r < lanes.size(); ++r) {
+        auto &lane = lanes[r];
+        int first = r * rows, keep = 1;
+        std::vector<int> actual(next.begin() + first, next.begin() + first + rows);
+        if (speculative) {
+            keep = verify_speculation(op, lane.target_probs, lane.draft_probs, int(lane.history.size()) + 1,
+                                      lane.options.seed, {ids.begin() + first + 1, ids.begin() + first + rows}, actual);
+            ++stats.rounds;
+            stats.accepted += keep - 1;
+        }
+        keep = std::min(keep, lane.limit - int(lane.generated.size()));
+        auto stop = std::find(actual.begin(), actual.begin() + keep, 120025);
+        if (stop != actual.begin() + keep) keep = int(stop - actual.begin()) + 1;
+        if (gpu.batch_draft) {
+            Mat state = target.state.row(lane.slot * 6, rows);
+            checked(hipMemcpyAsync(state.p, h.row(first).p, state.bytes(), hipMemcpyDeviceToDevice, op.stream));
+            if (keep > 1)
+                checked(hipMemcpyAsync(state.p, state.row(keep - 1).p, state.row(0).bytes(),
+                                       hipMemcpyDeviceToDevice, op.stream));
+            for (int layer : sources) gpu.sparse_last[lane.slot][layer] = keep - 1;
+        }
+        lane.history.insert(lane.history.end(), ids.begin() + first, ids.begin() + first + keep);
+        lane.generated.insert(lane.generated.end(), actual.begin(), actual.begin() + keep);
+        stats.tokens += keep;
+        if (emit)
+            for (int i = 0; i < keep; ++i) emit(lane.id, actual[i]);
+    }
+}
+}
+std::vector<std::vector<int>> generate_batch(Residency &gpu, const std::vector<std::vector<int>> &prompts,
+                                              const std::vector<int> &counts, const Hy4BatchOptions &options,
+                                              const std::function<void(int, int)> &emit) {
+    const size_t batch = prompts.size();
+    if (batch < 1 || batch > size_t(gpu.max_slots) || counts.size() != batch || options.chunk < 1 ||
+        options.chunk > max_prefill_chunk || !std::isfinite(options.temperature) || options.temperature < 0 ||
+        options.top_k < 0 || options.top_k > 64 || !(options.top_p > 0 && options.top_p <= 1) ||
+        (options.temperature > 0 && options.top_p < 1 && !options.top_k))
+        throw std::invalid_argument("生成バッチの指定が不正です");
+    for (size_t s = 0; s < batch; ++s)
+        if (prompts[s].empty() || counts[s] <= 0 || prompts[s].size() + counts[s] > gpu.tokens ||
+            std::any_of(prompts[s].begin(), prompts[s].end(), [](int id) { return id < 0 || id >= 120832; }))
+            throw std::invalid_argument("入力列または生成長が不正です");
+    if (batch == 1) {
+        auto output = generate(gpu, prompts.front(), counts.front(), options.chunk, options.temperature,
+                               options.seed, {}, options.top_k, options.top_p, [&](int id) { if (emit) emit(0, id); });
+        return {std::move(output)};
+    }
+    auto now = std::chrono::steady_clock::now;
+    auto begin = now();
+    Target target(gpu, options.temperature, options.seed, options.top_k, options.top_p);
+    target.op.slot_draft = gpu.batch_draft;
+    std::vector<std::vector<int>> histories(batch), generated(batch);
+    for (size_t s = 0; s < batch; ++s) {
+        target.history.clear();
+        target.op.slot = int(s);
+        int next = 0;
+        for (size_t first = 0; first < prompts[s].size(); first += options.chunk) {
+            auto end = std::min(first + size_t(options.chunk), prompts[s].size());
+            auto result = target.forward({prompts[s].begin() + first, prompts[s].begin() + end}, false,
+                                         end == prompts[s].size());
+            if (!result.empty()) next = result.back();
+        }
+        histories[s] = target.history;
+        generated[s].push_back(next);
+        if (emit) emit(int(s), next);
+    }
+    target.op.slot = 0;
+    auto prefill = now();
+    BatchStats stats;
+    for (;;) {
+        std::vector<BatchLane> lanes;
+        for (size_t s = 0; s < batch; ++s)
+            if (generated[s].size() < size_t(counts[s]) && generated[s].back() != 120025)
+                lanes.push_back({int(s), int(s), counts[s], histories[s], generated[s], options});
+        if (lanes.empty()) break;
+        decode_batch(target, lanes, stats, emit);
+    }
+    size_t decode_tokens = stats.tokens;
+    fprintf(stderr, "batch_draft_rounds=%zu batch_accepted=%zu\n", stats.rounds, stats.accepted);
+    auto end = now();
+    double pp = std::chrono::duration<double>(prefill - begin).count();
+    double tg = std::chrono::duration<double>(end - prefill).count();
+    fprintf(stderr, "batch_prefill_s=%.6f batch_decode_s=%.6f batch_decode_tokens=%zu batch_agg_tok_s=%.6f batch_slot_tok_s=%.6f\n",
+            pp, tg, decode_tokens, tg ? decode_tokens / tg : 0, tg ? decode_tokens / tg / batch : 0);
+    return generated;
+}
+
+struct Hy4BatchSession::Impl {
+    struct State {
+        Hy4Request request;
+        std::vector<int> history, generated;
+        size_t prefetched = 0;
+    };
+    Residency &gpu;
+    std::optional<Target> target;
+    Emit emit;
+    Done done;
+    std::vector<std::optional<State>> states;
+    std::deque<Hy4Request> waiting;
+    BatchStats stats;
+    Impl(Residency &gpu, Emit emit, Done done)
+        : gpu(gpu), emit(std::move(emit)), done(std::move(done)), states(gpu.max_slots) {
+        if (gpu.tp_size > 1)
+            throw std::invalid_argument("バッチセッションは TP=1 で使用してください");
+    }
+    void fill() {
+        for (auto &state : states) {
+            if (waiting.empty()) break;
+            if (!state) {
+                state.emplace();
+                state->request = std::move(waiting.front());
+                waiting.pop_front();
+            }
+        }
+    }
+    void finish(int slot, const char *reason) {
+        auto state = std::move(*states[slot]);
+        states[slot].reset();
+        done(state.request.id, state.generated, reason);
+    }
+    void step() {
+        fill();
+        if (!target) {
+            if (std::none_of(states.begin(), states.end(), [](const auto &state) { return bool(state); }))
+                return;
+            target.emplace(gpu, 0, 0, 0, 1);
+            target->op.slot_draft = gpu.batch_draft;
+        }
+        for (size_t s = 0; s < states.size(); ++s) {
+            if (!states[s] || states[s]->prefetched == states[s]->request.input_ids.size()) continue;
+            auto &state = *states[s];
+            auto &request = state.request;
+            auto end = std::min(state.prefetched + size_t(request.options.chunk), request.input_ids.size());
+            target->op.batch_decode = false;
+            target->op.slot = int(s);
+            target->history = std::move(state.history);
+            target->temperature = request.options.temperature;
+            target->seed = request.options.seed;
+            target->top_k = request.options.top_k;
+            target->top_p = request.options.top_p;
+            auto result = target->forward({request.input_ids.begin() + state.prefetched, request.input_ids.begin() + end},
+                                         false, end == request.input_ids.size());
+            state.history = std::move(target->history);
+            state.prefetched = end;
+            if (!result.empty()) {
+                state.generated.push_back(result.back());
+                emit(request.id, result.back());
+                if (result.back() == 120025 || state.generated.size() == size_t(request.count))
+                    finish(int(s), result.back() == 120025 ? "stop" : "length");
+            }
+            return;
+        }
+        std::vector<BatchLane> lanes;
+        for (size_t s = 0; s < states.size(); ++s) if (states[s]) {
+            auto &state = *states[s];
+            lanes.push_back({int(s), state.request.id, state.request.count, state.history, state.generated,
+                             state.request.options});
+        }
+        if (lanes.empty()) return;
+        decode_batch(*target, lanes, stats, emit);
+        for (auto &lane : lanes) {
+            int slot = lane.slot;
+            auto &state = *states[slot];
+            if (state.generated.back() == 120025 || state.generated.size() == size_t(state.request.count))
+                finish(slot, state.generated.back() == 120025 ? "stop" : "length");
+        }
+    }
+};
+Hy4BatchSession::Hy4BatchSession(Residency &gpu, Emit emit, Done done)
+    : impl(std::make_unique<Impl>(gpu, std::move(emit), std::move(done))) {}
+Hy4BatchSession::~Hy4BatchSession() = default;
+void Hy4BatchSession::admit(Hy4Request request) {
+    auto &o = request.options;
+    if (request.input_ids.empty() || request.count <= 0 || request.input_ids.size() + request.count > impl->gpu.tokens ||
+        o.chunk < 1 || o.chunk > max_prefill_chunk || !std::isfinite(o.temperature) || o.temperature < 0 ||
+        o.top_k < 0 || o.top_k > 64 || !(o.top_p > 0 && o.top_p <= 1) ||
+        (o.temperature > 0 && o.top_p < 1 && !o.top_k) ||
+        std::any_of(request.input_ids.begin(), request.input_ids.end(), [](int id) { return id < 0 || id >= 120832; }))
+        throw std::invalid_argument("入力列または生成パラメータが不正です");
+    for (const auto &state : impl->states)
+        if (state && state->request.id == request.id) throw std::invalid_argument("request_id が重複しています");
+    for (const auto &queued : impl->waiting)
+        if (queued.id == request.id) throw std::invalid_argument("request_id が重複しています");
+    impl->waiting.push_back(std::move(request));
+    impl->fill();
+}
+void Hy4BatchSession::cancel(int id) {
+    for (size_t s = 0; s < impl->states.size(); ++s)
+        if (impl->states[s] && impl->states[s]->request.id == id) {
+            impl->finish(int(s), "cancelled");
+            impl->fill();
+            return;
+        }
+    for (auto it = impl->waiting.begin(); it != impl->waiting.end(); ++it)
+        if (it->id == id) {
+            impl->waiting.erase(it);
+            impl->done(id, {}, "cancelled");
+            return;
+        }
+}
+void Hy4BatchSession::step() { impl->step(); }
+size_t Hy4BatchSession::active() const {
+    return std::count_if(impl->states.begin(), impl->states.end(), [](const auto &s) { return bool(s); });
+}
+size_t Hy4BatchSession::draft_rounds() const { return impl->stats.rounds; }
+size_t Hy4BatchSession::queued() const { return impl->waiting.size(); }
+
 }

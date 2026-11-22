@@ -30,6 +30,45 @@ int main() {
             peer[ranks - 1][ranks - 2] = false;
             check(!graph_topology(ranks, 1, true, true, peer), "peer access 不足時の Graph が有効です");
         }
+        for (int rows : {1, 6, 12, 16, 32, 48, 64, 96}) {
+            std::array<int, 512> owners;
+            for (int e = 0; e < 512; ++e) owners[e] = e % ranks;
+            std::vector<Hy4Route> picks;
+            unsigned masks[3][512]{};
+            for (int row = 0; row < rows; ++row)
+                for (int j = 15; j >= 0; --j) {
+                    int e = (row % 5 + j) % 512;
+                    picks.push_back({row, e, float(row + j)});
+                    masks[row / 32][e] |= 1u << (row % 32);
+                }
+            auto ordered = picks;
+            std::array<std::vector<Hy4Route>, 4> routes;
+            std::array<std::vector<int>, 4> offsets;
+            partition_routes(ordered, rows, owners, ranks, routes, offsets);
+            for (int r = 0; r < ranks; ++r) {
+                Hy4GroupedPlan plan{};
+                std::copy(offsets[r].begin(), offsets[r].end(), plan.offsets);
+                std::array<int, 512> starts{};
+                int cursor = 0;
+                for (int e = 0; e < 512; ++e) {
+                    starts[e] = cursor;
+                    if (owners[e] == r)
+                        for (auto &word : masks) cursor += __builtin_popcount(word[e]);
+                }
+                for (auto pick : picks)
+                    if (owners[pick.expert] == r)
+                        plan.place(pick, picks.data() + pick.row * 16, owners.data(), masks, starts[pick.expert]);
+                std::vector<int> inverse;
+                std::vector<Hy4ExpertBatch> batches;
+                group_routes(routes[r], inverse, batches);
+                check(std::equal(inverse.begin(), inverse.end(), plan.inverse), "重み付き和の順序が異なります");
+                for (size_t i = 0; i < routes[r].size(); ++i) {
+                    auto actual = plan.routes[i], expected = routes[r][i];
+                    check(actual.expert == expected.expert && actual.row == expected.row && actual.weight == expected.weight,
+                          "expert のグループ化が CPU 計画と異なります");
+                }
+            }
+        }
         for (int rows = 1; rows <= Hy4MoePlan::max_rows; ++rows) {
             check(Hy4MoePlan::supports(rows), "有効な行数が拒否されました");
             std::vector<Hy4Route> picks;

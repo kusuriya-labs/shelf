@@ -38,6 +38,12 @@ struct Region {
 struct Residency {
     Checkpoint &model;
     size_t tokens;
+    int max_slots;
+    bool batch_draft;
+    std::vector<std::array<int, 42>> sparse_last;
+    int *sparse_top_slot(int layer, int slot) const {
+        return sparse_top[0][layer] + (max_prefill_chunk + slot * 6) * 511;
+    }
     int ranks = 0;
     int ep_size = 1;
     int tp_size = 1;
@@ -52,13 +58,14 @@ struct Residency {
     std::array<std::map<std::string, void *>, 4> folded;
     std::array<std::array<uint8_t *, 42>, 4> cache{};
     std::array<std::array<uint16_t *, 42>, 4> index_keys{};
-    explicit Residency(Checkpoint &model, size_t tokens);
+    explicit Residency(Checkpoint &model, size_t tokens, int slots = 1);
     ~Residency() noexcept;
     Residency(const Residency &) = delete;
     Residency &operator=(const Residency &) = delete;
     std::array<hipEvent_t, 4> expert_begin{}, expert_end{};
     std::array<double, 4> expert_ms{};
     double attention_ms = 0, ffn_ms = 0, transfer_ms = 0;
+    static Status check_batch_topology(int tp_size, int slots);
     Status reserve();
     void upload();
     void upload_experts(int rank, int layer);
@@ -71,6 +78,10 @@ struct Residency {
     void reserve_experts(int rank, Region &buffer);
     void collect_route_counts(int rank);
     static constexpr size_t matrix_bytes = 41 * 512 * 3 * sizeof(Hy4ExpertProjection);
+    size_t transfer_packet_bytes() const {
+        return max_slots == 1 ? Hy4MoePlan::packet_bytes(Hy4MoePlan::max_rows)
+                              : Hy4GroupedPlan::packet_bytes(max_slots * (batch_draft ? 6 : 1));
+    }
     void transfer(void *dst, int destination, const void *src, int source, size_t bytes);
     std::array<std::array<bool, 4>, 4> peer{}, owns_peer{};
     bool push = false;

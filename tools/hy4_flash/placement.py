@@ -8,9 +8,13 @@ GIB = 1 << 30
 GRAPH_HEADROOM = 256 << 20
 
 
-def cache_bytes(tokens):
+def cache_bytes(tokens, slots=1):
     sliding = min(tokens, 518)
-    return 294 * (30 * sliding + 12 * tokens), 12 * (tokens // 4 + 12) * 128 * 2
+    def align(size):
+        return (size + 255) & ~255
+
+    return (30 * align(294 * slots * sliding) + 12 * align(294 * slots * tokens),
+            12 * align(slots * (tokens // 4 + 12) * 256))
 
 
 def routing_counts(work):
@@ -99,6 +103,7 @@ def main():
     p.add_argument("--capacity", type=float, nargs="+", default=[32,32,32])
     p.add_argument("--workspace", type=float, nargs="+", default=None)
     p.add_argument("--tokens", type=int, default=2097152)
+    p.add_argument("--max-concurrent-requests", type=int, default=1)
     p.add_argument("--tensor-parallel", type=int, default=1)
     p.add_argument("--safety-gib", type=float, default=0.5)
     p.add_argument("--output", type=Path)
@@ -107,35 +112,40 @@ def main():
         raise ValueError("KV の予約長が範囲外です")
     if not 1 <= args.tensor_parallel <= 4:
         raise ValueError("TP の値が範囲外です")
-    args.workspace = args.workspace or [2] + [0.5] * (len(args.capacity) - 1)
+    if not 1 <= args.max_concurrent_requests <= 16 or (args.tensor_parallel > 1 and args.max_concurrent_requests != 1):
+        raise ValueError("スロット数は TP=1 で 1〜16、TP 実行では 1 です")
+    if args.workspace is None:
+        args.workspace = [1] * len(args.capacity) if args.tensor_parallel > 1 else [2] + [0.5] * (len(args.capacity) - 1)
     if len(args.workspace) != len(args.capacity):
         raise ValueError("作業域と GPU の台数が一致しません")
     fixed, experts = checkpoint_sizes(args.model)
     if len(experts) != 41 * 512 or any(size != EXPERT_BYTES for size in experts.values()):
         raise ValueError("4 bpw expert の数または tensor サイズが不正です")
     draft = checkpoint_sizes(args.draft)[0] if args.draft else 0
-    kv, indexer = cache_bytes(args.tokens)
+    kv, indexer = cache_bytes(args.tokens, args.max_concurrent_requests)
     if args.safety_gib < 0:
         raise ValueError("安全余裕が不正です")
     config = json.loads((args.model / "config.json").read_bytes())
     storage = config["quantization_config"]["linear_storage"]
     folded = sum(meta["original_shape"][1] * 512 * 2 for name, meta in storage.items()
                  if name.endswith(".self_attn.kv_b_proj.weight"))
-    matrix_bytes = 41 * 512 * 3 * 32
+    matrix_bytes = 41 * 512 * 3 * 40
     expert_bytes = EXPERT_BYTES // args.tensor_parallel
-    graph_bytes = GRAPH_HEADROOM if args.tensor_parallel == 1 else 0
+    graph_bytes = GRAPH_HEADROOM if args.tensor_parallel == 1 and args.max_concurrent_requests == 1 else 0
     base = [int(w * GIB) + matrix_bytes + graph_bytes for w in args.workspace]
+    routing_bytes = 41 * 512 * 4 + 256
     if args.tensor_parallel > 1:
-        local = fixed // args.tensor_parallel + draft + kv + indexer + folded // args.tensor_parallel
+        collective_bytes = 1024 * (3072 + (1536 if len(args.capacity) > 1 else 0)) * 2
+        local = routing_bytes + collective_bytes + fixed // args.tensor_parallel + draft + kv + indexer + folded // args.tensor_parallel
         base = [value + local for value in base]
     else:
-        base[0] += fixed + draft + kv + indexer + folded
+        base[0] += routing_bytes + fixed + draft + kv + indexer + folded
     capacities = [int(c * GIB) - used - int(args.safety_gib * GIB)
                   for c, used in zip(args.capacity, base)]
     owners = assign(capacities, [1] * len(capacities), routing_counts(args.work), base, expert_bytes)
     rank_experts = [sum(row.count(r) for row in owners) for r in range(len(capacities))]
     print(json.dumps(dict(fixed_bytes=fixed, draft_bytes=draft, kv_bytes=kv, index_bytes=indexer,
-                          folded_bytes=folded, matrix_bytes=matrix_bytes, graph_bytes_per_rank=graph_bytes, safety_gib=args.safety_gib,
+                          folded_bytes=folded, routing_bytes=routing_bytes, matrix_bytes=matrix_bytes, graph_bytes_per_rank=graph_bytes, safety_gib=args.safety_gib,
                           rank_experts=rank_experts, expert_bytes=expert_bytes,
                           peak_estimate=[b+count*expert_bytes for b,count in zip(base, rank_experts)],
                           free_after=[b-count*expert_bytes for b,count in zip(capacities, rank_experts)])))

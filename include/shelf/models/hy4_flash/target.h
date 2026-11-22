@@ -21,9 +21,10 @@ struct Target {
     std::vector<int> propose(int anchor);
     void accept(int keep, int submitted);
 
+    float *head_logits(Mat hidden);
+
   private:
     bool target_graph = false, draft_graph = false;
-    float *head_logits(Mat hidden);
     void sample(float *logits, int rows, int position, uint64_t rng, int *ids, float *distribution,
                 const Hy4StepParams *params = nullptr);
     std::vector<int> predict(Mat hidden, int position, bool draft = false, const Path &dump = {},

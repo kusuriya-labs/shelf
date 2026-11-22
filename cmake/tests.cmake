@@ -802,6 +802,7 @@ shelf_add_test(NAME test_token_mask_scheduler SOURCE unit/test_token_mask_schedu
 
 shelf_add_test(NAME test_ngram_quantization SOURCE unit/test_ngram_quantization.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES shelf_quant_ngram)
 shelf_add_test(NAME test_qwen4exp_ngram SOURCE unit/test_qwen4exp_ngram.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES shelf_qwen4exp shelf_quant_ngram)
+shelf_add_test(NAME test_hy4_session SOURCE unit/test_hy4_session.cpp LABELS "cpu;required" LIBRARIES shelf_hy4_model)
 shelf_add_test(NAME test_hy4_routes SOURCE unit/test_hy4_routes.cpp LABELS "cpu;required" LIBRARIES shelf_core hip::host)
 
 find_package(Python3 COMPONENTS Interpreter)

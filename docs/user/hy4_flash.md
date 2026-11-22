@@ -12,8 +12,6 @@ build/shelf-compute hy4 inspect --model-dir /path/to/model --engram-dir /path/to
   --dfly-dir /path/to/dfly --placement owners.json
 build/shelf-compute hy4 reserve --model-dir /path/to/model --engram-dir /path/to/engram \
   --dfly-dir /path/to/dfly --placement owners.json --max-seq-len 2097152
-build/shelf-server --model-dir /path/to/model --engram-dir /path/to/engram \
-  --dfly-dir /path/to/dfly --placement owners.json --max-seq-len 2097152
 ```
 
 予約に必要な容量が不足する場合はエラーで停止する。予約長を 1Mi に変更する場合は、配置表も `--tokens 1048576` で再生成する。静的容量と前提は[調査記録](../research/20261119/hy4_r9700_capacity.md)を参照。
@@ -22,7 +20,7 @@ build/shelf-server --model-dir /path/to/model --engram-dir /path/to/engram \
 
 TP=1、EP=1〜4 で push 転送を使用し、すべての GPU 間で peer access が有効な場合、decode 1 行と verify 1〜6 行で層ごとの HIP Graph を使用する。単一リクエストの DFly2 は、候補 5 個を 1 回の Graph 起動で生成する。Target は `SHELF_HY4_GRAPH=0`、DFly2 は `SHELF_HY4_DRAFT_GRAPH=0` で個別に eager 実行へ切り替えられる。
 
-`placement.py` は TP=1 の各 rank の `peak_estimate` に Graph 用の 256 MiB を含める。実行時は、重み、KV、作業域の予約後にこの余裕を確保できる場合に Graph を有効にする。余裕不足、capture 失敗、EP のプロファイル取得時は eager 実行を使用する。
+`placement.py` は単一スロット、TP=1 の各 rank の `peak_estimate` に Graph 用の 256 MiB を含める。実行時は、重み、KV、作業域の予約後にこの余裕を確保できる場合に Graph を有効にする。余裕不足、capture 失敗、EP のプロファイル取得時は eager 実行を使用する。
 
 ## EP=2 × TP=2 の例
 
@@ -64,3 +62,35 @@ export SHELF_HY4_ENGRAM_MLOCK=1
 ```
 
 上限不足や固定失敗は起動エラーとなる。64 GB 級のホストでは全表を固定する容量を確保できないため、`SHELF_HY4_ENGRAM_MLOCK` を設定せず、`SHELF_HY4_ENGRAM_POPULATE=0` を指定すると遅延 mmap で読み込む。初回 request は遅くなる場合がある。populate を無効にした状態で mlock を要求することはできない。SSD から直接読み出す専用モードは未実装であり、今後の課題である。
+
+## バッチ生成と Continuous Batching
+
+`shelf-server --max-concurrent-requests N` は TP=1、EP=1〜4 で 1〜16 件を同時に保持する。既定値は 4 件である。compute を直接起動する場合は `shelf-compute hy4 serve --max-concurrent-requests N` を使う。こちらの既定値は 1 件である。`--max-seq-len` はスロットごとの予約長を表す。配置試算と実行には同じ予約長とスロット数を指定する。
+
+`--dfly-dir` を指定すると、複数スロットでも DFly2 の候補をまとめて生成・検証する。`SHELF_HY4_BATCH_DFLY=0` で複数スロットの投機を無効にできる。単一リクエストの Target Graph と DFly2 Graph の切り替えは上記の「HIP Graph の切り替え」を参照する。
+
+### R9700 を 3 台または 4 台使った照合
+
+使用する R9700 の UUID を `ROCR_VISIBLE_DEVICES` に指定する。次の例では `BODY`、`ENGRAM`、`DFLY` を各 checkpoint のパス、`IDS` を入力 ID ファイルのパスとする。容量は 3 台なら `32 32 32`、4 台なら `32 32 32 32` とする。2Mi の単一スロット予約は冒頭の `reserve` で検証する。バッチの照合には別の配置表を作成する。
+
+```bash
+capacity=(32 32 32)
+python3 tools/hy4_flash/placement.py "$BODY" --draft "$DFLY" --capacity "${capacity[@]}" \
+  --tokens 4096 --max-concurrent-requests 16 --output owners-batch.json
+common=(--model-dir "$BODY" --engram-dir "$ENGRAM" --dfly-dir "$DFLY" --placement owners-batch.json)
+for transport in push peer host; do
+  export SHELF_HY4_EP_TRANSPORT=$transport
+  for draft in 0 1; do
+    for batch in 1 2 4 8 16; do
+      SHELF_HY4_BATCH_DFLY=$draft build/shelf-compute hy4 generate "${common[@]}" \
+        --max-seq-len 4096 --input-ids-file "$IDS" --max-new-tokens 32 --temperature 0 --batch-size "$batch"
+    done
+  done
+done
+python3 tests/server/test_hy4_continuous_batching.py "${common[@]}"
+devices=$(seq -s, 0 $((${#capacity[@]} - 1)))
+build/shelf-server "${common[@]}" --device "$devices" --expert-parallel "${#capacity[@]}" \
+  --max-seq-len 4096 --max-concurrent-requests 16
+```
+
+各スロットの `GENERATED_IDS[i]` を同じ転送方式の B=1 の `GENERATED_IDS` と比較する。異なるプロンプトを一括生成するには `--batch-input-files a.ids,b.ids` を、個別の生成上限を指定するには `--batch-max-new-tokens 16,32` を使う。サーバーの検証スクリプトは JSONL 経由で同時投入、待機、個別キャンセル、スロット再利用を検査する。

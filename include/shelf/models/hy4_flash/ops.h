@@ -24,6 +24,9 @@ class Ops {
   public:
     Residency &gpu;
     int rank;
+    int slot = 0;
+    bool batch_decode = false;
+    bool slot_draft = false;
     Region &arena;
     std::future<std::array<std::vector<uint8_t>, 4>> engram_future;
     std::optional<std::array<std::vector<uint8_t>, 4>> engram_data;
@@ -52,6 +55,8 @@ class Ops {
     Mat collapse_norm(Mat x, const std::string &prefix, float *&post, const std::string &key, float eps = 1e-5f);
     Mat expand(Mat x, Mat y, const float *post);
     Mat rope(Mat x, int heads, int start, float theta);
+    Mat rope_batch(Mat x, int heads, float theta, const int *row_positions);
+    Mat rope_from_batch(Mat x, int first, int width, int heads, float theta, const int *row_positions);
     Mat rope_from(Mat x, int first, int width, int heads, int start, float theta);
     void copy(void *dest, const void *src, size_t bytes, hipMemcpyKind kind);
     int *indices(const std::vector<int> &ids);
