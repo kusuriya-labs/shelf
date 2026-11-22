@@ -243,7 +243,8 @@ int main() {
         const std::uint32_t lgkf = lgk * kGdnHeadDim;
         const std::uint32_t lgvf = lgv * kGdnHeadDim;
         const std::uint32_t lconv = 2u * lgkf + lgvf;
-        const std::uint32_t lexperts = kExperts / tp;
+        const std::uint32_t lexperts = kExperts;
+        const std::uint32_t lintermediate = kIntermediate / tp;
 
         shelf::qwen4exp::Qwen4ExpRankWeights tw;
         tw.embed_tokens = matrix(kVocab, kHidden);
@@ -274,16 +275,16 @@ int main() {
             layer.mlp.shared_gate_proj = matrix(kShared, kHidden);
             layer.mlp.shared_up_proj = matrix(kShared, kHidden);
             layer.mlp.shared_down_proj = matrix(kHidden, kShared);
-            layer.mlp.gate_experts = experts(kIntermediate, kHidden);
+            layer.mlp.gate_experts = experts(lintermediate, kHidden);
             layer.mlp.gate_experts.experts = lexperts;
-            layer.mlp.up_experts = experts(kIntermediate, kHidden);
+            layer.mlp.up_experts = experts(lintermediate, kHidden);
             layer.mlp.up_experts.experts = lexperts;
-            layer.mlp.down_experts = experts(kHidden, kIntermediate);
+            layer.mlp.down_experts = experts(kHidden, lintermediate);
             layer.mlp.down_experts.experts = lexperts;
             layer.mlp.experts = {kExperts, lexperts, 0u};
-            layer.mlp.gate_experts_host = empty_host(kIntermediate, kHidden);
-            layer.mlp.up_experts_host = empty_host(kIntermediate, kHidden);
-            layer.mlp.down_experts_host = empty_host(kHidden, kIntermediate);
+            layer.mlp.gate_experts_host = empty_host(lintermediate, kHidden);
+            layer.mlp.up_experts_host = empty_host(lintermediate, kHidden);
+            layer.mlp.down_experts_host = empty_host(kHidden, lintermediate);
             if (tp_config.layer_has_ple(li)) {
                 layer.ple.present = true;
                 layer.ple.key_proj = matrix(kWidth, kHidden);
@@ -314,6 +315,97 @@ int main() {
                 local_heads = attn.query_heads == lq && attn.kv_heads == lkv;
             }
             check(local_heads, "the TP=2 attention runs the rank's local heads");
+        }
+    }
+
+    {
+        shelf::qwen4exp::Qwen4ExpTextConfig overlap_config = config;
+        overlap_config.num_key_value_heads = 2u;
+        const std::uint32_t backbone_tp = 2u;
+        const std::uint32_t ep = 2u;
+        const std::uint32_t lq = kQHeads / backbone_tp;
+        const std::uint32_t lkv = overlap_config.num_key_value_heads / backbone_tp;
+        const std::uint32_t lqf = lq * kHeadDim;
+        const std::uint32_t lkvf = lkv * kHeadDim;
+        const std::uint32_t lgk = kGdnKeyHeads / backbone_tp;
+        const std::uint32_t lgv = kGdnValueHeads / backbone_tp;
+        const std::uint32_t lgkf = lgk * kGdnHeadDim;
+        const std::uint32_t lgvf = lgv * kGdnHeadDim;
+        const std::uint32_t lconv = 2u * lgkf + lgvf;
+        const std::uint32_t local_experts = kExperts / ep;
+
+        shelf::qwen4exp::Qwen4ExpRankWeights ow;
+        ow.embed_tokens = matrix(kVocab, kHidden);
+        ow.lm_head = matrix(kVocab, kHidden);
+        ow.mixer = hyper();
+        ow.layers.resize(overlap_config.num_hidden_layers);
+        for (std::uint32_t li = 0; li < overlap_config.num_hidden_layers; ++li) {
+            auto& layer = ow.layers[li];
+            layer.attn_hyper_connection = hyper();
+            layer.mlp_hyper_connection = hyper();
+            layer.attention.is_gdn = li == 0u;
+            if (layer.attention.is_gdn) {
+                layer.attention.in_proj_qkv = matrix(lconv, kHidden);
+                layer.attention.in_proj_z = matrix(lgvf, kHidden);
+                layer.attention.in_proj_b = matrix(lgv, kHidden);
+                layer.attention.in_proj_a = matrix(lgv, kHidden);
+                layer.attention.out_proj = matrix(kHidden, lgvf);
+            } else {
+                layer.attention.q_proj = matrix(2u * lqf, kHidden);
+                layer.attention.k_proj = matrix(lkvf, kHidden);
+                layer.attention.v_proj = matrix(lkvf, kHidden);
+                layer.attention.o_proj = matrix(kHidden, lqf);
+                layer.attention.index_qk_proj =
+                    matrix((kIndexHeads + 1u) * kIndexDim, kHidden);
+            }
+            layer.mlp.router = matrix(kExperts, kHidden);
+            layer.mlp.shared_gate = matrix(1u, kHidden);
+            layer.mlp.shared_gate_proj = matrix(kShared, kHidden);
+            layer.mlp.shared_up_proj = matrix(kShared, kHidden);
+            layer.mlp.shared_down_proj = matrix(kHidden, kShared);
+            layer.mlp.gate_experts = experts(kIntermediate, kHidden);
+            layer.mlp.gate_experts.experts = local_experts;
+            layer.mlp.up_experts = experts(kIntermediate, kHidden);
+            layer.mlp.up_experts.experts = local_experts;
+            layer.mlp.down_experts = experts(kHidden, kIntermediate);
+            layer.mlp.down_experts.experts = local_experts;
+            layer.mlp.experts = {kExperts, local_experts, 0u};
+            layer.mlp.gate_experts_host = empty_host(kIntermediate, kHidden);
+            layer.mlp.up_experts_host = empty_host(kIntermediate, kHidden);
+            layer.mlp.down_experts_host = empty_host(kHidden, kIntermediate);
+        }
+
+        shelf::qwen4exp::Qwen4ExpLowerOptions oo;
+        oo.max_context_tokens = 64u;
+        oo.tp_size = backbone_tp;
+        oo.tp_rank = 0u;
+        oo.ep_size = ep;
+        oo.ep_rank = 0u;
+        oo.ep_enabled = true;
+        oo.expert_tp_size = 1u;
+        auto overlap = shelf::qwen4exp::lower_qwen4exp_to_primitives(
+            overlap_config, ow, oo);
+        check(overlap.ok(), "an EP/backbone-overlap rank lowers");
+        if (overlap.ok()) {
+            const auto& graph = overlap.value().graph;
+            check(rt::validate_primitive_graph(graph).ok(),
+                  "the overlap graph validates");
+            std::uint32_t moe_ep_combines = 0;
+            std::uint32_t backbone_tp_combines = 0;
+            for (const auto& node : graph.nodes) {
+                if (rt::primitive_kind_of(node.node) == rt::PrimitiveKind::MOE_COMBINE) {
+                    if (node.ep_combine != 0u) ++moe_ep_combines;
+                    if (node.tp_combine != 0u) {
+                        check(false, "overlap MoE combine must not use TP reduce");
+                    }
+                } else if (node.tp_combine != 0u) {
+                    ++backbone_tp_combines;
+                }
+            }
+            check(moe_ep_combines == overlap_config.num_hidden_layers,
+                  "one EP-only MoE combine per layer");
+            check(backbone_tp_combines == overlap_config.num_hidden_layers,
+                  "backbone keeps one TP combine per layer");
         }
     }
 

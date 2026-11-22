@@ -14,14 +14,20 @@ namespace qwen_hybrid {
 struct TensorParallelContext {
     std::uint32_t tp_size = 1;
     std::uint32_t tp_rank = 0;
-    // The expert-axis split. EP=1 keeps the legacy layout where the routed experts follow
-    // the tensor parallel ranks.
+    // The expert-axis split. EP=1 keeps every expert on every TP rank; TP then splits each
+    // expert's matrix inside the rank.
     std::uint32_t ep_size = 1;
     std::uint32_t ep_rank = 0;
-    // True when an explicit EP group was requested. Without it the expert axis overlaps the
-    // TP ranks and the legacy single reduce is used.
+    // True when an explicit EP group was requested.
     bool ep_enabled = false;
+    // EP>1 and TP==1: the EP ranks also form the backbone's tensor group.
+    bool axes_overlap = false;
+    // Dense FFN width and routed-expert width on this rank.
     std::uint32_t local_intermediate_size = 0;
+    std::uint32_t local_moe_intermediate_size = 0;
+    // Routed expert matrix TP. In axes_overlap this stays 1 while tp_size is the EP size.
+    std::uint32_t expert_tp_size = 1;
+    std::uint32_t expert_tp_rank = 0;
     std::uint32_t local_attention_heads = 0;
     std::uint32_t local_key_value_heads = 0;
     std::uint32_t local_gdn_key_heads = 0;

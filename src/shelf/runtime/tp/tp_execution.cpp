@@ -92,7 +92,7 @@ Result<TpExecutionSchedule> build_tp_execution_schedule(
                 "dispatch source node index out of range", __FILE__, __LINE__);
         }
         const PrimitiveGraphNode& node = graph.nodes[node_index];
-        if (node.tp_combine != 0) {
+        if (node.tp_combine != 0 || node.ep_combine != 0) {
             if (node.outputs.empty()) {
                 return Status::invalid_argument(
                     "tp_combine node has no output value", __FILE__, __LINE__);
@@ -111,7 +111,7 @@ Result<TpExecutionSchedule> build_tp_execution_schedule(
             try_fuse_combine_consumer(graph, program, group_end, combine, current);
             const uint32_t next_begin = current.dispatch_end;
             const bool ep_reduce = ep_enabled && node.ep_combine != 0u && ep_size > 1u;
-            const bool tp_reduce = tp_size != 1u;
+            const bool tp_reduce = node.tp_combine != 0u && tp_size != 1u;
             bool pushed = false;
             if (ep_reduce && !tp_reduce) {
                 current.ep_scope = true;

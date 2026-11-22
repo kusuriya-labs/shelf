@@ -114,6 +114,8 @@ struct RunResult {
     std::vector<float> hidden_row0;
     std::vector<float> logits_row0;
     std::uint32_t plane_experts = 0;
+    std::uint32_t expert_w13_rows = 0;
+    std::uint32_t expert_w2_cols = 0;
     std::uint32_t shared_rows = 0;
     std::uint32_t kv_heads = 0;
     std::uint32_t router_rows = 0;
@@ -248,6 +250,8 @@ RunResult run_rank(const std::string& model_dir, int device, std::uint32_t tp_si
     if (barrier != nullptr) ex.tp_barrier = barrier;
 
     result.plane_experts = model.weights().layers[0].ffn.expert_w13.experts;
+    result.expert_w13_rows = model.weights().layers[0].ffn.expert_w13.rows;
+    result.expert_w2_cols = model.weights().layers[0].ffn.expert_w2.cols;
     result.shared_rows = model.weights().layers[0].ffn.shared_gate_proj.rows;
     result.kv_heads = local_kv_heads;
     result.router_rows = model.weights().layers[0].ffn.router.rows;
@@ -362,8 +366,9 @@ int main() {
     const fs::path root =
         fs::temp_directory_path(ec) / ("shelf_moe_tp_exec_" + std::to_string(::getpid()));
     fs::remove_all(root, ec);
+    constexpr std::uint32_t kTestInter = 256u;
     Fixture f;
-    if (!write_fixture(f, root / "moe", false, true)) {
+    if (!write_fixture(f, root / "moe", false, true, kTestInter, kTestInter)) {
         std::printf("FAIL: moe fixture write\n");
         return 1;
     }
@@ -379,7 +384,7 @@ int main() {
     std::printf("tp1: plane experts=%u shared rows=%u kv heads=%u router rows=%u\n",
                 solo.plane_experts, solo.shared_rows, solo.kv_heads, solo.router_rows);
     check(solo.plane_experts == kExperts, "tp1 owns every expert");
-    check(solo.shared_rows == kInter, "tp1 holds the whole shared expert");
+    check(solo.shared_rows == kTestInter, "tp1 holds the whole shared expert");
     check(solo.router_rows == kExperts, "tp1 router logits are one column per expert");
 
     auto transport = rt::create_tp_transport({devices[0], devices[1]});
@@ -423,9 +428,13 @@ int main() {
     std::printf("tp2: plane experts=%u shared rows=%u kv heads=%u router rows=%u\n",
                 rank0.plane_experts, rank0.shared_rows, rank0.kv_heads, rank0.router_rows);
 
-    check(rank0.plane_experts == kExperts / 2u && rank1.plane_experts == kExperts / 2u,
-          "each rank holds half the expert plane");
-    check(rank0.shared_rows == kInter / 2u, "each rank holds half the shared expert width");
+    check(rank0.plane_experts == kExperts && rank1.plane_experts == kExperts,
+          "each rank holds every expert and splits each expert's matrix by TP");
+    check(rank0.expert_w13_rows == kTestInter &&
+              rank0.expert_w2_cols == kTestInter / 2u,
+          "each expert's gate/up rows and down columns are TP-split");
+    check(rank0.shared_rows == kTestInter / 2u,
+          "each rank holds half the shared expert width");
     check(rank0.kv_heads == rank1.kv_heads && rank0.kv_heads == kKvHeads / 2u,
           "each rank's KV pool holds half the kv heads");
     check(rank0.router_rows == kExperts && rank1.router_rows == kExperts,

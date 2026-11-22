@@ -275,8 +275,7 @@ public:
         const std::uint32_t top_k = static_cast<std::uint32_t>(cfg.ffn.num_experts_per_tok);
         const std::uint32_t tokens = static_cast<std::uint32_t>(max_batch_rows);
         const std::uint32_t hidden = static_cast<std::uint32_t>(cfg.hidden_size);
-        const std::uint32_t inter =
-            static_cast<std::uint32_t>(cfg.ffn.moe_intermediate_size);
+        const std::uint32_t inter = context_.local_moe_intermediate_size;
         const std::uint32_t group_rows = ::shelf::runtime::grouped_row_capacity(
             tokens, ::shelf::runtime::GroupedRowShape{local_experts, top_k});
         std::size_t total = static_cast<std::size_t>(group_rows) * inter * 2u * 2u;
@@ -456,6 +455,10 @@ Result<q35::Executor> create_qwen4exp_model_executor(
     options.ep_size = config.tp != nullptr ? config.tp->ep_size : 1u;
     options.ep_rank = config.tp != nullptr ? config.tp->ep_rank : 0u;
     options.ep_enabled = config.tp != nullptr && config.tp->ep_enabled;
+    options.expert_tp_size =
+        config.tp != nullptr ? config.tp->expert_tp_size : options.tp_size;
+    options.expert_tp_rank =
+        config.tp != nullptr ? config.tp->expert_tp_rank : options.tp_rank;
     options.rope_attention_factor = static_cast<float>(config.rope_profile.attention_factor);
     options.hidden_taps = std::span<const std::uint32_t>(
         config.target_hidden_taps.data(), config.target_hidden_tap_count);
@@ -577,12 +580,26 @@ Result<std::unique_ptr<TpRankModel>> build_qwen4exp_tp_rank_model(
     auto text_config = qwen4exp::read_qwen4exp_text_config(config.model_dir);
     if (!text_config.ok()) return text_config.status();
     const auto& cfg = text_config.value();
+    const bool heads_divide_ep =
+        config.ep_size > 1u &&
+        (cfg.num_attention_heads % config.ep_size) == 0u &&
+        (cfg.num_key_value_heads % config.ep_size) == 0u &&
+        (cfg.linear_num_key_heads % config.ep_size) == 0u &&
+        (cfg.linear_num_value_heads % config.ep_size) == 0u;
+    const bool axes_overlap =
+        config.ep_enabled && config.tp_size == 1u && heads_divide_ep;
+    const std::uint32_t backbone_tp_size =
+        axes_overlap ? config.ep_size : config.tp_size;
+    const std::uint32_t backbone_tp_rank =
+        axes_overlap ? config.ep_rank : config.tp_rank;
     qwen4exp::Qwen4ExpLoadOptions load_options;
     load_options.load_mtp = config.load_mtp_layers;
     load_options.mtp_split = config.mtp_split;
     load_options.ep_size = config.ep_size;
     load_options.ep_rank = config.ep_rank;
     load_options.ep_enabled = config.ep_enabled;
+    load_options.backbone_tp_size = backbone_tp_size;
+    load_options.backbone_tp_rank = backbone_tp_rank;
     if (const char* host_experts = std::getenv("SHELF_MOE_HOST_EXPERTS")) {
         load_options.moe_host_experts =
             static_cast<std::uint32_t>(std::strtoul(host_experts, nullptr, 10));
@@ -597,21 +614,24 @@ Result<std::unique_ptr<TpRankModel>> build_qwen4exp_tp_rank_model(
     if (!model.ok()) return model.status();
 
     qhy::TensorParallelContext context;
-    context.tp_size = config.tp_size;
-    context.tp_rank = config.tp_rank;
+    context.tp_size = backbone_tp_size;
+    context.tp_rank = backbone_tp_rank;
     context.local_attention_heads =
-        static_cast<std::uint32_t>(cfg.num_attention_heads / config.tp_size);
+        static_cast<std::uint32_t>(cfg.num_attention_heads / backbone_tp_size);
     context.local_key_value_heads =
-        static_cast<std::uint32_t>(cfg.num_key_value_heads / config.tp_size);
+        static_cast<std::uint32_t>(cfg.num_key_value_heads / backbone_tp_size);
     context.local_gdn_key_heads =
-        static_cast<std::uint32_t>(cfg.linear_num_key_heads / config.tp_size);
+        static_cast<std::uint32_t>(cfg.linear_num_key_heads / backbone_tp_size);
     context.local_gdn_value_heads =
-        static_cast<std::uint32_t>(cfg.linear_num_value_heads / config.tp_size);
+        static_cast<std::uint32_t>(cfg.linear_num_value_heads / backbone_tp_size);
     context.local_vocab_size = static_cast<std::uint32_t>(cfg.vocab_size);
     context.vocab_parallel_lm_head = false;
     context.ep_size = config.ep_size;
     context.ep_rank = config.ep_rank;
     context.ep_enabled = config.ep_enabled;
+    context.axes_overlap = axes_overlap;
+    context.expert_tp_size = config.tp_size;
+    context.expert_tp_rank = config.tp_rank;
     context.global_num_experts = static_cast<std::uint32_t>(cfg.ffn.num_experts);
     if (config.ep_size == 0u || config.ep_rank >= config.ep_size ||
         (cfg.ffn.num_experts % config.ep_size) != 0u) {
@@ -623,6 +643,13 @@ Result<std::unique_ptr<TpRankModel>> build_qwen4exp_tp_rank_model(
     context.expert_begin = config.ep_rank * context.local_num_experts;
     context.local_shared_expert_intermediate_size =
         static_cast<std::uint32_t>(cfg.ffn.shared_expert_intermediate_size);
+    if ((cfg.ffn.moe_intermediate_size % config.tp_size) != 0u) {
+        return Status::unsupported(
+            "Qwen4Exp routed expert intermediate size must divide by tp_size", __FILE__,
+            __LINE__);
+    }
+    context.local_moe_intermediate_size =
+        static_cast<std::uint32_t>(cfg.ffn.moe_intermediate_size / config.tp_size);
 
     auto ple_table = shared_ple_table(config.model_dir, cfg);
     if (ple_table == nullptr) {

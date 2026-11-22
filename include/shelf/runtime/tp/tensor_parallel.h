@@ -326,6 +326,8 @@ private:
     // varies. Every rank reaches an EP barrier exactly once per collective.
     std::vector<ReduceGroup> ep_groups_;
     bool explicit_ep_ = false;
+    // EP>1 and TP==1: the EP group is also the backbone's TP group.
+    bool axes_overlap_ = false;
     std::vector<std::unique_ptr<Worker>> workers_;
     std::unordered_map<std::uint64_t, MirrorSequences> mirrors_;
 };

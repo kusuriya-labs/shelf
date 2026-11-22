@@ -297,8 +297,15 @@ int main(int argc, char** argv) {
         auto loaded = shelf::qwen4exp::load_qwen4exp_rank(model_dir, *arenas[index],
                                                           streams[index], options);
         if (!loaded.ok()) {
-            std::fprintf(stderr, "rank%u load: %s\n", rank,
-                         loaded.status().message().c_str());
+            const std::string message = loaded.status().message();
+            if (message.find("EXL3 expert TP requires") != std::string::npos) {
+                std::fprintf(stderr,
+                             "rank%u expected EXL3 expert TP rejection: %s\n", rank,
+                             message.c_str());
+                check(true, "EXL3 expert TP rejects an unaligned N/K split");
+                return 0;
+            }
+            std::fprintf(stderr, "rank%u load: %s\n", rank, message.c_str());
             return 1;
         }
         const auto& weights = loaded.value();

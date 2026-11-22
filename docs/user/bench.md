@@ -124,8 +124,9 @@ backbone kernel の allowlist に登録済みで、prefill の throughput は TP
 | `--prefill-chunk N` | (default 128) |
 | `--warmup N` | (default 0) |
 | `--compute-logits 0\|1` | (default 1) |
-| `--device LIST` | comma separated GPUs, one per --tensor-parallel rank (default 0; e.g. --device 0,2) |
+| `--device LIST` | comma separated GPUs, one per tensor-parallel * expert-parallel rank (default 0; e.g. --device 0,2) |
 | `--tensor-parallel N` | tensor parallel degree 1 \| 2 \| 4 (default 1) |
+| `--expert-parallel N` | expert parallel degree 1 \| 2 \| 4 (default 1) |
 | `--model-dir PATH` | (required) |
 | `--page-tokens N` | (default 16) |
 | `--kv-cache-dtype bf16\|fp8\|octave:FORMAT (default bf16)` |  |
@@ -154,9 +155,13 @@ backbone kernel の allowlist に登録済みで、prefill の throughput は TP
 
 greedy mode は `--compute-logits 1` が必要。
 
-`--tensor-parallel N`（N=1 / 2 / 4）は decode を N GPU に分割する。`--device` に N 個の
-GPU を指定する。`models/Qwen3.8-Flash-Next-Quark-MXFP4` は `--tensor-parallel 4` を使う。
-TP の decode は rank0 の stream で測り、`tp=` と `devices=` を出力する。
+`--tensor-parallel N`（N=1 / 2 / 4）は backbone と各 routed expert の matrix 軸を
+N GPU に分割する。`--expert-parallel M`（M=1 / 2 / 4）は routed expert の expert ID を
+M GPU に分割する。qwen4exp では EP>1 かつ TP=1 で head 数が EP で割り切れる場合、
+backbone も EP rank で分割する。`--device` には `N * M` 個の GPU を指定する。
+TP の decode は rank0 の stream で測り、`tp=` / `ep=` / `devices=` を出力する。
+EXL3 INT8 の routed expert は local の N / K が 128 の倍数でなければならないため、
+checkpoint によっては TP>1 を起動できない。
 `--tokens-file` / `--tokens-offset` は prefill する context を PSKLDTOK corpus から取る。
 
 `--kv-cache-dtype fp8` は KV cache を fp8 E4M3 にする。grouped expert checkpoint（MoE）でも

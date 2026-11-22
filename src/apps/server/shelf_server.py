@@ -538,14 +538,15 @@ def parse_args(argv=None):
                              "-N = total VRAM minus N GiB (default auto)")
     parser.add_argument("--device", default="0",
                         help="comma separated GPU devices, one per rank; "
-                             "count must match --tensor-parallel (default 0)")
+                             "count must match pipeline_parallel * expert_parallel * "
+                             "tensor_parallel (default 0)")
     parser.add_argument("--tensor-parallel", type=int, default=1, choices=(1, 2),
                         help="tensor parallel size forwarded to compute (default 1)")
     parser.add_argument("--expert-parallel", type=int, default=1, choices=(1, 2, 4),
                         help="expert parallel size forwarded to compute (default 1)")
     parser.add_argument("--pipeline-parallel", type=int, default=1, choices=(1, 2, 4),
                         help="pipeline parallel size forwarded to compute "
-                             "(mutually exclusive with --tensor-parallel; default 1)")
+                             "(default 1)")
     parser.add_argument("--kv-cache-dtype", default="bf16",
                         type=kv_cache_dtype_value,
                         help="KV cache dtype (default bf16)")

@@ -276,6 +276,28 @@ static void test_schedule_build() {
               "single segment covers all dispatches");
     }
 
+    PrimitiveGraph ep_graph;
+    Program ep_program;
+    const std::uint32_t ep_node =
+        add_node(ep_graph, "L0.moe_routed_combine", false, 14);
+    ep_graph.nodes[ep_node].ep_combine = 1u;
+    ep_program.dispatches.resize(1);
+    ep_program.dispatch_source_node = {ep_node};
+    bind_value(ep_program, 14);
+    auto ep_schedule = build_tp_execution_schedule(ep_graph, ep_program, 2u, 2u, true);
+    check(ep_schedule.ok(), "EP-only combine schedule builds");
+    if (ep_schedule.ok()) {
+        const auto& ep_segments = ep_schedule.value().segments;
+        check(ep_segments.size() == 1u, "EP-only combine yields one segment");
+        if (ep_segments.size() == 1u) {
+            check(ep_segments[0].ep_scope, "EP-only combine uses the EP scope");
+            check(ep_segments[0].barrier_after == TpBarrierKind::SumHidden,
+                  "EP-only combine keeps the sum barrier");
+            check(ep_segments[0].combine_value.id == 14u,
+                  "EP-only combine value is preserved");
+        }
+    }
+
     PrimitiveGraph bad_index;
     Program index_program;
     index_program.dispatches.resize(1);

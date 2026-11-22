@@ -59,8 +59,9 @@ inline shelf::weights::Exl3LinearShape exl3_linear_shape(
 
 struct Qwen35MoeLoadOptions : shelf::qwen_hybrid::HybridLoadOptions {
     bool load_mtp_layers = false;
-    // Routed experts follow the expert-parallel rank; the backbone and shared expert still
-    // follow the tensor-partition plan's tp_size / tp_rank.
+    // Routed expert IDs follow the expert-parallel rank. The backbone, shared expert and
+    // each local expert's matrix follow the tensor-partition plan's tp_size / tp_rank.
+    // ep_size == 0 means EP=1.
     std::uint32_t ep_size = 0;
     std::uint32_t ep_rank = 0;
     bool ep_enabled = false;
@@ -118,8 +119,8 @@ Status validate_qwen35moe_weights(const Qwen35MoeModelWeights& weights,
                                  std::uint32_t tp_size,
                                  std::uint32_t tp_rank);
 
-// The routed experts follow (ep_rank, ep_size); the shared expert and backbone follow
-// (tp_rank, tp_size).
+// The routed expert IDs follow (ep_rank, ep_size); the backbone, shared expert and each
+// local expert's matrix follow (tp_rank, tp_size).
 Status validate_qwen35moe_weights(const Qwen35MoeModelWeights& weights,
                                  const Qwen35MoeTextConfig& config,
                                  std::uint32_t ep_size,

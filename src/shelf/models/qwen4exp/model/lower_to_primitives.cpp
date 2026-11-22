@@ -144,6 +144,15 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
     }
 
     const std::uint32_t tp_size = options.tp_size == 0u ? 1u : options.tp_size;
+    const std::uint32_t expert_tp_size =
+        options.expert_tp_size == 0u ? tp_size : options.expert_tp_size;
+    const bool axes_overlap = options.ep_enabled && tp_size > expert_tp_size;
+    if (intermediate == 0u || (intermediate % expert_tp_size) != 0u) {
+        return Status::unsupported(
+            "Qwen4Exp routed expert intermediate size must divide by expert_tp_size",
+            __FILE__, __LINE__);
+    }
+    const std::uint32_t local_intermediate = intermediate / expert_tp_size;
     auto divide_heads = [&](std::size_t heads, const char* what) -> Result<std::uint32_t> {
         if (heads == 0u || (heads % tp_size) != 0u) {
             return Status::unsupported(what, __FILE__, __LINE__);
@@ -438,12 +447,14 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
             expert_begin,
             top_k,
             hidden,
-            intermediate,
+            local_intermediate,
             shared_intermediate,
             options.tp_rank == 0u ? 1.0f : 0.0f,
             1.0f,
             options.ep_enabled,
-            options.tp_size,
+            axes_overlap,
+            expert_tp_size,
+            expert_tp_size,
         };
         layer.moe_weights = lw.mlp;
         layer.moe_indices = {
@@ -803,7 +814,9 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_mtp_to_primitives(
         options.tp_rank == 0u ? 1.0f : 0.0f,
         1.0f,
         options.ep_enabled,
+        false,
         tp_size,
+        1u,
     };
     layer.moe_weights = lw.mlp;
     layer.moe_indices = {router, shared_gate, shared_gate_proj, shared_up_proj,

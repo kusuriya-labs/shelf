@@ -7,6 +7,7 @@
 #include <shelf/quantization/exl3/exl3_int8.h>
 #include <shelf/quantization/mxfp4/mxfp4.h>
 #include <shelf/quantization/mxfp4/mxfp4_native.h>
+#include <shelf/weights/canonical_partition.h>
 #include <shelf/weights/tensor_partition.h>
 #include <shelf/weights/weight_loader.h>
 
@@ -191,23 +192,34 @@ bool quantized_lm_head_shardable(const QuantizedLmHeadSummary& head,
 Result<TensorPartitionPlan> build_tp_plan(const Qwen4ExpTextConfig& config,
                                           std::uint32_t tp_size,
                                           std::uint32_t tp_rank,
+                                          std::uint32_t backbone_tp_size,
+                                          std::uint32_t backbone_tp_rank,
                                           bool shard_lm_head,
                                           std::uint32_t ep_size,
                                           bool shard_mtp) {
+    if (backbone_tp_size == 0u) {
+        backbone_tp_size = tp_size;
+        backbone_tp_rank = tp_rank;
+    }
     TensorPartitionPlan plan;
-    plan.tp_size = tp_size;
-    plan.tp_rank = tp_rank;
-    if (tp_size == 1u) return plan;
-    if (tp_size != 2u && tp_size != 4u) {
-        return Status::unsupported("Qwen4Exp load path supports TP=2 or TP=4",
+    plan.tp_size = backbone_tp_size;
+    plan.tp_rank = backbone_tp_rank;
+    if (tp_size != 1u && tp_size != 2u && tp_size != 4u) {
+        return Status::unsupported("Qwen4Exp routed expert TP supports 1, 2 or 4",
                                    __FILE__, __LINE__);
     }
-    if (ep_size == 0u) ep_size = tp_size;
+    if (backbone_tp_size != 1u && backbone_tp_size != 2u && backbone_tp_size != 4u) {
+        return Status::unsupported("Qwen4Exp backbone TP supports 1, 2 or 4",
+                                   __FILE__, __LINE__);
+    }
+    if (ep_size == 0u) ep_size = 1u;
     if (config.ffn.num_experts == 0u || (config.ffn.num_experts % ep_size) != 0u) {
         return Status::unsupported("Qwen4Exp num_experts must divide by ep_size", __FILE__,
                                    __LINE__);
     }
-    auto body_result = qhy::build_hybrid_partition(config, tp_size, tp_rank);
+    if (backbone_tp_size == 1u) return plan;
+    auto body_result =
+        qhy::build_hybrid_partition(config, backbone_tp_size, backbone_tp_rank);
     if (!body_result.ok()) return body_result.status();
     const qhy::HybridPartition& body = body_result.value();
     for (std::size_t layer = 0; layer < config.num_hidden_layers; ++layer) {
@@ -648,6 +660,374 @@ Result<MatrixWeight> load_mxfp4_expert_matrix(
     return w;
 }
 
+Result<MatrixWeight> load_expert_matrix_tp(const qqb::QuantizedModelReader& reader,
+                                          const std::string& prefix,
+                                          const char* projection,
+                                          std::uint32_t local_experts,
+                                          std::uint32_t expert_begin,
+                                          std::uint32_t k,
+                                          std::uint32_t n,
+                                          std::uint32_t host_experts,
+                                          shelf::weights::PinnedHostArena& host_arena,
+                                          GpuArena& arena,
+                                          hipStream_t stream,
+                                          MatrixWeight& host_plane,
+                                          std::uint32_t tp_size,
+                                          std::uint32_t tp_rank) {
+    if (tp_size < 2u || tp_rank >= tp_size) {
+        return Status::invalid_argument("Qwen4Exp expert TP size / rank is invalid",
+                                        __FILE__, __LINE__);
+    }
+    if (host_experts >= local_experts) {
+        return Status::invalid_argument(
+            "Qwen4Exp expert TP split leaves no VRAM expert", __FILE__, __LINE__);
+    }
+    const bool k_axis = std::string(projection) == "down_proj";
+    const std::uint32_t split = k_axis ? k : n;
+    if (split == 0u || (split % tp_size) != 0u) {
+        return Status::unsupported(
+            ("Qwen4Exp expert TP requires the split dimension to divide by tp_size: " +
+             prefix + projection)
+                .c_str(),
+            __FILE__, __LINE__);
+    }
+    const std::uint32_t local_n = k_axis ? n : n / tp_size;
+    const std::uint32_t local_k = k_axis ? k / tp_size : k;
+    const std::uint32_t local_dim = k_axis ? local_k : local_n;
+
+    shelf::weights::TensorPartitionDesc partition;
+    partition.axis = k_axis ? 1 : 0;
+    partition.index = tp_rank;
+    partition.count = tp_size;
+    partition.global_shape = {static_cast<std::int64_t>(n), static_cast<std::int64_t>(k)};
+    partition.ranges.push_back(shelf::weights::TensorPartitionRange{
+        static_cast<std::uint64_t>(tp_rank) * local_dim,
+        static_cast<std::uint64_t>(local_dim)});
+
+    const std::string first_name =
+        prefix + "mlp.experts." + std::to_string(expert_begin) + "." + projection + ".weight";
+    auto first = reader.resolve(first_name);
+    if (!first.ok()) return first.status();
+    const qqb::QuantizedTensorView& first_view = first.value();
+    if (first_view.encoding != qqm::QuantizedEncoding::Exl3 &&
+        first_view.encoding != qqm::QuantizedEncoding::Mxfp4) {
+        return Status::unsupported(
+            ("Qwen4Exp routed expert is not EXL3 or MXFP4: " + first_name).c_str(),
+            __FILE__, __LINE__);
+    }
+    if (first_view.encoding == qqm::QuantizedEncoding::Exl3 &&
+        ((local_n % 128u) != 0u || (local_k % 128u) != 0u)) {
+        return Status::unsupported(
+            ("EXL3 expert TP requires N/128 and K/128 to be divisible by tp_size: " +
+             first_name)
+                .c_str(),
+            __FILE__, __LINE__);
+    }
+    if (first_view.encoding == qqm::QuantizedEncoding::Mxfp4 &&
+        ((local_n % shelf::quantization::kMxfp4ScaleBlockK) != 0u ||
+         (local_k % shelf::quantization::kMxfp4ScaleBlockK) != 0u)) {
+        return Status::unsupported(
+            ("MXFP4 expert TP requires N and K to be aligned to the MXFP4 block: " +
+             first_name)
+                .c_str(),
+            __FILE__, __LINE__);
+    }
+
+    const std::uint32_t vram_experts = local_experts - host_experts;
+    MatrixWeight w;
+    host_plane = MatrixWeight{};
+    host_plane.rows = local_n;
+    host_plane.cols = local_k;
+    host_plane.k_padded = local_k;
+    host_plane.experts = host_experts;
+
+    bool allocated = false;
+    bool host_allocated = false;
+    std::uint64_t codes_batch = 0;
+    std::uint64_t scales_batch = 0;
+    std::uint64_t row_ref_stride = 0;
+    std::uint8_t* host_codes = nullptr;
+    std::uint8_t* host_scales = nullptr;
+    std::uint8_t* host_row_ref = nullptr;
+
+    auto allocate_host = [&]() -> Status {
+        if (host_experts == 0u) return Status::make_ok();
+        if (codes_batch == 0u || scales_batch == 0u || row_ref_stride == 0u) {
+            return Status::invalid_state("Qwen4Exp host expert TP geometry is empty",
+                                         __FILE__, __LINE__);
+        }
+        void* codes = nullptr;
+        void* scales = nullptr;
+        void* row_ref = nullptr;
+        Status st = host_arena.allocate(
+            static_cast<std::size_t>(codes_batch * host_experts), &codes);
+        if (!st.ok()) return st;
+        st = host_arena.allocate(
+            static_cast<std::size_t>(scales_batch * host_experts), &scales);
+        if (!st.ok()) return st;
+        st = host_arena.allocate(
+            static_cast<std::size_t>(row_ref_stride * host_experts), &row_ref);
+        if (!st.ok()) return st;
+        host_codes = static_cast<std::uint8_t*>(codes);
+        host_scales = static_cast<std::uint8_t*>(scales);
+        host_row_ref = static_cast<std::uint8_t*>(row_ref);
+        host_plane.host_resident = true;
+        host_plane.host_codes = host_codes;
+        host_plane.host_scales = host_scales;
+        host_plane.host_row_ref = host_row_ref;
+        host_plane.codes_row_stride_bytes = w.codes_row_stride_bytes;
+        host_plane.scale_row_stride_bytes = w.scale_row_stride_bytes;
+        host_plane.storage_scale_stride_bytes = w.storage_scale_stride_bytes;
+        host_plane.codes_batch_stride_bytes = codes_batch;
+        host_plane.scales_batch_stride_bytes = scales_batch;
+        host_allocated = true;
+        return Status::make_ok();
+    };
+
+    for (std::uint32_t local = 0; local < local_experts; ++local) {
+        const std::uint32_t expert = expert_begin + local;
+        const std::string name =
+            prefix + "mlp.experts." + std::to_string(expert) + "." + projection + ".weight";
+        auto resolved = reader.resolve(name);
+        if (!resolved.ok()) return resolved.status();
+        const qqb::QuantizedTensorView& value = resolved.value();
+        if (value.encoding != first_view.encoding) {
+            return Status::invalid_argument(
+                ("Qwen4Exp expert encoding differs inside one layer: " + name).c_str(),
+                __FILE__, __LINE__);
+        }
+
+        shelf::weights::OwnedCanonicalTensor owned;
+        qqb::QuantizedTensorView local_view;
+        const qqb::QuantizedTensorView* v = &value;
+        Status materialized = shelf::weights::materialize_rank_local_canonical(
+            partition, value, owned, local_view);
+        if (!materialized.ok()) return materialized;
+        v = &local_view;
+        if (v->logical_shape.size() != 2u ||
+            static_cast<std::uint32_t>(v->logical_shape[0]) != local_n ||
+            static_cast<std::uint32_t>(v->logical_shape[1]) != local_k ||
+            static_cast<std::uint32_t>(v->k_padded) != local_k) {
+            return Status::invalid_argument(
+                ("Qwen4Exp expert TP local shape mismatch: " + name).c_str(), __FILE__,
+                __LINE__);
+        }
+
+        if (v->encoding == qqm::QuantizedEncoding::Exl3) {
+            const std::uint32_t ka = v->exl3_ka;
+            const bool half = v->exl3_half;
+            if (ka < 1u || ka > 8u || (half && ka > 3u)) {
+                return Status::invalid_argument(
+                    ("Qwen4Exp expert bit rate is invalid: " + name).c_str(), __FILE__,
+                    __LINE__);
+            }
+            if (v->marker.size != 4u || v->marker.data == nullptr) {
+                return Status::invalid_argument(
+                    ("Qwen4Exp expert marker must be 4 bytes: " + name).c_str(), __FILE__,
+                    __LINE__);
+            }
+            std::uint32_t multiplier = 0;
+            std::memcpy(&multiplier, v->marker.data, sizeof(multiplier));
+            if (multiplier != shelf::quantization::exl3::kExl3Mul24Multiplier) {
+                return Status::unsupported(
+                    ("Qwen4Exp expert codebook is not mul24: " + name).c_str(), __FILE__,
+                    __LINE__);
+            }
+            const std::uint32_t words = 16u * ka + (half ? 8u : 0u);
+            const std::uint64_t trellis_bytes = static_cast<std::uint64_t>(local_k / 16u) *
+                                                (local_n / 16u) * words * 2u;
+            const std::uint64_t suh_bytes = static_cast<std::uint64_t>(local_k) * 2u;
+            const std::uint64_t svh_bytes = static_cast<std::uint64_t>(local_n) * 2u;
+            if (!allocated) {
+                codes_batch = trellis_bytes;
+                scales_batch = suh_bytes;
+                row_ref_stride = svh_bytes;
+                w.encoding = shelf::weights::MatrixEncoding::Exl3;
+                w.rows = local_n;
+                w.cols = local_k;
+                w.k_padded = local_k;
+                w.experts = vram_experts;
+                w.exl3_ka = ka;
+                w.exl3_half = half;
+                w.preshuffled = false;
+                w.codes_row_stride_bytes = static_cast<std::uint32_t>(
+                    (static_cast<std::uint64_t>(local_n) / 16u) * words * 2u);
+                w.codes_batch_stride_bytes = trellis_bytes;
+                w.exl3_suh_batch_stride_bytes = suh_bytes;
+                w.exl3_svh_batch_stride_bytes = svh_bytes;
+                w.exl3_marker_batch_stride_bytes = 4u;
+                w.codes = alloc_u8(trellis_bytes * vram_experts,
+                                   {vram_experts, static_cast<std::size_t>(trellis_bytes)},
+                                   {static_cast<std::size_t>(trellis_bytes), 1u}, arena);
+                w.exl3_suh = alloc_u16(suh_bytes * vram_experts,
+                                       {vram_experts, local_k}, {local_k, 1u}, arena);
+                w.exl3_svh = alloc_u16(svh_bytes * vram_experts,
+                                       {vram_experts, local_n}, {local_n, 1u}, arena);
+                w.exl3_marker = alloc_u8(4u * vram_experts, {vram_experts, 4u}, {4u, 1u},
+                                         arena);
+                if (w.codes.ndim() == 0 || w.exl3_suh.ndim() == 0 ||
+                    w.exl3_svh.ndim() == 0 || w.exl3_marker.ndim() == 0) {
+                    return Status::insufficient_memory(
+                        "Qwen4Exp expert TP plane allocation failed", __FILE__, __LINE__);
+                }
+                host_plane.encoding = shelf::weights::MatrixEncoding::Exl3;
+                host_plane.exl3_ka = ka;
+                host_plane.exl3_half = half;
+                host_plane.codes_row_stride_bytes = w.codes_row_stride_bytes;
+                host_plane.codes_batch_stride_bytes = trellis_bytes;
+                host_plane.exl3_suh_batch_stride_bytes = suh_bytes;
+                host_plane.exl3_svh_batch_stride_bytes = svh_bytes;
+                host_plane.exl3_marker_batch_stride_bytes = 4u;
+                host_plane.host_exl3_marker = w.exl3_marker.data<void>();
+                allocated = true;
+            } else if (v->exl3_ka != w.exl3_ka || v->exl3_half != w.exl3_half ||
+                       v->codes.size != trellis_bytes || v->suh.size != suh_bytes ||
+                       v->svh.size != svh_bytes) {
+                return Status::invalid_argument(
+                    ("Qwen4Exp expert TP geometry differs inside one layer: " + name).c_str(),
+                    __FILE__, __LINE__);
+            }
+            if (local < vram_experts) {
+                Status st = copy_async(w.codes.data<std::uint8_t>() + local * trellis_bytes,
+                                       v->codes.data, static_cast<std::size_t>(trellis_bytes),
+                                       stream, "Qwen4Exp expert TP trellis upload");
+                if (!st.ok()) return st;
+                st = copy_async(w.exl3_suh.data<std::uint16_t>() +
+                                    static_cast<std::size_t>(local) * local_k,
+                                v->suh.data, static_cast<std::size_t>(suh_bytes), stream,
+                                "Qwen4Exp expert TP suh upload");
+                if (!st.ok()) return st;
+                st = copy_async(w.exl3_svh.data<std::uint16_t>() +
+                                    static_cast<std::size_t>(local) * local_n,
+                                v->svh.data, static_cast<std::size_t>(svh_bytes), stream,
+                                "Qwen4Exp expert TP svh upload");
+                if (!st.ok()) return st;
+                st = copy_async(w.exl3_marker.data<std::uint8_t>() +
+                                    static_cast<std::size_t>(local) * 4u,
+                                v->marker.data, 4u, stream,
+                                "Qwen4Exp expert TP marker upload");
+                if (!st.ok()) return st;
+            } else {
+                if (!host_allocated) {
+                    Status st = allocate_host();
+                    if (!st.ok()) return st;
+                }
+                const std::uint32_t slot = local - vram_experts;
+                std::memcpy(host_codes + static_cast<std::size_t>(slot) * trellis_bytes,
+                            v->codes.data, static_cast<std::size_t>(trellis_bytes));
+                std::memcpy(host_scales + static_cast<std::size_t>(slot) * suh_bytes,
+                            v->suh.data, static_cast<std::size_t>(suh_bytes));
+                std::memcpy(host_row_ref + static_cast<std::size_t>(slot) * svh_bytes,
+                            v->svh.data, static_cast<std::size_t>(svh_bytes));
+            }
+            continue;
+        }
+
+        shelf::quantization::mxfp4::Mxfp4CanonicalView cv;
+        cv.batch = 1u;
+        cv.n = local_n;
+        cv.padded_k = local_k;
+        cv.codes = static_cast<const std::uint8_t*>(v->codes.data);
+        cv.codes_bytes = v->codes.size;
+        cv.scales = static_cast<const std::uint8_t*>(v->metadata1.data);
+        cv.scales_bytes = v->metadata1.size;
+        shelf::quantization::mxfp4::Mxfp4NativeHost native;
+        if (!cv.validate() ||
+            !shelf::quantization::mxfp4::preshuffle_mxfp4_native(cv, native)) {
+            return Status::invalid_argument(
+                ("Qwen4Exp MXFP4 expert TP preshuffle failed: " + name).c_str(), __FILE__,
+                __LINE__);
+        }
+        const std::uint64_t tc = native.codes.size();
+        const std::uint64_t ts = native.scales.size();
+        const std::uint64_t tr = native.row_ref.size();
+        if (!allocated) {
+            codes_batch = tc;
+            scales_batch = ts;
+            row_ref_stride = tr;
+            w.encoding = shelf::weights::MatrixEncoding::Mxfp4;
+            w.rows = local_n;
+            w.cols = local_k;
+            w.k_padded = local_k;
+            w.experts = vram_experts;
+            w.weight_scale_group = shelf::quantization::kMxfp4ScaleBlockK;
+            w.preshuffled = true;
+            w.codes_row_stride_bytes =
+                static_cast<std::uint32_t>(native.codes_row_stride_bytes);
+            w.scale_row_stride_bytes =
+                static_cast<std::uint32_t>(native.scale_row_stride_bytes);
+            w.storage_scale_stride_bytes = w.scale_row_stride_bytes;
+            w.codes_batch_stride_bytes = tc;
+            w.scales_batch_stride_bytes = ts;
+            w.codes = alloc_u8(tc * vram_experts,
+                               {vram_experts, static_cast<std::size_t>(local_n / 16u),
+                                static_cast<std::size_t>(w.codes_row_stride_bytes)},
+                               {static_cast<std::size_t>(tc),
+                                static_cast<std::size_t>(w.codes_row_stride_bytes), 1u},
+                               arena);
+            w.scales = alloc_u8(ts * vram_experts,
+                                {vram_experts, static_cast<std::size_t>(local_n),
+                                 static_cast<std::size_t>(w.scale_row_stride_bytes)},
+                                {static_cast<std::size_t>(ts),
+                                 static_cast<std::size_t>(w.scale_row_stride_bytes), 1u},
+                                arena);
+            w.row_ref = alloc_u8(tr * vram_experts,
+                                 {vram_experts, static_cast<std::size_t>(local_n)},
+                                 {static_cast<std::size_t>(tr), 1u}, arena);
+            if (w.codes.ndim() == 0 || w.scales.ndim() == 0 || w.row_ref.ndim() == 0) {
+                return Status::insufficient_memory(
+                    "Qwen4Exp MXFP4 expert TP plane allocation failed", __FILE__, __LINE__);
+            }
+            host_plane.encoding = shelf::weights::MatrixEncoding::Mxfp4;
+            host_plane.weight_scale_group = shelf::quantization::kMxfp4ScaleBlockK;
+            host_plane.preshuffled = true;
+            host_plane.codes_row_stride_bytes = w.codes_row_stride_bytes;
+            host_plane.scale_row_stride_bytes = w.scale_row_stride_bytes;
+            host_plane.storage_scale_stride_bytes = w.storage_scale_stride_bytes;
+            host_plane.codes_batch_stride_bytes = tc;
+            host_plane.scales_batch_stride_bytes = ts;
+            allocated = true;
+        } else if (tc != codes_batch || ts != scales_batch || tr != row_ref_stride) {
+            return Status::invalid_argument(
+                ("Qwen4Exp MXFP4 expert TP geometry differs inside one layer: " + name).c_str(),
+                __FILE__, __LINE__);
+        }
+        if (local < vram_experts) {
+            Status st = copy_async(w.codes.data<std::uint8_t>() + local * tc,
+                                   native.codes.data(), static_cast<std::size_t>(tc), stream,
+                                   "Qwen4Exp MXFP4 expert TP codes upload");
+            if (!st.ok()) return st;
+            st = copy_async(w.scales.data<std::uint8_t>() + local * ts,
+                            native.scales.data(), static_cast<std::size_t>(ts), stream,
+                            "Qwen4Exp MXFP4 expert TP scales upload");
+            if (!st.ok()) return st;
+            st = copy_from_staging(w.row_ref.data<std::uint8_t>() + local * tr,
+                                   native.row_ref.data(), static_cast<std::size_t>(tr), stream,
+                                   "Qwen4Exp MXFP4 expert TP row_ref upload");
+            if (!st.ok()) return st;
+        } else {
+            if (!host_allocated) {
+                Status st = allocate_host();
+                if (!st.ok()) return st;
+            }
+            const std::uint32_t slot = local - vram_experts;
+            std::memcpy(host_codes + static_cast<std::size_t>(slot) * tc,
+                        native.codes.data(), static_cast<std::size_t>(tc));
+            std::memcpy(host_scales + static_cast<std::size_t>(slot) * ts,
+                        native.scales.data(), static_cast<std::size_t>(ts));
+            std::memcpy(host_row_ref + static_cast<std::size_t>(slot) * tr,
+                        native.row_ref.data(), static_cast<std::size_t>(tr));
+        }
+    }
+    if (host_experts != 0u && !host_allocated) {
+        Status st = allocate_host();
+        if (!st.ok()) return st;
+    }
+    shelf::weights::apply_default_compute_spec(w);
+    shelf::weights::apply_default_compute_spec(host_plane);
+    return w;
+}
+
 Result<MatrixWeight> load_expert_matrix(const qqb::QuantizedModelReader& reader,
                                         const std::string& prefix,
                                         const char* projection,
@@ -659,7 +1039,14 @@ Result<MatrixWeight> load_expert_matrix(const qqb::QuantizedModelReader& reader,
                                         shelf::weights::PinnedHostArena& host_arena,
                                         GpuArena& arena,
                                         hipStream_t stream,
-                                        MatrixWeight& host_plane) {
+                                        MatrixWeight& host_plane,
+                                        std::uint32_t tp_size,
+                                        std::uint32_t tp_rank) {
+    if (tp_size > 1u) {
+        return load_expert_matrix_tp(reader, prefix, projection, local_experts, expert_begin,
+                                     k, n, host_experts, host_arena, arena, stream,
+                                     host_plane, tp_size, tp_rank);
+    }
     host_plane = MatrixWeight{};
     host_plane.experts = 0u;
     host_plane.rows = n;
@@ -889,29 +1276,46 @@ Status load_moe(const qqb::QuantizedModelReader& reader, const std::string& pref
     if (!st.ok()) return st;
 
     const std::uint32_t global_experts = static_cast<std::uint32_t>(config.ffn.num_experts);
-    if (ep_size == 0u) ep_size = tp_size;
+    if (ep_size == 0u) ep_size = 1u;
+    if (ep_rank >= ep_size) {
+        return Status::invalid_argument("Qwen4Exp expert load ep_rank is out of range",
+                                        __FILE__, __LINE__);
+    }
+    if ((global_experts % ep_size) != 0u) {
+        return Status::unsupported("Qwen4Exp experts must divide by ep_size", __FILE__,
+                                   __LINE__);
+    }
     const std::uint32_t local_experts = global_experts / ep_size;
     const std::uint32_t expert_begin = ep_rank * local_experts;
     const std::uint32_t hidden = static_cast<std::uint32_t>(config.hidden_size);
     const std::uint32_t intermediate =
         static_cast<std::uint32_t>(config.ffn.moe_intermediate_size);
+    if (tp_size == 0u) {
+        return Status::invalid_argument("Qwen4Exp expert load tp_size is zero", __FILE__,
+                                        __LINE__);
+    }
+    if ((intermediate % tp_size) != 0u) {
+        return Status::unsupported(
+            "Qwen4Exp routed expert intermediate size must divide by tp_size", __FILE__,
+            __LINE__);
+    }
     out.experts.global_experts = global_experts;
     out.experts.local_experts = local_experts;
     out.experts.expert_begin = expert_begin;
 
     auto gate = load_expert_matrix(reader, prefix, "gate_proj", local_experts, expert_begin,
                                    hidden, intermediate, host_experts, host_arena, arena,
-                                   stream, out.gate_experts_host);
+                                   stream, out.gate_experts_host, tp_size, tp_rank);
     if (!gate.ok()) return gate.status();
     out.gate_experts = gate.release();
     auto up = load_expert_matrix(reader, prefix, "up_proj", local_experts, expert_begin,
                                  hidden, intermediate, host_experts, host_arena, arena,
-                                 stream, out.up_experts_host);
+                                 stream, out.up_experts_host, tp_size, tp_rank);
     if (!up.ok()) return up.status();
     out.up_experts = up.release();
     auto down = load_expert_matrix(reader, prefix, "down_proj", local_experts, expert_begin,
                                    intermediate, hidden, host_experts, host_arena, arena,
-                                   stream, out.down_experts_host);
+                                   stream, out.down_experts_host, tp_size, tp_rank);
     if (!down.ok()) return down.status();
     out.down_experts = down.release();
     return Status::make_ok();
@@ -1071,7 +1475,7 @@ std::vector<std::string> qwen4exp_rank_logical_names(
             "model.language_model.hyper_connection_mixer.input_mix_weight_up.weight");
         names.push_back("model.language_model.hyper_connection_mixer.hc_norm.weight");
     }
-    if (ep_size == 0u) ep_size = tp_size;
+    if (ep_size == 0u) ep_size = 1u;
     const std::uint32_t local_experts =
         static_cast<std::uint32_t>(config.ffn.num_experts) / ep_size;
     const std::uint32_t expert_begin = ep_rank * local_experts;
@@ -1128,9 +1532,8 @@ Result<Qwen4ExpRankWeights> load_qwen4exp_rank(const std::string& model_dir,
     if (!config_result.ok()) return config_result.status();
     const Qwen4ExpTextConfig& config = config_result.value();
     const std::uint32_t ep_size =
-        options.ep_size == 0u ? options.tp_size : options.ep_size;
-    const std::uint32_t ep_rank =
-        options.ep_size == 0u ? options.tp_rank : options.ep_rank;
+        options.ep_size == 0u ? 1u : options.ep_size;
+    const std::uint32_t ep_rank = options.ep_rank;
     if (options.stage.enabled && options.tp_size > 1u) {
         return Status::unsupported(
             "a pipeline stage of a Qwen4Exp expert-axis rank is not wired", __FILE__, __LINE__);
@@ -1145,12 +1548,19 @@ Result<Qwen4ExpRankWeights> load_qwen4exp_rank(const std::string& model_dir,
         return Status::invalid_argument("invalid pipeline stage range", __FILE__, __LINE__);
     }
 
+    const std::uint32_t backbone_tp_size = options.backbone_tp_size != 0u
+        ? options.backbone_tp_size
+        : options.tp_size;
+    const std::uint32_t backbone_tp_rank = options.backbone_tp_size != 0u
+        ? options.backbone_tp_rank
+        : options.tp_rank;
     QuantizedLmHeadSummary lm_head_summary;
     const bool shard_lm_head =
         read_quantized_lm_head_summary(model_dir, lm_head_summary) &&
-        quantized_lm_head_shardable(lm_head_summary, options.tp_size);
+        quantized_lm_head_shardable(lm_head_summary, backbone_tp_size);
     auto plan_result = build_tp_plan(config, options.tp_size, options.tp_rank,
-                                     shard_lm_head, ep_size, options.mtp_split);
+                                     backbone_tp_size, backbone_tp_rank, shard_lm_head,
+                                     ep_size, options.mtp_split);
     if (!plan_result.ok()) return plan_result.status();
     const TensorPartitionPlan& plan = plan_result.value();
 
@@ -1294,8 +1704,8 @@ Result<Qwen4ExpRankWeights> load_qwen4exp_rank(const std::string& model_dir,
 
     Status valid = options.stage.enabled
         ? validate_qwen4exp_stage(out, config, options.stage)
-        : validate_qwen4exp_rank(out, config, options.tp_size, options.tp_rank,
-                                 ep_size, ep_rank);
+        : validate_qwen4exp_rank(out, config, backbone_tp_size, backbone_tp_rank,
+                                 ep_size, ep_rank, options.tp_size);
     if (!valid.ok()) return valid;
     return out;
 }
@@ -1469,10 +1879,17 @@ Status validate_qwen4exp_rank(const Qwen4ExpRankWeights& weights,
                               std::uint32_t tp_size,
                               std::uint32_t tp_rank,
                               std::uint32_t ep_size,
-                              std::uint32_t ep_rank) {
+                              std::uint32_t ep_rank,
+                              std::uint32_t expert_tp_size) {
     if (ep_size == 0u) {
-        ep_size = tp_size;
-        ep_rank = tp_rank;
+        ep_size = 1u;
+        ep_rank = 0u;
+    }
+    if (expert_tp_size == 0u) expert_tp_size = tp_size;
+    if (expert_tp_size == 0u || expert_tp_size > 4u ||
+        (512u % expert_tp_size) != 0u) {
+        return Status::unsupported("Qwen4Exp expert TP supports 1, 2 or 4", __FILE__,
+                                   __LINE__);
     }
     if (ep_size != 0u && (ep_size > 4u || (512u % ep_size) != 0u)) {
         return Status::unsupported("Qwen4Exp validation supports ep_size 1, 2 or 4", __FILE__,
@@ -1505,6 +1922,12 @@ Status validate_qwen4exp_rank(const Qwen4ExpRankWeights& weights,
     const std::uint32_t expert_begin = ep_rank * local_experts;
     const std::uint32_t intermediate =
         static_cast<std::uint32_t>(config.ffn.moe_intermediate_size);
+    if ((intermediate % expert_tp_size) != 0u) {
+        return Status::unsupported(
+            "Qwen4Exp routed expert intermediate size must divide by expert_tp_size",
+            __FILE__, __LINE__);
+    }
+    const std::uint32_t local_intermediate = intermediate / expert_tp_size;
     const std::uint32_t shared_intermediate =
         static_cast<std::uint32_t>(config.ffn.shared_expert_intermediate_size);
     const std::uint32_t local_shared = shared_intermediate;
@@ -1653,13 +2076,13 @@ Status validate_qwen4exp_rank(const Qwen4ExpRankWeights& weights,
                                             __LINE__);
         }
         st = expect_experts(w.mlp.gate_experts, w.mlp.gate_experts_host, local_experts,
-                            intermediate, hidden, "gate_experts");
+                            local_intermediate, hidden, "gate_experts");
         if (!st.ok()) return st;
         st = expect_experts(w.mlp.up_experts, w.mlp.up_experts_host, local_experts,
-                            intermediate, hidden, "up_experts");
+                            local_intermediate, hidden, "up_experts");
         if (!st.ok()) return st;
         st = expect_experts(w.mlp.down_experts, w.mlp.down_experts_host, local_experts,
-                            hidden, intermediate, "down_experts");
+                            hidden, local_intermediate, "down_experts");
         if (!st.ok()) return st;
         const bool has_ple = config.layer_has_ple(layer);
         if (w.ple.present != has_ple) {

@@ -179,6 +179,19 @@ Result<RT::ValueId> emit_qwen4exp_moe(Emitter& em,
         em.pg.nodes.back().tp_combine = 1;
         return output;
     }
+    if (geometry.axes_overlap) {
+        // The EP group is also the backbone TP group. The routed expert shards are split by
+        // EP and the shared expert is replicated with only TP rank 0 contributing, so one
+        // EP reduction folds both terms and removes the separate shared TP barrier.
+        RT::MoeCombineNode n;
+        n.shape = RT::RowwiseShapeKey{geometry.hidden};
+        n.top_k = geometry.top_k;
+        em.emit(RT::PrimitiveNode{n}, {expert_out, shared_out, shared_weight}, {output});
+        em.pg.nodes.back().debug_name = std::string(debug_prefix) + "moe_combine";
+        em.pg.nodes.back().tp_combine = 0u;
+        em.pg.nodes.back().ep_combine = 1u;
+        return output;
+    }
     RT::ValueId routed = em.value(geometry.hidden);
     {
         RT::MoeCombineNode n;
@@ -188,7 +201,7 @@ Result<RT::ValueId> emit_qwen4exp_moe(Emitter& em,
         em.emit(RT::PrimitiveNode{n}, {expert_out, shared_out, shared_weight}, {routed});
         em.pg.nodes.back().debug_name = std::string(debug_prefix) + "moe_routed_combine";
     }
-    if (geometry.tp_size > 1u) {
+    if (geometry.expert_tp_size < geometry.tp_size) {
         RT::ValueId scaled = em.value(geometry.hidden);
         em.emit(RT::PrimitiveNode{RT::ScaleNode{RT::RowwiseShapeKey{geometry.hidden},
                                                 1.0f / geometry.tp_size}},
@@ -196,7 +209,7 @@ Result<RT::ValueId> emit_qwen4exp_moe(Emitter& em,
         em.pg.nodes.back().debug_name = std::string(debug_prefix) + "moe_routed_tp_scale";
         routed = scaled;
     }
-    em.pg.nodes.back().tp_combine = 1;
+    em.pg.nodes.back().tp_combine = geometry.tp_size > 1u ? 1u : 0u;
     em.pg.nodes.back().ep_combine = 1;
     RT::ValueId shared_contribution = em.value(geometry.hidden);
     {

@@ -4,6 +4,8 @@
 #include <shelf/quantization/manifest/quantized_manifest.h>
 #include <shelf/quantization/mxfp4/mxfp4.h>
 #include <shelf/quantization/mxfp4/mxfp4_native.h>
+#include <shelf/weights/canonical_partition.h>
+#include <shelf/weights/tensor_partition.h>
 
 #include <cstdint>
 #include <cstring>
@@ -80,8 +82,8 @@ Status gather_plane(const QuantizedModelReader& reader, const MoeExpertGroupPlan
         auto resolved = reader.resolve(src.name);
         if (!resolved.ok())
             return resolved.status();
-        const QuantizedTensorView& v = resolved.value();
-        if (v.encoding != QuantizedEncoding::Mxfp4) {
+        const QuantizedTensorView& global = resolved.value();
+        if (global.encoding != QuantizedEncoding::Mxfp4) {
             return Status::invalid_argument(
                 ("moe expert tensor is not mxfp4: " + src.name).c_str(), __FILE__, __LINE__);
         }
@@ -89,19 +91,40 @@ Status gather_plane(const QuantizedModelReader& reader, const MoeExpertGroupPlan
             return Status::invalid_argument(
                 ("moe expert source rows out of plane: " + src.name).c_str(), __FILE__, __LINE__);
         }
-        if (v.logical_shape.size() != 2u || static_cast<uint64_t>(v.logical_shape[0]) != src.rows ||
-            static_cast<uint64_t>(v.logical_shape[1]) != out.cols ||
-            static_cast<uint64_t>(v.k_padded) != out.k_padded) {
+        shelf::weights::OwnedCanonicalTensor owned;
+        QuantizedTensorView local;
+        const QuantizedTensorView* v = &global;
+        if (plan.tp_size > 1u) {
+            const bool down = src.projection == MoeExpertProjection::Down;
+            shelf::weights::TensorPartitionDesc partition;
+            partition.axis = down ? 1 : 0;
+            partition.index = plan.tp_rank;
+            partition.count = plan.tp_size;
+            partition.global_shape = global.logical_shape;
+            const std::uint32_t offset =
+                down ? src.source_col_offset : src.source_row_offset;
+            const std::uint32_t extent = down ? src.source_col_extent : src.rows;
+            partition.ranges.push_back(shelf::weights::TensorPartitionRange{
+                static_cast<std::uint64_t>(offset), static_cast<std::uint64_t>(extent)});
+            Status materialized = shelf::weights::materialize_rank_local_canonical(
+                partition, global, owned, local);
+            if (!materialized.ok()) return materialized;
+            v = &local;
+        }
+        if (v->logical_shape.size() != 2u ||
+            static_cast<std::uint64_t>(v->logical_shape[0]) != src.rows ||
+            static_cast<std::uint64_t>(v->logical_shape[1]) != out.cols ||
+            static_cast<std::uint64_t>(v->k_padded) != out.k_padded) {
             return Status::invalid_argument(
                 ("moe expert logical shape mismatch: " + src.name).c_str(), __FILE__, __LINE__);
         }
         const uint64_t codes_want = static_cast<uint64_t>(src.rows) * packed_k;
         const uint64_t scales_want = static_cast<uint64_t>(src.rows) * out.scale_k;
-        if (v.codes.data == nullptr || v.codes.size != codes_want) {
+        if (v->codes.data == nullptr || v->codes.size != codes_want) {
             return Status::invalid_argument(
                 ("moe expert codes payload size mismatch: " + src.name).c_str(), __FILE__, __LINE__);
         }
-        if (v.metadata1.data == nullptr || v.metadata1.size != scales_want) {
+        if (v->metadata1.data == nullptr || v->metadata1.size != scales_want) {
             return Status::invalid_argument(
                 ("moe expert scale payload size mismatch: " + src.name).c_str(), __FILE__, __LINE__);
         }
@@ -113,9 +136,9 @@ Status gather_plane(const QuantizedModelReader& reader, const MoeExpertGroupPlan
         }
         const uint64_t local_expert = src.expert - plan.expert_begin;
         const uint64_t row_base = local_expert * out.rows + src.row_offset;
-        std::memcpy(out.codes.data() + row_base * packed_k, v.codes.data,
+        std::memcpy(out.codes.data() + row_base * packed_k, v->codes.data,
                     static_cast<std::size_t>(codes_want));
-        std::memcpy(out.scales.data() + row_base * out.scale_k, v.metadata1.data,
+        std::memcpy(out.scales.data() + row_base * out.scale_k, v->metadata1.data,
                     static_cast<std::size_t>(scales_want));
     }
     return Status::make_ok();

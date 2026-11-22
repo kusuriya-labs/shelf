@@ -210,10 +210,16 @@ inline shelf::weights::Exl3LinearShape mtp_exl3_linear_shape(
 struct Qwen4ExpLoadOptions {
     std::uint32_t tp_size = 1;
     std::uint32_t tp_rank = 0;
-    // Routed experts follow the expert-parallel rank; the backbone still follows tp.
+    // Routed expert IDs follow the expert-parallel rank. The backbone, shared expert and
+    // each local expert's matrix follow tp_size / tp_rank. ep_size == 0 means EP=1.
     std::uint32_t ep_size = 0;
     std::uint32_t ep_rank = 0;
     bool ep_enabled = false;
+    // The backbone's TP geometry when it differs from the routed-expert TP. EP>1 with
+    // TP==1 uses the EP ranks as the backbone's tensor group, so the trunk is not
+    // replicated. Zero means "same as tp_size / tp_rank".
+    std::uint32_t backbone_tp_size = 0;
+    std::uint32_t backbone_tp_rank = 0;
     bool verify_quantized_payload_crc = false;
     // Text-only is the first target. MTP and Vision are not loaded by this path.
     bool load_mtp = false;
@@ -244,11 +250,12 @@ std::vector<std::string> qwen4exp_rank_logical_names(
     std::uint32_t ep_size = 0u, std::uint32_t ep_rank = 0u,
     bool mtp_split = false);
 
-// Loads one tensor-parallel rank of a Qwen4Exp checkpoint. Routed experts are split on
-// the expert axis. The canonical partition contract does not split EXL3 matrices yet, so
-// the shared expert, GDN/full attention, router, hyper-connections, embedding, LM head and
-// PLE small weights are replicated on every rank for this first load path. The PLE table
-// is not loaded here.
+// Loads one tensor-parallel rank of a Qwen4Exp checkpoint. Routed expert IDs split on the
+// expert axis, and each local expert's matrix splits on tp_size / tp_rank (gate/up on N,
+// down on K). The shared expert, router, hyper-connections and PLE small weights stay
+// replicated; attention / GDN and the embedding / LM head follow the tensor partition plan.
+// EXL3 INT8 requires the local N and K to stay 128-aligned. The PLE table is not loaded
+// here.
 Result<Qwen4ExpRankWeights> load_qwen4exp_rank(const std::string& model_dir,
                                                gpu::GpuArena& arena,
                                                hipStream_t stream,
@@ -260,7 +267,8 @@ Status validate_qwen4exp_rank(const Qwen4ExpRankWeights& weights,
                               std::uint32_t tp_size,
                               std::uint32_t tp_rank,
                               std::uint32_t ep_size = 0u,
-                              std::uint32_t ep_rank = 0u);
+                              std::uint32_t ep_rank = 0u,
+                              std::uint32_t expert_tp_size = 0u);
 
 Status validate_qwen4exp_stage(const Qwen4ExpRankWeights& weights,
                                const Qwen4ExpTextConfig& config,

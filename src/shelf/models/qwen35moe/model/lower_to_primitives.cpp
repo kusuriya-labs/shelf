@@ -91,8 +91,6 @@ Status emit_moe_ffn(
     uint32_t global_experts,
     uint32_t top_k,
     const std::string& layer_prefix,
-    uint32_t tp_size,
-    uint32_t ep_size,
     bool ep_enabled,
     MoeFfnOutput& out) {
 
@@ -194,13 +192,6 @@ Status emit_moe_ffn(
             em.emit(RT::PrimitiveNode{n}, {expert_out, shared_out, shared_weight}, {routed});
             name_last("routed_combine");
         }
-        if (tp_size > 1u) {
-            RT::ValueId scaled = em.value(static_cast<uint32_t>(hidden_key.features));
-            em.emit(RT::PrimitiveNode{RT::ScaleNode{hidden_key, 1.0f / tp_size}},
-                    {routed}, {scaled});
-            name_last("routed_tp_scale");
-            routed = scaled;
-        }
         pg.nodes.back().tp_combine = 1;
         pg.nodes.back().ep_combine = 1;
         RT::ValueId shared_contribution = em.value(static_cast<uint32_t>(hidden_key.features));
@@ -241,10 +232,8 @@ Result<QH::HybridLoweredPrimitives> lower_qwen35_moe_to_primitives(
         return Status::invalid_argument("MoE lowering: tp_size / tp_rank out of range",
                                         __FILE__, __LINE__);
     }
-    const std::uint32_t ep_size =
-        options.ep_size == 0u ? options.tp_size : options.ep_size;
-    const std::uint32_t ep_rank =
-        options.ep_size == 0u ? options.tp_rank : options.ep_rank;
+    const std::uint32_t ep_size = options.ep_size == 0u ? 1u : options.ep_size;
+    const std::uint32_t ep_rank = options.ep_rank;
     const bool ep_enabled = options.ep_enabled;
     Status status = validate_qwen35moe_weights(weights, config, ep_size, ep_rank,
                                                options.tp_size, options.tp_rank,
@@ -280,8 +269,13 @@ Result<QH::HybridLoweredPrimitives> lower_qwen35_moe_to_primitives(
     status = QH::checked_u32(config.ffn.num_experts_per_tok, "invalid expert selection width",
                              top_k);
     if (!status.ok()) return status;
-    status = QH::checked_u32(config.ffn.moe_intermediate_size, "invalid routed expert width",
-                             moe_intermediate);
+    if ((config.ffn.moe_intermediate_size % options.tp_size) != 0u) {
+        return Status::unsupported(
+            "MoE lowering: moe_intermediate_size must divide by tp_size", __FILE__,
+            __LINE__);
+    }
+    status = QH::checked_u32(config.ffn.moe_intermediate_size / options.tp_size,
+                             "invalid routed expert width", moe_intermediate);
     if (!status.ok()) return status;
     status = QH::checked_u32(config.ffn.shared_expert_intermediate_size,
                              "invalid shared expert width", shared_intermediate);
@@ -512,7 +506,7 @@ Result<QH::HybridLoweredPrimitives> lower_qwen35_moe_to_primitives(
         status = emit_moe_ffn(em, plans[li], lw_idx, lw.ffn, blk.post_norm,
                               blk.attention_residual, hidden_key, moe_intermediate,
                               local_shared_intermediate, local_experts, experts, top_k,
-                              layer_prefix, tp_size, ep_size, ep_enabled, ffn_out);
+                              layer_prefix, ep_enabled, ffn_out);
         if (!status.ok()) return status;
         layer_input = ffn_out.layer_output;
 

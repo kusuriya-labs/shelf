@@ -22,8 +22,8 @@ Result<Qwen35MoeModel> Qwen35MoeModel::load_from_safetensors(
     const shelf::weights::TensorPartitionPlan* plan = options.weights.partition_plan;
     const std::uint32_t matrix_size = plan != nullptr ? plan->tp_size : 1u;
     const std::uint32_t matrix_rank = plan != nullptr ? plan->tp_rank : 0u;
-    const std::uint32_t expert_size = options.ep_size == 0u ? matrix_size : options.ep_size;
-    const std::uint32_t expert_rank = options.ep_size == 0u ? matrix_rank : options.ep_rank;
+    const std::uint32_t expert_size = options.ep_size == 0u ? 1u : options.ep_size;
+    const std::uint32_t expert_rank = options.ep_size == 0u ? 0u : options.ep_rank;
     Status validation = validate_qwen35moe_weights(
         weights, text_config, expert_size, expert_rank, matrix_size, matrix_rank,
         options.stage);

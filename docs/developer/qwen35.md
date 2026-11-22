@@ -524,7 +524,7 @@ Qwen35 の top-level load path は partition plan を
 
 ### Weights / Config
 
-dense model の weight は「共通 backbone + dense FFN」の合成で、FFN 以外の字段を
+dense model の weight は「共通 backbone + dense FFN」の合成で、FFN 以外のフィールドを
 `shelf::qwen35` は持たない。
 
 - `include/shelf/models/qwen35/model/qwen35_config.h`

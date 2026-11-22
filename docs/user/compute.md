@@ -208,9 +208,12 @@ dense checkpoint を TP=2 で動かす場合:
 制約:
 
 - checkpoint に MTP block（`mtp.*`）が必要。無い checkpoint で `--mtp` を指定すると起動時に失敗する。
-- dense checkpoint は `--tensor-parallel 2` に対応する。qwen4exp は TP / EP に対応する。
-  `--serve-stdio` の TP では MTP block を全 rank に分割し、drafter は target の語彙分割
-  lm_head を共用する。単発生成の TP は rank0 が MTP block 全体を持つ。
+- dense checkpoint は `--tensor-parallel 2` に対応する。qwen4exp は TP / EP に対応し、
+  EP は routed expert の expert ID、TP は backbone と各 expert の matrix 軸を分割する。
+  EXL3 INT8 の routed expert は local の N / K が 128 の倍数でなければならず、
+  `moe_intermediate_size / (128 * tp_size)` が整数でない TP は起動時に `unsupported`
+  になる。`--serve-stdio` の TP では MTP block を全 rank に分割し、drafter は target の
+  語彙分割 lm_head を共用する。単発生成の TP は rank0 が MTP block 全体を持つ。
 - `--pipeline-parallel 2`、`--dump-logits` は未対応。
 - `--serve-stdio` は複数 request を同時に保持する。dense など QSA / PLE を持たない
   target は 1 round の verify を 4 request / 32 行ずつの chunk に分けて融合実行する。
@@ -297,8 +300,10 @@ DFlash2 経路でも prefix cache を使う。
 カンマ区切りで指定する（例 `--device 0,1`、非連続な `--device 0,2` も可）。
 `--device` の既定は `0` であり、`--tensor-parallel 2` のときは 2 個の指定が必須である
 （例 `--device 0,1`）。個数が `--tensor-parallel` と一致しない場合・重複している場合・
-可視 device を超出する場合は明示エラー。model weight は rank ごとに
-順次 load するため load 時間は単 GPU より長い。
+可視 device を超える場合は明示エラー。model weight は rank ごとに
+順次 load するため load 時間は単 GPU より長い。MoE では backbone に加えて
+routed expert の行列も TP 分割する。EXL3 INT8 は local の N / K が 128 の倍数で
+なければならないため、checkpoint によっては TP>1 が起動時に拒否される。
 
 `--serve-stdio` も同じ runtime の TP 経路を使う。TP2 の serve 性能は未計測であり、
 性能値は [../perf/current.md](../perf/current.md)、数値互換性・対応範囲の契約は
@@ -327,12 +332,10 @@ K128 一括セットを要求する量子化方式では、各 TP グループ�
 - `--pipeline-parallel` は prefix cache、DFlash2、MTP、hidden taps、
   `--dump-logits` と併用できない。grouped expert checkpoint（Qwen3.6-35B-A3B MoE）も受理する
   （layer を stage で割り、担当外 layer の expert 平面は読まない）。
-- pipeline stage 内の EP / TP 展開は実装済みである。MoE の routed expert は EP、
-  backbone と shared expert は TP で分割し、TP reduce の後に EP reduce を行う。
-  EP=2 / 4、EP=2 + TP=2 で生成列が TP=2 と一致することを確認済み。
+- pipeline stage 内の EP / TP 展開は実装済みである。MoE の routed expert ID は EP、
+  backbone と各 routed expert の matrix は TP で分割し、TP reduce の後に EP reduce を
+  行う。qwen35moe の shared expert は TP、qwen4exp の shared expert は replicated である。
   dense model は EP で分割せず、EP グループごとに同じ計算を複製する。
-- `qwen4_exp` の PP + TP 併用は 2048 token の prefill で non-finite になる
-  既知の問題がある。PP 単体と短いプロンプトだけを確認している。
 - decode と prefill が同じ batch に混在する実行は未対応である。
   `--max-concurrent-requests 1` で運用するか、phase ごとに batch が分かれる条件で使う。
 - KV の page 数は stage 0 の auto-fit 結果を全 stage で共有する。

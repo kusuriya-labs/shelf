@@ -130,17 +130,16 @@ int main() {
         check(moe_expert_tensor_count(dense) == 0u, "a dense config has no expert tensors");
     }
     {
-        // An expert-axis split: one rank owns a contiguous range of the expert axis, the
-        // plane depth shrinks and the source names keep the global expert ids.
+        // TP-only: every expert is replicated and each expert's matrix splits on N / K.
         auto r0 = build_moe_expert_group_plan(cfg, 3, 2, 0);
         auto r1 = build_moe_expert_group_plan(cfg, 3, 2, 1);
-        check(r0.ok() && r1.ok(), "both ranks of a 2-way expert split have a plan");
+        check(r0.ok() && r1.ok(), "both ranks of a 2-way TP split have a plan");
         const auto& a = r0.value();
         const auto& b = r1.value();
-        check(a.experts == 128u && a.expert_begin == 0u && a.global_experts == 256u,
-              "rank 0 holds the first half of the expert axis");
-        check(b.experts == 128u && b.expert_begin == 128u && b.global_experts == 256u,
-              "rank 1 holds the second half");
+        check(a.experts == 256u && a.expert_begin == 0u && a.global_experts == 256u,
+              "rank 0 keeps every expert");
+        check(b.experts == 256u && b.expert_begin == 0u && b.global_experts == 256u,
+              "rank 1 keeps every expert");
         check(a.tp_size == 2u && a.tp_rank == 0u && b.tp_rank == 1u,
               "the plan carries the split it was built for");
         check(a.layer == 3u && b.layer == 3u, "the split keeps the layer");
@@ -148,18 +147,19 @@ int main() {
                   a.w13_scales_bytes * 2u == p.w13_scales_bytes &&
                   a.w2_codes_bytes * 2u == p.w2_codes_bytes &&
                   a.w2_scales_bytes * 2u == p.w2_scales_bytes,
-              "each rank's planes are half the depth, per-expert geometry unchanged");
-        check(a.w13_rows == p.w13_rows && a.w13_k_padded == p.w13_k_padded &&
-                  a.w13_codes_batch_stride_bytes == p.w13_codes_batch_stride_bytes,
-              "the split does not change one expert's layout");
-        check(a.sources.size() == 128u * 3u && b.sources.size() == 128u * 3u,
-              "sources enumerate only the owned experts");
+              "each rank's planes hold half of each expert's matrix");
+        check(a.w13_rows * 2u == p.w13_rows && a.w13_k_padded == p.w13_k_padded &&
+                  a.w13_codes_batch_stride_bytes * 2u == p.w13_codes_batch_stride_bytes &&
+                  a.w2_rows == p.w2_rows && a.w2_cols * 2u == p.w2_cols,
+              "gate/up N and down K are halved, hidden N and hidden K stay whole");
+        check(a.sources.size() == 256u * 3u && b.sources.size() == 256u * 3u,
+              "sources still enumerate every expert");
         check(a.sources.front().name ==
                   "model.language_model.layers.3.mlp.experts.0.down_proj.weight",
               "rank 0's first source is global expert 0");
         check(b.sources.front().name ==
-                  "model.language_model.layers.3.mlp.experts.128.down_proj.weight",
-              "rank 1's first source keeps the global expert id 128");
+                  "model.language_model.layers.3.mlp.experts.0.down_proj.weight",
+              "rank 1's first source is also global expert 0");
         check(b.sources.back().name ==
                   "model.language_model.layers.3.mlp.experts.255.up_proj.weight",
               "rank 1's last source is the last expert of the config");
@@ -168,7 +168,18 @@ int main() {
             if (src.expert < b.expert_begin || src.expert >= b.expert_begin + b.experts)
                 in_range = false;
         }
-        check(in_range, "every source of a rank plan is inside that rank's expert range");
+        check(in_range, "every source is inside the plan's expert range");
+        bool source_tiles_ok = true;
+        for (const auto& src : b.sources) {
+            if (src.projection == MoeExpertProjection::Down) {
+                if (src.source_col_offset != 256u || src.source_col_extent != 256u)
+                    source_tiles_ok = false;
+            } else if (src.source_row_offset != 256u || src.rows != 256u ||
+                       src.source_col_extent != 2048u) {
+                source_tiles_ok = false;
+            }
+        }
+        check(source_tiles_ok, "sources read only the rank's matrix tile");
 
         auto whole = build_moe_expert_group_plan(cfg, 3);
         check(whole.ok() && whole.value().expert_begin == 0u &&
@@ -176,10 +187,20 @@ int main() {
                   whole.value().tp_size == 1u,
               "without a split the plan owns every expert");
 
+        auto ep0 = build_moe_expert_group_plan(cfg, 0, 2u, 0u, 2u, 0u);
+        auto ep1 = build_moe_expert_group_plan(cfg, 0, 2u, 1u, 2u, 1u);
+        check(ep0.ok() && ep1.ok() &&
+                  ep0.value().experts == 128u && ep0.value().expert_begin == 0u &&
+                  ep1.value().experts == 128u && ep1.value().expert_begin == 128u,
+              "EP splits the expert IDs before TP splits each local expert");
         Qwen35MoeTextConfig odd = moe_config();
         odd.ffn.num_experts = 253;
-        check(!build_moe_expert_group_plan(odd, 0, 2, 0).ok(),
-              "an expert count that does not divide by tp_size has no split plan");
+        check(!build_moe_expert_group_plan(odd, 0, 2u, 0u, 1u, 0u).ok(),
+              "an expert count that does not divide by ep_size has no split plan");
+        odd = moe_config();
+        odd.ffn.moe_intermediate_size = 500;
+        check(!build_moe_expert_group_plan(odd, 0, 1u, 0u, 2u, 0u).ok(),
+              "an intermediate width that does not divide by tp_size has no split plan");
         check(!build_moe_expert_group_plan(cfg, 0, 0, 0).ok(), "tp_size 0 is rejected");
         check(!build_moe_expert_group_plan(cfg, 0, 2, 2).ok(), "tp_rank >= tp_size is rejected");
     }

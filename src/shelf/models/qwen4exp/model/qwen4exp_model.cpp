@@ -23,10 +23,15 @@ Result<Qwen4ExpModel> Qwen4ExpModel::load_from_safetensors(
     auto weights = load_qwen4exp_rank(model_dir, arena, stream, options);
     if (!weights.ok()) return weights.status();
 
+    const std::uint32_t backbone_tp_size =
+        options.backbone_tp_size != 0u ? options.backbone_tp_size : tp_size;
+    const std::uint32_t backbone_tp_rank =
+        options.backbone_tp_size != 0u ? options.backbone_tp_rank : tp_rank;
     Status valid = options.stage.enabled
         ? validate_qwen4exp_stage(weights.value(), config.value(), options.stage)
-        : validate_qwen4exp_rank(weights.value(), config.value(), tp_size, tp_rank,
-                                 options.ep_size, options.ep_rank);
+        : validate_qwen4exp_rank(weights.value(), config.value(), backbone_tp_size,
+                                 backbone_tp_rank, options.ep_size, options.ep_rank,
+                                 tp_size);
     if (!valid.ok()) return valid;
     return Qwen4ExpModel(weights.release(), config.release());
 }

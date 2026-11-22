@@ -43,6 +43,10 @@ Result<shelf::qwen_hybrid::TensorParallelContext> make_qwen35moe_tensor_parallel
             config.ffn.shared_expert_intermediate_size, tp_size,
             "qwen35moe tp requires shared_expert_intermediate_size divisible by tp_size");
         if (!st.ok()) return st;
+        st = require_divisible(
+            config.ffn.moe_intermediate_size, tp_size,
+            "qwen35moe tp requires moe_intermediate_size divisible by tp_size");
+        if (!st.ok()) return st;
     }
 
     shelf::qwen_hybrid::TensorParallelContext& out = ctx.value();
@@ -55,6 +59,8 @@ Result<shelf::qwen_hybrid::TensorParallelContext> make_qwen35moe_tensor_parallel
     out.local_shared_expert_intermediate_size =
         static_cast<std::uint32_t>(config.ffn.shared_expert_intermediate_size / tp_size);
     out.local_intermediate_size = out.local_shared_expert_intermediate_size;
+    out.local_moe_intermediate_size =
+        static_cast<std::uint32_t>(config.ffn.moe_intermediate_size / tp_size);
     return ctx;
 }
 
@@ -62,7 +68,7 @@ Result<shelf::qwen_hybrid::TensorParallelContext> make_qwen35moe_tensor_parallel
     const Qwen35MoeTextConfig& config, std::uint32_t tp_size, std::uint32_t tp_rank,
     bool vocab_parallel_lm_head) {
     return make_qwen35moe_tensor_parallel_context(
-        config, tp_size, tp_rank, tp_size, tp_rank, false, vocab_parallel_lm_head);
+        config, tp_size, tp_rank, 1u, 0u, false, vocab_parallel_lm_head);
 }
 
 }  // namespace shelf::qwen35moe

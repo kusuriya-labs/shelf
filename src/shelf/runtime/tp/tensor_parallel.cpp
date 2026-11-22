@@ -407,17 +407,16 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
     const std::uint32_t tp_size = config.tensor_parallel == 0u
         ? static_cast<std::uint32_t>(devices_.size())
         : config.tensor_parallel;
-    // Without an explicit EP group the routed experts follow the TP ranks (legacy layout):
-    // the expert group overlaps the tensor group instead of adding a device axis.
+    // TP and EP are independent axes. EP=1 keeps every expert on every TP rank and lets TP
+    // split each expert's matrix; EP>1 first splits the expert IDs, then TP splits each local
+    // expert's matrix inside the EP group.
     const bool explicit_ep = config.expert_parallel > 1u;
-    const std::uint32_t ep_size = explicit_ep ? config.expert_parallel : tp_size;
-    const std::size_t expected_devices = explicit_ep
-        ? static_cast<std::size_t>(ep_size) * tp_size
-        : tp_size;
+    const std::uint32_t ep_size = config.expert_parallel;
+    const std::size_t expected_devices = static_cast<std::size_t>(ep_size) * tp_size;
     if (devices_.empty() || tp_size == 0u || ep_size == 0u ||
         devices_.size() != expected_devices) {
         return Status::invalid_argument(
-            "tp coordinator device count does not match tensor_parallel / expert_parallel",
+            "tp coordinator device count does not match tensor_parallel * expert_parallel",
             __FILE__, __LINE__);
     }
     if (config.memory == nullptr) {
@@ -456,14 +455,11 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
         rank_config.tp_size = tp_size;
         rank_config.tp_rank = static_cast<std::uint32_t>(r % tp_size);
         rank_config.ep_size = ep_size;
-        rank_config.ep_rank = explicit_ep
-            ? static_cast<std::uint32_t>(r / tp_size)
-            : static_cast<std::uint32_t>(r % tp_size);
+        rank_config.ep_rank = static_cast<std::uint32_t>(r / tp_size);
         rank_config.ep_enabled = explicit_ep;
         rank_config.expert_partition = explicit_ep
             ? ExpertPartitionMode::AcrossEP
-            : (tp_size > 1u ? ExpertPartitionMode::LegacyAcrossTP
-                            : ExpertPartitionMode::Replicated);
+            : ExpertPartitionMode::Replicated;
         rank_config.device_id = devices_[r];
         rank_config.max_batch_rows = config.max_batch_rows;
         rank_config.max_scheduled_requests = config.max_scheduled_requests;
@@ -523,7 +519,7 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
     explicit_ep_ = explicit_ep;
     ParallelShape shape;
     shape.pp = 1u;
-    shape.ep = explicit_ep ? config.expert_parallel : 1u;
+    shape.ep = config.expert_parallel;
     shape.tp = tp_size;
     auto topology_result = ParallelTopology::create(shape, devices_);
     if (!topology_result.ok()) return topology_result.status();
@@ -568,10 +564,18 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
         }
     }
 
+    axes_overlap_ = explicit_ep && topology_->shape().tp == 1u &&
+                    topology_->shape().ep > 1u;
     for (std::size_t r = 0; r < ranks_.size(); ++r) {
         const ParallelCoord coord = topology_->coord(static_cast<std::uint32_t>(r));
         auto& executor = ranks_[r]->executor();
-        if (explicit_ep) {
+        if (axes_overlap_) {
+            auto* barrier = ep_groups_[coord.tp].barrier.get();
+            executor.tp_barrier = barrier;
+            executor.tp_rank = static_cast<int>(coord.ep);
+            executor.ep_barrier = barrier;
+            executor.ep_rank = static_cast<int>(coord.ep);
+        } else if (explicit_ep) {
             executor.tp_barrier = tp_groups_[coord.ep].barrier.get();
             executor.tp_rank = static_cast<int>(coord.tp);
             executor.ep_barrier = ep_groups_[coord.tp].barrier.get();
@@ -738,7 +742,13 @@ Status TpCoordinator::attach_aux_executor(Executor& executor, std::uint32_t rank
                                         __LINE__);
     }
     const ParallelCoord coord = topology_->coord(rank);
-    if (explicit_ep_) {
+    if (axes_overlap_) {
+        auto* barrier = ep_groups_[coord.tp].barrier.get();
+        executor.tp_barrier = barrier;
+        executor.tp_rank = static_cast<int>(coord.ep);
+        executor.ep_barrier = barrier;
+        executor.ep_rank = static_cast<int>(coord.ep);
+    } else if (explicit_ep_) {
         executor.tp_barrier = tp_groups_[coord.ep].barrier.get();
         executor.tp_rank = static_cast<int>(coord.tp);
         executor.ep_barrier = ep_groups_[coord.tp].barrier.get();
@@ -933,8 +943,9 @@ Status TpCoordinator::draft_sum(const shelf::runtime::TpSumTarget& target,
                                 hipStream_t stream, int rank) {
     const ParallelCoord coord = topology_->coord(static_cast<std::uint32_t>(rank));
     const std::size_t group_index = explicit_ep_ ? coord.ep : 0u;
-    const int local_rank = static_cast<int>(coord.tp);
-    auto* barrier = tp_groups_[group_index].barrier.get();
+    const int local_rank = static_cast<int>(axes_overlap_ ? coord.ep : coord.tp);
+    auto* barrier = axes_overlap_ ? ep_groups_[coord.tp].barrier.get()
+                                  : tp_groups_[group_index].barrier.get();
     if (barrier == nullptr) {
         return Status::invalid_state("tp barrier group missing", __FILE__, __LINE__);
     }

@@ -21,6 +21,10 @@ struct Qwen4ExpLowerOptions {
     std::uint32_t ep_size = 1;
     std::uint32_t ep_rank = 0;
     bool ep_enabled = false;
+    // The routed expert matrix TP. In axes_overlap this is 1 while tp_size is the EP size.
+    // Zero means "same as tp_size / tp_rank".
+    std::uint32_t expert_tp_size = 0;
+    std::uint32_t expert_tp_rank = 0;
     float rope_attention_factor = 1.0f;
     // Target layers whose completed output, averaged over the hyper-connection streams,
     // is exposed as a DFlash2 target feature. Appended after the head's four outputs.

@@ -25,6 +25,11 @@ struct MoeExpertTensorSource {
     // Row range this source occupies inside its destination plane.
     uint32_t row_offset = 0;
     uint32_t rows = 0;
+    // The matrix tile this source owns inside the checkpoint tensor. Gate / up split the
+    // output rows (N); down splits the input columns (K).
+    uint32_t source_row_offset = 0;
+    uint32_t source_col_offset = 0;
+    uint32_t source_col_extent = 0;
 };
 
 // The rank-3 planes one MoE layer's routed experts resolve to. w13 is the fused
@@ -39,8 +44,8 @@ struct MoeExpertGroupPlan {
     // The expert count the router selects over. It is the whole config count whatever the
     // split is, and it is what the checkpoint's own plane depth is.
     uint32_t global_experts = 0;
-    // The routed experts follow ep_size / ep_rank. The shared expert follows tp_size /
-    // tp_rank, the way a dense FFN does.
+    // The routed experts follow ep_size / ep_rank. Inside one EP group the routed
+    // expert matrices follow tp_size / tp_rank: gate / up split N and down splits K.
     uint32_t ep_size = 1;
     uint32_t ep_rank = 0;
     uint32_t tp_size = 1;
@@ -106,17 +111,16 @@ std::string moe_expert_tensor_name(const std::string& mlp, uint32_t expert,
 Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig& config,
                                                         std::size_t layer);
 
-// The same plan for one rank of an expert-axis split: the rank owns the contiguous expert
-// range [tp_rank * experts/tp_size, ...), and `experts` counts that range. The plane depth
-// a checkpoint stores stays the global count, which the plan keeps as global_experts.
-// num_experts must divide by tp_size.
+// The same plan for a TP-only rank: every expert is replicated, and tp_size / tp_rank
+// split each expert's gate/up N and down K. This is equivalent to the 6-argument overload
+// with ep_size = 1, ep_rank = 0.
 Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig& config,
                                                         std::size_t layer,
                                                         uint32_t tp_size,
                                                         uint32_t tp_rank);
 
-// The routed experts follow (ep_rank, ep_size) and the shared expert follows
-// (tp_rank, tp_size).
+// The routed expert IDs follow (ep_rank, ep_size), and each local expert's matrix follows
+// (tp_size, tp_rank): gate/up split N and down splits K.
 Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig& config,
                                                         std::size_t layer,
                                                         uint32_t ep_size,

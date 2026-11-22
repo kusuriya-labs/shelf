@@ -31,12 +31,11 @@ struct RankGroup {
     std::vector<std::uint32_t> ranks;
 };
 
-// How the routed experts divide. Topology always states the real PP / EP / TP shape; the
-// legacy layout keeps the expert axis on the TP ranks without adding an EP axis.
+// How the routed experts divide. EP is the expert-ID axis; TP splits each expert's matrix
+// inside the EP group.
 enum class ExpertPartitionMode : std::uint8_t {
     Replicated,
     AcrossEP,
-    LegacyAcrossTP,
 };
 
 // Pure rank geometry: coordinate <-> rank <-> device, and the rank groups the collective

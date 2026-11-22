@@ -16,6 +16,11 @@ MoE pipeline parallel（Qwen3.6-35B-A3B MXFP4）、
 2026-11-06 の model load（Flash Next MXFP4 TP4 / 27B FP8 TP2）と、同じ日の
 BF16 GEMM / TP copy（Flash Next MXFP4 TP4）は reference run として下の節に記録する。
 
+2026-11-23 に MoE の TP semantics を expert-ID split から expert matrix split へ
+変更した。以下の MoE TP（Qwen3.6-35B-A3B MXFP4、Qwen3.8-Flash-Next）の値は
+旧 expert-ID split の測定であり、新しい expert matrix split の性能を表さない。
+再計測するまでは reference としてのみ扱う。
+
 これまでに記録していた値は、計測の前提だった構成がソースから削除されたため、
 再現できなくなっている。該当する計測を削除した。
 
@@ -736,6 +741,38 @@ reference run である。qualified baseline ではない。
 - GPU: Radeon AI PRO R9700 2 枚（GPU 0,1）
 - 生成結果: `The capital of France is Paris. The capital of the United Kingdom is London.`
 - decode は rank あたり 26 GiB の weight traffic による DRAM bound にほぼ一致する。
+
+## 2026-11-23 Qwen3.8-Flash-Next EXL3 EP decode
+
+`models/kusuriya-labs/Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw` を bf16 KV /
+prefix cache なし / greedy / context 128 / 64 token で計測した単発の reference run である。
+qualified baseline ではない。TP は expert matrix split のため、この checkpoint
+（routed expert intermediate 640）は TP>1 を起動できない。以下は EP のみの値である。
+
+| 構成 | GPU | decode tok/s |
+| --- | ---: | ---: |
+| 旧 TP=2（clean `72dce8a7`、expert-ID split） | 0,1 | **33.62 / 34.17** |
+| EP=2 / TP=1（backbone split + 別 reduce） | 0,1 | 32.63 / 32.64 |
+| EP=2 / TP=1（backbone split + 単一 combine） | 0,1 | **33.24 / 33.68** |
+| EP=4 / TP=1（backbone fallback） | 0,1,2,3 | 28.94〜31.44 |
+
+- command（EP=2）:
+  `shelf-bench tg --mode greedy --context 128 --tokens 64 --warmup 2 --device 0,1 --tensor-parallel 1 --expert-parallel 2 --model-dir models/kusuriya-labs/Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw --kv-cache-dtype bf16 --arena-gib auto`
+- command（EP=4）:
+  `shelf-bench tg --mode greedy --context 128 --tokens 64 --warmup 2 --device 0,1,2,3 --tensor-parallel 1 --expert-parallel 4 --model-dir models/kusuriya-labs/Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw --kv-cache-dtype bf16 --arena-gib auto`
+- 旧 TP=2 は clean worktree（`72dce8a7`、変更前）で同じコマンドの
+  `--tensor-parallel 2` を実行した。2 回の値は 33.62 / 34.17 tok/s
+  （p50 34.14 / 34.17）で、生成 token 列の先頭 8 token は現在の EP 構成と一致した。
+- EP=2 / TP=1 は EP rank を backbone の TP 軸にも使う。backbone を複製しない分、
+  backbone split 前の 32.02 / 31.98 から 32.63 / 32.64 へ改善した。
+- axes overlap では EP group が backbone TP group でもあるため、routed expert の
+  EP 部分和と shared expert の寄与を 1 回の combine でまとめて reduce する。
+  これにより layer あたりの MoE barrier が 2 回から 1 回になり、33.24 / 33.68 まで
+  改善した。旧 TP=2 との差は約 1 % である。
+- EP=4 は `num_key_value_heads=2` が 4 で割れないため backbone の EP-TP overlap を
+  使わず、backbone を複製する fallback 経路になる。値は run 間の変動が大きい。
+- 現在の build で TP=2 を指定すると、routed expert の N / K が 128 の倍数にならないため
+  `EXL3 expert TP requires N/128 and K/128 to be divisible by tp_size` で失敗する。
 
 ## 2026-11-05 EXL3 W16A16 decode / prefill
 

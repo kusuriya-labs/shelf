@@ -15,16 +15,23 @@ struct Qwen4ExpMoeLoweringGeometry {
     std::uint32_t expert_begin = 0;
     std::uint32_t top_k = 0;
     std::uint32_t hidden = 0;
+    // Routed expert width on this rank. It is moe_intermediate_size / expert_tp_size.
     std::uint32_t intermediate = 0;
     std::uint32_t shared_intermediate = 0;
     // The shared expert is replicated on every rank. Only one rank contributes it before
     // the TP sum; the others scale it to zero.
     float shared_scale = 1.0f;
-    // With an explicit EP group the expert shard is replicated inside each TP group, so
-    // its contribution is scaled before the global reduce.
+    // Used only when the expert matrices are still replicated inside the TP group (the MTP
+    // path); the normal path sets expert_tp_size == tp_size and performs no scaling.
     float expert_scale = 1.0f;
     bool ep_enabled = false;
+    // EP>1 and TP==1: the EP group is also the backbone TP group. The routed and shared
+    // terms can then be reduced by one EP barrier instead of separate EP / TP barriers.
+    bool axes_overlap = false;
     std::uint32_t tp_size = 1;
+    // The routed expert matrices are split by this factor. It is tp_size on the normal
+    // path; the MTP block keeps 1 because its expert planes are not TP-split.
+    std::uint32_t expert_tp_size = 1;
 };
 
 struct Qwen4ExpMoeLoweringIndices {

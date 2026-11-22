@@ -44,6 +44,7 @@ struct BenchOptions {
     bool compute_logits = true;
     std::vector<int> devices = {0};
     int tp = 1;
+    int ep = 1;
     std::string model_dir;
     int page_tokens = 16;
     std::string kv_cache_dtype = "bf16";
@@ -71,9 +72,10 @@ void print_usage(FILE* out) {
         "  --prefill-chunk N            (default 128)\n"
         "  --warmup N                   (default 0)\n"
         "  --compute-logits 0|1         (default 1)\n"
-        "  --device LIST                comma separated GPUs, one per --tensor-parallel rank\n"
-        "                                (default 0; e.g. --device 0,2)\n"
+        "  --device LIST                comma separated GPUs, one per tensor-parallel *\n"
+        "                                expert-parallel rank (default 0; e.g. --device 0,2)\n"
         "  --tensor-parallel N          tensor parallel degree 1 | 2 | 4 (default 1)\n"
+        "  --expert-parallel N          expert parallel degree 1 | 2 | 4 (default 1)\n"
         "  --model-dir PATH             (required)\n"
         "  --page-tokens N              (default 16)\n"
         "  --kv-cache-dtype bf16|fp8|octave:FORMAT (default bf16)\n"
@@ -248,6 +250,12 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
                 fprintf(stderr, "--tensor-parallel must be 1, 2 or 4\n");
                 return false;
             }
+        } else if (key == "--expert-parallel") {
+            if (!parse_int(need_value(), opts.ep) ||
+                (opts.ep != 1 && opts.ep != 2 && opts.ep != 4)) {
+                fprintf(stderr, "--expert-parallel must be 1, 2 or 4\n");
+                return false;
+            }
         } else if (key == "--model-dir") {
             opts.model_dir = need_value();
         } else if (key == "--page-tokens") {
@@ -346,9 +354,13 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
         fprintf(stderr, "--model-dir is required\n");
         return false;
     }
-    if (opts.devices.size() != static_cast<size_t>(opts.tp)) {
-        fprintf(stderr, "--device expects %d entries for --tensor-parallel %d, got %zu\n",
-                opts.tp, opts.tp, opts.devices.size());
+    const std::size_t parallel_width =
+        static_cast<std::size_t>(opts.tp) * static_cast<std::size_t>(opts.ep);
+    if (opts.devices.size() != parallel_width) {
+        fprintf(stderr,
+                "--device expects %zu entries for tensor-parallel %d * expert-parallel %d, "
+                "got %zu\n",
+                parallel_width, opts.tp, opts.ep, opts.devices.size());
         return false;
     }
     std::vector<int> sorted_devices = opts.devices;
@@ -517,7 +529,7 @@ int run_tg(int argc, char** argv) {
     shelf::state::PagedKVPool* kv_pool = nullptr;
     shelf::qwen35::Executor* executor = nullptr;
 
-    if (opts.tp == 1) {
+    if (opts.tp == 1 && opts.ep == 1) {
         hip_err = hipStreamCreate(&stream);
         if (hip_err != hipSuccess) {
             fprintf(stderr, "hipStreamCreate failed: %s\n", hipGetErrorString(hip_err));
@@ -605,6 +617,8 @@ int run_tg(int argc, char** argv) {
         shelf::qwen35::runtime::TpCoordinatorConfig tp_cfg;
         tp_cfg.model_dir = opts.model_dir;
         tp_cfg.devices = opts.devices;
+        tp_cfg.tensor_parallel = static_cast<std::uint32_t>(opts.tp);
+        tp_cfg.expert_parallel = static_cast<std::uint32_t>(opts.ep);
         tp_cfg.max_batch_rows = exec_config.max_batch_rows;
         tp_cfg.max_scheduled_requests = 1;
         tp_cfg.max_scheduled_output_rows = 1;
@@ -1087,6 +1101,7 @@ int run_tg(int argc, char** argv) {
     }
     printf("\n");
     printf("tp=%d\n", opts.tp);
+    printf("ep=%d\n", opts.ep);
     printf("mode=%s\n", mode_label);
     printf("context=%d\n", opts.context);
     printf("tokens=%d\n", opts.tokens);

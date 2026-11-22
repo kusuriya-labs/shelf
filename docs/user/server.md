@@ -80,10 +80,10 @@ Ready.
 | `--large-context-tokens LARGE_CONTEXT_TOKENS` | prompt tokens above which the larger inference budget applies (default 262144) |
 | `--large-context-inference-budget-tokens LARGE_CONTEXT_INFERENCE_BUDGET_TOKENS` | max generated tokens for a request whose prompt is longer than --large-context-tokens (default 65536) |
 | `--arena-gib N\|auto\|-N` | GPU arena capacity in GiB; auto = free VRAM minus 0.5 GiB, -N = total VRAM minus N GiB (default auto) |
-| `--device DEVICE` | comma separated GPU devices, one per rank; count must match --tensor-parallel (default 0) |
+| `--device DEVICE` | comma separated GPU devices, one per rank; count must match pipeline_parallel * expert_parallel * tensor_parallel (default 0) |
 | `--tensor-parallel {1,2}` | tensor parallel size forwarded to compute (default 1) |
 | `--expert-parallel {1,2,4}` | expert parallel size forwarded to compute (default 1) |
-| `--pipeline-parallel {1,2,4}` | pipeline parallel size forwarded to compute (mutually exclusive with --tensor-parallel; default 1) |
+| `--pipeline-parallel {1,2,4}` | pipeline parallel size forwarded to compute (default 1) |
 | `--kv-cache-dtype KV_CACHE_DTYPE` | KV cache dtype (default bf16) |
 | `--page-tokens PAGE_TOKENS` | paged KV page size in tokens (default 16) |
 | `--mtp-window MTP_WINDOW` | MTP draft attention window in tokens (0 = full context) |
@@ -209,7 +209,8 @@ Qwen3.8-27B-DFlash2、同時 request 1 件では追加 scratch は 16.953 MiB。
   `--max-concurrent-requests` が同時に保持する request 数の上限である。
 - qwen4exp で `--tensor-parallel` を使うときは、MTP block を全 rank に分割し、
   drafter は target の語彙分割 lm_head を共用する。単発生成の TP は rank0 が
-  MTP block 全体を持つ。
+  MTP block 全体を持つ。routed expert も TP で行列分割されるため、EXL3 INT8 では
+  local の N / K が 128 の倍数になる checkpoint だけが TP>1 で起動できる。
 - MTP も prefix cache を使う。target に加えて MTP drafter の KV ring と hidden /
   position を保存・復元する。`restored_tokens` に復元数が出る。checkpoint 間隔は
   `--prefix-cache-save-interval` で調整できる。

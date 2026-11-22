@@ -40,12 +40,22 @@ group は Topology だけが計算する。`TpCoordinator` は受け取った `R
 
 | mode | 意味 |
 | --- | --- |
-| `Replicated` | expert 軸を分割しない |
+| `Replicated` | expert 軸を分割しない。全 expert を各 TP rank に置く |
 | `AcrossEP` | routed expert を EP rank で分割する |
-| `LegacyAcrossTP` | EP=1 の旧構成。expert 軸を TP rank に重ねる |
 
-Topology 上は常に実際の `EP` を表す。EP=1 のときに expert 軸を TP に重ねるのは
-partition policy であり、Topology の軸を崩さない。
+EP は expert ID の軸、TP は matrix 軸である。EP=1 では全 expert を各 TP rank に
+複製し、TP が各 expert の gate/up の N と down の K を分割する。EP>1 では
+EP が expert ID を分割した後、同じ TP が各 local expert の行列を分割する。
+router は全 rank が同じ top-k を選ぶため replicated のままである。
+
+EP>1 かつ TP=1 で、attention / GDN の head 数が EP で割り切れる場合、EP rank を
+backbone の TP 軸にも使う（axes overlap）。backbone、shared expert、lm_head は
+EP グループ内で TP 分割され、routed expert は EP 軸だけで分割される。
+`num_key_value_heads` などが EP で割り切れない場合は backbone を複製する
+fallback 経路になる。Qwen3.8-Flash-Next EXL3（KV head 2）は EP=2 で overlap し、
+EP=4 では KV head が 4 で割れないため fallback する。
+axes overlap の backbone 分割を実装しているのは現在 qwen4exp である。
+qwen35moe の EP 単独構成は backbone を複製する。
 
 ## 2. Execution hierarchy
 
@@ -78,20 +88,23 @@ ContinuousBatcher (global, 1 個)
 
 ### matrix axis（TP）
 
-`TensorPartitionPlan` が backbone と shared expert の matrix axis を分割する。
-正本は [tensor_partition.md](tensor_partition.md)。
+`TensorPartitionPlan` が backbone と（qwen35moe の）shared expert の matrix axis を
+分割する。正本は [tensor_partition.md](tensor_partition.md)。
 
 - dense MLP: gate/up は axis 0、down は axis 1
 - full attention: q/k/v は axis 0、o は axis 1。GQA は q head と KV head の両方を割る
 - GDN: in_proj / conv は axis 0、out_proj は axis 1。recurrent state は rank-local
-- shared expert: gate/up は axis 0、down は axis 1
-- lm_head: dense は vocab-parallel（BF16 / EXL3）。MoE の lm_head は replicated
+- routed expert: gate/up は N 軸（axis 0）、down は K 軸（axis 1）
+- qwen35moe の shared expert: gate/up は axis 0、down は axis 1
+- qwen4exp の shared expert: replicated（matrix 分割しない）
+- lm_head: dense は vocab-parallel。qwen35moe は replicated。qwen4exp は
+  checkpoint の量子化形式が許す場合に vocab-parallel
 - embedding / norm / router / `shared_expert_gate` は replicated
 
 ### expert axis（EP）
 
-routed expert 平面は matrix axis を持たないため、`MoeExpertGroupPlan` が
-expert 軸で切る。
+`MoeExpertGroupPlan` が expert ID を切り、同じ plan の `tp_size` / `tp_rank` が
+各 expert の matrix 軸を切る。
 
 ```cpp
 build_moe_expert_group_plan(config, layer, ep_size, ep_rank, tp_size, tp_rank);
@@ -99,11 +112,16 @@ build_moe_expert_group_plan(config, layer, ep_size, ep_rank, tp_size, tp_rank);
 
 - `experts * ep_size == global_experts`
 - `expert_begin == ep_rank * experts`
-- `tp_size` / `tp_rank` は shared expert の matrix axis 検証に使う
-- 4 引数 overload は `ep_size = tp_size`, `ep_rank = tp_rank` の旧構成
+- `w13_gate_rows` / `w13_up_rows` は `moe_intermediate_size / tp_size`
+- `w2_cols` は `moe_intermediate_size / tp_size`
+- 4 引数 overload は `ep_size = 1`, `ep_rank = 0` の TP-only 構成
 
 `num_experts` が `ep_size` で割り切れない場合は `unsupported`。router は全 rank が
 同じ logits と同じ top-k を持ち、所有範囲外の選択を `kMoeSlotNotOwned` にする。
+MXFP4 / EXL3 の expert を TP 分割するときは、各 rank の N / K が量子化形式の
+alignment を満たす必要がある。EXL3 INT8 は N と K の双方が 128 の倍数である
+必要があり、`moe_intermediate_size / (128 * tp_size)` が整数でない構成は
+load 時に `unsupported` になる。
 
 ## 4. Collectives
 
@@ -116,10 +134,17 @@ routed expert partial
   → shared expert contribution を加算
 ```
 
-- `tp_group(pp, ep)` が TP reduce の group。
+- `tp_group(pp, ep)` が TP reduce の group。EP=1 では全 expert を複製しているため、
+  この reduce が routed expert の matrix tile を足し合わせる。
 - `ep_group(pp, tp)` が EP reduce の group。TP lane ごとに独立しており、同じ
   lane の全 EP rank が参加する。全 rank がちょうど 1 回ずつ EP barrier に参加する。
-- shared expert は TP reduce にだけ参加し、EP reduce の対象にしない。
+  EP=1 では EP reduce は存在しない。
+- axes overlap（EP>1, TP=1）では EP group が backbone の TP group も兼ねる。
+  backbone の `tp_combine` は EP group で reduce する。qwen4exp では routed と shared の
+  両方を含む 1 個の MoE combine に `ep_combine` を付け、EP group で 1 回だけ reduce
+  する。これにより routed 用と shared 用の 2 barrier を 1 barrier に畳む。
+- shared expert は通常の EP reduce の対象にしない。qwen4exp の shared expert は
+  replicated で、backbone TP rank 0 だけが寄与する。
 - reduction は f32 で累積し、最後に 1 回だけ bf16 へ丸める。
   peer 経路と host 経路は同じ contract を持つ。
 - `HipPeerTpTransport` は peer write ベースの対称 push reduce。
@@ -157,8 +182,10 @@ bit 同一にならない。token 列の完全一致を要求してよいのは�
 | --- | --- |
 | single と PP=2 | token 列の完全一致（PP は層の配置だけを変える） |
 | TP=2 と PP=2 + TP=2 | token 列の完全一致（同じ TP グループ、同じ reduce 順序） |
-| single と TP=2 | 許容誤差。logits の相対誤差・top-1・必要なら KLD で判定し、token 列の完全一致を要求しない |
-| TP=2 と EP=2 / EP=4 | expert の部分和の順序が変わるため許容誤差 |
+| single と TP=2 | 許容誤差。routed expert も matrix 分割されるため、logits の相対誤差・top-1・必要なら KLD で判定し、token 列の完全一致を要求しない |
+| single と EP=2 | 許容誤差。expert ID の部分和の順序が変わる |
+| TP=2 と EP=2 + TP=2 | 許容誤差。expert の group と reduce 順序が変わる |
+| EP=2 と EP=2 + TP=2 | 許容誤差。expert の matrix 分割が加わる |
 
 TP=2 どうしでも、prompt の logits margin が小さい場合は丸め差で greedy token が
 分岐し得る。E2E の採否は上表の組で行い、単一 GPU との token 一致を TP の
@@ -168,7 +195,8 @@ TP=2 どうしでも、prompt の logits margin が小さい場合は丸め差�
 ## 7. Numerical compatibility
 
 partition された GEMM の出力（bf16）と barrier の SUM で丸めが入るため、
-TP=1 と TP=2 は bit-identical ではない。Qwen3.8-27B FP8（64 層、
+TP=1 と TP=2 は bit-identical ではない。MoE の routed expert も TP で matrix 分割
+される場合は、combine の TP reduce で同じ丸めが入る。Qwen3.8-27B FP8（64 層、
 prefill 5 tokens / greedy 16 tokens）の layer ごとの相対 drift:
 
 ```text
@@ -202,6 +230,12 @@ plane の row reference が一致しない。MXFP4 の drift は FP8 と同じ�
 - EP は routed expert を持つ model だけに意味がある。dense は EP で分割せず、
   EP グループごとに同じ計算を複製する（高速化しない）。
 - Qwen4Exp の TP=4 は KV head 数などの local geometry 条件で起動時に拒否される。
+- EXL3 INT8 の routed expert は N と K が 128 の倍数でなければならない。
+  `moe_intermediate_size / (128 * tp_size)` が整数でない TP は load 時に
+  `unsupported` になる。Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw（intermediate 640）は
+  TP=2 でこの条件を満たさない。
+- qwen35moe の MXFP4 routed expert も local の K が native group alignment（128）を
+  満たす必要がある。
 - `--tensor-parallel 1|2|4` は CLI で受け付ける。実際に起動できるかは model の
   head 数、intermediate width、lm_head の分割条件で決まる。
 - dflash2 は drafter を分割せず、target verify のみ TP=2 で実行する。
@@ -225,8 +259,9 @@ plane の row reference が一致しない。MXFP4 の drift は FP8 と同じ�
 | `test_tp_transport` | gpu2;optional | `sum_hidden` の CPU reference oracle |
 | `test_qwen35_tp_execution` | gpu2;optional | tiny model の TP 実行、rank 間 logits 一致、layer drift |
 | `test_qwen35_tp_e2e` | gpu2;optional;external_files | 実 model の TP=1 / TP=2 greedy |
-| `test_qwen35moe_tensor_parallel_plan` | cpu;required | MoE の rank plan（shared expert / router 非分割） |
-| `test_qwen35moe_tp_execution` | gpu2;optional | MoE fixture の TP 実行と局所 geometry |
+| `test_qwen35moe_tensor_parallel_plan` | cpu;required | MoE の rank plan（routed expert の matrix TP / shared expert / router 非分割） |
+| `test_qwen35moe_tp_execution` | gpu2;optional | MoE fixture の TP 実行、routed expert の N/K 分割、局所 geometry |
+| `test_qwen4exp_load` | gpu2;optional;external_files | EXL3 expert TP の 128 alignment 条件。満たさない checkpoint は load 時に拒否される |
 | `test_moe_router` | gpu1;required | routing / group plan / 非所有 slot |
 
 GPU2 テストは `ctest -L gpu2` で実行する。GPU 不足時は exit 77 で skip し、required

@@ -19,13 +19,18 @@ uint32_t align_up_u32(uint32_t value, uint32_t alignment) noexcept {
 }
 
 void add_source(MoeExpertGroupPlan& plan, uint32_t expert, MoeExpertProjection projection,
-                const char* projection_name, uint32_t row_offset, uint32_t rows) {
+                const char* projection_name, uint32_t row_offset, uint32_t rows,
+                uint32_t source_row_offset, uint32_t source_col_offset,
+                uint32_t source_col_extent) {
     MoeExpertTensorSource src;
     src.name = moe_expert_tensor_name(plan.mlp_prefix, expert, projection_name, false);
     src.expert = expert;
     src.projection = projection;
     src.row_offset = row_offset;
     src.rows = rows;
+    src.source_row_offset = source_row_offset;
+    src.source_col_offset = source_col_offset;
+    src.source_col_extent = source_col_extent;
     plan.sources.push_back(std::move(src));
 }
 
@@ -108,14 +113,25 @@ Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig
     plan.tp_rank = tp_rank;
     plan.scale_block_k = kMxScaleBlockK;
 
-    plan.w13_rows = 2u * inter;
+    if ((inter % tp_size) != 0u || inter < tp_size) {
+        return Status::unsupported(
+            "build_moe_expert_group_plan: moe_intermediate_size must divide by tp_size",
+            __FILE__, __LINE__);
+    }
+    const uint32_t local_inter = inter / tp_size;
+    if (tp_size > 1u && (local_inter % kNativeKGroupAlignment) != 0u) {
+        return Status::unsupported(
+            "build_moe_expert_group_plan: local expert K must be a multiple of 128",
+            __FILE__, __LINE__);
+    }
+    plan.w13_rows = 2u * local_inter;
     plan.w13_cols = hidden;
-    plan.w13_gate_rows = inter;
-    plan.w13_up_rows = inter;
+    plan.w13_gate_rows = local_inter;
+    plan.w13_up_rows = local_inter;
     plan.w13_k_padded = align_up_u32(plan.w13_cols, kMxPaddedKAlignment);
 
     plan.w2_rows = hidden;
-    plan.w2_cols = inter;
+    plan.w2_cols = local_inter;
     plan.w2_k_padded = align_up_u32(plan.w2_cols, kMxPaddedKAlignment);
 
     if ((plan.w13_rows % kNativeOutputTile) != 0u || (plan.w2_rows % kNativeOutputTile) != 0u)
@@ -153,10 +169,14 @@ Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig
     plan.w2_row_ref_bytes_per_expert = plan.w2_rows;
 
     plan.sources.reserve(static_cast<std::size_t>(plan.experts) * 3u);
+    const uint32_t source_offset = tp_rank * local_inter;
     for (uint32_t e = plan.expert_begin; e < plan.expert_begin + plan.experts; ++e) {
-        add_source(plan, e, MoeExpertProjection::Down, "down_proj", 0u, plan.w2_rows);
-        add_source(plan, e, MoeExpertProjection::Gate, "gate_proj", 0u, inter);
-        add_source(plan, e, MoeExpertProjection::Up, "up_proj", inter, inter);
+        add_source(plan, e, MoeExpertProjection::Down, "down_proj", 0u, plan.w2_rows,
+                   0u, source_offset, local_inter);
+        add_source(plan, e, MoeExpertProjection::Gate, "gate_proj", 0u, local_inter,
+                   source_offset, 0u, hidden);
+        add_source(plan, e, MoeExpertProjection::Up, "up_proj", local_inter, local_inter,
+                   source_offset, 0u, hidden);
     }
     return plan;
 }
@@ -165,7 +185,7 @@ Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig
                                                         std::size_t layer,
                                                         uint32_t tp_size,
                                                         uint32_t tp_rank) {
-    return build_moe_expert_group_plan(config, layer, tp_size, tp_rank, tp_size, tp_rank);
+    return build_moe_expert_group_plan(config, layer, 1u, 0u, tp_size, tp_rank);
 }
 
 Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig& config,

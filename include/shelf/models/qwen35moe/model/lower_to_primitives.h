@@ -23,14 +23,13 @@ struct Qwen35MoeLowerOptions {
     // One more external output: the final norm applied to every token row of the last
     // layer. An MTP drafter reads it as the previous hidden of its own block.
     bool emit_normed_token_hidden = false;
-    // One rank of an expert-axis split. The routed experts divide along the expert axis, the
-    // shared expert and the backbone along their matrix axes, and the graph's grouped row
-    // shape carries this rank's expert count. The weights have to have been loaded with the
-    // matching partition plan. tp_size == 1 lowers the whole model on one device.
+    // One rank of a TP / EP split. TP splits the backbone, the shared expert and each local
+    // expert's matrix; EP splits routed expert IDs. The graph's grouped row shape carries
+    // this rank's expert count. The weights must have been loaded with the matching plan.
+    // tp_size == 1 and ep_size == 1 lower the whole model on one device.
     uint32_t tp_size = 1;
     uint32_t tp_rank = 0;
-    // The routed experts follow the expert-parallel rank; the shared expert and the
-    // backbone follow tp_size / tp_rank.
+    // EP=1 (or 0, meaning unset) keeps every expert on every TP rank.
     uint32_t ep_size = 0;
     uint32_t ep_rank = 0;
     bool ep_enabled = false;

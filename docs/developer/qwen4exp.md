@@ -19,32 +19,36 @@ PLE の n-gram history を復元 prefix で再 seed する。DFlash2 は
 TP で target の lm_head が語彙分割されるときは drafter 用に全語彙の lm_head を
 rank0 へ追加で load する（[mtp.md](mtp.md)）。QSA / PLE を持つため verify は深さごとの Wavefront DECODE batch を使い、
 生成列は target-only と一致する。routed expert は
-`--expert-parallel` で expert 軸に分割でき、TP と EP の積が device 数になる。
+`--expert-parallel` で expert ID を分割でき、`--tensor-parallel` が各 expert の
+matrix 軸（gate/up は N、down は K）を分割する。TP と EP の積が device 数になる。
 
 `--pipeline-parallel` にも対応する。各 stage は担当地の層だけをロードし、
 embedding は先頭、final mixer と lm_head は末尾の stage が持つ。stage 間では
 HyperConnection の stream 全体（`hc_count * hidden_size`）を bf16 で受け渡す。
-routed expert は EP、backbone と shared expert は TP で分割する。EP=1 では
-従来どおり expert 軸を TP rank に重ねる。PP stage 内の EP / TP 展開は実装済みで、
-TP reduce の後に EP reduce を行う。ただし PP と TP の併用は 2048 token の
-prefill で non-finite になる既知の問題があり、PP 単体と短いプロンプトだけを
-確認している。
+routed expert は EP で expert ID を分割し、TP が各 expert の matrix 軸を分割する。
+backbone は TP で分割する。shared expert は replicated で、TP rank 0 だけが
+combine に寄与する。EP=1 では全 expert を複製して TP で matrix を分ける。
+PP stage 内の EP / TP 展開は実装済みで、TP reduce の後に EP reduce を行う。
 
 ## 2. 重みの形式とロード
 
 | 領域 | checkpoint の形式 | rank の持ち方 |
 | --- | --- | --- |
-| routed expert | MXFP4 E2M1 / E8M0 group32 | expert 軸で 512 を EP rank に分割し、rank-3 `MatrixWeight`（EP=1 では TP rank） |
-| shared expert | MXFP4 | 全 rank に複製 |
-| attention / GDN | FP8 E4M3 per-channel + F32 `[n]` | 全 rank に複製、preshuffle して WMMA fragment order |
+| routed expert | EXL3 INT8 / MXFP4 | expert ID を EP rank に分割し、各 expert の matrix を TP rank に分割した rank-3 `MatrixWeight` |
+| shared expert | EXL3 / MXFP4 | 全 rank に複製（matrix 分割しない） |
+| attention / GDN | EXL3 / MXFP4 / FP8 | TP rank の local head / feature 幅に分割 |
 | PLE table（FP8 shard checkpoint） | FP8 E4M3 per-tensor + BF16 `[1]` | CPU RAM に 1 個を共有 |
 | PLE table（Ngram4 / Ngram5） | bundle root の `ngram_manifest.json`（`format: "ngram-q"`）と対応 safetensors shard | CPU RAM に 1 個を共有 |
 | embed / lm_head / hyper / router | BF16 | 全 rank に複製 |
 
 - routed expert は `preshuffle_mxfp4_native` で 16 出力 x 32 K の 256 バイト block に
   repack する。E8M0 scale は row-major、row reference は行ごとの最大 E8M0 byte。
-- Qwen4Exp は TP=1 / 2 / 4 で実行できる。TP=1 は単一 GPU 構成で、`shelf-bench tg` と
-  同じ配置（`--moe-host-experts` で expert を host に退避）を使う。
+- Qwen4Exp は TP=1 / 2 / 4 を受け付けるが、routed expert の matrix 分割は
+  量子化形式の alignment 条件を満たす必要がある。EXL3 INT8 は local の N と K が
+  128 の倍数でなければならない。`moe_intermediate_size / (128 * tp_size)` が
+  整数でない checkpoint は load 時に `unsupported` になる。
+  `Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw`（intermediate 640）は TP=2 でこの条件を
+  満たさない。TP=1 は単一 GPU 構成で、`shelf-bench tg` と同じ配置を使う。
 - lm_head は load 時に BF16 から INT8 W32 へオンライン量子化する
   （`--lm-head-int8 0` / `SHELF_LM_HEAD_INT8=0` で無効化）。量子化すると
   vocab-parallel head は `Int8W32`、DFlash2 の sharded proposal も `Int8W32` 経路で
@@ -84,13 +88,20 @@ prefill で non-finite になる既知の問題があり、PP 単体と短いプ
 
 ## 3. TP の contract
 
-Qwen4Exp で TP 集約するのは **MoE combine だけ**である。
+TP は attention / GDN の matrix 軸、routed expert の matrix 軸、および
+vocab-parallel な lm_head を分割する。EP>1 かつ TP=1 で head 数が EP で割り切れる
+場合、EP rank を backbone の TP 軸にも使う（axes overlap）。このとき routed expert は
+EP 軸だけで分割し、backbone / shared expert は EP group の TP reduce を使う。
 
-- routed expert は expert 軸の部分和を MoE combine で足す。
-- shared expert は rank0 だけが寄与し、他 rank は 0 を足す。
-- attention / GDN / hyper / embed / lm_head / PLE 小物は複製なので、
-  `tp_combine` を付けない。GDN / attention の geometry は
-  `tp_combine = false` で lower する。
+- routed expert は gate/up の N と down の K を TP 分割し、MoE combine の後に
+  TP reduce する。EP>1 では続けて EP reduce する。
+- axes overlap（EP>1, TP=1）では routed と shared を 1 個の combine にまとめ、
+  EP group で 1 回だけ reduce する。
+- shared expert は replicated で、backbone TP rank 0 だけが寄与し、他 rank は 0 を足す。
+  shared expert の combine は overlap 以外では TP reduce にだけ参加する。
+- attention / GDN は local head / feature 幅で lower し、`o_proj` / `out_proj` の
+  後に `tp_combine` する。
+- hyper-connection、router、embedding は replicated。
 - PLE table は同一 process の rank で 1 個を共有する。
 
 ### 活性 workspace

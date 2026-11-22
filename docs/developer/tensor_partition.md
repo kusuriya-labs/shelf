@@ -300,12 +300,13 @@ local_shape = [256, 1280, 2560]
 
 descriptor と N-D slicing は 3D tensor を扱える
 （`tests/unit/test_canonical_partition.cpp` の 3D case）。
-ただし **routed expert 平面の分割はここを通さない**。explicit EP では
-`ep_size` / `ep_rank` が expert 軸を担い、`tp_size` / `tp_rank` は backbone と
-shared expert の matrix axis を担う（EP=1 では expert 軸を TP rank に重ねる）。
-Qwen3.5 MoE は expert 軸を
-`MoeExpertGroupPlan` の `expert_begin` / `experts` で切る。matrix axis の
-partition descriptor は backbone と shared expert、そして dense FFN が使う
+routed expert 平面は EP で expert ID を切り、TP で各 expert の matrix 軸を切る。
+EP>1 かつ TP=1 で head 数が EP で割り切れる場合、backbone の matrix partition は
+EP rank を TP 軸として使う（qwen4exp の axes overlap）。
+Qwen3.5 MoE は expert ID を `MoeExpertGroupPlan` の `expert_begin` / `experts` で
+切り、matrix 軸を同 plan の local N / K で表す。expert 内の matrix tile は
+`materialize_rank_local_canonical` で canonical から切り出す。
+backbone と shared expert、dense FFN は `TensorPartitionPlan` の descriptor を使う
 （正本は [qwen35moe.md](qwen35moe.md) §3「expert 軸の分割」）。
 
 ## 11. 現在の runtime で未対応のもの
