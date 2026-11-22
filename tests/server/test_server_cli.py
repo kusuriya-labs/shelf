@@ -73,9 +73,28 @@ def main() -> int:
     checker.check("default-save-interval",
                   value_of(default_argv, "--prefix-cache-save-interval") == "16384",
                   repr(value_of(default_argv, "--prefix-cache-save-interval")))
-    checker.check("default-prefill-chunk-absent",
-                  "--prefill-chunk" not in default_argv,
+    checker.check("default-prefill-chunk",
+                  value_of(default_argv, "--prefill-chunk") == "4096",
                   repr(value_of(default_argv, "--prefill-chunk")))
+    hy4 = shelf_server.parse_args([
+        "--model-dir", "body", "--placement", "owners.json", "--engram-dir", "fp8",
+        "--dfly-dir", "draft", "--max-seq-len", "2304", "--compute", "shelf-compute",
+    ])
+    checker.check("hy4-ep3", shelf_server.build_compute_argv(hy4) == [
+        "shelf-compute", "hy4", "serve", "--model-dir", "body", "--engram-dir", "fp8",
+        "--placement", "owners.json", "--max-seq-len", "2304", "--chunk", "1024",
+        "--max-concurrent-requests", "4", "--dfly-dir", "draft",
+    ])
+    for ep, tp, slots in ((3, 1, 16), (4, 1, 4), (2, 2, 1)):
+        opts = shelf_server.parse_args([
+            "--model-dir", "body", "--placement", "owners.json", "--expert-parallel", str(ep),
+            "--tensor-parallel", str(tp), "--device", ",".join(map(str, range(ep * tp))),
+            "--max-concurrent-requests", str(slots),
+        ])
+        argv = shelf_server.build_compute_argv(opts)
+        checker.check("hy4-parallel", value_of(argv, "--expert-parallel") == str(ep))
+        checker.check("hy4-tp", value_of(argv, "--tensor-parallel") == (str(tp) if tp > 1 else None))
+        checker.check("hy4-slots", value_of(argv, "--max-concurrent-requests") == str(slots))
     return checker.done()
 
 

@@ -82,6 +82,18 @@ def _resolve_compute_binary(explicit: str | None) -> str:
 
 
 def build_compute_argv(opts) -> list[str]:
+    if getattr(opts, "placement", None):
+        argv = [opts.compute, "hy4", "serve", "--model-dir", opts.model_dir,
+                "--engram-dir", opts.engram_dir or opts.model_dir, "--placement", opts.placement,
+                "--max-seq-len", str(opts.max_seq_len), "--chunk", "1024",
+                "--max-concurrent-requests", str(opts.max_concurrent_requests)]
+        if opts.expert_parallel > 1 or opts.tensor_parallel > 1:
+            argv += ["--expert-parallel", str(opts.expert_parallel)]
+        if opts.tensor_parallel > 1:
+            argv += ["--tensor-parallel", str(opts.tensor_parallel)]
+        if opts.dfly_dir:
+            argv += ["--dfly-dir", opts.dfly_dir]
+        return argv
     argv = [
         opts.compute,
         "--model-dir", opts.model_dir,
@@ -503,6 +515,9 @@ def tree_budget_value(text: str):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Shelf Server")
     parser.add_argument("--model-dir", required=True, help="model directory")
+    parser.add_argument("--placement", help="Hy4 の expert 配置表")
+    parser.add_argument("--engram-dir", help="Hy4 FP8 Engram のディレクトリ")
+    parser.add_argument("--dfly-dir", help="Hy4 DFly2 のディレクトリ")
     parser.add_argument("--model", default="shelf",
                         help="model name reported by the API")
     parser.add_argument("--host", default="127.0.0.1",
@@ -541,7 +556,7 @@ def parse_args(argv=None):
                              "count must match --tensor-parallel (default 0)")
     parser.add_argument("--tensor-parallel", type=int, default=1, choices=(1, 2),
                         help="tensor parallel size forwarded to compute (default 1)")
-    parser.add_argument("--expert-parallel", type=int, default=1, choices=(1, 2, 4),
+    parser.add_argument("--expert-parallel", type=int, default=1, choices=(1, 2, 3, 4),
                         help="expert parallel size forwarded to compute (default 1)")
     parser.add_argument("--pipeline-parallel", type=int, default=1, choices=(1, 2, 4),
                         help="pipeline parallel size forwarded to compute "
@@ -617,6 +632,8 @@ def parse_args(argv=None):
         parser.error(f"bad --device: {opts.device}")
     parallel_width = (opts.pipeline_parallel * opts.expert_parallel *
                       opts.tensor_parallel)
+    if opts.expert_parallel == 3 and not opts.placement:
+        parser.error("EP=3 には Hy4 の配置表が必要です")
     if len(devices) != parallel_width:
         parser.error(f"--device expects {parallel_width} entries for "
                      f"--pipeline-parallel {opts.pipeline_parallel} * "
@@ -693,6 +710,21 @@ async def _serve(opts) -> int:
     except (OSError, ValueError):
         config = {}
     is_plamo = config.get("model_type") == "plamo3"
+    is_hy4 = config.get("model_type") == "hy_v4_flash"
+    if is_hy4 != bool(opts.placement) or (not is_hy4 and (opts.dfly_dir or opts.engram_dir)):
+        raise SystemExit("Hy4-flash には --placement と FP8 Engram が必要です")
+    if is_hy4:
+        if opts.mtp or opts.dflash2_model_dir or opts.pipeline_parallel != 1:
+            raise SystemExit("Hy4-flash は --dfly-dir に対応します")
+        if opts.max_concurrent_requests > 16:
+            raise SystemExit("Hy4-flash の同時リクエスト数は 16 以下にしてください")
+        opts.max_num_batched_tokens = 1024
+        opts.kv_cache_dtype = "octave"
+        opts.prefix_cache = 0
+        opts.prefix_cache_strategy = "off"
+        opts.prefix_cache_checkpoints = 0
+        opts.prefix_cache_save_interval = 0
+
     if opts.max_seq_len is None:
         opts.max_seq_len = 2048 if is_plamo else 32768
     if is_plamo and opts.max_seq_len > 2048:
@@ -700,10 +732,18 @@ async def _serve(opts) -> int:
         return 2
     processor = await asyncio.to_thread(
         codec.load_processor, opts.model_dir, max_seq_len=opts.max_seq_len)
-    reasoning_capability = ({"thinking": False, "effort": False, "close_token": -1}
-                            if is_plamo else await asyncio.to_thread(
-                                codec.reasoning_capability, processor))
-    if not is_plamo and not (reasoning_capability["thinking"] and reasoning_capability["effort"]):
+    if is_hy4:
+        processor._shelf_hy4 = True
+        close_ids = processor.encode("</think:opensource>", add_special_tokens=False)
+        if len(close_ids) != 1:
+            raise SystemExit("Hy4 の思考終了 token が見つかりません")
+        processor._shelf_reasoning_close_ids = tuple(close_ids)
+        reasoning_capability = {"thinking": True, "effort": True, "close_token": -1}
+    elif is_plamo:
+        reasoning_capability = {"thinking": False, "effort": False, "close_token": -1}
+    else:
+        reasoning_capability = await asyncio.to_thread(codec.reasoning_capability, processor)
+    if not is_plamo and not is_hy4 and not (reasoning_capability["thinking"] and reasoning_capability["effort"]):
         _log("Reasoning is part of the Chat Completions contract, but the "
              "loaded chat template does not support it.")
         _log(f"  probe: {reasoning_capability}")
@@ -712,6 +752,7 @@ async def _serve(opts) -> int:
     compute = AsyncComputeClient(
         build_compute_argv(opts),
         max_inflight=opts.max_concurrent_requests,
+        startup_timeout=900.0 if is_hy4 else 300.0,
     )
     await compute.start()
 
@@ -767,7 +808,9 @@ async def _serve(opts) -> int:
         else:
             _log(f"PLaMo EXL3 chat warmup: {time.monotonic() - started:.2f}s")
 
-    if opts.dflash2_model_dir:
+    if opts.dfly_dir and (opts.max_concurrent_requests == 1 or os.environ.get("SHELF_HY4_BATCH_DFLY") != "0"):
+        speculative = {"method": "dfly2", "drafts": 5}
+    elif opts.dflash2_model_dir:
         speculative = {"method": "dflash2", "drafts": opts.dflash2_drafts}
     else:
         speculative = None
@@ -809,6 +852,11 @@ async def _serve(opts) -> int:
         },
     }
 
+    if is_hy4:
+        server_meta["reasoning"]["default_reasoning_effort"] = "medium"
+        server_meta["reasoning"]["default_native_effort"] = "high"
+        server_meta["inference_budget"]["answer_reserve_tokens"] = 0
+        server_meta["inference_budget"]["thinking_budget_tokens"] = 0
     app = create_app(service, compute, server_meta)
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
@@ -837,25 +885,27 @@ async def _serve(opts) -> int:
         _log(_banner("Draft model:", Path(opts.dflash2_model_dir).name))
     _log(_banner("Inference budget:",
                  f"{opts.inference_budget_tokens} tokens "
-                 f"(thinking {thinking_budget_tokens(opts.inference_budget_tokens)}, "
-                 f"answer reserve {answer_reserve_tokens(opts.inference_budget_tokens)})"))
-    if opts.large_context_tokens > 0:
+                 f"(thinking {server_meta['inference_budget']['thinking_budget_tokens']}, "
+                 f"answer reserve {server_meta['inference_budget']['answer_reserve_tokens']})"))
+    if opts.large_context_tokens > 0 and not is_hy4:
         _log(_banner(f"  prompt > {opts.large_context_tokens}:",
                      f"{opts.large_context_inference_budget_tokens} tokens "
                      f"(thinking "
                      f"{thinking_budget_tokens(opts.large_context_inference_budget_tokens)})"))
-    if reasoning_capability["thinking"] and reasoning_capability["close_token"] < 0:
+    if not is_hy4 and reasoning_capability["thinking"] and reasoning_capability["close_token"] < 0:
         _log("  thinking budget is not enforced "
              "(the reasoning close tag is not one token)")
     if reasoning_capability["thinking"]:
         _log(_banner("Reasoning:",
                      f"enabled (thinking on, effort "
-                     f"{codec.DEFAULT_REASONING_EFFORT}, preserve_thinking on)"))
+                     f"{server_meta['reasoning']['default_reasoning_effort']}, preserve_thinking on)"))
         _log(_banner("Efforts:", ", ".join(codec.REASONING_EFFORTS)))
     else:
         _log(_banner("Reasoning:", "disabled"))
     _log("")
-    if is_plamo:
+    if is_hy4:
+        _log(_banner("Hy4-flash:", f"DFly2={bool(speculative)}, SSE"))
+    elif is_plamo:
         _log(_banner("Supported:",
                      "Chat Completions, Responses, SSE, translation, sampling, "
                      "concurrency, cancel"))

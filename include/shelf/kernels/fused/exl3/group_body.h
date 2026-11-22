@@ -9,7 +9,7 @@
 
 namespace shelf::kernel::exl3_detail::mul24 {
 
-template <int BITS, int MT, bool PIPE = true, int WAVES = 4, bool FUSED = false>
+template <int BITS, int MT, bool PIPE = true, int WAVES = 4, bool FUSED = false, bool K_MAJOR = false>
 __device__ __forceinline__ void
 group_body(const int8_t *__restrict__ codes, const float *__restrict__ scales,
            const uint32_t code_row_stride, const uint32_t scale_row_stride_floats,
@@ -61,8 +61,8 @@ group_body(const int8_t *__restrict__ codes, const float *__restrict__ scales,
     const uint32_t g1 = min(k >> 7u, g0 + groups_per_split);
     if constexpr (!FUSED)
         yprime += static_cast<size_t>(tile_z) * rows * n;
-    const uint32_t *tile_base = trellis + static_cast<size_t>(nt) * (k >> 4u) * kWords;
-    constexpr size_t kt_stride = kWords;
+    const uint32_t *tile_base = trellis + static_cast<size_t>(nt) * (K_MAJOR ? 1u : (k >> 4u)) * kWords;
+    const size_t kt_stride = K_MAJOR ? static_cast<size_t>(n >> 4u) * kWords : kWords;
     const uint32_t *wp0 = tile_base + static_cast<size_t>(g0 * 8u) * kt_stride + i0;
     const uint32_t *wp1 = tile_base + static_cast<size_t>(g0 * 8u) * kt_stride + i1;
     const uint32_t *wp2 = tile_base + static_cast<size_t>(g0 * 8u) * kt_stride + i2;

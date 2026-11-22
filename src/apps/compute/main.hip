@@ -2,6 +2,8 @@
 #include "single_request.h"
 #include "stdio_server.h"
 
+#include <shelf/models/hy4_flash/cli.h>
+#include <string_view>
 #include <shelf/runtime/dflash2_config.h>
 #include <shelf/models/plamo3/model/config.h>
 #include <shelf/models/qwen35/model/rope_profile.h>
@@ -17,6 +19,7 @@
 #include <vector>
 
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string_view(argv[1]) == "hy4") return shelf::hy4::compute(argc-1,argv+1);
     shelf::app::ComputeOptions opt;
     const int parse_rc = shelf::app::parse_compute_options(argc, argv, opt);
     if (parse_rc == shelf::app::kComputeParseHelp) {

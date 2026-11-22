@@ -84,6 +84,7 @@ root namespace は `shelf`。`include/shelf/**` と `src/shelf/**` のディレ�
 | `shelf/models/qwen35qsa/**` | `shelf::qwen35qsa` |
 | `shelf/models/qwen4exp/**` | `shelf::qwen4exp` |
 | `shelf/models/plamo3/**` | `shelf::plamo3` |
+| `shelf/models/hy4_flash/**` | `shelf::hy4` |
 | `shelf/models/model_weights_factory.h` / `loaded_model.h` / `tp_rank_model.h` / `pipeline_stage_model.h` | `shelf::models` |
 | `src/apps/**` | `shelf::app` / `shelf::bench::quality` |
 
@@ -168,6 +169,8 @@ CMake target の詳細な一覧は `cmake/targets.cmake` を参照。
 
 `shelf_kernels_correctness` は `shelf_runtime` に link する一方、
 `shelf_runtime` は `shelf_core` / `shelf_gpu` / `shelf_kernels_fused` だけを使う。
+
+Hy4-flash の固有 kernel と実行は `models/hy4_flash` に置き、専用の `shelf_hy4_model` / `shelf_hy4_flash` target と `shelf-compute hy4` から利用する。共通 kernel 層には model 非依存の radix 選択などを置く。
 
 ### weight loader の依存
 

@@ -68,6 +68,9 @@ Ready.
 | --- | --- |
 | `-h, --help` | show this help message and exit |
 | `--model-dir MODEL_DIR` | model directory |
+| `--placement PLACEMENT` | Hy4 の expert 配置表 |
+| `--engram-dir ENGRAM_DIR` | Hy4 FP8 Engram のディレクトリ |
+| `--dfly-dir DFLY_DIR` | Hy4 DFly2 のディレクトリ |
 | `--model MODEL` | model name reported by the API |
 | `--host HOST` | listen address (default 127.0.0.1) |
 | `--port PORT` | listen port (default 8000) |
@@ -82,10 +85,12 @@ Ready.
 | `--arena-gib N\|auto\|-N` | GPU arena capacity in GiB; auto = free VRAM minus 0.5 GiB, -N = total VRAM minus N GiB (default auto) |
 | `--device DEVICE` | comma separated GPU devices, one per rank; count must match --tensor-parallel (default 0) |
 | `--tensor-parallel {1,2}` | tensor parallel size forwarded to compute (default 1) |
-| `--expert-parallel {1,2,4}` | expert parallel size forwarded to compute (default 1) |
+| `--expert-parallel {1,2,3,4}` | expert parallel size forwarded to compute (default 1) |
 | `--pipeline-parallel {1,2,4}` | pipeline parallel size forwarded to compute (mutually exclusive with --tensor-parallel; default 1) |
 | `--kv-cache-dtype KV_CACHE_DTYPE` | KV cache dtype (default bf16) |
 | `--page-tokens PAGE_TOKENS` | paged KV page size in tokens (default 16) |
+| `--mtp-window MTP_WINDOW` | MTP draft attention window in tokens (0 = full context) |
+| `--mtp-sink MTP_SINK` | MTP draft attention sink tokens kept before the window |
 | `--working-set-reserve-gib WORKING_SET_RESERVE_GIB` | arena headroom kept free for the working set (0 = size it from the row bucket, default 0) |
 | `--rope-factor {auto,1,2,4}` | static YaRN rope factor forwarded to compute (default auto) |
 | `--prefix-cache {0,1}` | enable prefix cache (default 1) |
@@ -551,6 +556,8 @@ streaming 中の tool call にも対応する。OpenAI 形式の `delta.tool_cal
 model 固有の `<tool_call>` 等の markup は client へ漏れない。
 
 ### concurrency と cancel
+
+Hy4-flash は `--max-concurrent-requests` で 1〜16 スロットを予約する。`/v1/meta` の KV 統計では固定スロット 1 個を 1 ページとし、`page_tokens` はスロットの予約長を表す。TP=1 では空きスロットに次の要求を受け入れ、要求ごとに token を配信する。単一スロットの Graph と複数スロットの DFly2 の切り替え、必要な KV 容量、複数 GPU での照合手順は [Hy4-flash の実行](hy4_flash.md)を参照する。
 
 `--max-concurrent-requests N` は最大 in-flight request 数であり、同時に 1 executor step で
 scheduler が扱える最大 request 数でもある。physical KV capacity は起動時に arena の余りから

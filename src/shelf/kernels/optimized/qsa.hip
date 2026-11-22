@@ -1,4 +1,5 @@
 #include <shelf/kernels/optimized/qsa.h>
+#include <shelf/kernels/fused/detail/radix_select.h>
 #include <shelf/kernels/fused/detail/qsa_common.h>
 
 #include <hip/hip_bf16.h>
@@ -434,93 +435,6 @@ __device__ __forceinline__ float qsa_radix_value(uint32_t key) {
     return __uint_as_float(bits);
 }
 
-// Exact top-k over scores[0..usable). Writes the selected indices (unsorted) to out.
-// Ties on the score keep the smaller index, matching the sort/merge path.
-__device__ void qsa_radix_select(const float* scores, uint32_t usable, uint32_t k,
-                                 uint32_t* hist, uint32_t* state, std::int32_t* out,
-                                 float* out_scores, uint32_t index_base) {
-    const uint32_t t = threadIdx.x;
-    const uint32_t stride = blockDim.x;
-    uint32_t rank = k;
-    uint32_t prefix = 0u;
-    uint32_t above = 0u;
-    for (uint32_t pass = 0u; pass < 4u; ++pass) {
-        const uint32_t shift = 24u - 8u * pass;
-        for (uint32_t i = t; i < 256u; i += stride) hist[i] = 0u;
-        __syncthreads();
-        for (uint32_t i = t; i < usable; i += stride) {
-            const uint32_t key = qsa_radix_key(scores[i]);
-            if (pass == 0u || (key >> (shift + 8u)) == (prefix >> (shift + 8u)))
-                atomicAdd(&hist[(key >> shift) & 0xFFu], 1u);
-        }
-        __syncthreads();
-        if (t == 0u) {
-            uint32_t acc = 0u;
-            uint32_t bucket = 0u;
-            for (int b = 255; b >= 0; --b) {
-                const uint32_t count = hist[static_cast<uint32_t>(b)];
-                if (acc + count >= rank) {
-                    bucket = static_cast<uint32_t>(b);
-                    break;
-                }
-                acc += count;
-            }
-            state[0] = bucket;
-            state[1] = acc;
-            state[2] = rank - acc;
-        }
-        __syncthreads();
-        above += state[1];
-        rank = state[2];
-        prefix |= state[0] << shift;
-        __syncthreads();
-    }
-    const float threshold = qsa_radix_value(prefix);
-    uint32_t need = k - above;
-    uint32_t index_prefix = 0u;
-    for (uint32_t pass = 0u; pass < 2u && need != 0u; ++pass) {
-        const uint32_t shift = 8u - 8u * pass;
-        for (uint32_t i = t; i < 256u; i += stride) hist[i] = 0u;
-        __syncthreads();
-        for (uint32_t i = t; i < usable; i += stride) {
-            if (scores[i] != threshold) continue;
-            if (pass != 0u && (i >> (shift + 8u)) != (index_prefix >> (shift + 8u)))
-                continue;
-            atomicAdd(&hist[(i >> shift) & 0xFFu], 1u);
-        }
-        __syncthreads();
-        if (t == 0u) {
-            uint32_t acc = 0u;
-            uint32_t bucket = 0u;
-            for (uint32_t b = 0u; b < 256u; ++b) {
-                const uint32_t count = hist[b];
-                if (acc + count >= need) {
-                    bucket = b;
-                    break;
-                }
-                acc += count;
-            }
-            state[0] = bucket;
-            state[1] = need - acc;
-        }
-        __syncthreads();
-        index_prefix |= state[0] << shift;
-        need = state[1];
-        __syncthreads();
-    }
-    if (t == 0u) state[3] = 0u;
-    __syncthreads();
-    for (uint32_t i = t; i < usable; i += stride) {
-        const float value = scores[i];
-        if (value > threshold || (value == threshold && i <= index_prefix)) {
-            const uint32_t pos = atomicAdd(&state[3], 1u);
-            out[pos] = static_cast<std::int32_t>(index_base + i);
-            if (out_scores != nullptr) out_scores[pos] = value;
-        }
-    }
-    __syncthreads();
-}
-
 // Selects the top `k` entries of [0, count) ordered by (value desc, block index asc).
 // Used for the multi-window top-k: the previous shortlist and the new window candidates
 // are concatenated, so the result does not need a bitonic sort per window.
@@ -674,7 +588,7 @@ __global__ __launch_bounds__(kQsaTopkMaxThreads) void qsa_topk_kernel(QsaTopkArg
                              usable <= 65536u;
     if (select_once) {
         if (block_max != 0u)
-            qsa_radix_select(
+            ::shelf::kernel::detail::radix_select<2>(
                 args.scores + static_cast<uint64_t>(row) * args.score_row_stride,
                 usable, block_max, hist, radix_state, indices, nullptr, 0u);
     } else {
@@ -691,7 +605,7 @@ __global__ __launch_bounds__(kQsaTopkMaxThreads) void qsa_topk_kernel(QsaTopkArg
 
         if (usable != 0u) {
             const uint32_t want = usable < top_k ? usable : top_k;
-            qsa_radix_select(
+            ::shelf::kernel::detail::radix_select<2>(
                 args.scores + static_cast<uint64_t>(row) * args.score_row_stride,
                 usable, want, hist, radix_state, indices + half, scores + half,
                 args.block_begin);
