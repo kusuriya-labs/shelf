@@ -7,6 +7,7 @@
 #include <shelf/models/pipeline_stage_model.h>
 #include <shelf/models/tp_rank_model.h>
 #include <shelf/runtime/executor_footprint.h>
+#include <shelf/runtime/kv_pages.h>
 #include <shelf/weights/weight_bytes.h>
 #include <shelf/runtime/execution/row_bucket.h>
 #include <shelf/runtime/request_handle.h>
@@ -96,7 +97,7 @@ Result<std::unique_ptr<PipelineStageRuntime>> PipelineStageRuntime::create(
 
     const shelf::qwen_hybrid::QwenHybridConfig& tc = stage->model_->hybrid_config();
     const std::uint32_t max_blocks_per_sequence =
-        ceil_div(config.max_seq_len + 1u, config.page_tokens) + 1u;
+        kv_pages_for_context(config.max_seq_len, config.page_tokens);
     const std::uint32_t attention_layers = count_attention_layers(tc, config.stage);
     if (attention_layers == 0) {
         return Status::unsupported(

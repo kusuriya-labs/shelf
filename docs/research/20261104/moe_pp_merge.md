@@ -174,4 +174,4 @@ load（約 26 s）より前の起動段階で拒否される。
 - PP の E2E 採否（PP=1 と PP=2 の生成列一致）は `pipeline_parallel_port.md` の手順に従う。
   MoE 側の 40 層 E2E 数値 gate（HF 照合）とは独立で、どちらも未実施
 - `merge/moe-pp` は `.worktrees/moe-pp-merge` に作成した。`feature/moe-weights` への反映は
-  `docs/homework.md` の未 commit 編集を片付けてから fast-forward する
+  当時の未 commit 編集を片付けてから fast-forward する

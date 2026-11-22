@@ -295,8 +295,11 @@ auto の working set reserve は `tests/unit/test_executor_footprint.cpp`（い�
 
 group と test 一覧は `tests/server/run_server_regression.py` の `GROUPS` が正本である。
 現在の group は `core` / `tools` / `reasoning` / `unsupported` / `concurrency-cancel` / `agent`。
-`concurrency-cancel` の `test_server_context_boundary.py` は 32K BF16 KV を前提にするため、
-32 GiB の GPU 1 枚に 27B FP8 を載せる構成では起動しない。
+`concurrency-cancel` の `test_server_context_boundary.py` は 32K BF16 KV を前提にする。
+27B FP8（約 27 GiB の重み）は 32 GiB 1 枚に収まらないが、重みが小さい checkpoint
+（EXL3-INT8 など）なら `SHELF_SERVER_MODEL_DIR` で実行できる。
+2026-11-22 に EXL3-INT8-4bpw を `SHELF_TEST_DEVICE=2` / `SHELF_TEST_ARENA_GIB=30` で
+指定し、14/14 PASS を確認した。
 
 prefix cache の JSONL contract は
 `tests/server/test_compute_prefix_contract.py` が固定する。

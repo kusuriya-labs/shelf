@@ -218,7 +218,7 @@ sampling 系、`create_device_batch_context`）は合計 0.04 GiB 程度で支�
 
 という順序にすれば自動化できる。split は `create_model_executor` の 1600 行台を
 またぐ変更で、TP1 / TP2 / bench / single request の呼び出し側が追随するため、
-別の change として扱う判断にした（`docs/homework.md`）。
+別の change として扱う判断にした（当時の残課題）。
 
 ### working set reserve を auto にした（実測）
 
@@ -268,7 +268,7 @@ final の式は `44 × (hidden + intermediate / tp) / (hidden + intermediate)` �
 構造的な足枷として、`main.hip` が `max_scheduled_tokens`（現 `max_num_batched_tokens`）
 = `max_seq_len`
 とするため、context を伸ばすと必ず R8192 bucket に張り付き program workspace が
-1.75 GiB（TP1）出る。**prefill の chunk size を下げる CLI が無い**（homework）。
+1.75 GiB（TP1）出る。**prefill の chunk size を下げる CLI が無い**（当時の残課題）。
 
 ### run.sh の構成（TP2 + drafter + 262144）は chunk size で収まる
 

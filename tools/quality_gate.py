@@ -253,7 +253,7 @@ def corpus_sha256(path: Path) -> str:
 
 
 def compute_argv(build_dir: Path, model_dir: str, device: int, max_seq_len: int,
-                 kv_dtype: str) -> list[str]:
+                 kv_dtype: str, rope_factor: str = "auto") -> list[str]:
     return [
         str(build_dir / "shelf-compute"),
         "--model-dir", model_dir,
@@ -262,6 +262,7 @@ def compute_argv(build_dir: Path, model_dir: str, device: int, max_seq_len: int,
         "--arena-gib", "auto",
         "--device", str(device),
         "--kv-cache-dtype", kv_dtype,
+        "--rope-factor", rope_factor,
         "--prefix-cache", "0",
         "--max-concurrent-requests", "1",
         "--temperature", "0",
@@ -270,8 +271,9 @@ def compute_argv(build_dir: Path, model_dir: str, device: int, max_seq_len: int,
 
 def run_generation_suite(build_dir: Path, model_dir: str, device: int,
                          cases: list[dict], max_seq_len: int, kv_dtype: str,
-                         tokenizer) -> dict:
-    session = ServeSession(compute_argv(build_dir, model_dir, device, max_seq_len, kv_dtype))
+                         tokenizer, rope_factor: str = "auto") -> dict:
+    session = ServeSession(compute_argv(build_dir, model_dir, device, max_seq_len,
+                                        kv_dtype, rope_factor))
     try:
         results = []
         for case in cases:
@@ -305,7 +307,8 @@ def run_generation_suite(build_dir: Path, model_dir: str, device: int,
 
 def run_quality_dump(build_dir: Path, model_dir: str, device: int, corpus: Path,
                      context: int, positions: int, kv_dtype: str,
-                     dump: Path, compare: Path | None) -> dict:
+                     dump: Path, compare: Path | None,
+                     rope_factor: str = "auto") -> dict:
     argv = [
         str(build_dir / "shelf-bench"),
         "quality",
@@ -317,6 +320,7 @@ def run_quality_dump(build_dir: Path, model_dir: str, device: int, corpus: Path,
         "--arena-gib", "auto",
         "--device", str(device),
         "--kv-cache-dtype", kv_dtype,
+        "--rope-factor", rope_factor,
         "--dump", str(dump),
     ]
     if compare is not None:
@@ -386,7 +390,11 @@ def gate_metrics(parser: argparse.Namespace, fp8: dict,
         "top1_agreement": top1,
         "top5_overlap": float(fp8["QUALITY_TOP5_OVERLAP"]),
         "logit_max_abs_delta": float(fp8["QUALITY_LOGIT_MAX_ABS_DELTA"]),
+        "context": getattr(parser, "context", 0),
         "positions": int(fp8["QUALITY_POSITIONS"]),
+        "rope_factor": getattr(parser, "rope_factor", "auto"),
+        "gate": "PASS" if not failures else "FAIL",
+        "failures": failures,
         "generation_mean_prefix_agreement": mean_prefix,
         "generation": agreement,
         "endtask_baseline_correct": base_correct if bf16_gen["cases"] else None,
@@ -453,10 +461,12 @@ def cmd_run(parser: argparse.Namespace) -> int:
 
     print("quality gate: teacher-forced BF16 KV baseline", flush=True)
     run_quality_dump(build_dir, parser.model_dir, parser.device, corpus,
-                     parser.context, parser.positions, "bf16", bf16_dump, None)
+                     parser.context, parser.positions, "bf16", bf16_dump, None,
+                     parser.rope_factor)
     print("quality gate: teacher-forced FP8 KV candidate", flush=True)
     fp8 = run_quality_dump(build_dir, parser.model_dir, parser.device, corpus,
-                           parser.context, parser.positions, "fp8", fp8_dump, bf16_dump)
+                           parser.context, parser.positions, "fp8", fp8_dump, bf16_dump,
+                           parser.rope_factor)
     print(f"  ppl bf16={float(fp8['QUALITY_PPL_BASELINE']):.6f} "
           f"fp8={float(fp8['QUALITY_PPL_CANDIDATE']):.6f} "
           f"delta={float(fp8['QUALITY_PPL_DELTA_PCT']):.4f}%", flush=True)
@@ -499,9 +509,11 @@ def cmd_run(parser: argparse.Namespace) -> int:
         max_seq_len = max(max_seq_len, parser.max_seq_len)
         print(f"quality gate: greedy generation comparison ({len(cases)} cases)", flush=True)
         bf16_gen = run_generation_suite(
-            build_dir, parser.model_dir, parser.device, cases, max_seq_len, "bf16", tokenizer)
+            build_dir, parser.model_dir, parser.device, cases, max_seq_len, "bf16", tokenizer,
+            parser.rope_factor)
         fp8_gen = run_generation_suite(
-            build_dir, parser.model_dir, parser.device, cases, max_seq_len, "fp8", tokenizer)
+            build_dir, parser.model_dir, parser.device, cases, max_seq_len, "fp8", tokenizer,
+            parser.rope_factor)
         base_reasoning = [
             case for case in bf16_gen["cases"] if case.get("answer_format") != "gsm8k"]
         fp8_reasoning = [
@@ -718,6 +730,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--device", type=int, default=0)
     run.add_argument("--context", type=int, default=128)
     run.add_argument("--positions", type=int, default=0)
+    run.add_argument("--rope-factor", default="auto", choices=("auto", "1", "2", "4"),
+                     help="static YaRN rope factor passed to shelf-bench quality (default auto)")
     run.add_argument("--max-seq-len", type=int, default=2048)
     run.add_argument("--max-ppl-regression-pct", type=float, default=1.0)
     run.add_argument("--max-kl", type=float, default=0.05)

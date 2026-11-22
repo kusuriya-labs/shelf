@@ -1,3 +1,5 @@
+#include "bench_rope.h"
+
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/memory/gpu_memory_manager.h>
 #include <shelf/models/loaded_model.h>
@@ -46,6 +48,7 @@ struct BenchOptions {
     int page_tokens = 16;
     std::string kv_cache_dtype = "bf16";
     shelf::kernel::OctaveKVCacheFormat octave_format{};
+    std::string rope_factor = "auto";
     double arena_gib = 0.0;
     bool arena_auto = true;
     std::string output;
@@ -74,6 +77,7 @@ void print_usage(FILE* out) {
         "  --model-dir PATH             (required)\n"
         "  --page-tokens N              (default 16)\n"
         "  --kv-cache-dtype bf16|fp8|octave:FORMAT (default bf16)\n"
+        "  --rope-factor auto | 1 | 2 | 4 (default auto)\n"
         "  --arena-gib N                (default auto = free VRAM minus 0.5 GiB)\n"
         "  --moe-host-experts N       routed experts per layer kept in host memory (default 0)\n"
         "  --moe-cache-swap-budget N  expert cache swap budget (default 96)\n"
@@ -257,6 +261,13 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
                 !shelf::kernel::parse_octave_kv_cache_format(
                     opts.kv_cache_dtype, opts.octave_format)) {
                 fprintf(stderr, "invalid --kv-cache-dtype\n");
+                return false;
+            }
+        } else if (key == "--rope-factor") {
+            opts.rope_factor = need_value();
+            if (opts.rope_factor != "auto" && opts.rope_factor != "1" &&
+                opts.rope_factor != "2" && opts.rope_factor != "4") {
+                fprintf(stderr, "invalid --rope-factor (expected auto | 1 | 2 | 4)\n");
                 return false;
             }
         } else if (key == "--arena-gib") {
@@ -467,12 +478,29 @@ int run_tg(int argc, char** argv) {
     const uint32_t num_pages =
         ceil_div(required_seq_len, static_cast<uint32_t>(opts.page_tokens)) + 1;
 
+    auto rope_profile_result = shelf::bench::resolve_bench_rope_profile(
+        opts.model_dir, opts.rope_factor);
+    if (!rope_profile_result.ok()) {
+        fprintf(stderr, "rope profile: %s\n", rope_profile_result.status().message().c_str());
+        return 1;
+    }
+    const auto& rope_profile = rope_profile_result.value();
+    if (rope_profile.has_value()) {
+        const shelf::Status rope_status = shelf::bench::check_bench_rope_len(
+            *rope_profile, opts.rope_factor, required_seq_len);
+        if (!rope_status.ok()) {
+            fprintf(stderr, "%s\n", rope_status.message().c_str());
+            return 1;
+        }
+    }
+
     shelf::qwen35::ExecutorConfig exec_config;
     exec_config.max_batch_rows =
         std::max(opts.prefill_chunk, opts.tokens + opts.warmup + 16);
     exec_config.max_scheduled_requests = 1;
     exec_config.max_context_tokens = required_seq_len;
     exec_config.backend = opts.decode_backend;
+    if (rope_profile.has_value()) exec_config.rope_profile = *rope_profile;
 
     hipStream_t stream = nullptr;
     shelf::qwen_hybrid::QwenHybridConfig tc;
@@ -589,6 +617,7 @@ int run_tg(int argc, char** argv) {
                                     : opts.kv_cache_dtype == "fp8"
                                           ? shelf::kernel::KVCacheDType::FP8_E4M3
                                           : shelf::kernel::KVCacheDType::BF16;
+        if (rope_profile.has_value()) tp_cfg.rope_profile = *rope_profile;
         auto memory_result = shelf::gpu::GpuMemoryManager::create(opts.devices, arena_bytes);
         if (!memory_result.ok()) {
             fprintf(stderr, "GpuMemoryManager::create failed: %s\n",

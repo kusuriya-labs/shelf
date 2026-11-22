@@ -56,6 +56,9 @@ Gate 6 の production 計測は、この selector envelope が blocker である
 `docs/perf/current.md` には 524,288 の速度を載せない。上記の 1 run 値のみが実測値である。
 production 値の取得は未完了として残す。
 
+2026-11-22 に EXL3 target で warmup 1 + 3 run の p50（prefill 1,056,876.5 ms /
+496.06 tok/s）を取得し、`docs/perf/current.md` に記録した。
+
 採用に伴い `tests/unit/test_qwen35_paged_attention_selector` の expected を
 524288（measured max）/ 524289（above measured）基準へ更新し、`24 x 4` の
 rule も境界検証に加えた。

@@ -278,8 +278,9 @@ mtp.layers.0.mlp.experts.down_proj      BF16 [256, 2048, 512]
 ```
 
   この形は既存 `load_bf16_matrix_axis_slice`（rank-3 `[E,N,K]` の unit 範囲ロード）と
-  ぴったり一致する。MTP 自体は未実装（`docs/homework.md` TODO）で、
-  現行 drafter は DFlash2。MTP は今回の実装範囲に含めない。
+  ぴったり一致する。MTP 自体は当時未実装で、
+  現行 drafter は DFlash2 と MTP block（[MTP の契約](../../developer/mtp.md)）である。
+  MTP は今回の実装範囲に含めない。
 - vision tower（`model.visual.*`, 333 tensor, 0.832 GiB, BF16）は既存 model
   （Qwen3.8-27B 系）と同じで、Shelf は読まない。読む tensor を固定列挙する
   現行 loader 方針のままなら自然に無視される。

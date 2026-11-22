@@ -902,6 +902,50 @@ Qwen3.8-27B-FP8 / TP2 / FP8 KV / `--rope-factor 2`、selector の範囲内
 - 524,288 は production の値が未取得（`kMeasuredMaxVisible24 = 524288` を採用済みだが、
   warmup + 5 run の production 計測は未実施。1 run の参考値のみ research 記録にあり）。詳細は
   [../research/20261103/gate6_long_context.md](../research/20261103/gate6_long_context.md)。
+  2026-11-22 に EXL3 target で warmup 1 + 3 run の p50 を取得した（下節）。
+
+## 2026-11-22 524,288 prefill（EXL3、Static YaRN 2x）
+
+`models/kusuriya-labs/Qwen3.8-27B-EXL3-INT8-4bpw`、TP=2（`--device 0,1`）、
+FP8 KV、`--rope-factor 2`。warmup 1 + 3 run の p50。
+
+| 条件 | 値 |
+| --- | ---: |
+| prompt tokens | 524,272（要求 seq len 524,288） |
+| prefill chunk | 2048 |
+| gpu_ms p50 | 1,056,876.5 |
+| gpu_tokens_per_sec p50 | 496.06 |
+| run 間 p10 / p90 | 1,056,287.1 / 1,057,351.5 ms |
+| gpu_ms stddev | 669.1 ms |
+| kv_reserved_bytes | 22,322,892,800 |
+
+- measurement revision: HEAD `438879e2` + 作業ツリー（`shelf-bench pp` の
+  `--rope-factor` 追加）
+- command: `shelf-bench pp --model-dir models/kusuriya-labs/Qwen3.8-27B-EXL3-INT8-4bpw
+  --prompt-tokens 524272 --prefill-chunk 2048 --kv-cache-dtype fp8 --rope-factor 2
+  --device 0,1 --tensor-parallel 2 --runs 3 --warmup 1 --arena-gib 30`
+- 各 run の gpu_ms: 1,056,139.75 / 1,056,876.50 / 1,057,470.25
+- run 間のばらつきは stddev 0.06% で、p10 / p90 も p50 の ±0.05% に収まる。
+- HF FP8 checkpoint はこの環境に無いため EXL3-INT8-4bpw を測定対象とする。
+- 1 run の E2E（DFlash2 併用、32 token 生成）は prefill 1,090,479 ms、decode 10.20 tok/s、
+  生成文は発散しなかった
+  （[../research/20261122/dflash2_yarn_target.md](../research/20261122/dflash2_yarn_target.md)）。
+
+decode は同じ条件の続きで、context 524,260 / 16 token / warmup 1 の target-only。
+
+| 条件 | 値 |
+| --- | ---: |
+| gpu_us_per_token p50 | 127,897.87 |
+| gpu_tokens_per_sec p50 | 7.82 |
+| final_position | 524,276 |
+| kv_used_pages | 32,768 |
+| kv_reserved_bytes | 24,596,049,920 |
+
+- command: `shelf-bench tg --model-dir models/kusuriya-labs/Qwen3.8-27B-EXL3-INT8-4bpw
+  --mode forward --context 524260 --tokens 16 --warmup 1 --prefill-chunk 2048
+  --kv-cache-dtype fp8 --rope-factor 2 --device 0,1 --tensor-parallel 2 --arena-gib 30`
+- 16 token の p50。DFlash2 併用時の 32 token E2E は decode 10.20 tok/s で、
+  target-only より投機分だけ速い。
 
 ## 2026-11-04 Qwen3.6-35B-A3B MoE decode
 
@@ -1319,6 +1363,75 @@ Qwen4Exp の QSA 層（`q_per_kv = 12`）を block-sparse kernel の対象にし
 （`GENERATED_IDS` の sha1: 8,192 = `2e293f3dc225966c6c7bb82b0bf00b2bb9cce82b`、
 32,768 = `8a12f56fc9e5f422a9339c6c37bc4bdf4c411d47`）。
 各値は 1 回の測定で、同一条件の連続起動で before → after の順に取った。
+
+## 2026-11-22 FP8 KV 品質（Native / YaRN 2x）
+
+`models/kusuriya-labs/Qwen3.8-27B-EXL3-INT8-4bpw`、R9700 1 枚（`--device 0`）、
+corpus は BetterBench v1 の 2,203 token（sha256 `99fe6aa9…`）。
+BF16 KV の teacher-forced dump に対する FP8 KV の比較。
+
+- measurement revision: HEAD `438879e2` + 作業ツリー（`shelf-bench quality` と
+  `tools/quality_gate.py` の `--rope-factor` 追加）
+- command: `tools/quality_gate.py run --model-dir <model> --corpus <corpus>
+  --device 0 --context <N> --positions <N> --rope-factor <1|2>
+  --skip-endtask --skip-gsm8k`
+- `--rope-factor 1` は Native、`2` は Static YaRN factor 2。
+
+| factor | context | positions | PPL BF16 | PPL FP8 | PPL 差 | mean KL | top-1 | gate |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 1 | 128 | 2048 | 15.663659 | 15.466097 | -1.26% | 0.004362 | 0.975586 | PASS |
+| 2 | 128 | 2048 | 15.782134 | 15.670305 | -0.71% | 0.003905 | 0.972656 | PASS |
+| 1 | 1600 | 602 | 8.783930 | 8.707198 | -0.87% | 0.003053 | 0.985050 | PASS |
+| 2 | 1600 | 602 | 9.547516 | 9.597738 | +0.53% | 0.004487 | 0.955150 | PASS |
+
+同じ採点位置の BF16 Native と BF16 YaRN 2x の PPL 差は、context 128 で +0.76%、
+context 1600 で +8.69% だった。FP8 KV の差はこの範囲より小さく、YaRN 2x 併用時に
+追加される KV 量子化の劣化はこの分解能では分離できない。測定対象は EXL3-INT8-4bpw
+を採用する。詳細は
+[../research/20261122/fp8_kv_yarn_quality.md](../research/20261122/fp8_kv_yarn_quality.md)。
+
+## 2026-11-22 DFlash2 + Target Static YaRN（Gate 5）
+
+`models/kusuriya-labs/Qwen3.8-27B-EXL3-INT8-4bpw` を target、
+`models/kusuriya-labs/Qwen3.8-27B-DFlash2-EXL3-INT8-4bpw` を drafter とし、
+TP=2（`--device 0,1`）、温度 0、`--dflash2-drafts 6` で測った。
+
+- measurement revision: HEAD `438879e2` + 作業ツリー
+- command: `shelf-compute --model-dir <target> --dflash2-model-dir <drafter>
+  --input-ids-file <ids> --max-new-tokens <N> --max-seq-len <N>
+  --rope-factor <1|2|4> --device 0,1 --tensor-parallel 2
+  --kv-cache-dtype <bf16|fp8> --temperature 0 --arena-gib 30 --dflash2-drafts 6`
+
+短文は 51 token prompt、128 token 生成の 2 run。
+
+| factor | decode tok/s（2 run） | mean accepted | rounds |
+| ---: | ---: | ---: | ---: |
+| 1 | 68.62 / 68.47 | 1.822 | 45 |
+| 2 | 67.13 / 67.07 | 1.761 | 46 |
+| 4 | 68.59 / 68.64 | 1.822 | 45 |
+
+生成列は全 factor・全 run で一致した（`GENERATED_IDS` の sha1
+`1524af36c720f586e37b24b9eed162357f4010f5`）。
+
+長位置は 2,203 token の corpus を繰り返した 262,000 token prompt、32 token 生成、
+FP8 KV。繰り返し corpus のため受理率は自然文の比較に使わない。
+
+| factor | prefill | decode tok/s | mean accepted | rounds |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 323,215 ms | 22.34 | 2.875 | 8 |
+| 2 | 323,262 ms | 19.76 | 2.444 | 9 |
+| 4 | 325,715 ms | 19.76 | 2.444 | 9 |
+
+262,000 token の生成列も全 factor で一致した（`GENERATED_IDS` の sha1
+`9b613cfae22d62c18aa6c50dc354ef9031dd673a`）。
+
+524,000 token prompt（factor 2）の 1 run は prefill 1,090,479 ms、decode 10.20 tok/s、
+mean accepted 2.100（32 token 生成）。run 間のばらつきを評価していないため参考値として
+扱う。生成文は発散しなかった。
+
+Drafter は全 factor で `DFLASH2 rope: type=default ... source=checkpoint` を出し、
+target の factor を継承しない。詳細は
+[../research/20261122/dflash2_yarn_target.md](../research/20261122/dflash2_yarn_target.md)。
 
 ## 記録規則
 

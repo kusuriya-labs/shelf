@@ -6,6 +6,7 @@
 #include <shelf/kernels/optimized/gdn/recurrence.h>
 #include <shelf/models/qwen35/runtime/spec_decode.h>
 #include <shelf/models/qwen35/runtime/tp_batch_hook.h>
+#include <shelf/runtime/kv_pages.h>
 
 #include <algorithm>
 #include <chrono>
@@ -541,7 +542,7 @@ uint32_t draft_ring_pages(const MtpDrafterConfig& options) noexcept {
     const uint32_t ring = static_cast<uint32_t>(ceil_div_u32(
                               static_cast<uint32_t>(tokens), options.page_tokens)) + 1u;
     const uint32_t logical =
-        ceil_div_u32(options.max_seq_len + 1u, options.page_tokens) + 1u;
+        ::shelf::runtime::kv_pages_for_context(options.max_seq_len, options.page_tokens);
     return ring < logical ? ring : logical;
 }
 
@@ -866,7 +867,7 @@ std::size_t mtp_drafter_reserve_bytes(const shelf::qwen_hybrid::QwenHybridConfig
     shelf::qwen_hybrid::QwenHybridConfig mtp = mtp_executor_config(config);
     if (options.local_kv_heads != 0u) mtp.num_key_value_heads = options.local_kv_heads;
     const uint32_t full_pages =
-        ceil_div_u32(options.max_seq_len + 1u, options.page_tokens) + 1u;
+        ::shelf::runtime::kv_pages_for_context(options.max_seq_len, options.page_tokens);
     const uint32_t ring = draft_ring_pages(options);
     const uint32_t pages = ring != 0u ? ring : full_pages;
     const std::size_t kv = state::PagedKVPool::page_bytes(
@@ -920,7 +921,7 @@ std::size_t mtp_shared_draft_reserve_bytes(
     shelf::qwen_hybrid::QwenHybridConfig mtp = mtp_executor_config(config);
     if (options.local_kv_heads != 0u) mtp.num_key_value_heads = options.local_kv_heads;
     const uint32_t full_pages =
-        ceil_div_u32(options.max_seq_len + 1u, options.page_tokens) + 1u;
+        ::shelf::runtime::kv_pages_for_context(options.max_seq_len, options.page_tokens);
     const uint32_t ring = draft_ring_pages(options);
     const uint32_t pages = ring != 0u ? ring : full_pages;
     const std::size_t kv = state::PagedKVPool::page_bytes(
@@ -1013,7 +1014,7 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
     drafter->ring_pages = draft_ring_pages(options);
 
     const uint32_t pages =
-        ceil_div_u32(options.max_seq_len + 1u, options.page_tokens) + 1u;
+        ::shelf::runtime::kv_pages_for_context(options.max_seq_len, options.page_tokens);
     const uint32_t ring_pages = draft_ring_pages(options);
     if (shared_draft == nullptr) {
         auto slot_pool = state::SequenceSlotPool::create(arena, 1u, pages);
@@ -1986,7 +1987,7 @@ Result<MtpSpecBatchContext> create_mtp_spec_batch_context(
         if (local_kv_heads != 0u)
             shared->config.num_key_value_heads = local_kv_heads;
         const uint32_t pages =
-            ceil_div_u32(options.max_seq_len + 1u, options.page_tokens) + 1u;
+            ::shelf::runtime::kv_pages_for_context(options.max_seq_len, options.page_tokens);
         const uint32_t ring_pages = draft_ring_pages(options);
         auto slot_pool =
             state::SequenceSlotPool::create(rank_arena, max_requests, pages);

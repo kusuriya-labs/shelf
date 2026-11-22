@@ -600,7 +600,10 @@ ACCEPT。Target text 経路の Native / YaRN 2x / YaRN 4x が同一の table と
 
 - 長文 E2E の品質・性能測定は Gate 6（2x のみ。4x は方針により実装のみ）。
 - 2x 全長は FP8 KV で容量が成立したが、FP8 KV の品質劣化（既知の FAIL）を含むため、
-  品質評価は BF16 KV の短文比較と分離して行う。
+  品質評価は BF16 KV の短文比較と分離して行う。この FAIL は同日の
+  [fp8_kv_prefill_quality_audit.md](fp8_kv_prefill_quality_audit.md) で修正され、
+  2026-11-22 の再測では Native / YaRN 2x とも数値ゲート PASS
+  （[../20261122/fp8_kv_yarn_quality.md](../20261122/fp8_kv_yarn_quality.md)）。
 
 ### 9.5 採否
 

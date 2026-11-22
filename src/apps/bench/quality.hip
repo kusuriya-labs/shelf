@@ -1,3 +1,4 @@
+#include "bench_rope.h"
 #include "quality_core.h"
 
 #include <shelf/core/memory/arena.h>
@@ -39,6 +40,7 @@ struct QualityOptions {
     bool arena_auto = true;
     shelf::kernel::KVCacheDType kv_dtype = shelf::kernel::KVCacheDType::BF16;
     shelf::kernel::OctaveKVCacheFormat octave_format{};
+    std::string rope_factor = "auto";
     bool dump_prefill = false;
     std::string dump_path;
     std::string compare_path;
@@ -56,6 +58,7 @@ void print_usage(FILE* out) {
         "  --prefill-chunk N            prefill chunk size (default 2048)\n"
         "  --batch-size N               identical teacher-forced sequences (default 1, max 64)\n"
         "  --kv-cache-dtype bf16|fp8|octave:FORMAT (default bf16)\n"
+        "  --rope-factor auto | 1 | 2 | 4 (default auto)\n"
         "  --page-tokens N              (default 16)\n"
         "  --arena-gib N|auto           (default auto = free VRAM minus 0.5 GiB)\n"
         "  --device LIST                comma separated GPUs, one per --tensor-parallel rank\n"
@@ -169,6 +172,13 @@ bool parse_args(int argc, char** argv, QualityOptions& opts) {
                 opts.kv_dtype = shelf::kernel::KVCacheDType::OCTAVE;
             } else {
                 fprintf(stderr, "invalid --kv-cache-dtype: %s\n", dtype.c_str());
+                return false;
+            }
+        } else if (key == "--rope-factor") {
+            opts.rope_factor = need_value();
+            if (opts.rope_factor != "auto" && opts.rope_factor != "1" &&
+                opts.rope_factor != "2" && opts.rope_factor != "4") {
+                fprintf(stderr, "invalid --rope-factor (expected auto | 1 | 2 | 4)\n");
                 return false;
             }
         } else if (key == "--device") {
@@ -357,6 +367,21 @@ int run_quality(int argc, char** argv) {
         return 1;
     }
     const uint32_t required_seq_len = score_start + positions;
+    auto rope_profile_result = shelf::bench::resolve_bench_rope_profile(
+        opts.model_dir, opts.rope_factor);
+    if (!rope_profile_result.ok()) {
+        fprintf(stderr, "rope profile: %s\n", rope_profile_result.status().message().c_str());
+        return 1;
+    }
+    const auto& rope_profile = rope_profile_result.value();
+    if (rope_profile.has_value()) {
+        const shelf::Status rope_status = shelf::bench::check_bench_rope_len(
+            *rope_profile, opts.rope_factor, required_seq_len);
+        if (!rope_status.ok()) {
+            fprintf(stderr, "%s\n", rope_status.message().c_str());
+            return 1;
+        }
+    }
     const uint32_t batch_size = static_cast<uint32_t>(opts.batch_size);
     const uint32_t pages_per_sequence =
         ceil_div(required_seq_len, static_cast<uint32_t>(opts.page_tokens)) + 1u;
@@ -367,6 +392,7 @@ int run_quality(int argc, char** argv) {
         std::max(opts.prefill_chunk, std::max(2, static_cast<int>(batch_size))));
     exec_config.max_scheduled_requests = batch_size;
     exec_config.max_scheduled_output_rows = opts.dump_prefill ? exec_config.max_batch_rows : batch_size;
+    if (rope_profile.has_value()) exec_config.rope_profile = *rope_profile;
 
     std::unique_ptr<shelf::gpu::GpuMemoryManager> tp_memory;
     std::unique_ptr<shelf::qwen35::runtime::TpCoordinator> tp_coord;
@@ -413,6 +439,7 @@ int run_quality(int argc, char** argv) {
         tp_cfg.max_seq_len = required_seq_len;
         tp_cfg.page_tokens = static_cast<uint32_t>(opts.page_tokens);
         tp_cfg.kv_cache_dtype = opts.kv_dtype;
+        if (rope_profile.has_value()) tp_cfg.rope_profile = *rope_profile;
         auto memory_result = shelf::gpu::GpuMemoryManager::create(opts.devices, arena_bytes);
         if (!memory_result.ok()) {
             fprintf(stderr, "GpuMemoryManager::create failed: %s\n",

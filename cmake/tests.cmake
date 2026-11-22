@@ -164,6 +164,7 @@ set_tests_properties(test_dflash2_adaptive PROPERTIES ENVIRONMENT "SHELF_DFLASH2
 add_test(NAME test_dflash2_adaptive_cap_override COMMAND test_dflash2_adaptive --check-cap-override)
 set_tests_properties(test_dflash2_adaptive_cap_override PROPERTIES LABELS "cpu;required" TIMEOUT 30 ENVIRONMENT "SHELF_DFLASH2_POLICY_MAX_SESSIONS=4")
 shelf_add_test(NAME test_dflash2_tree SOURCE unit/test_dflash2_tree.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_core)
+shelf_add_test(NAME test_kv_pages SOURCE unit/test_kv_pages.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_core)
 add_test(NAME test_gdn_tree_chunk_reference COMMAND python3 "${CMAKE_SOURCE_DIR}/tests/unit/test_gdn_tree_chunk_reference.py")
 set_tests_properties(test_gdn_tree_chunk_reference PROPERTIES LABELS "cpu;required" TIMEOUT 30)
 shelf_add_test(NAME test_thinking_budget SOURCE unit/test_thinking_budget.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
@@ -384,6 +385,7 @@ add_custom_target(
         test_qwen35_tp_weight_load
         test_qwen35_mtp_weight_load
         test_dflash2_config
+        test_kv_pages
         test_thinking_budget
         test_dflash2_footprint
         test_mtp_reserve

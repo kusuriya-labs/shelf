@@ -24,7 +24,8 @@ Gate A（Quark MXFP4 format の受理）は実装済みで、現在形の contra
 | D4 | 正しさの ground truth は **f64 oracle `tiny_moe` + Quark packer bit 一致** | router / 集約順は oracle が HF を op-by-op 検証済み。MXFP4 codec は `downcast_to_mxfp` / `even_round` と bit 一致で固定する |
 
 範囲: 言語モデルのみ。`model.visual.*` は読まない（現行 model と同じ）。
-`mtp.*` は今回の contract に含めない（`docs/homework.md` の MTP 未実装と同一）。
+`mtp.*` は今回の contract に含めない（当時 MTP は未実装で、現行は
+[MTP の契約](../../developer/mtp.md) が別に存在する）。
 
 ## 1. MXFP4 canonical format 契約
 

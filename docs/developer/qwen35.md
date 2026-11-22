@@ -145,6 +145,8 @@ build_program_set(graph, weights, params, DECODE, opts)
 - YaRN の `original_max_position_embeddings` は `rope_parameters` の値、無ければ `text_config.max_position_embeddings` を使う。
 - `attention_factor` は config の明示値、無ければ `1 + 0.1 * ln(factor)`。`beta_fast` / `beta_slow` / `truncate` の既定は 32 / 1 / true。
 - `--max-seq-len` の上限は `min(original_len * factor, 1048576)`。Native は `original_len`。
+- 長文 E2E の検証対象は 2x（524,288）までとする。4x は起動と RoPE の実装までを対象とし、
+  1M 級の E2E は行わない。1M 超を対応済みとして扱わない。
 - YaRN 選択中も speculative decoding（`--dflash2-model-dir`）を使える。Drafter は target の factor や attention factor を継承せず、DFlash2 checkpoint の `rope_theta` と `rope_type=default` で独立に RoPE を適用する。
 - 逆周波数 table は YaRN 時に `launch_rope_inv_freq_yarn_init`、Native 時に `launch_rope_inv_freq_init` で 32 要素の double を生成する。
 

@@ -62,5 +62,5 @@ launcher は 1 回の launch で扱えるのが `rows <= kBf16GemmExactRowsKerne
 
 マルチリクエストの end-to-end スループットを測る計測口がまだ無い
 （`shelf-bench batch` は合成トークンで即 EOS し、token/s も出さない）。
-並列数を上げたときの効果測定は [../../homework.md](../../homework.md) の
-「マルチリクエスト + 投機推論」に残した。
+並列数を上げたときの効果測定は
+[../../developer/roadmap.md](../../developer/roadmap.md) の「Multi-request + 投機推論」に残す。
