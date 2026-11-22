@@ -68,6 +68,9 @@ Ready.
 | --- | --- |
 | `-h, --help` | show this help message and exit |
 | `--model-dir MODEL_DIR` | model directory |
+| `--placement PLACEMENT` | Hy4 の expert 配置表 |
+| `--engram-dir ENGRAM_DIR` | Hy4 FP8 Engram のディレクトリ |
+| `--dfly-dir DFLY_DIR` | Hy4 DFly2 のディレクトリ |
 | `--model MODEL` | model name reported by the API |
 | `--host HOST` | listen address (default 127.0.0.1) |
 | `--port PORT` | listen port (default 8000) |
@@ -86,6 +89,8 @@ Ready.
 | `--pipeline-parallel {1,2,4}` | pipeline parallel size forwarded to compute (mutually exclusive with --tensor-parallel; default 1) |
 | `--kv-cache-dtype KV_CACHE_DTYPE` | KV cache dtype (default bf16) |
 | `--page-tokens PAGE_TOKENS` | paged KV page size in tokens (default 16) |
+| `--mtp-window MTP_WINDOW` | MTP draft attention window in tokens (0 = full context) |
+| `--mtp-sink MTP_SINK` | MTP draft attention sink tokens kept before the window |
 | `--working-set-reserve-gib WORKING_SET_RESERVE_GIB` | arena headroom kept free for the working set (0 = size it from the row bucket, default 0) |
 | `--rope-factor {auto,1,2,4}` | static YaRN rope factor forwarded to compute (default auto) |
 | `--prefix-cache {0,1}` | enable prefix cache (default 1) |

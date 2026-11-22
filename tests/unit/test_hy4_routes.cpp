@@ -17,6 +17,40 @@ int main() {
             ++failures;
         }
     };
+    check(!Hy4MoePlan::supports(0) && !Hy4MoePlan::supports(7), "decode の行数境界が不正です");
+    for (int ranks = 1; ranks <= 4; ++ranks) {
+        for (int rows = 1; rows <= Hy4MoePlan::max_rows; ++rows) {
+            check(Hy4MoePlan::supports(rows), "有効な行数が拒否されました");
+            std::vector<Hy4Route> picks;
+            for (int row = 0; row < rows; ++row)
+                for (int j = 15; j >= 0; --j)
+                    picks.push_back({row, (row * 7 + j) % 512, float(j + 1) / 16});
+            for (bool concentrated : {false, true}) {
+                std::array<int, 512> owners{};
+                for (int e = 0; e < 512; ++e)
+                    owners[e] = concentrated ? ranks - 1 : e % ranks;
+                auto sorted = picks;
+                std::array<std::vector<Hy4Route>, 4> routes;
+                std::array<std::vector<int>, 4> offsets;
+                partition_routes(sorted, rows, owners, ranks, routes, offsets);
+                int total = 0;
+                for (int group = 0; group < ranks; ++group) {
+                    Hy4MoePlan plan{};
+                    plan.partition(picks.data(), rows, owners.data(), group);
+                    offsets[group].push_back(routes[group].size());
+                    check(std::equal(offsets[group].begin(), offsets[group].end(), plan.offsets),
+                          "GPU 計画の行境界が CPU の経路と一致しません");
+                    check(plan.count == int(routes[group].size()), "GPU 計画の経路数が一致しません");
+                    check(std::equal(routes[group].begin(), routes[group].end(), plan.routes,
+                                     [](auto a, auto b) {
+                                         return a.row == b.row && a.expert == b.expert && a.weight == b.weight;
+                                     }), "GPU 計画の expert 順または重みが一致しません");
+                    total += plan.count;
+                }
+                check(total == Hy4MoePlan::capacity(rows), "rank 間で経路が欠落しています");
+            }
+        }
+    }
     for (bool push : {false, true})
         for (bool source : {false, true})
             for (bool destination : {false, true}) {
