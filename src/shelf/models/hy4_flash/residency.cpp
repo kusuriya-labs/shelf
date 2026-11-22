@@ -115,6 +115,7 @@ Status Residency::reserve() {
             throw std::runtime_error(allocation.status().message());
         check(hipMemset(allocation.value().data(), 0, bytes));
         Region buffer{static_cast<uint8_t *>(allocation.value().data()), bytes};
+        check(hipStreamCreateWithFlags(&compute[r], hipStreamNonBlocking));
         weight_base[r] = static_cast<uint8_t *>(buffer.next(model.bytes[r]));
         if (attention_rank) {
             for (int i = 0; i < 42; ++i) {
@@ -285,27 +286,33 @@ void Residency::transfer(void *dst, int destination, const void *src, int source
         parity[source][destination] = p ^ 1;
         if (push) {
             check(hipSetDevice(physical[destination]));
-            check(hipEventRecord(ack_event, nullptr));
+            check(hipEventRecord(ack_event, compute[destination]));
             check(hipSetDevice(physical[source]));
-            check(hipStreamWaitEvent(nullptr, ack_event, 0));
-            peer_copy(dst, src, bytes);
-            check(hipEventRecord(ready_event, nullptr));
+            check(hipStreamWaitEvent(compute[source], ack_event, 0));
+            peer_copy(dst, src, bytes, compute[source]);
+            check(hipEventRecord(ready_event, compute[source]));
             check(hipSetDevice(physical[destination]));
-            check(hipStreamWaitEvent(nullptr, ready_event, 0));
+            check(hipStreamWaitEvent(compute[destination], ready_event, 0));
         } else {
             check(hipSetDevice(physical[source]));
-            check(hipEventRecord(ready_event, nullptr));
+            check(hipEventRecord(ready_event, compute[source]));
             check(hipSetDevice(physical[destination]));
-            check(hipStreamWaitEvent(nullptr, ready_event, 0));
-            check(hipMemcpyPeerAsync(dst, physical[destination], src, physical[source], bytes, nullptr));
+            check(hipStreamWaitEvent(compute[destination], ready_event, 0));
+            check(hipMemcpyPeerAsync(dst, physical[destination], src, physical[source], bytes, compute[destination]));
+            check(hipEventRecord(ack_event, compute[destination]));
+            check(hipSetDevice(physical[source]));
+            check(hipStreamWaitEvent(compute[source], ack_event, 0));
+            check(hipSetDevice(physical[destination]));
         }
     } else {
         if (!staging || bytes > max_prefill_chunk * 3072u * 2u)
             throw std::runtime_error("転送作業域の範囲外です");
         check(hipSetDevice(physical[source]));
-        check(hipMemcpy(staging, src, bytes, hipMemcpyDeviceToHost));
+        check(hipMemcpyAsync(staging, src, bytes, hipMemcpyDeviceToHost, compute[source]));
+        check(hipStreamSynchronize(compute[source]));
         check(hipSetDevice(physical[destination]));
-        check(hipMemcpy(dst, staging, bytes, hipMemcpyHostToDevice));
+        check(hipMemcpyAsync(dst, staging, bytes, hipMemcpyHostToDevice, compute[destination]));
+        check(hipStreamSynchronize(compute[destination]));
     }
     if (expert_begin[0])
         transfer_ms +=
@@ -345,7 +352,7 @@ void Residency::reduce_pair(void *data, int rank, size_t bytes, bool ep) {
         check(hipEventSynchronize(consumed_events[rank][p]));
     tp_ptr[rank] = data;
     tp_bytes[rank] = bytes;
-    check(hipEventRecord(ready_events[rank][p], nullptr));
+    check(hipEventRecord(ready_events[rank][p], compute[rank]));
     barrier->arrive_and_wait();
     if (rank == a) {
         if (tp_bytes[a] != tp_bytes[b] || bytes > max_prefill_chunk * (ep ? 1536u : 3072u) * 2u)
@@ -355,17 +362,17 @@ void Residency::reduce_pair(void *data, int rank, size_t bytes, bool ep) {
             auto mode = select_reduce_transport(push, peer[source][destination], peer[destination][source]);
             if (mode == ReduceTransport::push) {
                 check(hipSetDevice(physical[source]));
-                check(hipStreamWaitEvent(nullptr, ready_events[source][p], 0));
+                check(hipStreamWaitEvent(compute[source], ready_events[source][p], 0));
                 if (recorded[destination][p ^ 1])
-                    check(hipStreamWaitEvent(nullptr, consumed_events[destination][p ^ 1], 0));
-                peer_copy(recv[destination], tp_ptr[source], bytes);
-                check(hipEventRecord(done_events[source][p], nullptr));
+                    check(hipStreamWaitEvent(compute[source], consumed_events[destination][p ^ 1], 0));
+                peer_copy(recv[destination], tp_ptr[source], bytes, compute[source]);
+                check(hipEventRecord(done_events[source][p], compute[source]));
                 check(hipSetDevice(physical[destination]));
-                check(hipStreamWaitEvent(nullptr, done_events[source][p], 0));
+                check(hipStreamWaitEvent(compute[destination], done_events[source][p], 0));
             } else if (mode == ReduceTransport::peer) {
                 check(hipSetDevice(physical[destination]));
-                check(hipStreamWaitEvent(nullptr, ready_events[source][p], 0));
-                check(hipMemcpyPeerAsync(recv[destination], physical[destination], tp_ptr[source], physical[source], bytes, nullptr));
+                check(hipStreamWaitEvent(compute[destination], ready_events[source][p], 0));
+                check(hipMemcpyPeerAsync(recv[destination], physical[destination], tp_ptr[source], physical[source], bytes, compute[destination]));
             } else {
                 check(hipEventSynchronize(ready_events[source][p]));
                 check(hipEventSynchronize(ready_events[destination][p]));
@@ -374,16 +381,17 @@ void Residency::reduce_pair(void *data, int rank, size_t bytes, bool ep) {
                 check(hipSetDevice(physical[source]));
                 check(hipMemcpy(reduce_staging[a], tp_ptr[source], bytes, hipMemcpyDeviceToHost));
                 check(hipSetDevice(physical[destination]));
-                check(hipMemcpy(recv[destination], reduce_staging[a], bytes, hipMemcpyHostToDevice));
+                check(hipMemcpyAsync(recv[destination], reduce_staging[a], bytes, hipMemcpyHostToDevice, compute[destination]));
+                check(hipStreamSynchronize(compute[destination]));
             }
-            check(hipEventRecord(arrived_events[destination][p], nullptr));
+            check(hipEventRecord(arrived_events[destination][p], compute[destination]));
         }
         for (int destination : {a, b}) {
             check(hipSetDevice(physical[destination]));
-            check(hipStreamWaitEvent(nullptr, arrived_events[a][p], 0));
-            check(hipStreamWaitEvent(nullptr, arrived_events[b][p], 0));
-            tp_add_bf16(tp_ptr[destination], recv[destination], bytes);
-            check(hipEventRecord(consumed_events[destination][p], nullptr));
+            check(hipStreamWaitEvent(compute[destination], arrived_events[a][p], 0));
+            check(hipStreamWaitEvent(compute[destination], arrived_events[b][p], 0));
+            tp_add_bf16(tp_ptr[destination], recv[destination], bytes, compute[destination]);
+            check(hipEventRecord(consumed_events[destination][p], compute[destination]));
         }
         recorded[a][p] = recorded[b][p] = true;
         parity ^= 1;
@@ -405,16 +413,24 @@ void *Residency::route_buffer(int rank, size_t bytes) {
 }
 void Residency::shutdown() {
     std::string errors;
+    auto collect = [&](hipError_t e) {
+        if (e != hipSuccess)
+            errors += std::string(hipGetErrorString(e)) + "\n";
+    };
+    for (int r = 0; r < ranks; ++r) {
+        if (compute[r]) {
+            collect(hipSetDevice(physical[r]));
+            collect(hipStreamSynchronize(compute[r]));
+            collect(hipStreamDestroy(compute[r]));
+            compute[r] = nullptr;
+        }
+    }
     for (auto it = arenas.rbegin(); it != arenas.rend(); ++it) {
         auto status = it->shutdown();
         if (!status.ok())
             errors += status.message() + "\n";
     }
     arenas.clear();
-    auto collect = [&](hipError_t e) {
-        if (e != hipSuccess)
-            errors += std::string(hipGetErrorString(e)) + "\n";
-    };
     for (int r = 0; r < ranks; ++r) {
         collect(hipSetDevice(physical[r]));
         for (auto events : {&tp_ready, &tp_done, &tp_arrived, &tp_consumed, &ep_ready, &ep_done, &ep_arrived, &ep_consumed})

@@ -6,6 +6,7 @@
 #include <shelf/kernels/fused/detail/radix_select.h>
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/decode.h>
 #include <algorithm>
+#include <climits>
 #include <numeric>
 #include <stdexcept>
 
@@ -13,6 +14,12 @@ namespace shelf::hy4 {
 namespace {
 using namespace shelf::kernel::exl3_detail::mul24;
 using shelf::kernel::detail::octave::sign_of;
+__device__ int step_at(int value, const Hy4StepParams *params) { return params ? params->position : value; }
+__device__ int kv_base(int first, int row_offset, bool sliding, const Hy4StepParams *params) {
+    if (!params)
+        return first;
+    return sliding ? max(0, params->position + row_offset - 511) : 0;
+}
 __device__ constexpr float levels[] = {-2.73258948f, -2.06901717f, -1.61804640f, -1.25623119f,
                                        -0.94234043f, -0.65675914f, -0.38804829f, -0.12839504f,
                                        0.12839504f,  0.38804829f,  0.65675914f,  0.94234043f,
@@ -33,6 +40,17 @@ __device__ float wht(float v, float *scratch, int width) {
     }
     return v * rsqrtf(float(width));
 }
+__device__ float wht_shared(float v, float *scratch, int width, int c, bool active) {
+    for (int step = 1; step < width; step *= 2) {
+        scratch[c] = active ? v : 0.f;
+        __syncthreads();
+        float other = scratch[c ^ step];
+        __syncthreads();
+        if (active)
+            v = (c & step) ? other - v : v + other;
+    }
+    return v * rsqrtf(float(width));
+}
 template <bool Max> __device__ float reduce(float v, float *scratch, int width) {
     int c = threadIdx.x;
     scratch[c] = v;
@@ -46,13 +64,24 @@ template <bool Max> __device__ float reduce(float v, float *scratch, int width) 
     __syncthreads();
     return result;
 }
-template <int Width, int Salt> __global__ void pack(Mat x, uint8_t *records, int offset) {
-    __shared__ float scratch[Width];
-    __shared__ uint8_t codes[Width];
-    int c = threadIdx.x, sub = blockIdx.x, row = blockIdx.y;
+template <bool Max> __device__ float reduce_shared(float v, float *scratch, int width, int c, bool active) {
+    scratch[c] = active ? v : (Max ? -INFINITY : 0.f);
+    __syncthreads();
+    for (int step = width / 2; step; step /= 2) {
+        if (c < step && c < width)
+            scratch[c] = Max ? fmaxf(scratch[c], scratch[c + step]) : scratch[c] + scratch[c + step];
+        __syncthreads();
+    }
+    float result = active ? scratch[0] : 0.f;
+    __syncthreads();
+    return result;
+}
+template <int Width, int Salt>
+__device__ void pack_part(Mat x, uint8_t *records, int offset, int sub, int row, int c, bool active, float *scratch,
+                          uint8_t *codes) {
     uint8_t *dst = records + size_t(row) * 294 + offset + sub * (Width / 2 + 2);
-    float v = wht(bv(x, row, sub * Width + c) * sign_of(c, Salt), scratch, Width);
-    float ss = reduce<false>(v * v, scratch, Width);
+    float v = wht_shared(active ? bv(x, row, sub * Width + c) * sign_of(c, Salt) : 0.f, scratch, Width, c, active);
+    float ss = reduce_shared<false>(v * v, scratch, Width, c, active);
     float z = ss > 0 ? v * rsqrtf(ss / Width) : 0;
     int lo = 0, hi = 15;
     while (lo < hi) {
@@ -62,21 +91,40 @@ template <int Width, int Salt> __global__ void pack(Mat x, uint8_t *records, int
         else
             hi = mid;
     }
-    codes[c] = ss > 0 ? lo : 0;
-    float dot = reduce<false>(v * levels[lo], scratch, Width);
-    if (c < Width / 2)
+    codes[c] = active && ss > 0 ? lo : 0;
+    float dot = reduce_shared<false>(active ? v * levels[lo] : 0.f, scratch, Width, c, active);
+    if (active && c < Width / 2)
         dst[c] = codes[c * 2] | (codes[c * 2 + 1] << 4);
-    if (!c) {
+    if (active && !c) {
         uint16_t h = __half_as_ushort(__float2half(dot > 0 ? ss / dot : 0));
         dst[Width / 2] = h & 255;
         dst[Width / 2 + 1] = h >> 8;
     }
 }
+__global__ void pack_kv_combined(Mat lat, Mat rot, uint8_t *records) {
+    __shared__ float scratch[256];
+    __shared__ uint8_t codes[256];
+    int sub = blockIdx.x, row = blockIdx.y, c = threadIdx.x;
+    if (sub < 2)
+        pack_part<256, 29>(lat, records, 0, sub, row, c, true, scratch, codes);
+    else
+        pack_part<64, 11>(rot, records, 260, 0, row, c, c < 64, scratch, codes);
+}
 template <int Width, int Salt>
-__global__ void unpack(const uint8_t *cache, const uint8_t *fresh, const int *ids, int start, int slots,
-                       Mat out, int offset) {
+__global__ void unpack(const uint8_t *cache, const uint8_t *fresh, const int *ids, int first, int start, int slots,
+                       Mat out, int offset, const Hy4StepParams *params, bool sliding, int row_offset, int chunk_rows) {
     __shared__ float scratch[Width];
-    int c = threadIdx.x, sub = blockIdx.x, row = blockIdx.y, id = ids[row];
+    start = step_at(start, params);
+    int base = kv_base(first, row_offset, sliding, params);
+    int c = threadIdx.x, sub = blockIdx.x, row = blockIdx.y, id = ids ? ids[row] : base + row;
+    if (!ids && id >= start + row_offset + chunk_rows) {
+        out.p[size_t(row) * out.cols + sub * Width + c] = 0;
+        return;
+    }
+    if (id < 0) {
+        out.p[size_t(row) * out.cols + sub * Width + c] = 0;
+        return;
+    }
     const uint8_t *rec = id >= start ? fresh + size_t(id - start) * 294 : cache + size_t(id % slots) * 294;
     const uint8_t *src = rec + offset + sub * (Width / 2 + 2);
     int code = (src[c / 2] >> (4 * (c % 2))) & 15;
@@ -84,14 +132,20 @@ __global__ void unpack(const uint8_t *cache, const uint8_t *fresh, const int *id
     float value = wht(levels[code] * scale, scratch, Width) * sign_of(c, Salt);
     out.p[size_t(row) * out.cols + sub * Width + c] = f32_to_bf16_rne_device(value);
 }
-__global__ void save_records(uint8_t *cache, const uint8_t *fresh, int rows, int start, int slots) {
+__global__ void save_records(uint8_t *cache, const uint8_t *fresh, int rows, int start, int slots,
+                             const Hy4StepParams *params) {
+    start = step_at(start, params);
     int i = (rows - min(rows, slots)) * 294 + blockIdx.x * blockDim.x + threadIdx.x;
     if (i < 294 * rows)
         cache[size_t((start + i / 294) % slots) * 294 + i % 294] = fresh[i];
 }
 __global__ void pool(Mat keys, uint16_t *history, int first, int start, Param values, Param gates, Param ape,
-                     Param norm, const uint16_t *pending) {
+                     Param norm, const uint16_t *pending, const Hy4StepParams *params, int rows) {
     __shared__ float pooled[128], scratch[128];
+    start = step_at(start, params);
+    first = start / 4;
+    if (blockIdx.x >= (start + rows) / 4 - first)
+        return;
     int c = threadIdx.x, group = first + blockIdx.x;
     float v[4], g[4], peak = -INFINITY;
     for (int i = 0; i < 4; ++i) {
@@ -125,17 +179,19 @@ __global__ void pool(Mat keys, uint16_t *history, int first, int start, Param va
     }
     history[size_t(group) * 128 + c] = f32_to_bf16_rne_device(out);
 }
-__global__ void save_pending(Mat k, int start, uint16_t *pending) {
+__global__ void save_pending(Mat k, int start, uint16_t *pending, const Hy4StepParams *params) {
+    start = step_at(start, params);
     int row = k.rows - 1 - blockIdx.x;
     pending[((start + row) % 12) * 128 + threadIdx.x] = k.p[row * 128 + threadIdx.x];
 }
 __global__ void index_scores(Mat q, Mat weights, const uint16_t *groups, int first, int start, int stride,
-                             float *scores) {
+                             float *scores, const Hy4StepParams *params) {
+    start = step_at(start, params);
     int row = first + blockIdx.y;
     int count = (start + row) / 4;
     int group = blockIdx.x * 4 + threadIdx.x / 32;
     int lane = threadIdx.x % 32;
-    if (group >= count)
+    if (group >= count || group >= stride)
         return;
     float sum = 0;
     for (int h = 0; h < 16; ++h) {
@@ -149,72 +205,212 @@ __global__ void index_scores(Mat q, Mat weights, const uint16_t *groups, int fir
     if (!lane)
         scores[size_t(blockIdx.y) * stride + group] = sum;
 }
-__global__ void index_topk(const float *scores, int first, int start, int stride, int *selected) {
+__global__ void index_topk(const float *scores, int first, int start, int stride, int *selected,
+                           const Hy4StepParams *params) {
     __shared__ uint32_t histogram[256], state[4];
+    start = step_at(start, params);
     int row = blockIdx.x;
     unsigned count = (start + first + row) / 4;
+    count = min(count, (unsigned)stride);
     ::shelf::kernel::detail::radix_select<3>(scores + size_t(row) * stride, count, 511, histogram, state,
                                              selected + row * 511, nullptr, 0);
 }
+__global__ void contiguous_offsets(int *offsets, int n, int stride, int pos0, bool sliding, int first, int row_offset,
+                                   const Hy4StepParams *params) {
+    int r = blockIdx.y, t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= stride)
+        return;
+    int pos = step_at(pos0, params) + row_offset + r;
+    int base = kv_base(first, row_offset, sliding, params);
+    int len = sliding ? min(pos + 1, 512) : pos + 1;
+    int first_r = pos + 1 - len;
+    offsets[r * stride + t] = t < len ? first_r - base + t : -1;
+}
+__global__ void sparse_clear(int *mask, int mask_count, unsigned *bits, int word_count, int *meta, int *rev,
+                             int rev_count) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < mask_count)
+        mask[i] = 0;
+    if (i < word_count)
+        bits[i] = 0;
+    if (i < 516)
+        meta[i] = 0;
+    if (i < rev_count)
+        rev[i] = -1;
+}
+__global__ void sort_top(const int *top, int *groups, int *mask, int row_begin, int rows, int width) {
+    __shared__ int g[512];
+    int r = blockIdx.x, t = threadIdx.x;
+    g[t] = t < 511 ? top[(size_t(row_begin + r)) * 511 + t] : INT_MAX;
+    __syncthreads();
+    for (int k = 2; k <= 512; k <<= 1) {
+        for (int j = k >> 1; j > 0; j >>= 1) {
+            __syncthreads();
+            int other = g[t ^ j], v = g[t];
+            bool lower = (t & j) == 0;
+            bool gt = lower ? v > other : other > v;
+            bool lt = lower ? v < other : other < v;
+            bool swap = (t & k) == 0 ? gt : lt;
+            __syncthreads();
+            g[t] = swap ? other : v;
+        }
+    }
+    __syncthreads();
+    groups[size_t(r) * 512 + t] = g[t];
+    if (t < 511 && g[t] < width)
+        mask[size_t(r) * width + g[t]] = 1;
+}
+__global__ void sparse_group_ids(int *mask, int rows, int width, int *meta, int *ids, int *rev,
+                                 unsigned *bits, int pos0, int row_offset, const Hy4StepParams *params) {
+    pos0 = step_at(pos0, params) + row_offset;
+    for (int g = threadIdx.x; g < width; g += blockDim.x) {
+        int v = 0;
+        for (int r = 0; r < rows; ++r)
+            v |= mask[size_t(r) * width + g];
+        mask[g] = v;
+    }
+    __syncthreads();
+    if (!threadIdx.x) {
+        int count = 0;
+        for (int g = 0; g < width; ++g) {
+            int present = mask[g];
+            mask[g] = present ? count * 4 : -1;
+            count += present;
+        }
+        meta[512] = count * 4;
+    }
+    __syncthreads();
+    for (int g = threadIdx.x; g < width; g += blockDim.x)
+        if (mask[g] >= 0)
+            for (int k = 0; k < 4; ++k) {
+                int token = 4 * g + k;
+                ids[mask[g] + k] = token;
+                rev[token] = mask[g] + k;
+            }
+    for (int r = threadIdx.x; r < rows; r += blockDim.x) {
+        int pos = pos0 + r, base = pos & ~3;
+        for (int k = base; k <= pos; ++k)
+            atomicOr(bits + (k >> 5), 1u << (k & 31));
+    }
+}
+__global__ void sparse_tail_emit(const unsigned *bits, int *ids, int *rev, int *meta, int lo, int hi, bool dedup,
+                                 int start, int row_offset, int rows, const Hy4StepParams *params) {
+    int pos = step_at(start, params) + row_offset;
+    if (dedup)
+        lo = 2048, hi = pos + rows;
+    else
+        lo = pos & ~3, hi = lo + (pos & 3) + 1;
+    int i = blockIdx.x * blockDim.x + threadIdx.x, token = lo + i;
+    if (token >= hi)
+        return;
+    if ((!dedup || rev[token] < 0) && (bits[token >> 5] & (1u << (token & 31)))) {
+        int p = meta[512] + (dedup ? atomicAdd(meta + 513, 1) : i);
+        if (!dedup && i == 0)
+            meta[513] = hi - lo;
+        ids[p] = token;
+        rev[token] = p;
+    }
+}
+__global__ void draft_extra_ids(int start, int rows, int *ids, int *rev, int *meta,
+                                const Hy4StepParams *params) {
+    int i = threadIdx.x;
+    start = step_at(start, params);
+    if (i < rows) {
+        int p = meta[512] + meta[513] + i, token = start + i;
+        ids[p] = token;
+        rev[token] = p;
+    }
+    __syncthreads();
+    if (!i)
+        atomicAdd(meta + 513, rows);
+}
+__global__ void sparse_offsets(const int *groups, const int *rev, int *offsets, int rows, int stride, int pos0,
+                               int *ids, int *meta, int max_ids, int row_offset, const Hy4StepParams *params) {
+    int r = blockIdx.y, t = blockIdx.x * blockDim.x + threadIdx.x;
+    pos0 = step_at(pos0, params) + row_offset;
+    if (t < max_ids && t >= meta[512] + meta[513])
+        ids[t] = -1;
+    if (t >= stride)
+        return;
+    int token;
+    if (t < 2044) {
+        int g = groups[size_t(r) * 512 + t / 4];
+        token = 4 * g + t % 4;
+    } else {
+        int pos = pos0 + r;
+        token = (pos & ~3) + (t - 2044);
+        if (token > pos)
+            token = -1;
+    }
+    offsets[r * stride + t] = token >= 0 && rev[token] >= 0 ? rev[token] : -1;
+}
+__global__ void draft_offsets(int *offsets, int rows, int stride, int base_len, int *ids, int *meta, int max_ids,
+                              int start, const Hy4StepParams *params) {
+    int r = blockIdx.y, t = blockIdx.x * blockDim.x + threadIdx.x;
+    int pos = step_at(start, params) - 1;
+    base_len = 2044 + (pos & 3) + 1;
+    if (t < max_ids && t >= meta[512] + meta[513])
+        ids[t] = -1;
+    if (t >= stride)
+        return;
+    offsets[r * stride + t] = t < base_len + r + 1 ? t : -1;
+}
 Selection select(Ops &op, const std::string &p, int layer, int start, Mat x, Mat qres) {
     int end = start + x.rows;
+    int bucket = op.max_kv_len > 0 ? op.max_kv_len : std::max(2048, (end + 63) / 64 * 64);
     Selection selected(x.rows);
     bool sliding = layer != 0 && layer % 4 != 1;
+    int begin = sliding ? x.rows : std::min(x.rows, std::max(0, 2048 - start));
     if (!sliding) {
         Mat k = op.norm(op.linear(p + "token_key_projection", x), p + "token_key_norm.weight");
         auto groups = op.gpu.index_keys[op.rank][layer];
         auto pending = groups + (op.gpu.tokens / 4) * 128;
         int first = start / 4, ng = end / 4 - first;
-        if (ng) {
-            pool<<<ng, 128>>>(k, groups, first, start, op.param(p + "key_value_projection.weight"),
-                              op.param(p + "key_gate_projection.weight"), op.param(p + "intra_group_ape"),
-                              op.param(p + "key_norm.weight"), pending);
+        int pool_blocks = op.params ? 2 : ng;
+        if (pool_blocks) {
+            pool<<<pool_blocks, 128, 0, op.stream>>>(k, groups, first, start, op.param(p + "key_value_projection.weight"),
+                                            op.param(p + "key_gate_projection.weight"),
+                                            op.param(p + "intra_group_ape"), op.param(p + "key_norm.weight"),
+                                            pending, op.params, x.rows);
             checked(hipGetLastError());
         }
-        save_pending<<<std::min(k.rows, 12), 128>>>(k, start, pending);
+        save_pending<<<std::min(k.rows, 12), 128, 0, op.stream>>>(k, start, pending, op.params);
         checked(hipGetLastError());
         if (end > 2048) {
             Mat q = op.rope(op.linear(p + "query_projection", qres), 16, start, 1e7f);
             Mat w = op.linear(p + "head_weight_projection", x);
-            int begin = std::max(0, 2048 - start), stride = (end - 1) / 4;
+            int stride = std::max(512, (bucket - 1) / 4);
             int batch = std::min(16, x.rows - begin);
             auto buffer = static_cast<float *>(op.arena.next(size_t(stride) * batch * 4));
-            auto top = static_cast<int *>(op.arena.next(batch * 511 * 4));
-            std::vector<int> ids(batch * 511);
-            for (int first = begin; first < x.rows; first += batch) {
-                int rows = std::min(batch, x.rows - first);
-                index_scores<<<dim3((stride + 3) / 4, rows), 128>>>(q, w, groups, first, start, stride, buffer);
+            if (!op.gpu.sparse_top[op.rank][layer])
+                op.gpu.sparse_top[op.rank][layer] =
+                    static_cast<int *>(op.reserve_persistent(size_t(max_prefill_chunk) * 511 * 4));
+            auto top = op.gpu.sparse_top[op.rank][layer];
+            op.sparse_last_layer[layer] = x.rows - 1;
+            for (int row = begin; row < x.rows; row += batch) {
+                int rows = std::min(batch, x.rows - row);
+                index_scores<<<dim3((stride + 3) / 4, rows), 128, 0, op.stream>>>(q, w, groups, row, start, stride,
+                                                                                  buffer, op.params);
                 checked(hipGetLastError());
-                index_topk<<<rows, 256>>>(buffer, first, start, stride, top);
+                index_topk<<<rows, 256, 0, op.stream>>>(buffer, row, start, stride, top + size_t(row) * 511,
+                                                        op.params);
                 checked(hipGetLastError());
-                op.copy(ids.data(), top, size_t(rows) * 511 * 4, hipMemcpyDeviceToHost);
-                for (int j = 0; j < rows; ++j) {
-                    auto &tokens = selected[first + j];
-                    tokens.reserve(2048);
-                    auto groups_begin = ids.begin() + j * 511;
-                    std::sort(groups_begin, groups_begin + 511);
-                    for (auto it = groups_begin; it != groups_begin + 511; ++it)
-                        for (int k = 0; k < 4; ++k)
-                            tokens.push_back(*it * 4 + k);
-                    int pos = start + first + j;
-                    for (int k = (pos / 4) * 4; k <= pos; ++k)
-                        tokens.push_back(k);
-                }
             }
         }
     }
-    for (int i = 0; i < x.rows; ++i)
-        if (selected[i].empty()) {
-            int pos = start + i, first = sliding ? std::max(0, pos - 511) : 0;
-            selected[i].resize(pos - first + 1);
-            std::iota(selected[i].begin(), selected[i].end(), first);
-        }
+    for (int i = 0; i < begin; ++i) {
+        int pos = start + i, from = sliding ? std::max(0, pos - 511) : 0;
+        selected[i].resize(pos - from + 1);
+        std::iota(selected[i].begin(), selected[i].end(), from);
+    }
     return selected;
 }
 }
 Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidden, Selection &selected,
               bool draft) {
     std::string p = prefix + "self_attn.";
+    int bucket = op.max_kv_len > 0 ? op.max_kv_len
+                                   : std::max(2048, (start + hidden.rows + 63) / 64 * 64);
     bool sliding = layer != 0 && layer % 4 != 1;
     const auto *projection = op.gpu.model.shape_of(p + "q_b_proj", op.rank);
     int heads = projection ? projection->at(1) / 256 : (sliding ? 64 : 32);
@@ -233,79 +429,133 @@ Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidd
                       : static_cast<const void *>(static_cast<const uint16_t *>(sinks.p) + first);
     }
     auto fresh = static_cast<uint8_t *>(op.arena.next(size_t(hidden.rows) * 294));
-    pack<256, 29><<<dim3(2, hidden.rows), 256>>>(lat, fresh, 0);
-    checked(hipGetLastError());
-    pack<64, 11><<<dim3(1, hidden.rows), 64>>>(rot, fresh, 260);
+    pack_kv_combined<<<dim3(3, hidden.rows), 256, 0, op.stream>>>(lat, rot, fresh);
     checked(hipGetLastError());
     if (!draft)
         selected = select(op, p + "compressed_indexer.", layer, start, hidden, qres);
     Mat out = op.mat(hidden.rows, heads * 256);
     int slots = sliding ? std::min(op.gpu.tokens, size_t(518)) : op.gpu.tokens;
     auto cache = op.gpu.cache[op.rank][layer];
+    bool contiguous = sliding || start + hidden.rows <= 2048;
+    int begin = std::min(hidden.rows, std::max(0, 2048 - start));
     for (int i = 0; i < hidden.rows;) {
         size_t save = op.arena.cursor;
-        bool contiguous = sliding || start + hidden.rows <= 2048;
+        bool chunk_contiguous = contiguous;
         int n = hidden.rows - i;
-        if (!contiguous && !draft && start + hidden.rows > 4096)
-            n = std::min(n, 16);
+        if (!contiguous && !draft) {
+            if (i < begin) {
+                chunk_contiguous = true;
+                n = std::min(n, begin - i);
+            } else if (start + hidden.rows > 4096)
+                n = std::min(n, 16);
+        }
         int stride = 0;
         for (int r = i; r < i + n; ++r)
             stride = std::max(stride, int(selected[r].size()));
-        bool tiles = n >= 16 && contiguous && !draft;
-        std::vector<int> ids, offsets(tiles ? 0 : n * stride, -1);
-        if (n == 1) {
+        bool tiles = n >= 16 && chunk_contiguous && !draft;
+        bool dynamic_sizes = !op.params && chunk_contiguous;
+        if (!dynamic_sizes)
+            stride = chunk_contiguous ? (sliding ? 512 : 2048) : 2048;
+        int first = chunk_contiguous ? selected[i][0] : 0;
+        int count = chunk_contiguous ? selected[i + n - 1].back() + 1 - first : 0;
+        int ids_count = dynamic_sizes ? count
+                                      : (chunk_contiguous ? (sliding ? 518 : 2048) : (2044 * n + 4 * n + 8));
+        int *ids_gpu = nullptr, *offsets_gpu = nullptr, *groups = nullptr;
+        int *mask = nullptr, *meta = nullptr, *rev = nullptr;
+        unsigned *bits = nullptr;
+        if (draft && selected[0].size() == 1 && op.gpu.sparse_top[op.rank][layer]) {
+            int last = op.sparse_last_layer[layer], pos = start - 1;
+            int tail_len = (pos & 3) + 1, tail_base = pos & ~3;
+            int base_len = 2044 + tail_len;
+            stride = base_len + n;
+            int width = (pos + 3) / 4 + 2;
+            ids_count = std::min(4 * width, 2044) + 4 + n + 8;
+            int words = (start + n + 31) / 32, rev_count = std::max(pos, start + n) + 8;
+            groups = static_cast<int *>(op.arena.next(size_t(512) * 4));
+            mask = static_cast<int *>(op.arena.next(size_t(width) * 4));
+            bits = static_cast<unsigned *>(op.arena.next(size_t(words) * 4));
+            meta = static_cast<int *>(op.arena.next(size_t(516) * 4));
+            rev = static_cast<int *>(op.arena.next(size_t(rev_count) * 4));
+            ids_gpu = static_cast<int *>(op.arena.next(size_t(ids_count) * 4));
+            offsets_gpu = static_cast<int *>(op.arena.next(size_t(n) * stride * 4));
+            sparse_clear<<<(std::max({width, words, rev_count, 516}) + 255) / 256, 256, 0, op.stream>>>(
+                mask, width, bits, words, meta, rev, rev_count);
+            sort_top<<<1, 512, 0, op.stream>>>(op.gpu.sparse_top[op.rank][layer], groups, mask, last, 1, width);
+            sparse_group_ids<<<1, 256, 0, op.stream>>>(mask, 1, width, meta, ids_gpu, rev, bits,
+                                                                       start, -1, op.params);
+            sparse_tail_emit<<<(tail_len + 255) / 256, 256, 0, op.stream>>>(bits, ids_gpu, rev, meta, tail_base,
+                                                                            tail_base + tail_len, false, start, -1, n,
+                                                                            op.params);
+            draft_extra_ids<<<1, 64, 0, op.stream>>>(start, n, ids_gpu, rev, meta, op.params);
+            draft_offsets<<<dim3((std::max(stride, ids_count) + 255) / 256, n), 256, 0, op.stream>>>(
+                offsets_gpu, n, stride, base_len, ids_gpu, meta, ids_count, start, op.params);
+        } else if (draft) {
+            stride = 0;
+            for (int r = i; r < i + n; ++r)
+                stride = std::max(stride, int(selected[r].size()));
+            std::vector<int> ids, offsets(n * stride, -1);
             ids = selected[i + n - 1];
             for (int r = 0; r < n; ++r)
-                std::iota(offsets.begin() + r * stride, offsets.begin() + r * stride + selected[i + r].size(),
-                          0);
-        } else if (contiguous && !draft) {
-            int first = selected[i][0];
-            ids.resize(selected[i + n - 1].back() + 1 - first);
-            std::iota(ids.begin(), ids.end(), first);
-            if (!tiles)
-                for (int r = 0; r < n; ++r)
-                    std::iota(offsets.begin() + r * stride,
-                              offsets.begin() + r * stride + selected[i + r].size(),
-                              selected[i + r][0] - first);
+                std::iota(offsets.begin() + r * stride, offsets.begin() + r * stride + selected[i + r].size(), 0);
+            ids_gpu = op.indices(ids);
+            offsets_gpu = op.indices(offsets);
+            ids_count = int(ids.size());
+        } else if (chunk_contiguous) {
+            offsets_gpu = static_cast<int *>(op.arena.next(size_t(n) * stride * 4));
+            contiguous_offsets<<<dim3((stride + 255) / 256, n), 256, 0, op.stream>>>(
+                offsets_gpu, n, stride, start, sliding, first, i, op.params);
         } else {
-            std::vector<int> remap(start + i + n, -1);
-            for (int r = i; r < i + n; ++r)
-                for (int slot : selected[r])
-                    remap[slot] = 0;
-            for (int slot = 0; slot < int(remap.size()); ++slot)
-                if (remap[slot] == 0) {
-                    remap[slot] = ids.size();
-                    ids.push_back(slot);
-                }
-            for (int r = 0; r < n; ++r)
-                for (size_t t = 0; t < selected[i + r].size(); ++t)
-                    offsets[r * stride + t] = remap[selected[i + r][t]];
+            int rows = n, pos0 = start + i;
+            stride = 2048;
+            int width = bucket / 4 + 8;
+            ids_count = std::min(4 * width, 2044 * rows) + 4 * rows + 8;
+            int words = (bucket + 31) / 32;
+            int rev_count = bucket + 8;
+            groups = static_cast<int *>(op.arena.next(size_t(rows) * 512 * 4));
+            mask = static_cast<int *>(op.arena.next(size_t(rows) * width * 4));
+            bits = static_cast<unsigned *>(op.arena.next(size_t(words) * 4));
+            meta = static_cast<int *>(op.arena.next(size_t(516) * 4));
+            rev = static_cast<int *>(op.arena.next(size_t(rev_count) * 4));
+            ids_gpu = static_cast<int *>(op.arena.next(size_t(ids_count) * 4));
+            offsets_gpu = static_cast<int *>(op.arena.next(size_t(rows) * stride * 4));
+            int mask_count = rows * width;
+            sparse_clear<<<(std::max({mask_count, words, rev_count, 516}) + 255) / 256, 256, 0, op.stream>>>(
+                mask, mask_count, bits, words, meta, rev, rev_count);
+            sort_top<<<rows, 512, 0, op.stream>>>(op.gpu.sparse_top[op.rank][layer], groups, mask, i, rows, width);
+            sparse_group_ids<<<1, 256, 0, op.stream>>>(mask, rows, width, meta, ids_gpu, rev, bits,
+                                                                       start, i, op.params);
+            sparse_tail_emit<<<(bucket + rows - 2048 + 255) / 256, 256, 0, op.stream>>>(
+                bits, ids_gpu, rev, meta, 2048, pos0 + rows, true, start, i, rows, op.params);
+            sparse_offsets<<<dim3((std::max(stride, ids_count) + 255) / 256, rows), 256, 0, op.stream>>>(
+                groups, rev, offsets_gpu, rows, stride, start, ids_gpu, meta, ids_count, i, op.params);
         }
-        auto positions = op.indices(ids);
-        Mat a = op.mat(ids.size(), 512), b = op.mat(ids.size(), 64);
-        unpack<256, 29><<<dim3(2, ids.size()), 256>>>(cache, fresh, positions, start, slots, a, 0);
         checked(hipGetLastError());
-        unpack<64, 11><<<dim3(1, ids.size()), 64>>>(cache, fresh, positions, start, slots, b, 260);
+        Mat a = op.mat(ids_count, 512), b = op.mat(ids_count, 64);
+        unpack<256, 29><<<dim3(2, ids_count), 256, 0, op.stream>>>(cache, fresh, ids_gpu, first, start, slots, a, 0,
+                                                                    op.params, sliding, i, n);
+        checked(hipGetLastError());
+        unpack<64, 11><<<dim3(1, ids_count), 64, 0, op.stream>>>(cache, fresh, ids_gpu, first, start, slots, b, 260,
+                                                                  op.params, sliding, i, n);
         checked(hipGetLastError());
         if (tiles) {
             Mat expanded = op.linear(p + "kv_b_proj", a);
-            size_t size = size_t(n) * heads * ((ids.size() + 15) / 16 * 16);
+            size_t size = size_t(n) * heads * ((ids_count + 15) / 16 * 16);
             auto scores = static_cast<float *>(op.arena.next(size * 4));
             auto probs = static_cast<uint16_t *>(op.arena.next(size * 2));
             checked(shelf_hy4_mla_prefill(q.row(i, n).p, expanded.p, b.p, gate.row(i, n).p, sinks.p,
-                                          sinks.type == io::SType::F32, out.row(i, n).p, scores, probs, n,
-                                          heads, ids.size(), ids.front(), start + i, sliding));
-        } else {
-            auto offsets_gpu = op.indices(offsets);
+                                          sinks.type == io::SType::F32, out.row(i, n).p, scores, probs, n, heads,
+                                          ids_count, first, start, sliding, op.stream,
+                                           op.params ? &op.params->position : nullptr, i, op.params,
+                                           chunk_contiguous, n));
+        } else
             attend_absorbed(op, p + "kv_b_proj", a, b, q.row(i, n), gate.row(i, n), offsets_gpu, stride,
-                            sinks, out.row(i, n));
-        }
+                            sinks, out.row(i, n), chunk_contiguous, sliding, i, n);
         op.arena.cursor = save;
         i += n;
     }
     if (!draft) {
-        save_records<<<(std::min(hidden.rows, slots) * 294 + 255) / 256, 256>>>(cache, fresh, hidden.rows,
-                                                                                start, slots);
+        save_records<<<(std::min(hidden.rows, slots) * 294 + 255) / 256, 256, 0, op.stream>>>(
+            cache, fresh, hidden.rows, start, slots, op.params);
         checked(hipGetLastError());
     }
     return op.norm(op.linear(p + "o_proj", out), p + "post_proj_norm.weight");

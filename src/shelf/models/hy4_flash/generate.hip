@@ -174,7 +174,7 @@ struct Target {
         checked(shelf_hy4_head(hidden.p, static_cast<const uint16_t *>(op.param("lm_head.suh").p),
                                static_cast<const uint16_t *>(op.param("lm_head.svh").p),
                                static_cast<const uint32_t *>(op.param("lm_head.trellis").p), codes, scales,
-                               partial, logits, hidden.rows));
+                               partial, logits, hidden.rows, op.stream));
         if (!dump.empty()) {
             std::vector<float> host(120832);
             op.copy(host.data(), logits + size_t(hidden.rows - 1) * 120832, host.size() * 4,
@@ -184,15 +184,15 @@ struct Target {
                 throw std::runtime_error("logits を保存できません");
         }
         if (temperature > 0 && top_k > 0) {
-            truncate_logits<<<hidden.rows, 256>>>(logits, top_k, top_p, temperature);
+            truncate_logits<<<hidden.rows, 256, 0, op.stream>>>(logits, top_k, top_p, temperature);
             checked(hipGetLastError());
         }
         if (distribution) {
-            probabilities<<<hidden.rows, 256>>>(logits, distribution, temperature);
+            probabilities<<<hidden.rows, 256, 0, op.stream>>>(logits, distribution, temperature);
             checked(hipGetLastError());
         }
         int *device_ids = static_cast<int *>(op.arena.next(hidden.rows * 4));
-        best_ids<<<hidden.rows, 256>>>(logits, device_ids, position, seed ^ (draft ? 0x735a7ec51b09ull : 0ull),
+        best_ids<<<hidden.rows, 256, 0, op.stream>>>(logits, device_ids, position, seed ^ (draft ? 0x735a7ec51b09ull : 0ull),
                                        temperature);
         checked(hipGetLastError());
         std::vector<int> result(hidden.rows);
@@ -207,7 +207,7 @@ struct Target {
     }
     std::vector<int> forward(const std::vector<int> &ids, bool verify, bool need_head = true,
                              const Path &dump = {}) {
-        checked(hipStreamSynchronize(nullptr));
+        checked(hipStreamSynchronize(op.stream));
         op.arena.cursor = base;
         int start = history.size();
         if (ids.empty() || start + ids.size() > op.gpu.tokens || (verify && ids.size() > 6))
@@ -236,11 +236,11 @@ struct Target {
             return {};
         if (!verify)
             x = x.row(x.rows - 1);
-        float *unused;
-        Mat h = op.norm(op.collapse(x, "model.hc_head.hc_head_", unused), "model.norm.weight");
-        checked(hipMemcpyAsync(state.p, h.p, h.bytes(), hipMemcpyDeviceToDevice));
+        float *head_post;
+        Mat h = op.collapse_norm(x, "model.hc_head.hc_head_", head_post, "model.norm.weight");
+        checked(hipMemcpyAsync(state.p, h.p, h.bytes(), hipMemcpyDeviceToDevice, op.stream));
         auto result = predict(h, history.size() - h.rows + 1, false, dump, verify ? target_probs : nullptr);
-        checked(hipStreamSynchronize(nullptr));
+        checked(hipStreamSynchronize(op.stream));
         return result;
     }
     std::vector<int> propose(int anchor) {
@@ -252,7 +252,7 @@ struct Target {
         auto e = op.norm(x.row(0), p + "mtp_fusion.enorm.weight");
         auto h = op.norm(state.row(0), p + "mtp_fusion.hnorm.weight");
         auto fused = op.linear(p + "mtp_fusion.eh_proj", op.join(e, h));
-        fuse_anchor<<<12, 256>>>(x.row(0), fused,
+        fuse_anchor<<<12, 256, 0, op.stream>>>(x.row(0), fused,
                                  static_cast<const uint16_t *>(op.param(p + "mtp_fusion.gate").p));
         checked(hipGetLastError());
         int start = history.size();
@@ -281,13 +281,15 @@ struct Target {
                                draft_probs ? draft_probs + (i - 1) * 120832 : nullptr)[0];
             draft.push_back(previous);
         }
-        checked(hipStreamSynchronize(nullptr));
+        checked(hipStreamSynchronize(op.stream));
         return draft;
     }
     void accept(int keep, int submitted) {
         history.resize(history.size() - submitted + keep);
         if (keep > 1)
-            checked(hipMemcpyAsync(state.p, state.row(keep - 1).p, 3072 * 2, hipMemcpyDeviceToDevice));
+            checked(hipMemcpyAsync(state.p, state.row(keep - 1).p, 3072 * 2, hipMemcpyDeviceToDevice, op.stream));
+        for (auto layer : sources)
+            op.sparse_last_layer[layer] = keep - 1;
         for (auto &s : tapped)
             s = Selection{std::move(s[keep - 1])};
     }
@@ -303,7 +305,7 @@ int verify_speculation(Ops &op, const float *target_probs, const float *draft_pr
     }
     auto ids = op.indices(draft);
     auto out = static_cast<int *>(op.arena.next(5 * sizeof(int)));
-    test_drafts<<<1, 5>>>(target_probs, draft_probs, ids, position, seed, out);
+    test_drafts<<<1, 5, 0, op.stream>>>(target_probs, draft_probs, ids, position, seed, out);
     checked(hipGetLastError());
     int accepted[5];
     op.copy(accepted, out, sizeof(accepted), hipMemcpyDeviceToHost);
@@ -312,7 +314,7 @@ int verify_speculation(Ops &op, const float *target_probs, const float *draft_pr
             actual[i] = draft[i];
             continue;
         }
-        best_ids<<<1, 256>>>(target_probs + i * 120832, out, position + i, seed ^ 0xc1f8efb6703ull, 1.f,
+        best_ids<<<1, 256, 0, op.stream>>>(target_probs + i * 120832, out, position + i, seed ^ 0xc1f8efb6703ull, 1.f,
                              draft_probs + i * 120832);
         checked(hipGetLastError());
         int replacement;
@@ -330,7 +332,7 @@ void decoder_layer(Ops &op, int layer, int start, Mat x, const std::vector<int> 
     auto now = std::chrono::steady_clock::now;
     std::chrono::steady_clock::time_point start_time;
     if (op.gpu.tp_size == 1 && op.rank == 0 && op.gpu.expert_begin[0]) {
-        checked(hipStreamSynchronize(nullptr));
+        checked(hipStreamSynchronize(op.stream));
         start_time = now();
     }
     size_t save = op.arena.cursor;
@@ -344,19 +346,17 @@ void decoder_layer(Ops &op, int layer, int start, Mat x, const std::vector<int> 
         engram(op, layer, x, prior, ids);
     }
     float *post;
-    Mat a = op.collapse(x, p + "hc_attn_layer.hc_pre.hc_", post);
-    a = op.norm(a, p + "input_layernorm.weight");
+    Mat a = op.collapse_norm(x, p + "hc_attn_layer.hc_pre.hc_", post, p + "input_layernorm.weight");
     a = attention(op, p, layer, start, a, selection, false);
     op.expand(x, a, post);
     op.arena.cursor = save;
     if (op.gpu.tp_size == 1 && op.rank == 0 && op.gpu.expert_begin[0]) {
-        checked(hipStreamSynchronize(nullptr));
+        checked(hipStreamSynchronize(op.stream));
         auto end = now();
         op.gpu.attention_ms += std::chrono::duration<double, std::milli>(end - start_time).count();
         start_time = end;
     }
-    Mat f = op.collapse(x, p + "hc_mlp_layer.hc_pre.hc_", post);
-    f = op.norm(f, p + "post_attention_layernorm.weight");
+    Mat f = op.collapse_norm(x, p + "hc_mlp_layer.hc_pre.hc_", post, p + "post_attention_layernorm.weight");
     if (layer == 0)
         f = op.norm(feedforward(op, p + "mlp", f), p + "mlp.post_fc2_norm.weight");
     else
@@ -364,7 +364,7 @@ void decoder_layer(Ops &op, int layer, int start, Mat x, const std::vector<int> 
     op.expand(x, f, post);
     op.arena.cursor = save;
     if (op.gpu.tp_size == 1 && op.rank == 0 && op.gpu.expert_begin[0]) {
-        checked(hipStreamSynchronize(nullptr));
+        checked(hipStreamSynchronize(op.stream));
         op.gpu.ffn_ms += std::chrono::duration<double, std::milli>(now() - start_time).count();
     }
 }

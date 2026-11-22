@@ -14,6 +14,13 @@ inline bool multi_gpu_vmm_allowed(int ranks, std::string_view vmm) {
     return ranks <= 1 || vmm != "1";
 }
 
+struct Hy4StepParams {
+    int32_t rows;
+    int32_t position;
+    uint64_t seed;
+    std::array<uint64_t, 4> engram;
+};
+
 struct Region {
     uint8_t *base = nullptr;
     size_t size = 0;
@@ -31,6 +38,8 @@ struct Residency {
     std::vector<gpu::GpuArena> arenas;
     std::array<uint8_t *, 4> weight_base{};
     std::array<Region, 4> workspace{};
+    std::array<hipStream_t, 4> compute{};
+    std::array<std::array<int *, 42>, 4> sparse_top{};
     std::array<uint64_t, 4> routed_rows{};
     std::array<std::array<uint64_t, 4>, 4> transfer_bytes{};
     std::array<std::map<std::string, void *>, 4> folded;
@@ -75,6 +84,6 @@ struct Residency {
     void shutdown();
     const void *device(const Weight &w) const;
 };
-void peer_copy(void *dst, const void *src, size_t bytes);
-void tp_add_bf16(void *dst, const void *src, size_t bytes);
+void peer_copy(void *dst, const void *src, size_t bytes, hipStream_t stream = nullptr);
+void tp_add_bf16(void *dst, const void *src, size_t bytes, hipStream_t stream = nullptr);
 }

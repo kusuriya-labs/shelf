@@ -3,8 +3,38 @@
 
 namespace {
 using namespace shelf::kernel::exl3_detail::mul24;
+using shelf::hy4::Hy4StepParams;
 using B8 = short __attribute__((ext_vector_type(8)));
 using F8 = float __attribute__((ext_vector_type(8)));
+__device__ int effective_slots(int slots, bool contiguous, bool sliding, const Hy4StepParams *params, int row_offset,
+                               int chunk_rows) {
+    if (!params)
+        return slots;
+    int position = params->position + row_offset;
+    if (contiguous)
+        return min(slots, sliding ? min(max(position, 0), 511) + chunk_rows : position + chunk_rows);
+    int mod = 0;
+    for (int k = 0; k < chunk_rows; ++k)
+        mod = max(mod, (position + k) & 3);
+    return min(slots, 2045 + mod);
+}
+__device__ int effective_stride(int stride, bool contiguous, bool sliding, const Hy4StepParams *params, int row_offset,
+                                int chunk_rows) {
+    if (!params)
+        return stride;
+    int position = params->position + row_offset;
+    if (contiguous)
+        return min(stride, sliding ? min(512, position + chunk_rows) : position + chunk_rows);
+    int mod = 0;
+    for (int k = 0; k < chunk_rows; ++k)
+        mod = max(mod, (position + k) & 3);
+    return min(stride, 2045 + mod);
+}
+__device__ int effective_first(int first_key, bool sliding, const Hy4StepParams *params, int row_offset) {
+    if (!params)
+        return first_key;
+    return sliding ? max(0, params->position + row_offset - 511) : 0;
+}
 __device__ __forceinline__ B8 fragment(const uint16_t *source) {
     union {
         uint64_t u[2];
@@ -15,7 +45,12 @@ __device__ __forceinline__ B8 fragment(const uint16_t *source) {
     return value.b;
 }
 __global__ void score_tiles(const uint16_t *q, const uint16_t *kv, const uint16_t *rot, float *scores, int rows,
-                            int heads, int slots, int pitch, int first, int start, bool sliding) {
+                             int heads, int slots, int pitch, int first, int start, bool sliding,
+                             const int *d_start, int row_offset, const Hy4StepParams *params,
+                             bool contiguous, int chunk_rows) {
+    start = (d_start ? *d_start : start) + row_offset;
+    int eff_slots = effective_slots(slots, contiguous, sliding, params, row_offset, chunk_rows);
+    first = effective_first(first, sliding, params, row_offset);
     int lane = threadIdx.x % 32, lo = lane % 16, hi = lane / 16, h = blockIdx.z;
     int kb = blockIdx.x * 64 + (threadIdx.x / 32) * 16, rb = blockIdx.y * 16;
     int slot = kb + lo, row = rb + lo;
@@ -44,7 +79,7 @@ __global__ void score_tiles(const uint16_t *q, const uint16_t *kv, const uint16_
     for (int j = 0; j < 8; ++j) {
         int k = kb + hi * 8 + j;
         scores[(size_t(row) * heads + h) * pitch + k] =
-            (k < slots && first + k <= pos && (!sliding || first + k > pos - 512))
+            (k < eff_slots && first + k <= pos && (!sliding || first + k > pos - 512))
                 ? round_bf16(acc[j]) * 0.0625f
                 : -INFINITY;
     }
@@ -70,34 +105,44 @@ template <bool Max> __device__ float reduce(float x, float *parts) {
     __syncthreads();
     return result;
 }
-__global__ void normalize(float *scores, uint16_t *probs, const void *sinks, bool fp32, int pitch) {
+__global__ void normalize(float *scores, uint16_t *probs, const void *sinks, bool fp32, int pitch, int slots,
+                             bool sliding, const Hy4StepParams *params, int row_offset, bool contiguous,
+                             int chunk_rows, bool absorb) {
     __shared__ float parts[8];
     int h = blockIdx.x, r = blockIdx.y, t = threadIdx.x;
+    int limit = (absorb ? effective_stride(slots, contiguous, sliding, params, row_offset, chunk_rows)
+                        : effective_slots(slots, contiguous, sliding, params, row_offset, chunk_rows));
+    limit = (limit + 15) / 16 * 16;
     size_t base = (size_t(r) * gridDim.x + h) * pitch;
     float sink =
         fp32 ? static_cast<const float *>(sinks)[h] : bf16_bits_to_f32(static_cast<const uint16_t *>(sinks)[h]);
     float peak = sink;
-    for (int i = t; i < pitch; i += 256)
+    for (int i = t; i < limit; i += 256)
         peak = fmaxf(peak, scores[base + i]);
     peak = reduce<true>(peak, parts);
     float sum = t ? 0.f : expf(sink - peak);
-    for (int i = t; i < pitch; i += 256) {
+    for (int i = t; i < limit; i += 256) {
         float e = expf(scores[base + i] - peak);
         scores[base + i] = e;
         sum += e;
     }
     sum = reduce<false>(sum, parts);
-    for (int i = t; i < pitch; i += 256)
+    for (int i = t; i < limit; i += 256)
         probs[base + i] = f32_to_bf16_rne_device(scores[base + i] / sum);
 }
 __global__ void value_tiles(const uint16_t *probs, const uint16_t *kv, const uint16_t *gate, uint16_t *out,
-                            int rows, int heads, int slots, int pitch, int first, int start, bool sliding) {
+                             int rows, int heads, int slots, int pitch, int first, int start,
+                             bool sliding, const int *d_start, int row_offset, const Hy4StepParams *params,
+                             bool contiguous, int chunk_rows) {
+    start = (d_start ? *d_start : start) + row_offset;
+    int eff_slots = effective_slots(slots, contiguous, sliding, params, row_offset, chunk_rows);
+    first = effective_first(first, sliding, params, row_offset);
     int lane = threadIdx.x % 32, lo = lane % 16, hi = lane / 16, h = blockIdx.z;
     int cb = blockIdx.x * 64 + (threadIdx.x / 32) * 16, row = blockIdx.y * 16 + lo;
     F8 acc{};
     int rb = blockIdx.y * 16;
     int from = sliding ? max(0, start + rb - 511 - first) / 16 * 16 : 0;
-    int end = min(pitch, (start + rb + 16 - first + 15) / 16 * 16);
+    int end = min((eff_slots + 15) / 16 * 16, (start + rb + 16 - first + 15) / 16 * 16);
     for (int base = from; base < end; base += 16) {
         B8 a{}, b{};
 #pragma unroll
@@ -120,21 +165,25 @@ __global__ void value_tiles(const uint16_t *probs, const uint16_t *kv, const uin
 }
 }
 hipError_t shelf_hy4_mla_prefill(const uint16_t *q, const uint16_t *kv, const uint16_t *rotary,
-                                 const uint16_t *gate, const void *sink, bool sink_fp32, uint16_t *out,
-                                 float *scores, uint16_t *probs, int rows, int heads, int slots, int first_key,
-                                 int first_query, bool sliding) {
+                                  const uint16_t *gate, const void *sink, bool sink_fp32, uint16_t *out,
+                                  float *scores, uint16_t *probs, int rows, int heads, int slots, int first_key,
+                                  int first_query, bool sliding, hipStream_t stream, const int *d_start, int row_offset,
+                                  const Hy4StepParams *params, bool contiguous, int chunk_rows) {
     int pitch = (slots + 15) / 16 * 16, rb = (rows + 15) / 16;
-    score_tiles<<<dim3((pitch + 63) / 64, rb, heads), 128>>>(q, kv, rotary, scores, rows, heads, slots, pitch,
-                                                             first_key, first_query, sliding);
+    score_tiles<<<dim3((pitch + 63) / 64, rb, heads), 128, 0, stream>>>(q, kv, rotary, scores, rows, heads, slots,
+                                                                         pitch, first_key, first_query, sliding, d_start,
+                                                                         row_offset, params, contiguous, chunk_rows);
     auto status = hipGetLastError();
     if (status != hipSuccess)
         return status;
-    normalize<<<dim3(heads, rows), 256>>>(scores, probs, sink, sink_fp32, pitch);
+    normalize<<<dim3(heads, rows), 256, 0, stream>>>(scores, probs, sink, sink_fp32, pitch, slots, sliding, params,
+                                                       row_offset, contiguous, chunk_rows, false);
     status = hipGetLastError();
     if (status != hipSuccess)
         return status;
-    value_tiles<<<dim3(4, rb, heads), 128>>>(probs, kv, gate, out, rows, heads, slots, pitch, first_key,
-                                             first_query, sliding);
+    value_tiles<<<dim3(4, rb, heads), 128, 0, stream>>>(probs, kv, gate, out, rows, heads, slots, pitch,
+                                                           first_key, first_query, sliding, d_start, row_offset,
+                                                           params, contiguous, chunk_rows);
     return hipGetLastError();
 }
 
@@ -174,13 +223,15 @@ __global__ void project_query(const uint16_t *q, const _Float16 *w, _Float16 *qu
             query[(size_t(r) * heads + h) * 512 + col + hi * 8 + j] = static_cast<_Float16>(acc[j]);
 }
 __global__ void recall_scores(const _Float16 *input, const _Float16 *query, const uint16_t *rotary,
-                              const uint16_t *q, const int *ids, int heads, int stride, int pitch,
-                              float *scores) {
+                               const uint16_t *q, const int *ids, int heads, int stride, int pitch,
+                               float *scores, const Hy4StepParams *params, bool contiguous, bool sliding,
+                               int row_offset, int chunk_rows) {
+    int eff_stride = effective_stride(stride, contiguous, sliding, params, row_offset, chunk_rows);
     int lane = threadIdx.x % 32, lo = lane % 16, hi = lane / 16;
     int kb = blockIdx.x * 64 + (threadIdx.x / 32) * 16, h = blockIdx.y * 16 + lo, r = blockIdx.z;
     if (kb >= pitch)
         return;
-    int token = kb + lo < stride ? ids[r * stride + kb + lo] : -1;
+    int token = kb + lo < eff_stride ? ids[r * stride + kb + lo] : -1;
     F8 acc{};
     for (int k = 0; k < 512; k += 16) {
         H8 a{};
@@ -199,19 +250,22 @@ __global__ void recall_scores(const _Float16 *input, const _Float16 *query, cons
     for (int j = 0; j < 8; ++j) {
         int col = kb + hi * 8 + j;
         scores[(size_t(r) * heads + h) * pitch + col] =
-            col < stride && ids[r * stride + col] >= 0 ? round_bf16(acc[j]) * 0.0625f : -INFINITY;
+            col < eff_stride && ids[r * stride + col] >= 0 ? round_bf16(acc[j]) * 0.0625f : -INFINITY;
     }
 }
 __global__ void recall_values(const _Float16 *input, const uint16_t *probs, const int *ids, int heads,
-                              int stride, int pitch, _Float16 *values) {
+                               int stride, int pitch, _Float16 *values, const Hy4StepParams *params,
+                               bool contiguous, bool sliding, int row_offset, int chunk_rows) {
+    int eff_stride = effective_stride(stride, contiguous, sliding, params, row_offset, chunk_rows);
+    int limit = (eff_stride + 15) / 16 * 16;
     int lane = threadIdx.x % 32, lo = lane % 16, hi = lane / 16;
     int cb = blockIdx.x * 64 + (threadIdx.x / 32) * 16, h = blockIdx.y * 16 + lo, r = blockIdx.z;
     F8 acc{};
-    for (int k = 0; k < pitch; k += 16) {
+    for (int k = 0; k < limit; k += 16) {
         H8 a{};
         for (int j = 0; j < 8; ++j) {
             int pos = k + hi * 4 + j % 4 + 8 * (j / 4);
-            int token = pos < stride ? ids[r * stride + pos] : -1;
+            int token = pos < eff_stride ? ids[r * stride + pos] : -1;
             if (token >= 0)
                 a[j] = input[size_t(token) * 512 + cb + lo];
         }
@@ -242,29 +296,34 @@ __global__ void project_value(const _Float16 *values, const _Float16 *w, const u
 }
 }
 hipError_t shelf_hy4_mla_absorbed(const uint16_t *q, const void *folded, const uint16_t *rotary,
-                                  const uint16_t *gate, const void *sinks, bool sink_fp32, const int *indices,
-                                  int stride, const void *input_buffer, void *query_buffer, void *value_buffer,
-                                  float *scores, uint16_t *probs, uint16_t *out, int rows, int heads) {
+                                   const uint16_t *gate, const void *sinks, bool sink_fp32, const int *indices,
+                                   int stride, const void *input_buffer, void *query_buffer, void *value_buffer,
+                                   float *scores, uint16_t *probs, uint16_t *out, int rows, int heads,
+                                   hipStream_t stream, const Hy4StepParams *params, bool contiguous, bool sliding,
+                                   int row_offset, int chunk_rows) {
     auto w = static_cast<const _Float16 *>(folded), input = static_cast<const _Float16 *>(input_buffer);
     auto query = static_cast<_Float16 *>(query_buffer), values = static_cast<_Float16 *>(value_buffer);
     int pitch = (stride + 15) / 16 * 16, rb = (rows + 15) / 16;
-    project_query<<<dim3(8, rb, heads), 128>>>(q, w, query, rows, heads);
+    project_query<<<dim3(8, rb, heads), 128, 0, stream>>>(q, w, query, rows, heads);
     auto rc = hipGetLastError();
     if (rc != hipSuccess)
         return rc;
-    recall_scores<<<dim3((pitch + 63) / 64, heads / 16, rows), 128>>>(input, query, rotary, q, indices, heads,
-                                                                      stride, pitch, scores);
+    recall_scores<<<dim3((pitch + 63) / 64, heads / 16, rows), 128, 0, stream>>>(input, query, rotary, q, indices,
+                                                                       heads, stride, pitch, scores, params, contiguous,
+                                                                       sliding, row_offset, chunk_rows);
     rc = hipGetLastError();
     if (rc != hipSuccess)
         return rc;
-    normalize<<<dim3(heads, rows), 256>>>(scores, probs, sinks, sink_fp32, pitch);
+    normalize<<<dim3(heads, rows), 256, 0, stream>>>(scores, probs, sinks, sink_fp32, pitch, stride, sliding, params,
+                                                       row_offset, contiguous, chunk_rows, true);
     rc = hipGetLastError();
     if (rc != hipSuccess)
         return rc;
-    recall_values<<<dim3(8, heads / 16, rows), 128>>>(input, probs, indices, heads, stride, pitch, values);
+    recall_values<<<dim3(8, heads / 16, rows), 128, 0, stream>>>(input, probs, indices, heads, stride, pitch, values,
+                                                                    params, contiguous, sliding, row_offset, chunk_rows);
     rc = hipGetLastError();
     if (rc != hipSuccess)
         return rc;
-    project_value<<<dim3(4, rb, heads), 128>>>(values, w, gate, heads, rows, out);
+    project_value<<<dim3(4, rb, heads), 128, 0, stream>>>(values, w, gate, heads, rows, out);
     return hipGetLastError();
 }

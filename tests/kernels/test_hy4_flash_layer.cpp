@@ -119,6 +119,7 @@ int run(const Path &dir, int repeats) {
         gpu.workspace[0] = {static_cast<uint8_t *>(memory.next(work)), work};
         if (!gpu.folded[0].empty())
             fold_kv_weights(gpu, 0);
+        checked(hipStreamCreateWithFlags(&gpu.compute[0], hipStreamNonBlocking));
         Ops op(gpu);
         if (!layer)
             check_rejection(op);
@@ -151,6 +152,17 @@ int run(const Path &dir, int repeats) {
                     decoder_layer(op, layer, start + i, x, history, batch, selected);
                     for (int j = 0; j < count; ++j) {
                         auto positions = selected.at(j);
+                        if (positions.empty() && gpu.sparse_top[0][layer]) {
+                            std::array<int, 511> groups;
+                            op.copy(groups.data(), gpu.sparse_top[0][layer] + j * groups.size(),
+                                    sizeof(groups), hipMemcpyDeviceToHost);
+                            int end = start + i + j;
+                            for (int group : groups)
+                                for (int t = 0; t < 4; ++t)
+                                    positions.push_back(group * 4 + t);
+                            for (int t = end & ~3; t <= end; ++t)
+                                positions.push_back(t);
+                        }
                         std::sort(positions.begin(), positions.end());
                         if (positions.empty() || positions.back() != start + i + j || positions.size() > 2048 ||
                             std::adjacent_find(positions.begin(), positions.end()) != positions.end())
