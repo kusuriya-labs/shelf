@@ -704,6 +704,7 @@ Mat attention_batch(Ops &op, const std::string &prefix, int layer, const std::ve
         };
         if (sparse(first)) {
             op.slot = slots[first];
+            if (op.capture) op.params = &op.gpu.batch_input->step.lanes[first / block_rows];
             Selection selected;
             Mat row = attention_inner(op, p, layer, positions[first], hidden.row(first, block_rows),
                                       qres.row(first, block_rows), q.row(first, block_rows), lat.row(first, block_rows),
@@ -714,6 +715,7 @@ Mat attention_batch(Ops &op, const std::string &prefix, int layer, const std::ve
                 checked(hipMemcpyAsync(op.gpu.sparse_top_slot(layer, op.slot), op.gpu.sparse_top[op.rank][layer],
                                        size_t(block_rows) * 511 * sizeof(int), hipMemcpyDeviceToDevice, op.stream));
             }
+            op.params = nullptr;
             op.arena.cursor = mark;
             first += block_rows;
             continue;
@@ -722,6 +724,7 @@ Mat attention_batch(Ops &op, const std::string &prefix, int layer, const std::ve
         while (last < hidden.rows && !sparse(last)) last += block_rows;
         int rows = last - first;
         int stride = *std::max_element(positions.begin() + first, positions.begin() + last) + 1;
+        if (op.capture) stride = std::min(op.max_kv_len, 2048 + block_rows);
         if (sliding) stride = std::min(stride, 511 + block_rows);
         int blocks = rows / block_rows;
         Mat a = op.mat(blocks * stride, 512), b = op.mat(blocks * stride, 64);

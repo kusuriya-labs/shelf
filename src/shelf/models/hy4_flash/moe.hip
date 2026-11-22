@@ -185,7 +185,7 @@ Mat decode_moe(Ops &op, int layer, const std::string &prefix, Mat x, Mat latent,
     std::array<Plan *, 4> received{};
     std::array<Mat, 4> outputs{}, returns{};
     auto capture = op.capture;
-    auto segment = capture ? &capture->plan.layers[layer - 1] : nullptr;
+    auto segment = capture && (groups > 1 || !op.batch_decode) ? &capture->plan.layers[layer - 1] : nullptr;
     for (int r = 1; r < groups; ++r) {
         auto &arena = gpu.workspace[r];
         arena.cursor = 0;
@@ -196,7 +196,7 @@ Mat decode_moe(Ops &op, int layer, const std::string &prefix, Mat x, Mat latent,
         } else
             gpu.transfer(received[r], r, packets + r * stride, rank, stride);
     }
-    if (capture)
+    if (segment)
         capture->finish(segment->scatter);
     for (int r = 1; r < groups; ++r) {
         if (capture)
@@ -213,7 +213,7 @@ Mat decode_moe(Ops &op, int layer, const std::string &prefix, Mat x, Mat latent,
     checked(hipSetDevice(gpu.physical[rank]));
     auto local_stream = gpu.local_expert[rank];
     if (capture) {
-        capture->begin(rank);
+        if (segment) capture->begin(rank);
         local_stream = op.stream;
     } else {
         checked(hipEventRecord(gpu.local_ready[rank], op.stream));
@@ -222,11 +222,15 @@ Mat decode_moe(Ops &op, int layer, const std::string &prefix, Mat x, Mat latent,
     Mat result = decode_experts(op, layer, latent, reinterpret_cast<Plan *>(packets), local_stream);
     if (!capture)
         checked(hipEventRecord(gpu.local_done[rank], local_stream));
+    if (segment && op.batch_decode) {
+        capture->finish(segment->local);
+        capture->begin(rank);
+    }
     Mat shared = feedforward(op, prefix + "shared_experts", x);
-    if (capture) {
+    if (segment) {
         capture->finish(segment->expert[rank]);
         capture->begin(rank);
-    } else
+    } else if (!capture)
         checked(hipStreamWaitEvent(op.stream, gpu.local_done[rank], 0));
     for (int r = 1; r < groups; ++r) {
         Mat local = returns[r];
@@ -271,6 +275,29 @@ Mat grouped(Ops &op, Mat x, const Hy4Route *routes, int layer, int kind, const H
 }
 }
 Mat feedforward(Ops &op, const std::string &p, Mat x, bool clip) {
+    if (!clip && op.gpu.tp_size == 1 && !op.gpu.model.mixed && x.rows <= 16 && x.cols == 3072 &&
+        p.ends_with(".shared_experts")) {
+        auto projection = [&](const std::string &name) {
+            const auto *w = op.gpu.model.find(name + ".trellis", op.rank);
+            const auto *shape = op.gpu.model.shape_of(name, op.rank);
+            if (!w || !shape || *shape != std::array<int, 2>{3072, 1536} ||
+                w->spec.shape.size() != 3 || w->spec.shape[0] != 192 ||
+                w->spec.shape[1] != 96 || w->spec.shape[2] != 64)
+                return Hy4ExpertProjection{};
+            return Hy4ExpertProjection{static_cast<const uint16_t *>(op.param(name + ".suh").p),
+                                       static_cast<const uint16_t *>(op.param(name + ".svh").p),
+                                       static_cast<const uint32_t *>(op.gpu.device(*w)), 4, 3072, 1536};
+        };
+        auto gate = projection(p + ".gate_proj"), up = projection(p + ".up_proj");
+        if (gate.trellis && up.trellis) {
+            Mat activation = op.mat(x.rows, 1536);
+            size_t mark = op.arena.cursor;
+            auto partial = static_cast<float *>(op.arena.next(size_t(2 * 8 * x.rows * 1536) * sizeof(float)));
+            checked(shelf_hy4_shared_gate_up(x.p, gate, up, partial, activation.p, x.rows, op.stream));
+            op.arena.cursor = mark;
+            return op.linear(p + ".down_proj", activation);
+        }
+    }
     Mat gate = op.linear(p + ".gate_proj", x);
     Mat up = op.linear(p + ".up_proj", x);
     return op.linear(p + ".down_proj", op.swiglu(gate, up, clip));

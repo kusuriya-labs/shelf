@@ -35,6 +35,9 @@ extern "C" hipError_t shelf_hy4_expert_linear(const uint16_t *x, const Hy4Expert
                                               const Hy4ExpertBatch *batches, int num_batches, int mixed, int k,
                                               int n, hipStream_t stream = nullptr);
 
+hipError_t shelf_hy4_shared_gate_up(const uint16_t *input, Hy4ExpertProjection gate, Hy4ExpertProjection up,
+                                    float *partial, uint16_t *output, int rows, hipStream_t stream);
+
 hipError_t shelf_hy4_head(const uint16_t *x, const uint16_t *suh, const uint16_t *svh, const uint32_t *trellis,
                           int8_t *codes, float *scales, float *partial, float *logits, int rows, hipStream_t stream = nullptr);
 

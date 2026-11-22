@@ -9,7 +9,8 @@
 
 namespace shelf::kernel::exl3_detail::mul24 {
 
-template <int BITS, int MT, bool PIPE = true, int WAVES = 4, bool FUSED = false, bool K_MAJOR = false>
+template <int BITS, int MT, bool PIPE = true, int WAVES = 4, bool FUSED = false, bool K_MAJOR = false,
+          bool SHUFFLE_PREVIOUS = false>
 __device__ __forceinline__ void
 group_body(const int8_t *__restrict__ codes, const float *__restrict__ scales,
            const uint32_t code_row_stride, const uint32_t scale_row_stride_floats,
@@ -104,8 +105,14 @@ group_body(const int8_t *__restrict__ codes, const float *__restrict__ scales,
 #pragma unroll
         for (uint32_t s = 0u; s < 8u; ++s) {
             int32x2_t b;
-            const uint32_t w0 = PIPE ? cur[s][0] : wp0[s * kt_stride];
             const uint32_t w1 = PIPE ? cur[s][1] : wp1[s * kt_stride];
+            uint32_t w0;
+            if constexpr (SHUFFLE_PREVIOUS) {
+                static_assert(BITS == 4 && K_MAJOR && !PIPE);
+                w0 = __shfl(w1, (lane + 31) % 32, 32);
+            } else {
+                w0 = PIPE ? cur[s][0] : wp0[s * kt_stride];
+            }
             const uint32_t w2 = PIPE ? cur[s][2] : (kNeedW2 ? wp2[s * kt_stride] : 0u);
             uint32_t packed[2] = {0u, 0u};
 #pragma unroll
