@@ -352,7 +352,7 @@ void Residency::transfer(void *dst, int destination, const void *src, int source
             if (host)
                 check(hipMemcpyAsync(dst, host, bytes, hipMemcpyHostToDevice, compute[destination]));
             else
-                check(hipMemcpyPeerAsync(dst, physical[destination], src, physical[source], bytes, compute[destination]));
+                peer_copy(dst, src, bytes, compute[destination]);
             check(hipEventRecord(ack_event, compute[destination]));
             check(hipSetDevice(physical[source]));
             check(hipStreamWaitEvent(compute[source], ack_event, 0));
@@ -426,7 +426,7 @@ void Residency::reduce_pair(void *data, int rank, size_t bytes, bool ep) {
             } else if (mode == ReduceTransport::peer) {
                 check(hipSetDevice(physical[destination]));
                 check(hipStreamWaitEvent(compute[destination], ready_events[source][p], 0));
-                check(hipMemcpyPeerAsync(recv[destination], physical[destination], tp_ptr[source], physical[source], bytes, compute[destination]));
+                peer_copy(recv[destination], tp_ptr[source], bytes, compute[destination]);
             } else {
                 check(hipSetDevice(physical[source]));
                 check(hipMemcpyAsync(reduce_staging[source], tp_ptr[source], bytes, hipMemcpyDeviceToHost,

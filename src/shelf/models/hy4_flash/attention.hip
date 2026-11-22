@@ -1,5 +1,4 @@
 #include <hip/hip_fp16.h>
-#include <shelf/models/hy4_flash/mla_prefill.h>
 #include <shelf/models/hy4_flash/attention.h>
 #include <shelf/models/hy4_flash/absorbed.h>
 #include <shelf/kernels/fused/detail/octave_common.h>
@@ -544,8 +543,7 @@ Mat attention_inner(Ops &op, const std::string &p, int layer, int start, Mat hid
         int stride = 0;
         for (int r = i; r < i + n && !selected.empty(); ++r)
             stride = std::max(stride, int(selected[r].size()));
-        bool tiles = n >= 16 && chunk_contiguous && !draft;
-        bool dynamic_sizes = !op.params && (tiles || (chunk_contiguous && n == 1));
+        bool dynamic_sizes = !op.params && chunk_contiguous && !draft;
         if (!dynamic_sizes)
             stride = chunk_contiguous ? (sliding ? 512 : 2048) : 2048;
         int first = chunk_contiguous && !selected.empty() ? selected[i][0] : 0;
@@ -638,19 +636,8 @@ Mat attention_inner(Ops &op, const std::string &p, int layer, int start, Mat hid
         unpack<64, 11><<<dim3(1, ids_count), 64, 0, op.stream>>>(cache, fresh, ids_gpu, first, start, slots, b, 260,
                                                                   op.params, sliding, i, n);
         checked(hipGetLastError());
-        if (tiles) {
-            Mat expanded = op.linear(p + "kv_b_proj", a);
-            size_t size = size_t(n) * heads * ((ids_count + 15) / 16 * 16);
-            auto scores = static_cast<float *>(op.arena.next(size * 4));
-            auto probs = static_cast<uint16_t *>(op.arena.next(size * 2));
-            checked(shelf_hy4_mla_prefill(q.row(i, n).p, expanded.p, b.p, gate.row(i, n).p, sinks.p,
-                                          sinks.type == io::SType::F32, out.row(i, n).p, scores, probs, n, heads,
-                                          ids_count, first, start, sliding, op.stream,
-                                           op.params ? &op.params->position : nullptr, i, op.params,
-                                           chunk_contiguous, n));
-        } else
-            attend_absorbed(op, p + "kv_b_proj", a, b, q.row(i, n), gate.row(i, n), offsets_gpu, stride,
-                            sinks, out.row(i, n), chunk_contiguous, sliding, i, n);
+        attend_absorbed(op, p + "kv_b_proj", a, b, q.row(i, n), gate.row(i, n), offsets_gpu, stride,
+                        sinks, out.row(i, n), chunk_contiguous, sliding, i, n);
         op.arena.cursor = save;
         i += n;
     }

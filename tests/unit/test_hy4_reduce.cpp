@@ -1,8 +1,82 @@
-#include <shelf/models/hy4_flash/residency.h>
+#include <shelf/models/hy4_flash/ops.h>
 #include <hip/hip_runtime.h>
 #include <cstdint>
 #include <cstdio>
 #include <vector>
+#include <thread>
+#include <bit>
+#include <algorithm>
+
+namespace {
+void check_peer_collectives() {
+    using namespace shelf::hy4;
+    constexpr size_t elements = 65539, bytes = elements * sizeof(uint16_t);
+    Checkpoint model;
+    Residency gpu(model, 64);
+    gpu.ranks = 4;
+    gpu.tp_size = gpu.ep_size = 2;
+    gpu.physical.fill(0);
+    for (int group = 0; group < 2; ++group) {
+        gpu.tp_barrier[group] = std::make_unique<SyncBarrier>(2);
+        gpu.ep_barrier[group] = std::make_unique<SyncBarrier>(2);
+    }
+    std::array<uint16_t *, 4> data{};
+    for (int r = 0; r < gpu.ranks; ++r) {
+        gpu.peer[r].fill(true);
+        auto arena = shelf::gpu::GpuArena::create(0, 3 * (bytes + 256));
+        if (!arena.ok())
+            throw std::runtime_error(arena.status().message());
+        gpu.arenas.push_back(arena.release());
+        auto allocate = [&] {
+            auto memory = gpu.arenas.back().allocate_aligned(bytes, 256);
+            if (!memory.ok())
+                throw std::runtime_error(memory.status().message());
+            return memory.value().data();
+        };
+        data[r] = static_cast<uint16_t *>(allocate());
+        gpu.tp_recv[r] = allocate();
+        gpu.ep_recv[r] = allocate();
+        checked(hipStreamCreateWithFlags(&gpu.compute[r], hipStreamNonBlocking));
+        for (auto events : {&gpu.tp_ready, &gpu.tp_done, &gpu.tp_arrived, &gpu.tp_consumed,
+                            &gpu.ep_ready, &gpu.ep_done, &gpu.ep_arrived, &gpu.ep_consumed})
+            for (auto &event : (*events)[r])
+                checked(hipEventCreateWithFlags(&event, hipEventDisableTiming | hipEventReleaseToSystem));
+    }
+    std::array<std::exception_ptr, 4> failures{};
+    std::array<std::jthread, 4> workers;
+    try {
+        for (int r = 0; r < gpu.ranks; ++r)
+            workers[r] = std::jthread([&, r] {
+                try {
+                    for (int pass = 0; pass < 6; ++pass) {
+                        uint16_t bits = std::bit_cast<uint32_t>(float(pass + r + 1)) >> 16;
+                        std::vector<uint16_t> values(elements, bits);
+                        checked(hipMemcpyAsync(data[r], values.data(), bytes, hipMemcpyHostToDevice, gpu.compute[r]));
+                        gpu.tp_sum(data[r], r, bytes);
+                        gpu.ep_reduce(data[r], r, bytes);
+                        checked(hipMemcpyAsync(values.data(), data[r], bytes, hipMemcpyDeviceToHost, gpu.compute[r]));
+                        checked(hipStreamSynchronize(gpu.compute[r]));
+                        uint16_t expected = std::bit_cast<uint32_t>(float(4 * pass + 10)) >> 16;
+                        if (!std::all_of(values.begin(), values.end(), [&](auto value) { return value == expected; }))
+                            throw std::runtime_error("peer 転送を使った TP・EP の合算結果が不正です");
+                    }
+                } catch (...) {
+                    failures[r] = std::current_exception();
+                    gpu.abort_collectives();
+                }
+            });
+    } catch (...) {
+        gpu.abort_collectives();
+        throw;
+    }
+    for (auto &worker : workers)
+        worker.join();
+    gpu.shutdown();
+    for (auto &failure : failures)
+        if (failure)
+            std::rethrow_exception(failure);
+}
+}
 
 int main() {
     constexpr size_t count = 65539;
@@ -32,5 +106,13 @@ int main() {
         ok = check(hipFree(device_b)) && ok;
     if (device_a)
         ok = check(hipFree(device_a)) && ok;
+    if (ok) {
+        try {
+            check_peer_collectives();
+        } catch (const std::exception &e) {
+            std::fprintf(stderr, "%s\n", e.what());
+            return 1;
+        }
+    }
     return ok ? 0 : 1;
 }
