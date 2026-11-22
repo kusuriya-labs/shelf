@@ -56,9 +56,9 @@ int main() {
     config.indexer.compress_ratio = 4u;
     const auto from_config = shelf::qwen4exp::make_qwen4exp_qsa_indexer_geometry(
         config, kBlocks, 2u);
-    check(from_config.hidden == kHidden && from_config.index_heads == kIndexHeads &&
-              from_config.index_head_dim == kIndexDim &&
-              from_config.index_rotary_dim == 64u &&
+    check(from_config.hidden == kHidden && from_config.heads == kIndexHeads &&
+              from_config.head_dim == kIndexDim &&
+              from_config.rotary_dim == 64u &&
               from_config.compress_ratio == 4u &&
               from_config.blocks == kBlocks && from_config.top_k == 2u &&
               from_config.mask_bytes == kMaskBytes && from_config.state_index == 2u,
@@ -79,10 +79,9 @@ int main() {
     shelf::qwen_hybrid::Emitter em{graph};
     shelf::qwen4exp::Qwen4ExpQsaIndexerGeometry geometry;
     geometry.hidden = kHidden;
-    geometry.index_heads = kIndexHeads;
-    geometry.index_kv_heads = 1u;
-    geometry.index_head_dim = kIndexDim;
-    geometry.index_rotary_dim = kRotary;
+    geometry.heads = kIndexHeads;
+    geometry.head_dim = kIndexDim;
+    geometry.rotary_dim = kRotary;
     geometry.compress_ratio = 4u;
     geometry.blocks = kBlocks;
     geometry.top_k = kTopK;

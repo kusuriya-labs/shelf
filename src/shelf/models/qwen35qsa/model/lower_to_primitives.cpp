@@ -7,8 +7,8 @@
 #include <shelf/models/common/qwen_hybrid/block_lowering.h>
 #include <shelf/models/common/qwen_hybrid/gdn_geometry.h>
 #include <shelf/models/common/qwen_hybrid/head_lowering.h>
+#include <shelf/models/common/qwen_hybrid/qsa_indexer_lowering.h>
 #include <shelf/models/common/qwen_hybrid/weight_slot.h>
-#include <shelf/models/qwen35qsa/model/qsa_indexer_lowering.h>
 
 #include <cmath>
 #include <cstdint>
@@ -470,25 +470,36 @@ Result<shelf::qwen35::Qwen35LoweredPrimitives> lower_qwen35qsa_to_primitives(
         bool has_mask = false;
         RT::ValueId mask{};
         if (!lw.is_gdn && qsa_active) {
-            QsaIndexerLowering indexer;
-            indexer.hidden = hidden_size;
-            indexer.heads = geometry.heads;
-            indexer.head_dim = geometry.head_dim;
-            indexer.rotary_dim = geometry.rotary_dim;
-            indexer.compress_ratio = geometry.compress_ratio;
-            indexer.blocks = geometry.blocks;
-            indexer.top_k = geometry.top_k;
-            indexer.mask_bytes = geometry.mask_bytes;
-            indexer.theta = rope_theta;
-            indexer.eps = eps;
-            indexer.state_index = block.attention_indices.state_index;
-            indexer.weights = &weights.indexer[li];
-            indexer.w_q_proj = lw_idx.indexer_q;
-            indexer.w_k_proj = lw_idx.indexer_k;
-            indexer.p_q_norm = lp.indexer_q_norm;
-            indexer.p_k_norm = lp.indexer_k_norm;
-            indexer.p_k_block_norm = lp.indexer_k_block_norm;
-            mask = emit_qsa_block_mask(em, indexer, normed, layer_prefix);
+            QH::QsaIndexerGeometry indexer_geometry;
+            indexer_geometry.hidden = hidden_size;
+            indexer_geometry.heads = geometry.heads;
+            indexer_geometry.head_dim = geometry.head_dim;
+            indexer_geometry.rotary_dim = geometry.rotary_dim;
+            indexer_geometry.compress_ratio = geometry.compress_ratio;
+            indexer_geometry.blocks = geometry.blocks;
+            indexer_geometry.top_k = geometry.top_k;
+            indexer_geometry.mask_bytes = geometry.mask_bytes;
+            indexer_geometry.theta = rope_theta;
+            indexer_geometry.eps = eps;
+            indexer_geometry.state_index = block.attention_indices.state_index;
+            indexer_geometry.pre_pool_key_norm = true;
+
+            QH::QsaIndexerWeights indexer_weights;
+            indexer_weights.q_proj = &weights.indexer[li].q_proj;
+            indexer_weights.k_proj = &weights.indexer[li].k_proj;
+
+            QH::QsaIndexerIndices indexer_indices;
+            indexer_indices.w_q_proj = lw_idx.indexer_q;
+            indexer_indices.w_k_proj = lw_idx.indexer_k;
+            indexer_indices.p_q_norm = lp.indexer_q_norm;
+            indexer_indices.p_k_norm = lp.indexer_k_norm;
+            indexer_indices.p_k_block_norm = lp.indexer_k_block_norm;
+
+            auto indexer = QH::emit_qsa_indexer(em, indexer_geometry, indexer_weights,
+                                                indexer_indices, normed,
+                                                layer_prefix.c_str());
+            if (!indexer.ok()) return indexer.status();
+            mask = indexer.value().mask;
             has_mask = true;
         }
         const QH::HybridBlockOutput blk = QH::emit_hybrid_block_attention(

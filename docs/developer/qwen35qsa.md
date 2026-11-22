@@ -75,7 +75,10 @@ input_norm -> [indexer] -> gated attention -> residual -> post_norm -> FFN
 ```
 
 を emit する。indexer は `emit_qwen35qsa` の stage で、`qwen_hybrid` の block を
-`input_norm` と `attention+residual` に分けた間に挟まる。
+`input_norm` と `attention+residual` に分けた間に挟まる。indexer の graph は
+`qwen_hybrid::emit_qsa_indexer`（`models/common/qwen_hybrid/qsa_indexer_lowering.h`）が
+emit し、family は geometry、重み、pre-pool key norm の有無を渡す。この family は
+q/k 分離 projection と pre-pool norm を選ぶ。
 
 - query: `q_proj` → per-head RMSNorm（共有 weight）→ partial RoPE（token 位置）
 - key: `k_proj` → per-head RMSNorm → `QSA_KEY_CACHE` が

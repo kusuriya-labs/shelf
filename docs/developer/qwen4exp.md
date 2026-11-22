@@ -162,6 +162,10 @@ checkpoint は `ngram-q`、FP8 shard checkpoint は E4M3 code × per-tensor BF16
 
 ### QSA
 
+indexer の graph は `qwen_hybrid::emit_qsa_indexer`
+（`models/common/qwen_hybrid/qsa_indexer_lowering.h`）が emit し、この family は
+q/k 融合 projection と pool 後 1 段 norm を選ぶ。
+
 `QsaKeyStatePool` は sequence slot ごとに pooled key / partial key / counts を持つ。
 `QSA_KEY_CACHE` は 4 token が揃った時点で mean → RMSNorm → partial RoPE を行い、
 pooled key を書く。`QSA_SELECT` は score と選択を分ける。score は

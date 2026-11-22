@@ -154,10 +154,9 @@ int main() {
     layer.qsa_geometry.attention.eps = 1e-6f;
     layer.qsa_geometry.attention.tp_combine = false;
     layer.qsa_geometry.indexer.hidden = kHidden;
-    layer.qsa_geometry.indexer.index_heads = kIndexHeads;
-    layer.qsa_geometry.indexer.index_kv_heads = 1u;
-    layer.qsa_geometry.indexer.index_head_dim = kIndexDim;
-    layer.qsa_geometry.indexer.index_rotary_dim = kIndexRotary;
+    layer.qsa_geometry.indexer.heads = kIndexHeads;
+    layer.qsa_geometry.indexer.head_dim = kIndexDim;
+    layer.qsa_geometry.indexer.rotary_dim = kIndexRotary;
     layer.qsa_geometry.indexer.compress_ratio = 4u;
     layer.qsa_geometry.indexer.blocks = kIndexBlocks;
     layer.qsa_geometry.indexer.top_k = kIndexTopK;
