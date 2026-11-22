@@ -2,9 +2,17 @@
 #include <shelf/models/hy4_flash/generate.h>
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <numeric>
 #include <stdexcept>
+
+namespace shelf::hy4 {
+void verify_hy4_upload(Residency &gpu);
+void verify_hy4_layers(Residency &gpu, const Path &input, const Path &dump);
+bool trace_hy4_prefill(Residency &gpu, const Path &input, int chunk, const Path &dump);
+}
 
 namespace {
 int remaining_instantiations = 0;
@@ -12,6 +20,8 @@ using namespace shelf;
 using namespace shelf::hy4;
 
 void share_expert_weights(Checkpoint &model) {
+    if (model.mixed)
+        throw std::invalid_argument("expert 領域を共有する試験には 4 bpw checkpoint が必要です");
     model.bytes[0] = 0;
     model.upload_order[0].clear();
     for (auto &[key, weight] : model.local[0]) {
@@ -84,6 +94,30 @@ void reset_history(Residency &gpu) {
         checked(hipMemcpy(gpu.cache[0][l], kv.data(), slots * 294, hipMemcpyHostToDevice));
         if (gpu.index_keys[0][l])
             checked(hipMemcpy(gpu.index_keys[0][l], groups.data(), groups.size() * 2, hipMemcpyHostToDevice));
+    }
+}
+
+void check_sliding_chunks(Residency &gpu) {
+    Ops op(gpu);
+    std::vector<int> ids(20);
+    std::iota(ids.begin(), ids.end(), 100);
+    std::vector<uint16_t> reference;
+    for (int chunk : {1, 8, 15, 20}) {
+        reset_history(gpu);
+        checked(hipMemsetAsync(op.arena.base, 0xff, op.arena.size, op.stream));
+        std::vector<uint16_t> output(ids.size() * 3072);
+        for (int i = 0; i < int(ids.size()); i += chunk) {
+            int rows = std::min(chunk, int(ids.size()) - i);
+            op.arena.cursor = 0;
+            Mat x = op.embed({ids.begin() + i, ids.begin() + i + rows}, false);
+            Selection selection;
+            Mat result = attention(op, "model.layers.2.", 2, 511 + i, x, selection, false);
+            op.copy(output.data() + size_t(i) * 3072, result.p, result.bytes(), hipMemcpyDeviceToHost);
+        }
+        if (reference.empty())
+            reference = output;
+        if (output != reference)
+            throw std::runtime_error("sliding window の境界でチャンク間の出力が異なります");
     }
 }
 
@@ -160,6 +194,8 @@ void compare(const Path &body, const Path &draft, int ranks) {
         throw std::runtime_error(status.message());
     gpu.upload();
     logical_ranks(gpu, ranks);
+    if (ranks == 1)
+        check_sliding_chunks(gpu);
     auto eager = run(gpu, false);
     if (gpu.target_replays || gpu.draft_replays)
         throw std::runtime_error("無効化した Graph が起動しました");
@@ -246,6 +282,108 @@ void compare_batches(const Path &body, const Path &draft, int ranks) {
     }
 }
 
+std::vector<float> prefill_logits(Residency &gpu, const std::vector<int> &prompt, int chunk) {
+    Target target(gpu, 0.f, 0, 0, 1.f);
+    for (size_t i = 0; i < prompt.size(); i += chunk) {
+        size_t end = std::min(i + chunk, prompt.size());
+        target.forward({prompt.begin() + i, prompt.begin() + end}, false, end == prompt.size());
+    }
+    auto device = target.head_logits(target.state.row(0));
+    std::vector<float> logits(120832);
+    target.op.copy(logits.data(), device, logits.size() * sizeof(float), hipMemcpyDeviceToHost);
+    return logits;
+}
+
+void check_prefill(Residency &gpu, const std::vector<int> &prompt) {
+    std::vector<float> reference;
+    for (int pattern : {0x7f, 0xff}) {
+        for (int chunk : {1, 6, 8, 15, 16, 20, 32}) {
+            for (int r = 0; r < gpu.ranks; ++r) {
+                checked(hipSetDevice(gpu.physical[r]));
+                checked(hipMemsetAsync(gpu.workspace[r].base, pattern, gpu.workspace[r].size, gpu.compute[r]));
+            }
+            checked(hipSetDevice(gpu.physical[0]));
+            for (int layer = 0; layer < 42; ++layer) {
+                auto slots = gpu.index_keys[0][layer] ? gpu.tokens : std::min(gpu.tokens, size_t(518));
+                checked(hipMemsetAsync(gpu.cache[0][layer], pattern, slots * 294, gpu.compute[0]));
+                if (gpu.index_keys[0][layer])
+                    checked(hipMemsetAsync(gpu.index_keys[0][layer], pattern, (gpu.tokens / 4 + 12) * 256,
+                                           gpu.compute[0]));
+            }
+            auto logits = prefill_logits(gpu, prompt, chunk);
+            if (reference.empty()) {
+                if (!std::all_of(logits.begin(), logits.end(), [](float v) { return std::isfinite(v); }))
+                    throw std::runtime_error("prefill logits に非有限値があります");
+                reference = logits;
+            }
+            if (!same_bits(reference, logits))
+                throw std::runtime_error("初期値またはチャンク長によって prefill logits が変化しました: chunk=" +
+                                         std::to_string(chunk));
+        }
+    }
+}
+
+void compare_transports(const Path &body, const Path &draft, int ranks, const Owners *placement = nullptr) {
+    Checkpoint model(body, body, draft, placement ? *placement : Owners{}, placement ? ranks : 1, 1);
+    if (!placement)
+        share_expert_weights(model);
+    const std::vector<int> prompt32{802, 8778, 299, 9480, 341, 39144, 13, 360, 46544, 52315, 533,
+                                    10044, 565, 1823, 269, 7370, 587, 269, 10575, 2417, 18221, 302,
+                                    269, 18212, 13, 44635, 269, 1419, 4782, 269, 46544, 2929};
+    const std::vector<int> prompt(prompt32.begin(), prompt32.begin() + 20);
+    std::vector<int> reference;
+    std::vector<float> reference_logits;
+    for (bool speculate : {false, true}) {
+        model.has_draft = speculate;
+        for (const char *transport : {"push", "peer", "host"}) {
+            setenv("SHELF_HY4_EP_TRANSPORT", transport, 1);
+            setenv("SHELF_HY4_BATCH_DFLY", speculate ? "1" : "0", 1);
+            for (int slots : {1, 16}) {
+                if (!placement)
+                    for (auto &owners : model.owners)
+                        owners.fill(0);
+                Residency gpu(model, 64, slots);
+                auto status = gpu.reserve();
+                if (!status.ok())
+                    throw std::runtime_error(status.message());
+                gpu.upload();
+                if (!placement)
+                    logical_ranks(gpu, ranks);
+                if (slots == 16 && !speculate && std::string_view(transport) == "host")
+                    check_prefill(gpu, prompt32);
+                if (slots == 1) {
+                    auto logits = prefill_logits(gpu, prompt, 20);
+                    if (reference_logits.empty())
+                        reference_logits = logits;
+                    if (!same_bits(logits, reference_logits))
+                        throw std::runtime_error("転送方式によって prefill logits が変化しました");
+                    for (bool graphs : {false, true}) {
+                        setenv("SHELF_HY4_GRAPH", graphs ? "1" : "0", 1);
+                        setenv("SHELF_HY4_DRAFT_GRAPH", graphs ? "1" : "0", 1);
+                        auto ids = generate(gpu, prompt, 4, 20, 0, 0, {});
+                        if (reference.empty())
+                            reference = ids;
+                        if (ids != reference)
+                            throw std::runtime_error("転送方式、投機または Graph 設定によって生成 ID が変化しました");
+                    }
+                } else {
+                    for (int batch : {1, 2, 4, 8, 16}) {
+                        auto ids = generate_batch(gpu, std::vector<std::vector<int>>(batch, prompt),
+                                                  std::vector<int>(batch, 4), {});
+                        for (const auto &lane : ids)
+                            if (lane != reference)
+                                throw std::runtime_error("転送方式またはバッチ件数によって生成 ID が変化しました");
+                        printf("ep=%d transport=%s draft=%d batch=%d greedy=%d/%d\n",
+                               ranks, transport, speculate, batch, batch, batch);
+                        fflush(stdout);
+                    }
+                }
+                gpu.shutdown();
+            }
+        }
+    }
+}
+
 }
 extern "C" hipError_t __real_hipGraphInstantiate(hipGraphExec_t *, hipGraph_t, hipGraphNode_t *, char *, size_t);
 extern "C" hipError_t __wrap_hipGraphInstantiate(hipGraphExec_t *exec, hipGraph_t graph, hipGraphNode_t *node,
@@ -255,10 +393,63 @@ extern "C" hipError_t __wrap_hipGraphInstantiate(hipGraphExec_t *exec, hipGraph_
     return __real_hipGraphInstantiate(exec, graph, node, log, length);
 }
 int main(int argc, char **argv) {
-    if (argc != 3 && (argc != 4 || std::string_view(argv[3]) != "batch"))
-        return 2;
     try {
-        for (int ranks : {1, 4})
+        if (argc == 7 && std::string_view(argv[3]) == "layers") {
+            auto owners = read_owners(argv[4]);
+            int ranks = 1;
+            for (const auto &layer : owners)
+                ranks = std::max(ranks, 1 + *std::max_element(layer.begin(), layer.end()));
+            Checkpoint model(argv[1], argv[1], argv[2], Owners{}, 1, 1);
+            share_expert_weights(model);
+            Residency gpu(model, 64);
+            auto status = gpu.reserve();
+            if (!status.ok())
+                throw std::runtime_error(status.message());
+            gpu.upload();
+            logical_ranks(gpu, ranks);
+            model.owners = owners;
+            checked(hipMemcpy(gpu.moe_owners[0], owners.data(), sizeof(owners), hipMemcpyHostToDevice));
+            verify_hy4_layers(gpu, argv[5], argv[6]);
+            gpu.shutdown();
+            return 0;
+        }
+        if ((argc == 4 || argc == 5 || argc == 8) && std::string_view(argv[3]) == "upload") {
+            int count = 1;
+            checked(hipGetDeviceCount(&count));
+            bool shared = argc == 4 || std::string_view(argv[4]) == "-";
+            if (shared && count != 1)
+                throw std::runtime_error("複数 GPU の検証には配置表を指定してください");
+            Owners owners = shared ? Owners{} : read_owners(argv[4]);
+            Checkpoint model(argv[1], argv[1], argv[2], owners, count, 1);
+            if (shared)
+                share_expert_weights(model);
+            Residency gpu(model, argc == 8 ? 4096 : 64);
+            auto status = gpu.reserve();
+            if (!status.ok())
+                throw std::runtime_error(status.message());
+            gpu.upload();
+            bool match = argc != 8 || trace_hy4_prefill(gpu, argv[5], std::stoi(argv[6]), argv[7]);
+            verify_hy4_upload(gpu);
+            gpu.shutdown();
+            if (!match)
+                throw std::runtime_error("初回の logits と層別照合時の logits が異なります");
+            return 0;
+        }
+        if ((argc == 4 || argc == 5) && std::string_view(argv[3]) == "transport") {
+            if (argc == 5) {
+                int count = 0;
+                checked(hipGetDeviceCount(&count));
+                auto placement = read_owners(argv[4]);
+                compare_transports(argv[1], argv[2], count, &placement);
+            } else {
+                for (int ranks : {3, 4})
+                    compare_transports(argv[1], argv[2], ranks);
+            }
+            return 0;
+        }
+        if (argc != 3 && (argc != 4 || std::string_view(argv[3]) != "batch"))
+            return 2;
+        for (int ranks : {1, 3, 4})
             if (argc == 4) compare_batches(argv[1], argv[2], ranks);
             else compare(argv[1], argv[2], ranks);
         return 0;

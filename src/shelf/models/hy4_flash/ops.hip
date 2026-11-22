@@ -293,9 +293,8 @@ Mat Ops::linear(const std::string &name, Mat x) {
     auto codes = static_cast<int8_t *>(arena.next(size_t(x.rows) * pk));
     auto scales = static_cast<float *>(arena.next(size_t(x.rows) * pk / 128 * 4));
     int splits = 1;
-    if (x.rows <= 16 || (batch_decode && gpu.batch_draft))
-        while (splits < 16 && (pn / 64) * splits < 128 && (pk / 128) % (2 * splits) == 0)
-            splits *= 2;
+    while (splits < 16 && (pn / 64) * splits < 128 && (pk / 128) % (2 * splits) == 0)
+        splits *= 2;
     auto partial = static_cast<float *>(arena.next(size_t(x.rows) * pn * 4 * splits));
     checked(shelf_hy4_linear(x.p, static_cast<const uint16_t *>(param(name + ".suh").p),
                              static_cast<const uint16_t *>(param(name + ".svh").p),

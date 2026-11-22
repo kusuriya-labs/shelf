@@ -6,18 +6,6 @@ using namespace shelf::kernel::exl3_detail::mul24;
 using shelf::hy4::Hy4StepParams;
 using B8 = short __attribute__((ext_vector_type(8)));
 using F8 = float __attribute__((ext_vector_type(8)));
-__device__ int effective_slots(int slots, bool contiguous, bool sliding, const Hy4StepParams *params, int row_offset,
-                               int chunk_rows) {
-    if (!params)
-        return slots;
-    int position = params->position + row_offset;
-    if (contiguous)
-        return min(slots, sliding ? min(max(position, 0), 511) + chunk_rows : position + chunk_rows);
-    int mod = 0;
-    for (int k = 0; k < chunk_rows; ++k)
-        mod = max(mod, (position + k) & 3);
-    return min(slots, 2045 + mod);
-}
 __device__ int effective_stride(int stride, bool contiguous, bool sliding, const Hy4StepParams *params, int row_offset,
                                 int chunk_rows) {
     if (!params)
@@ -34,11 +22,6 @@ __device__ int effective_stride(int stride, bool contiguous, bool sliding, const
         mod = max(mod, (position + k) & 3);
     return min(stride, 2045 + mod);
 }
-__device__ int effective_first(int first_key, bool sliding, const Hy4StepParams *params, int row_offset) {
-    if (!params)
-        return first_key;
-    return sliding ? max(0, params->position + row_offset - 511) : 0;
-}
 __device__ __forceinline__ B8 fragment(const uint16_t *source) {
     union {
         uint64_t u[2];
@@ -47,46 +30,6 @@ __device__ __forceinline__ B8 fragment(const uint16_t *source) {
     __builtin_memcpy(&value.u[0], source, 8);
     __builtin_memcpy(&value.u[1], source + 8, 8);
     return value.b;
-}
-__global__ void score_tiles(const uint16_t *q, const uint16_t *kv, const uint16_t *rot, float *scores, int rows,
-                             int heads, int slots, int pitch, int first, int start, bool sliding,
-                             const int *d_start, int row_offset, const Hy4StepParams *params,
-                             bool contiguous, int chunk_rows) {
-    start = (d_start ? *d_start : start) + row_offset;
-    int eff_slots = effective_slots(slots, contiguous, sliding, params, row_offset, chunk_rows);
-    first = effective_first(first, sliding, params, row_offset);
-    int lane = threadIdx.x % 32, lo = lane % 16, hi = lane / 16, h = blockIdx.z;
-    int kb = blockIdx.x * 64 + (threadIdx.x / 32) * 16, rb = blockIdx.y * 16;
-    int slot = kb + lo, row = rb + lo;
-    if (kb >= pitch)
-        return;
-    if (first + kb > start + rb + 15 || (sliding && first + kb + 15 <= start + rb - 512)) {
-        if (row < rows)
-            for (int j = 0; j < 8; ++j)
-                scores[(size_t(row) * heads + h) * pitch + kb + hi * 8 + j] = -INFINITY;
-        return;
-    }
-    F8 acc{};
-    for (int d = 0; d < 256; d += 16) {
-        int offset = d + hi * 4;
-        B8 a{}, b{};
-        if (slot < slots)
-            a = d < 192 ? fragment(kv + (size_t(slot) * heads + h) * 448 + offset)
-                        : fragment(rot + slot * 64 + offset - 192);
-        if (row < rows)
-            b = fragment(q + (size_t(row) * heads + h) * 256 + offset);
-        acc = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12(a, b, acc);
-    }
-    if (row >= rows)
-        return;
-    int pos = start + row;
-    for (int j = 0; j < 8; ++j) {
-        int k = kb + hi * 8 + j;
-        scores[(size_t(row) * heads + h) * pitch + k] =
-            (k < eff_slots && first + k <= pos && (!sliding || first + k > pos - 512))
-                ? round_bf16(acc[j]) * 0.0625f
-                : -INFINITY;
-    }
 }
 template <bool Max> __device__ float reduce(float x, float *parts) {
     int lane = threadIdx.x % 32;
@@ -111,11 +54,10 @@ template <bool Max> __device__ float reduce(float x, float *parts) {
 }
 __global__ void normalize(float *scores, uint16_t *probs, const void *sinks, bool fp32, int pitch, int slots,
                              bool sliding, const Hy4StepParams *params, int row_offset, bool contiguous,
-                             int chunk_rows, bool absorb) {
+                             int chunk_rows) {
     __shared__ float parts[8];
     int h = blockIdx.x, r = blockIdx.y, t = threadIdx.x;
-    int limit = (absorb ? effective_stride(slots, contiguous, sliding, params, row_offset, chunk_rows)
-                        : effective_slots(slots, contiguous, sliding, params, row_offset, chunk_rows));
+    int limit = effective_stride(slots, contiguous, sliding, params, row_offset, chunk_rows);
     limit = (limit + 15) / 16 * 16;
     size_t base = (size_t(r) * gridDim.x + h) * pitch;
     float sink =
@@ -134,64 +76,6 @@ __global__ void normalize(float *scores, uint16_t *probs, const void *sinks, boo
     for (int i = t; i < limit; i += 256)
         probs[base + i] = f32_to_bf16_rne_device(scores[base + i] / sum);
 }
-__global__ void value_tiles(const uint16_t *probs, const uint16_t *kv, const uint16_t *gate, uint16_t *out,
-                             int rows, int heads, int slots, int pitch, int first, int start,
-                             bool sliding, const int *d_start, int row_offset, const Hy4StepParams *params,
-                             bool contiguous, int chunk_rows) {
-    start = (d_start ? *d_start : start) + row_offset;
-    int eff_slots = effective_slots(slots, contiguous, sliding, params, row_offset, chunk_rows);
-    first = effective_first(first, sliding, params, row_offset);
-    int lane = threadIdx.x % 32, lo = lane % 16, hi = lane / 16, h = blockIdx.z;
-    int cb = blockIdx.x * 64 + (threadIdx.x / 32) * 16, row = blockIdx.y * 16 + lo;
-    F8 acc{};
-    int rb = blockIdx.y * 16;
-    int from = sliding ? max(0, start + rb - 511 - first) / 16 * 16 : 0;
-    int end = min((eff_slots + 15) / 16 * 16, (start + rb + 16 - first + 15) / 16 * 16);
-    for (int base = from; base < end; base += 16) {
-        B8 a{}, b{};
-#pragma unroll
-        for (int j = 0; j < 8; ++j) {
-            int k = base + hi * 4 + j % 4 + 8 * (j / 4);
-            if (k < slots)
-                a[j] = kv[(size_t(k) * heads + h) * 448 + 192 + cb + lo];
-        }
-        if (row < rows)
-            b = fragment(probs + (size_t(row) * heads + h) * pitch + base + hi * 4);
-        acc = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12(a, b, acc);
-    }
-    if (row >= rows)
-        return;
-    for (int j = 0; j < 8; ++j) {
-        size_t i = (size_t(row) * heads + h) * 256 + cb + hi * 8 + j;
-        out[i] = f32_to_bf16_rne_device(round_bf16(acc[j]) *
-                                        round_bf16(1.f / (1.f + expf(-bf16_bits_to_f32(gate[i])))));
-    }
-}
-}
-hipError_t shelf_hy4_mla_prefill(const uint16_t *q, const uint16_t *kv, const uint16_t *rotary,
-                                  const uint16_t *gate, const void *sink, bool sink_fp32, uint16_t *out,
-                                  float *scores, uint16_t *probs, int rows, int heads, int slots, int first_key,
-                                  int first_query, bool sliding, hipStream_t stream, const int *d_start, int row_offset,
-                                  const Hy4StepParams *params, bool contiguous, int chunk_rows) {
-    int pitch = (slots + 15) / 16 * 16, rb = (rows + 15) / 16;
-    score_tiles<<<dim3((pitch + 63) / 64, rb, heads), 128, 0, stream>>>(q, kv, rotary, scores, rows, heads, slots,
-                                                                         pitch, first_key, first_query, sliding, d_start,
-                                                                         row_offset, params, contiguous, chunk_rows);
-    auto status = hipGetLastError();
-    if (status != hipSuccess)
-        return status;
-    normalize<<<dim3(heads, rows), 256, 0, stream>>>(scores, probs, sink, sink_fp32, pitch, slots, sliding, params,
-                                                       row_offset, contiguous, chunk_rows, false);
-    status = hipGetLastError();
-    if (status != hipSuccess)
-        return status;
-    value_tiles<<<dim3(4, rb, heads), 128, 0, stream>>>(probs, kv, gate, out, rows, heads, slots, pitch,
-                                                           first_key, first_query, sliding, d_start, row_offset,
-                                                           params, contiguous, chunk_rows);
-    return hipGetLastError();
-}
-
-namespace {
 using H8 = _Float16 __attribute__((ext_vector_type(8)));
 __device__ __forceinline__ H8 half_frag(const _Float16 *p) {
     union {
@@ -393,7 +277,7 @@ hipError_t shelf_hy4_mla_absorbed(const uint16_t *q, const void *folded, const u
     if (rc != hipSuccess)
         return rc;
     normalize<<<dim3(heads, rows), 256, 0, stream>>>(scores, probs, sinks, sink_fp32, pitch, stride, sliding, params,
-                                                       row_offset, contiguous, chunk_rows, true);
+                                                       row_offset, contiguous, chunk_rows);
     rc = hipGetLastError();
     if (rc != hipSuccess)
         return rc;
