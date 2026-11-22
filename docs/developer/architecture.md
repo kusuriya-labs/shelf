@@ -189,6 +189,8 @@ CMake target の詳細な一覧は `cmake/targets.cmake` を参照。
 `shelf_kernels_correctness` は `shelf_runtime` に link する一方、
 `shelf_runtime` は `shelf_core` / `shelf_gpu` / `shelf_kernels_fused` だけを使う。
 
+Hy4-flash の固有 kernel と実行は `models/hy4_flash` に置き、専用の `shelf_hy4_model` / `shelf_hy4_flash` target と `shelf-compute hy4` から利用する。共通 kernel 層には model 非依存の radix 選択などを置く。
+
 ### weight loader の依存
 
 weights loader（`shelf_weights`）の依存は下方向のみ:

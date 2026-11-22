@@ -96,6 +96,7 @@ add_test(NAME test_server_arena_gib COMMAND python3 "${_SHELF_TESTS_ROOT}/unit/t
 set_tests_properties(test_server_arena_gib PROPERTIES LABELS "cpu;required")
 
 shelf_add_test(NAME test_safetensors_writer SOURCE unit/test_safetensors_writer.cpp LABELS "cpu;required" LIBRARIES shelf_io)
+shelf_add_test(NAME test_safetensors_population SOURCE unit/test_safetensors_population.cpp LABELS "cpu;required" LIBRARIES shelf_io)
 shelf_add_test(NAME test_expert_slice_fixture SOURCE unit/test_expert_slice_fixture.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES shelf_weights shelf_io)
 shelf_add_test(NAME test_expert_slice_load SOURCE unit/test_expert_slice_load.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_weights shelf_kernels_correctness shelf_qwen35_kernels_optimized)
 shelf_add_test(NAME test_safetensors_partial_read SOURCE unit/test_safetensors_partial_read.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_io shelf_weights)
@@ -378,6 +379,7 @@ add_custom_target(
         test_arena_budget
         test_serve_host_memory
         test_safetensors_writer
+        test_safetensors_population
         test_expert_slice_fixture
         test_expert_slice_load
         test_safetensors_partial_read

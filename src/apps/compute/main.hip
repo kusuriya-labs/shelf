@@ -20,6 +20,7 @@
 #include <vector>
 
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string_view(argv[1]) == "hy4") return shelf::hy4::compute(argc-1,argv+1);
     shelf::app::ComputeOptions opt;
     const int parse_rc = shelf::app::parse_compute_options(argc, argv, opt);
     if (parse_rc == shelf::app::kComputeParseHelp) {
