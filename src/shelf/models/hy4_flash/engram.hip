@@ -102,24 +102,22 @@ std::vector<uint8_t> gather_engram(const Checkpoint &model, int layer, int rows,
 Mat engram(Ops &op, int layer, Mat x, const std::vector<int> &prior, const std::vector<int> &ids) {
     int g = (layer - 1) / 10;
     auto p = "model.layers." + std::to_string(layer) + ".engram_layer.";
-    auto table = p + "multi_head_embedding.embedding.weight";
-    const auto &lookup = op.gpu.model.at(p + "lookup_table", -1);
-    if (lookup.spec.dtype != io::SType::I32 || lookup.bytes != 120818 * 4)
-        throw std::runtime_error("Engram の語彙写像が異なります");
-    auto lut = static_cast<const int32_t *>(lookup.host);
-    auto bits = static_cast<const uint8_t *>(op.gpu.model.at(table, -1).host);
-    auto scales = static_cast<const uint8_t *>(op.gpu.model.at(table + ".scale", -1).host);
     auto bf = [&](const std::string &name) {
         auto v = op.param(p + name);
         if (v.type != io::SType::BF16)
             throw std::runtime_error("Engram パラメーターの型が異なります");
         return static_cast<const uint16_t *>(v.p);
     };
-    auto packed = op.take_engram(g);
-    if (packed.size() != size_t(x.rows) * 16 * 98)
-        packed = gather_engram(op.gpu.model, layer, x.rows, ids, prior);
-    auto memory = static_cast<uint8_t *>(op.arena.next(packed.size()));
-    op.copy(memory, packed.data(), packed.size(), hipMemcpyHostToDevice);
+    uint8_t *memory = nullptr;
+    if (op.capture)
+        memory = op.gpu.graph_input->engram[g];
+    else {
+        auto packed = op.take_engram(g);
+        if (packed.empty())
+            packed = gather_engram(op.gpu.model, layer, x.rows, ids, prior);
+        memory = static_cast<uint8_t *>(op.arena.next(packed.size()));
+        op.copy(memory, packed.data(), packed.size(), hipMemcpyHostToDevice);
+    }
     auto embed = op.mat(x.rows, 1536);
     Norms norms{};
     for (int i = 0; i < 16; ++i)
@@ -129,7 +127,7 @@ Mat engram(Ops &op, int layer, Mat x, const std::vector<int> &prior, const std::
     auto project = [&](const std::string &key) { return op.linear(p + key, embed); };
     constexpr float eps = 1.1920928955e-7f;
     auto values = op.norm_bias(project("value_proj"), bf("value_proj.bias"), p + "unified_pre_gamma", eps);
-    auto token_ids = op.indices(ids);
+    auto token_ids = op.capture ? op.params->ids : op.indices(ids);
     for (int i = 0; i < 4; ++i) {
         auto s = std::to_string(i);
         auto k = op.norm_bias(project("key_projs." + s), bf("key_projs." + s + ".bias"),

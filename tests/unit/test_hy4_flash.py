@@ -1,7 +1,11 @@
+import contextlib
+import io
+import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
 from safetensors.torch import load_file, save_file
@@ -9,6 +13,7 @@ from safetensors.torch import load_file, save_file
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools/hy4_flash"))
 from convert_engram import convert
 from octave import Cache, selected_tokens
+import placement
 from placement import EXPERT_BYTES, assign
 
 
@@ -72,6 +77,34 @@ class Hy4FlashTests(unittest.TestCase):
         peaks = [base[r] + counts[r] * EXPERT_BYTES for r in range(3)]
         self.assertLessEqual(max(peaks) - min(peaks), EXPERT_BYTES)
         self.assertLess(counts[0], counts[1])
+
+    def test_graph_headroom_at_two_million_tokens(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            config = {"quantization_config": {"linear_storage": {}}}
+            (directory / "config.json").write_text(json.dumps(config))
+            experts = dict.fromkeys(range(41 * 512), EXPERT_BYTES)
+            for ranks in (3, 4):
+                owners = directory / f"owners-{ranks}.json"
+                argv = ["placement.py", tmp, "--tokens", "2097152", "--capacity", *(["32"] * ranks),
+                        "--output", str(owners)]
+                output = io.StringIO()
+                with patch.object(sys, "argv", argv), patch.object(placement, "checkpoint_sizes",
+                        return_value=(4 << 30, experts)), contextlib.redirect_stdout(output):
+                    placement.main()
+                result = json.loads(output.getvalue())
+                layout = json.loads(owners.read_text())
+                self.assertEqual(len(layout), 41)
+                self.assertEqual(result["graph_bytes_per_rank"], 256 << 20)
+                for rank in range(ranks):
+                    fixed = (2 << 30) if not rank else (512 << 20)
+                    if not rank:
+                        fixed += (4 << 30) + sum(placement.cache_bytes(2097152))
+                    count = sum(row.count(rank) for row in layout)
+                    peak = fixed + result["matrix_bytes"] + (256 << 20) + count * EXPERT_BYTES
+                    self.assertEqual(result["peak_estimate"][rank], peak)
+                    self.assertEqual(result["free_after"][rank], (32 << 30) - (512 << 20) - peak)
+                    self.assertGreater(result["free_after"][rank], 0)
 
     def test_ep_capacity(self):
         budgets = [n * EXPERT_BYTES for n in (2, 1022, 0)]

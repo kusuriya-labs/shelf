@@ -4,6 +4,7 @@
 #include <shelf/models/hy4_flash/moe_graph_plan.h>
 #include <shelf/models/hy4_flash/checkpoint.h>
 #include <shelf/models/hy4_flash/sync.h>
+#include <shelf/models/hy4_flash/graph.h>
 #include <memory>
 #include <string_view>
 
@@ -18,7 +19,13 @@ struct Hy4StepParams {
     int32_t rows;
     int32_t position;
     uint64_t seed;
-    std::array<uint64_t, 4> engram;
+    int draft_last = -1;
+    int ids[6];
+};
+
+struct GraphInput {
+    Hy4StepParams step;
+    uint8_t engram[4][6 * 16 * 98];
 };
 
 struct Region {
@@ -67,6 +74,13 @@ struct Residency {
     void transfer(void *dst, int destination, const void *src, int source, size_t bytes);
     std::array<std::array<bool, 4>, 4> peer{}, owns_peer{};
     bool push = false;
+    bool graph_room = false;
+    bool target_capture_failed = false, draft_capture_failed = false;
+    std::array<GraphPlan, 4> target_graphs{};
+    std::array<GraphPlan, 2> draft_graphs{};
+    size_t target_victim = 0, draft_victim = 0;
+    GraphInput *graph_input = nullptr;
+    uint64_t target_replays = 0, draft_replays = 0;
     void *staging = nullptr;
     std::array<std::array<std::array<hipEvent_t, 2>, 4>, 4> ready{}, ack{};
     std::array<std::array<int, 4>, 4> parity{};

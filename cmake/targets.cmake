@@ -50,6 +50,7 @@ set_property(TARGET shelf_hy4_flash APPEND PROPERTY BUILD_RPATH "${SHELF_LIBCXX_
 
 add_library(shelf_hy4_model STATIC
     src/shelf/models/hy4_flash/checkpoint.cpp
+    src/shelf/models/hy4_flash/graph.cpp
     src/shelf/models/hy4_flash/residency.cpp
     src/shelf/models/hy4_flash/ops.hip
     src/shelf/models/hy4_flash/attention.hip

@@ -18,6 +18,12 @@ build/shelf-server --model-dir /path/to/model --engram-dir /path/to/engram \
 
 予約に必要な容量が不足する場合はエラーで停止する。予約長を 1Mi に変更する場合は、配置表も `--tokens 1048576` で再生成する。静的容量と前提は[調査記録](../research/20261119/hy4_r9700_capacity.md)を参照。
 
+## HIP Graph の切り替え
+
+TP=1、EP=1〜4 で push 転送を使用し、すべての GPU 間で peer access が有効な場合、decode 1 行と verify 1〜6 行で層ごとの HIP Graph を使用する。単一リクエストの DFly2 は、候補 5 個を 1 回の Graph 起動で生成する。Target は `SHELF_HY4_GRAPH=0`、DFly2 は `SHELF_HY4_DRAFT_GRAPH=0` で個別に eager 実行へ切り替えられる。
+
+`placement.py` は TP=1 の各 rank の `peak_estimate` に Graph 用の 256 MiB を含める。実行時は、重み、KV、作業域の予約後にこの余裕を確保できる場合に Graph を有効にする。余裕不足、capture 失敗、EP のプロファイル取得時は eager 実行を使用する。
+
 ## EP=2 × TP=2 の例
 
 4 台を 2 つの EP group と 2 つの TP lane で使う。配置表の値は expert の所有 EP group になる。配置表は TP 分割後の 1 lane 分の容量で生成する。
