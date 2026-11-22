@@ -52,7 +52,8 @@ void fold_kv_weights(Residency &gpu, int rank) {
     checked(hipDeviceSynchronize());
 }
 void attend_absorbed(Ops &op, const std::string &projection, Mat latent, Mat rotary, Mat q, Mat gate,
-                     const int *positions, int stride, Param sinks, Mat out) {
+                     const int *positions, int stride, Param sinks, Mat out, bool contiguous, bool sliding,
+                     int row_offset, int chunk_rows) {
     auto folded = static_cast<const _Float16 *>(op.gpu.folded[op.rank].at(projection));
     int heads = q.cols / 256, rows = q.rows;
     auto input = static_cast<_Float16 *>(op.arena.next(size_t(latent.rows) * 512 * 2));
@@ -61,10 +62,11 @@ void attend_absorbed(Ops &op, const std::string &projection, Mat latent, Mat rot
     size_t length = size_t(rows) * heads * ((stride + 15) / 16 * 16);
     auto scores = static_cast<float *>(op.arena.next(length * 4));
     auto probs = static_cast<uint16_t *>(op.arena.next(length * 2));
-    quant_latent<<<dim3(4, latent.rows), 32>>>(
+    quant_latent<<<dim3(4, latent.rows), 32, 0, op.stream>>>(
         latent, static_cast<const uint16_t *>(op.param(projection + ".suh").p), input);
     checked(hipGetLastError());
     checked(shelf_hy4_mla_absorbed(q.p, folded, rotary.p, gate.p, sinks.p, sinks.type == io::SType::F32,
-                                   positions, stride, input, query, values, scores, probs, out.p, rows, heads));
+                                   positions, stride, input, query, values, scores, probs, out.p, rows, heads,
+                                   op.stream, op.params, contiguous, sliding, row_offset, chunk_rows));
 }
 }

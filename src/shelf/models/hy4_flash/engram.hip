@@ -41,11 +41,6 @@ __global__ void decode_heads(const uint8_t *packed, Norms norms, Mat embed) {
         embed.p[blockIdx.y * 1536 + head * 96 + c] =
             f32_to_bf16_rne_device(round_bf16(v * inv) * bf16_bits_to_f32(norms.head[head][c]));
 }
-__global__ void bias(Mat x, const uint16_t *b) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < x.rows * x.cols)
-        x.p[i] = f32_to_bf16_rne_device(bf16_bits_to_f32(x.p[i]) + bf16_bits_to_f32(b[i % x.cols]));
-}
 __global__ void add_memory(Mat x, Mat k, Mat q, Mat value, const uint16_t *scale, const int *ids, int stream) {
     __shared__ float scratch[256];
     int row = blockIdx.x, tid = threadIdx.x;
@@ -125,26 +120,22 @@ Mat engram(Ops &op, int layer, Mat x, const std::vector<int> &prior, const std::
         packed = gather_engram(op.gpu.model, layer, x.rows, ids, prior);
     auto memory = static_cast<uint8_t *>(op.arena.next(packed.size()));
     op.copy(memory, packed.data(), packed.size(), hipMemcpyHostToDevice);
-    checked(hipStreamSynchronize(nullptr));
     auto embed = op.mat(x.rows, 1536);
     Norms norms{};
     for (int i = 0; i < 16; ++i)
         norms.head[i] = bf("lookup_per_head_norms." + std::to_string(i) + ".weight");
-    decode_heads<<<dim3(16, x.rows), 128>>>(memory, norms, embed);
+    decode_heads<<<dim3(16, x.rows), 128, 0, op.stream>>>(memory, norms, embed);
     checked(hipGetLastError());
-    auto project = [&](const std::string &key) {
-        Mat y = op.linear(p + key, embed);
-        bias<<<(y.rows * y.cols + 255) / 256, 256>>>(y, bf(key + ".bias"));
-        checked(hipGetLastError());
-        return y;
-    };
-    auto values = op.norm(project("value_proj"), p + "unified_pre_gamma", 1.1920928955e-7f);
+    auto project = [&](const std::string &key) { return op.linear(p + key, embed); };
+    constexpr float eps = 1.1920928955e-7f;
+    auto values = op.norm_bias(project("value_proj"), bf("value_proj.bias"), p + "unified_pre_gamma", eps);
     auto token_ids = op.indices(ids);
     for (int i = 0; i < 4; ++i) {
         auto s = std::to_string(i);
-        auto k = op.norm(project("key_projs." + s), p + "norm_key." + s + ".weight", 1.1920928955e-7f);
-        auto q = op.norm(op.slice(x, i * 3072, 3072), p + "norm_query." + s + ".weight", 1.1920928955e-7f);
-        add_memory<<<x.rows, 256>>>(x, k, q, values, bf("unified_per_hc_scales." + s), token_ids, i);
+        auto k = op.norm_bias(project("key_projs." + s), bf("key_projs." + s + ".bias"),
+                              p + "norm_key." + s + ".weight", eps);
+        auto q = op.norm_slice(x, i * 3072, 3072, p + "norm_query." + s + ".weight", eps);
+        add_memory<<<x.rows, 256, 0, op.stream>>>(x, k, q, values, bf("unified_per_hc_scales." + s), token_ids, i);
         checked(hipGetLastError());
     }
     return x;

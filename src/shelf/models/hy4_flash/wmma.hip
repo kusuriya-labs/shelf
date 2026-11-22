@@ -157,12 +157,12 @@ __global__ void expert_batch(const int8_t *codes, const float *scales, const Hy4
 }
 hipError_t shelf_hy4_wmma_experts(const int8_t *codes, const float *scales, const Hy4ExpertProjection *matrices,
                                   const Hy4Route *routes, const Hy4ExpertBatch *batches, int count,
-                                  float *partial, bool mixed, int k, int n) {
+                                  float *partial, bool mixed, int k, int n, hipStream_t stream) {
     if (n % 64)
         return hipErrorInvalidValue;
     if (mixed)
-        expert_batch<true><<<dim3(n / 64, count), 128>>>(codes, scales, matrices, routes, batches, partial, k, n);
+        expert_batch<true><<<dim3(n / 64, count), 128, 0, stream>>>(codes, scales, matrices, routes, batches, partial, k, n);
     else
-        expert_batch<false><<<dim3(n / 64, count), 128>>>(codes, scales, matrices, routes, batches, partial, k, n);
+        expert_batch<false><<<dim3(n / 64, count), 128, 0, stream>>>(codes, scales, matrices, routes, batches, partial, k, n);
     return hipGetLastError();
 }

@@ -2,6 +2,7 @@
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/decode.h>
 #include <cmath>
 #include <stdexcept>
+#include <vector>
 
 namespace shelf::hy4 {
 namespace {
@@ -64,7 +65,45 @@ __global__ void normalize_from(Mat x, Param weight, Mat y, float eps, int first,
         y.p[by + c] =
             f32_to_bf16_rne_device(round_bf16(value(x, bx + c) * inv) * (weight.p ? read(weight, c) : 1.f));
 }
-__global__ void rotary_from(Mat x, Mat y, int heads, int start, float theta, int first) {
+__global__ void norm_bias_kernel(Mat x, const uint16_t *bias, Param weight, Mat y, float eps) {
+    __shared__ float scratch[32];
+    size_t base = size_t(blockIdx.x) * x.cols;
+    uint16_t vals[12];
+    int n = 0;
+    float sum = 0;
+    for (int c = threadIdx.x; c < x.cols; c += 256) {
+        float v = bf16_bits_to_f32(x.p[base + c]) + bf16_bits_to_f32(bias[c]);
+        vals[n] = f32_to_bf16_rne_device(v);
+        float r = bf16_bits_to_f32(vals[n]);
+        sum += r * r;
+        ++n;
+    }
+    float inv = rsqrtf(blocksum(sum, scratch) / x.cols + eps);
+    for (int i = 0, c = threadIdx.x; c < x.cols; c += 256, ++i)
+        y.p[base + c] = f32_to_bf16_rne_device(round_bf16(bf16_bits_to_f32(vals[i]) * inv) *
+                                              (weight.p ? read(weight, c) : 1.f));
+}
+__global__ void norm_slice_kernel(Mat x, Param weight, Mat y, float eps, int first) {
+    __shared__ float scratch[32];
+    size_t bx = size_t(blockIdx.x) * x.cols + first, by = size_t(blockIdx.x) * y.cols;
+    uint16_t vals[12];
+    int n = 0;
+    float sum = 0;
+    for (int c = threadIdx.x; c < y.cols; c += 256) {
+        vals[n] = x.p[bx + c];
+        float r = bf16_bits_to_f32(vals[n]);
+        sum += r * r;
+        ++n;
+    }
+    float inv = rsqrtf(blocksum(sum, scratch) / y.cols + eps);
+    for (int i = 0, c = threadIdx.x; c < y.cols; c += 256, ++i)
+        y.p[by + c] = f32_to_bf16_rne_device(round_bf16(bf16_bits_to_f32(vals[i]) * inv) *
+                                            (weight.p ? read(weight, c) : 1.f));
+}
+__global__ void rotary_from(Mat x, Mat y, int heads, int start, float theta, int first,
+                            const Hy4StepParams *params) {
+    if (params)
+        start = params->position;
     size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= size_t(y.rows) * y.cols)
         return;
@@ -134,6 +173,26 @@ __global__ void hc_reduce(Mat x, Mat y, const float *gates, int count) {
             __fadd_rn(acc, __fmul_rn(gates[row * count + h], value(x, size_t(row) * x.cols + h * y.cols + c)));
     y.p[i] = f32_to_bf16_rne_device(acc);
 }
+__global__ void hc_reduce_norm(Mat x, const float *gates, Param weight, Mat y, float eps, int count) {
+    __shared__ float scratch[32];
+    int row = blockIdx.x, tid = threadIdx.x;
+    uint16_t vals[12];
+    int n = 0;
+    float sum = 0;
+    for (int c = tid; c < y.cols; c += 256) {
+        float acc = 0;
+        for (int h = 0; h < 4; ++h)
+            acc = __fadd_rn(acc, __fmul_rn(gates[row * count + h], value(x, size_t(row) * x.cols + h * y.cols + c)));
+        vals[n] = f32_to_bf16_rne_device(acc);
+        float v = bf16_bits_to_f32(vals[n]);
+        sum += v * v;
+        ++n;
+    }
+    float inv = rsqrtf(blocksum(sum, scratch) / y.cols + eps);
+    for (int i = 0, c = tid; c < y.cols; c += 256, ++i)
+        y.p[size_t(row) * y.cols + c] = f32_to_bf16_rne_device(
+            round_bf16(bf16_bits_to_f32(vals[i]) * inv) * (weight.p ? read(weight, c) : 1.f));
+}
 __global__ void hc_expand(Mat x, Mat y, const float *post) {
     size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= size_t(x.rows) * x.cols)
@@ -142,7 +201,9 @@ __global__ void hc_expand(Mat x, Mat y, const float *post) {
     x.p[i] = f32_to_bf16_rne_device(
         __fadd_rn(value(x, i), __fmul_rn(post[r * 8 + 4 + h], value(y, size_t(r) * y.cols + i % y.cols))));
 }
-__global__ void rotary(Mat x, Mat y, int heads, int start, float theta) {
+__global__ void rotary(Mat x, Mat y, int heads, int start, float theta, const Hy4StepParams *params) {
+    if (params)
+        start = params->position;
     size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= size_t(x.rows) * x.cols)
         return;
@@ -174,11 +235,11 @@ __global__ void peer_copy_kernel(uint8_t *dst, const uint8_t *src, size_t bytes)
         dst[i] = src[i];
 }
 }
-void peer_copy(void *dst, const void *src, size_t bytes) {
+void peer_copy(void *dst, const void *src, size_t bytes, hipStream_t stream) {
     if (!bytes)
         return;
     size_t threads = (bytes + 15) / 16;
-    peer_copy_kernel<<<(threads + 255) / 256, 256>>>(static_cast<uint8_t *>(dst),
+    peer_copy_kernel<<<(threads + 255) / 256, 256, 0, stream>>>(static_cast<uint8_t *>(dst),
                                                      static_cast<const uint8_t *>(src), bytes);
     checked(hipGetLastError());
 }
@@ -189,11 +250,11 @@ __global__ void add_bf16_kernel(uint16_t *dst, const uint16_t *src, size_t count
         dst[i] = f32_to_bf16_rne_device(bf16_bits_to_f32(dst[i]) + bf16_bits_to_f32(src[i]));
 }
 }
-void tp_add_bf16(void *dst, const void *src, size_t bytes) {
+void tp_add_bf16(void *dst, const void *src, size_t bytes, hipStream_t stream) {
     if (!bytes)
         return;
     size_t count = bytes / 2;
-    add_bf16_kernel<<<(count + 255) / 256, 256>>>(static_cast<uint16_t *>(dst),
+    add_bf16_kernel<<<(count + 255) / 256, 256, 0, stream>>>(static_cast<uint16_t *>(dst),
                                                   static_cast<const uint16_t *>(src), count);
     checked(hipGetLastError());
 }
@@ -216,7 +277,7 @@ Mat Ops::linear(const std::string &name, Mat x) {
             (w.spec.dtype != io::SType::F32 && w.spec.dtype != io::SType::BF16))
             throw std::runtime_error("線形の形状・型が不正です: " + name);
         Mat y = mat(x.rows, w.spec.shape[0]);
-        dense<<<dim3((y.cols + 3) / 4, y.rows), 128>>>(x, param(name + ".weight"), y);
+        dense<<<dim3((y.cols + 3) / 4, y.rows), 128, 0, stream>>>(x, param(name + ".weight"), y);
         checked(hipGetLastError());
         return y;
     }
@@ -237,7 +298,7 @@ Mat Ops::linear(const std::string &name, Mat x) {
     checked(shelf_hy4_linear(x.p, static_cast<const uint16_t *>(param(name + ".suh").p),
                              static_cast<const uint16_t *>(param(name + ".svh").p),
                              static_cast<const uint32_t *>(param(name + ".trellis").p), codes, scales, partial,
-                             y.p, x.rows, x.cols, y.cols, pk, pn, it->spec.shape[2] / 16, nullptr,
+                             y.p, x.rows, x.cols, y.cols, pk, pn, it->spec.shape[2] / 16, stream,
                              splits));
     if (gpu.model.row_parallel(name, rank))
         gpu.tp_sum(y.p, rank, y.bytes());
@@ -247,38 +308,52 @@ Mat Ops::linear(const std::string &name, Mat x) {
 Mat Ops::norm(Mat x, const std::string &key, float eps) {
     Mat y = mat(x.rows, x.cols);
     Param w = key.empty() ? Param{} : param(key);
-    normalize<<<x.rows, 256>>>(x, w, y, eps);
+    normalize<<<x.rows, 256, 0, stream>>>(x, w, y, eps);
     checked(hipGetLastError());
     return y;
 }
 Mat Ops::norm_from(Mat x, int first, int width, const std::string &key, float eps) {
     Mat y = mat(x.rows, width);
     Param w = key.empty() ? Param{} : param(key);
-    normalize_from<<<x.rows, 256>>>(x, w, y, eps, first, width);
+    normalize_from<<<x.rows, 256, 0, stream>>>(x, w, y, eps, first, width);
+    checked(hipGetLastError());
+    return y;
+}
+Mat Ops::norm_bias(Mat x, const uint16_t *bias, const std::string &key, float eps) {
+    Mat y = mat(x.rows, x.cols);
+    Param w = key.empty() ? Param{} : param(key);
+    norm_bias_kernel<<<x.rows, 256, 0, stream>>>(x, bias, w, y, eps);
+    checked(hipGetLastError());
+    return y;
+}
+Mat Ops::norm_slice(Mat x, int first, int width, const std::string &key, float eps) {
+    Mat y = mat(x.rows, width);
+    Param w = key.empty() ? Param{} : param(key);
+    norm_slice_kernel<<<x.rows, 256, 0, stream>>>(x, w, y, eps, first);
     checked(hipGetLastError());
     return y;
 }
 Mat Ops::slice(Mat x, int first, int width) {
     Mat y = mat(x.rows, width);
-    select_cols<<<grid(y), 256>>>(x, y, first);
+    select_cols<<<grid(y), 256, 0, stream>>>(x, y, first);
     checked(hipGetLastError());
     return y;
 }
 Mat Ops::join(Mat a, Mat b) {
     Mat y = mat(a.rows, a.cols + b.cols);
-    join_cols<<<grid(y), 256>>>(a, b, y);
+    join_cols<<<grid(y), 256, 0, stream>>>(a, b, y);
     checked(hipGetLastError());
     return y;
 }
 Mat Ops::add(Mat a, Mat b) {
     Mat y = mat(a.rows, a.cols);
-    element<<<grid(y), 256>>>(a, b, y, 0);
+    element<<<grid(y), 256, 0, stream>>>(a, b, y, 0);
     checked(hipGetLastError());
     return y;
 }
 Mat Ops::swiglu(Mat a, Mat b, bool clip) {
     Mat y = mat(a.rows, a.cols);
-    element<<<grid(y), 256>>>(a, b, y, clip ? 2 : 1);
+    element<<<grid(y), 256, 0, stream>>>(a, b, y, clip ? 2 : 1);
     checked(hipGetLastError());
     return y;
 }
@@ -287,10 +362,16 @@ int *Ops::indices(const std::vector<int> &ids) {
     copy(p, ids.data(), ids.size() * sizeof(int), hipMemcpyHostToDevice);
     return p;
 }
+void *Ops::reserve_persistent(size_t bytes) {
+    size_t aligned = (bytes + 255) & ~size_t(255);
+    if (aligned > arena.size || arena.cursor > arena.size - aligned)
+        throw std::runtime_error("作業域の容量が不足しています");
+    arena.size -= aligned;
+    return arena.base + arena.size;
+}
 void Ops::copy(void *dst, const void *src, size_t bytes, hipMemcpyKind kind) {
-    if (kind == hipMemcpyDeviceToHost)
-        checked(hipStreamSynchronize(nullptr));
-    checked(hipMemcpy(dst, src, bytes, kind));
+    checked(hipMemcpyAsync(dst, src, bytes, kind, stream));
+    checked(hipStreamSynchronize(stream));
 }
 Mat Ops::embed(const std::vector<int> &ids, bool expand) {
     const auto &w = gpu.model.at("model.embed_tokens.weight", rank);
@@ -302,7 +383,7 @@ Mat Ops::embed(const std::vector<int> &ids, bool expand) {
     Mat x{static_cast<uint16_t *>(const_cast<void *>(gpu.device(w))), 120832, 3072};
     Mat y = mat(ids.size(), expand ? 12288 : 3072);
     int *list = indices(ids);
-    gather_rows<<<grid(y), 256>>>(x, list, y, expand ? 4 : 1);
+    gather_rows<<<grid(y), 256, 0, stream>>>(x, list, y, expand ? 4 : 1);
     checked(hipGetLastError());
     return y;
 }
@@ -310,31 +391,43 @@ Mat Ops::collapse(Mat x, const std::string &prefix, float *&post) {
     int count = prefix == "model.hc_head.hc_head_" ? 4 : 8;
     post = static_cast<float *>(arena.next(size_t(x.rows) * count * 4));
     Mat y = mat(x.rows, 3072);
-    hc_mix<<<dim3(count, x.rows), 256>>>(x, param(prefix + "fn"), param(prefix + "scale"),
-                                         param(prefix + "base"), post, count);
+    hc_mix<<<dim3(count, x.rows), 256, 0, stream>>>(x, param(prefix + "fn"), param(prefix + "scale"),
+                                                    param(prefix + "base"), post, count);
     checked(hipGetLastError());
-    hc_reduce<<<grid(y), 256>>>(x, y, post, count);
+    hc_reduce<<<grid(y), 256, 0, stream>>>(x, y, post, count);
+    checked(hipGetLastError());
+    return y;
+}
+Mat Ops::collapse_norm(Mat x, const std::string &prefix, float *&post, const std::string &key, float eps) {
+    int count = prefix == "model.hc_head.hc_head_" ? 4 : 8;
+    post = static_cast<float *>(arena.next(size_t(x.rows) * count * 4));
+    Mat y = mat(x.rows, 3072);
+    Param w = key.empty() ? Param{} : param(key);
+    hc_mix<<<dim3(count, x.rows), 256, 0, stream>>>(x, param(prefix + "fn"), param(prefix + "scale"),
+                                                    param(prefix + "base"), post, count);
+    checked(hipGetLastError());
+    hc_reduce_norm<<<x.rows, 256, 0, stream>>>(x, post, w, y, eps, count);
     checked(hipGetLastError());
     return y;
 }
 Mat Ops::expand(Mat x, Mat y, const float *post) {
-    hc_expand<<<grid(x), 256>>>(x, y, post);
+    hc_expand<<<grid(x), 256, 0, stream>>>(x, y, post);
     checked(hipGetLastError());
     return x;
 }
 void Ops::add_into(Mat a, Mat b, Mat out) {
-    element<<<grid(a), 256>>>(a, b, out, 0);
+    element<<<grid(a), 256, 0, stream>>>(a, b, out, 0);
     checked(hipGetLastError());
 }
 Mat Ops::rope_from(Mat x, int first, int width, int heads, int start, float theta) {
     Mat y = mat(x.rows, width);
-    rotary_from<<<grid(y), 256>>>(x, y, heads, start, theta, first);
+    rotary_from<<<grid(y), 256, 0, stream>>>(x, y, heads, start, theta, first, params);
     checked(hipGetLastError());
     return y;
 }
 Mat Ops::rope(Mat x, int heads, int start, float theta) {
     Mat y = mat(x.rows, x.cols);
-    rotary<<<grid(y), 256>>>(x, y, heads, start, theta);
+    rotary<<<grid(y), 256, 0, stream>>>(x, y, heads, start, theta, params);
     checked(hipGetLastError());
     return y;
 }
