@@ -8,6 +8,10 @@ extern "C" hipError_t shelf_hy4_linear(const uint16_t *input, const uint16_t *su
                                        uint16_t *output, int rows, int input_width, int output_width,
                                        int padded_input, int padded_output, int bits, hipStream_t stream,
                                        int splits = 1);
+extern "C" hipError_t shelf_hy4_linear_fused_gemm(const uint16_t *input, const uint16_t *suh, const uint16_t *svh,
+                                                  const uint32_t *trellis, float *partial, uint16_t *output,
+                                                  int rows, int input_width, int output_width, int padded_input,
+                                                  int padded_output, int bits, int splits, hipStream_t stream);
 
 struct Hy4ExpertBatch {
     int first, count;

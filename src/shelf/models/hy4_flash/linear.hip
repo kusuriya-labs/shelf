@@ -73,15 +73,27 @@ extern "C" hipError_t shelf_hy4_linear(const uint16_t *input, const uint16_t *su
         return hipErrorInvalidValue;
     if (splits < 1 || splits > padded_input / 128)
         return hipErrorInvalidValue;
-    rotate_input<<<dim3(padded_input / 128, rows), 32, 0, stream>>>(input, suh, codes, scales, input_width,
-                                                                    padded_input);
-    auto status = hipGetLastError();
-    if (status != hipSuccess)
-        return status;
-    status = shelf_hy4_wmma(codes, scales, trellis, partial, rows, padded_input, padded_output, bits, stream,
-                            splits);
-    if (status != hipSuccess)
-        return status;
+    auto status = hipSuccess;
+    if (rows <= 16 && (bits == 4 || bits == 6)) {
+        const bool out_fused = splits == 1 && output_width == padded_output;
+        status = shelf_hy4_linear_fused_gemm(input, suh, out_fused ? svh : nullptr, trellis, partial,
+                                             out_fused ? output : nullptr, rows, input_width, output_width,
+                                             padded_input, padded_output, bits, splits, stream);
+        if (status != hipSuccess)
+            return status;
+        if (out_fused)
+            return hipSuccess;
+    } else {
+        rotate_input<<<dim3(padded_input / 128, rows), 32, 0, stream>>>(input, suh, codes, scales, input_width,
+                                                                        padded_input);
+        status = hipGetLastError();
+        if (status != hipSuccess)
+            return status;
+        status = shelf_hy4_wmma(codes, scales, trellis, partial, rows, padded_input, padded_output, bits, stream,
+                                 splits);
+        if (status != hipSuccess)
+            return status;
+    }
     rotate_output<<<dim3(padded_output / 128, rows), 32, 0, stream>>>(
         partial, svh, output, output_width, padded_output, nullptr, 0, nullptr, nullptr, splits);
     return hipGetLastError();

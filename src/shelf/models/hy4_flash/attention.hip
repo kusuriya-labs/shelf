@@ -222,8 +222,8 @@ Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidd
     Mat qres = op.norm(op.linear(p + "q_a_proj", hidden), p + "q_a_layernorm.weight");
     Mat q = op.rope(op.linear(p + "q_b_proj", qres), heads, start, theta);
     Mat ka = op.linear(p + "kv_a_proj_with_mqa", hidden);
-    Mat lat = op.norm(op.slice(ka, 0, 512), p + "kv_a_layernorm.weight");
-    Mat rot = op.rope(op.slice(ka, 512, 64), 1, start, theta);
+    Mat lat = op.norm_from(ka, 0, 512, p + "kv_a_layernorm.weight");
+    Mat rot = op.rope_from(ka, 512, 64, 1, start, theta);
     Mat gate = op.linear(p + "linear_gate", hidden);
     Param sinks = op.param(p + "learnable_sink_param");
     if (op.gpu.tp_size > 1 && !draft) {
