@@ -209,10 +209,11 @@ hipError_t launch_plamo_exl3_projection(const PlamoExl3ProjectionGroup &args, ui
                                         bool allow_shape_fusion, bool input_rotated) {
     if (launch_count)
         *launch_count = 0u;
+    const bool grouped_3bit = bits == 3u && args.rows <= 8u && !allow_shape_fusion;
     if (args.count == 0u || args.count > 3u || args.rows == 0u || args.rows >= 256u ||
         args.k % 128u != 0u || args.scale_stride_bytes % 4u != 0u || !args.input ||
         args.input_stride < args.k || args.scale_stride_bytes < args.k / 128u * 4u ||
-        (bits != 4u && bits != 5u && bits != 8u))
+        (!grouped_3bit && bits != 4u && bits != 5u && bits != 8u))
         return hipErrorInvalidValue;
     uint32_t n = 0u;
     for (uint32_t i = 0; i < args.count; ++i) {
@@ -250,7 +251,9 @@ hipError_t launch_plamo_exl3_projection(const PlamoExl3ProjectionGroup &args, ui
             *launch_count = input_rotated ? 1u : 2u;
         return launch_fused_output(args, bits, stream);
     }
-    if (bits == 4u)
+    if (bits == 3u)
+        err = launch_group_bits<3, 1, true>(args, stream);
+    else if (bits == 4u)
         err = args.rows <= 16u    ? launch_group_bits<4, 1, true>(args, stream)
               : args.rows <= 128u ? launch_group_bits<4, 2, true>(args, stream)
                                   : launch_group_bits<4, 4, true>(args, stream);

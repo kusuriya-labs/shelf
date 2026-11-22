@@ -288,6 +288,9 @@ int main() {
         for (uint32_t count : {2u, 3u})
             if (!run(rows, 4u, count, 1024u, 384u, 0u, false))
                 return 1;
+    for (uint32_t rows : {1u, 8u})
+        for (uint32_t count : {2u, 3u})
+            if (!run(rows, 3u, count, 1024u, 384u, 0u, false)) return 1;
     if (!run(1u, 4u, 2u, 1024u, 10240u, 1u, false))
         return 1;
     for (uint32_t rows : {1u, 4u, 16u})

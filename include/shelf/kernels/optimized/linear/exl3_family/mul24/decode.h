@@ -34,6 +34,13 @@ inline bool rotate_f4_enabled() {
 inline constexpr uint32_t kRotateQuantizeF4MinRows = 32u;
 inline constexpr uint32_t kRotateOutF4MinRows = 512u;
 
+__device__ __forceinline__ uint32_t trellis_state_3bit(uint32_t w0, uint32_t w1, uint32_t offset,
+                                                       uint32_t index) {
+    const uint32_t first = __builtin_amdgcn_alignbit(w0, w1, 32u - offset);
+    const uint32_t last = __builtin_amdgcn_alignbit(w0, w1, 27u - offset);
+    return (index < 4u ? first >> (16u - 3u * index) : last >> (3u * (7u - index))) & 0xFFFFu;
+}
+
 __device__ __forceinline__ uint16_t f32_to_bf16_rne_device(float f) {
     uint32_t u = __float_as_uint(f);
     if ((u & 0x7F800000u) == 0x7F800000u)

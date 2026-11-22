@@ -133,7 +133,9 @@ __global__ void __launch_bounds__(128) __attribute__((amdgpu_waves_per_eu((MT >=
             #pragma unroll
             for (uint32_t i = 0u; i < 8u; ++i) {
                 uint32_t state;
-                if constexpr (kAlignedWindows) {
+                if constexpr (BITS == 3 && MT == 1) {
+                    state = trellis_state_3bit(w0, w1, off, i);
+                } else if constexpr (kAlignedWindows) {
                     // BITS % 4 == 0: the window offset is the same for every lane, so the word pair and
                     // the shift are compile-time constants (one funnel shift per weight).
                     constexpr uint32_t off_c = (BITS + 32u - 16u) % 32u;

@@ -1122,7 +1122,8 @@ Result<PendingBatch> submit_co_batch(
     const void* graph_gdn_conv_history = options.gdn_spec_history.conv_history;
     const void* graph_gdn_recurrent_history = options.gdn_spec_history.recurrent_history;
 #endif
-    auto enqueue_batch = [&]() -> Status {
+    auto enqueue_batch = [&](bool capturing_graph) -> Status {
+        ctx.capturing_graph = capturing_graph;
         auto stq = upload_tokens(input_ids, token_src);
         if (!stq.ok()) return stq;
         stq = upload_tokens(bctx_token_ids, token_src);
@@ -1275,7 +1276,7 @@ Result<PendingBatch> submit_co_batch(
                 stage_graph_inputs();
                 const auto capture_start = std::chrono::steady_clock::now();
                 if (hipStreamBeginCapture(stream, hipStreamCaptureModeGlobal) == hipSuccess) {
-                    Status cap_st = enqueue_batch();
+                    Status cap_st = enqueue_batch(true);
                     hipGraph_t graph = nullptr;
                     hipError_t ec = hipStreamEndCapture(stream, &graph);
                     if (cap_st.ok() && ec == hipSuccess && graph != nullptr) {
@@ -1352,7 +1353,7 @@ Result<PendingBatch> submit_co_batch(
     }
 #endif
     if (!enqueued) {
-        Status plain_st = enqueue_batch();
+        Status plain_st = enqueue_batch(false);
         if (!plain_st.ok()) {
             shelf::gpu::discard_cleanup_result(hipEventDestroy(done));
             return on_error(plain_st);

@@ -111,7 +111,9 @@ group_body(const int8_t *__restrict__ codes, const float *__restrict__ scales,
 #pragma unroll
             for (uint32_t i = 0u; i < 8u; ++i) {
                 uint32_t state;
-                if constexpr (kAlignedWindows) {
+                if constexpr (BITS == 3 && MT == 1) {
+                    state = trellis_state_3bit(w0, w1, off, i);
+                } else if constexpr (kAlignedWindows) {
                     constexpr uint32_t off_c = (BITS + 32u - 16u) % 32u;
                     const uint32_t pos = off_c + i * BITS;
                     const uint32_t e = pos + 16u;

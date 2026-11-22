@@ -937,7 +937,9 @@ Result<OptimizedLaunchResult> try_launch_exl3_projection(
     const bool is_plamo = weight.plamo_exl3_linear;
     static const bool generic_enabled = std::getenv("SHELF_EXL3_INT8_ROTATE_F4") == nullptr &&
         std::getenv("SHELF_OP_DUMP") == nullptr && std::getenv("SHELF_OP_SYNC") == nullptr;
-    if (!is_plamo && (weight.exl3_ka != 4u || ctx.layer_override_count != 0u || !generic_enabled))
+    const bool grouped_3bit = weight.exl3_ka == 3u && ctx.capturing_graph;
+    if (!is_plamo && ((!grouped_3bit && weight.exl3_ka != 4u) ||
+                      ctx.layer_override_count != 0u || !generic_enabled))
         return miss;
     static const bool enabled = [] {
         const char* env = std::getenv("SHELF_PLAMO_EXL3_LINEAR");
@@ -959,7 +961,7 @@ Result<OptimizedLaunchResult> try_launch_exl3_projection(
     }();
     const bool use_prefill = is_plamo && prefill_mode != 0u && rows >= prefill_rows &&
         (weight.exl3_ka == 4u || weight.exl3_ka == 5u);
-    if (rows == 0u || (!is_plamo && rows > 64u) || (rows >= 256u && !use_prefill) || input.value().dtype != ValueDType::BF16 ||
+    if (rows == 0u || (!is_plamo && rows > (grouped_3bit ? 8u : 64u)) || (rows >= 256u && !use_prefill) || input.value().dtype != ValueDType::BF16 ||
         output.value().dtype != ValueDType::BF16 ||
         ctx.exl3_xrot == nullptr || ctx.exl3_accum == nullptr)
         return miss;
@@ -982,7 +984,7 @@ Result<OptimizedLaunchResult> try_launch_exl3_projection(
                 b.weight_index >= ctx.weight_count) break;
             const auto& w = ctx.weights[b.weight_index];
             if (w.plamo_exl3_linear || w.encoding != 4u || w.device_ptr != nullptr ||
-                w.exl3_ka != 4u || w.cols != weight.cols || w.k_padded != w.cols || w.experts != 1u ||
+                w.exl3_ka != weight.exl3_ka || w.cols != weight.cols || w.k_padded != w.cols || w.experts != 1u ||
                 w.rows == 0u || w.rows % 128u != 0u || w.output_col_total != 0u || w.output_col_offset != 0u ||
                 w.preshuffled || w.exl3_half || !w.codes || !w.exl3_suh || !w.exl3_svh) break;
             ++count;
