@@ -1565,11 +1565,3 @@ Status PrefixCache::save_output_tail(
     ++stats_.saves;
     return Status::make_ok();
 }
-
-Status PrefixCache::restore(
-    uint64_t entry_id,
-    PagedSequenceState& dst,
-    hipStream_t stream,
-    SpecRingOut* ring) {
-    if (!kv_ || !state_ || !aux_) {
-        ret

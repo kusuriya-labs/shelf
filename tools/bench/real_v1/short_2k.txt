@@ -219,20 +219,3 @@ std::size_t spec_gdn_conv_bytes(const GdnStatePool& pool) noexcept {
 std::size_t spec_gdn_recurrent_bytes(const GdnStatePool& pool) noexcept {
     return static_cast<std::size_t>(pool.device_view().recurrent_slot_stride) * sizeof(::shelf::state::GdnStateScalar);
 }
-
-Status spec_gdn_snapshot(
-    const GdnStatePool& pool,
-    SequenceSlotId slot,
-    void* conv_dst,
-    void* recurrent_dst,
-    std::size_t conv_bytes,
-    std::size_t recurrent_bytes,
-    hipStream_t stream) {
-
-    if (conv_dst == nullptr || recurrent_dst == nullptr) {
-        return Status::invalid_argument("spec_gdn_snapshot outputs are null", __FILE__, __LINE__);
-    }
-    if (slot >= pool.max_sequences()) {
-        return Status::out_of_range("spec_gdn_snapshot slot out of range", __FILE__, __LINE__);
-    }
-    if (conv_bytes != s

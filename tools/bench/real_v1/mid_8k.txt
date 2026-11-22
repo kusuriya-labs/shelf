@@ -747,36 +747,3 @@ class PrefixSequenceSetAdapter final : public PrefixSequenceSet {
     std::vector<PagedSequenceState*> ranks_;
     std::vector<std::unique_ptr<PrefixSequenceAdapter>> wrappers_;
 };
-
-class FamilyPrefixState {
- public:
-    static Result<std::unique_ptr<FamilyPrefixState>> create(
-        gpu::GpuArena& arena,
-        GdnStatePool& active_state,
-        ::shelf::state::QsaKeyStatePool* active_qsa,
-        ::shelf::state::PleConvStatePool* active_ple_conv,
-        const std::vector<PrefixCacheRankContext>& extra_ranks,
-        const PrefixCacheConfig& config) {
-        auto state = std::unique_ptr<FamilyPrefixState>(new FamilyPrefixState());
-        state->checkpoints_ = config.checkpoints;
-        state->capture_slots_ = config.capture_slots;
-        {
-            auto rank = make_rank(arena, active_state, active_qsa, active_ple_conv,
-                                  config.capture_slots, nullptr, -1);
-            if (!rank.ok()) return rank.status();
-            state->ranks_.push_back(rank.release());
-        }
-        for (const PrefixCacheRankContext& ctx : extra_ranks) {
-            if (ctx.active_state == nullptr || ctx.arena == nullptr ||
-                ctx.stream == nullptr) {
-                return Status::invalid_argument(
-                    "prefix cache rank context is incomplete", __FILE__, __LINE__);
-            }
-            auto scope = shelf::gpu::ScopedDevice::create(ctx.device);
-            if (!scope.ok()) return scope.status();
-            auto rank = make_rank(*ctx.arena, *ctx.active_state, ctx.active_qsa,
-                                  ctx.active_ple_conv, config.capture_slots,
-                                  ctx.stream, ctx.device);
-            if (!rank.ok()) return rank.status();
-            state->ranks_.push_back(rank.release());
-        }

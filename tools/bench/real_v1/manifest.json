@@ -1,10 +1,10 @@
 {
   "version": "real-v1",
   "files": {
-    "long_16k.txt": "113352dc41ac6f6cfc66a0d6a9c96ad348224051f81b55738806a447f1f298a9",
-    "mid_8k.txt": "c19b94c14df0364e3cddc4637d6f8993cec45b96d02ecbf602f6d5eff8259047",
-    "short_2k.txt": "92486fe85021e469a10019a16dafc8cb04dc409b58799166ec3ddbb27a1e009a",
-    "tasks.json": "2fa95bdb876577cb87c86ffd172cf2830540ab60519698cd95da3faf2438037c"
+    "long_16k.txt": "c73ad1b62046c1cf6bbcbbe3ea25494e309542a390233bb625c8ee50e785432e",
+    "mid_8k.txt": "5144ae9b3501efe71ff55948b88a4fdacedb1857f423a7f110d0abef2b2ffc97",
+    "short_2k.txt": "834dd7ded8b0526862e12f856fe79bcf24a380779aa755ee4985d7aa3bfd227c",
+    "tasks.json": "13cd40837b0b2a193562dd5278388c4c706308441c7cd3f88917c02b81460b4b"
   },
   "cells": [
     {
@@ -158,5 +158,17 @@
       "length_tier": "long_16k"
     }
   ],
-  "macro_average": "equal weight for all required cells; null if any cell is missing"
+  "macro_average": "課題ごとに実測 decode tok/s の中央値を取り、セル内を算術平均し、全30セルを等しく重み付けする。対象試行がない課題またはセルがあれば総合値は null。",
+  "context_tokenizer": {
+    "model": "Qwen3.8-27B-BF16",
+    "sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+    "add_special_tokens": false,
+    "chat_template_sha256": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"
+  },
+  "context_tokens": {
+    "long_16k.txt": 16267,
+    "mid_8k.txt": 7898,
+    "short_2k.txt": 1947
+  },
+  "source_revision": "55eedd4e3973d11a8d7eb072a099756cbab42570"
 }

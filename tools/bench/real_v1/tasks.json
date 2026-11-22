@@ -10,13 +10,14 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "複数ファイルの修正案を実装可能な差分として示し、境界条件とテスト、既存利用者への影響を具体的に説明してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
+    "prompt": "出力の残り枠がゼロのとき、呼び出し側が emitted_tokens の要素数をそのまま送信件数として扱います。残り枠がゼロの場合と生成途中の EOS の両方を検討してください。 複数ファイルの修正案を実装可能な差分として示し、境界条件とテスト、既存利用者への影響を具体的に説明してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。 資料の admit_request と spec_bound_result を手掛かりにし、観測できる挙動と仮説を区別してください。",
     "context_file": "short_2k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "残り枠ゼロと途中 EOS を具体的なトークン列で追跡する",
+      "失敗時の所有権と解放順を一貫して扱う",
+      "入力と期待結果を含む検証例を示す"
+    ],
+    "reference_prompt_tokens": 2113
   },
   {
     "id": "code_edit-ja-mid_8k",
@@ -29,13 +30,14 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "複数ファイルの修正案を実装可能な差分として示し、境界条件とテスト、既存利用者への影響を具体的に説明してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
+    "prompt": "GDN 状態の保存で畳み込み側の非同期コピーを投入した直後、再帰状態側のコピーが失敗しました。呼び出し側が片方だけの保存結果を復元に使わないようにしてください。 複数ファイルの修正案を実装可能な差分として示し、境界条件とテスト、既存利用者への影響を具体的に説明してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。 資料の admit_request と spec_gdn_snapshot を手掛かりにし、観測できる挙動と仮説を区別してください。",
     "context_file": "mid_8k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "2回の非同期コピーの順序と失敗後に利用できる状態を区別する",
+      "失敗時の所有権と解放順を一貫して扱う",
+      "入力と期待結果を含む検証例を示す"
+    ],
+    "reference_prompt_tokens": 8070
   },
   {
     "id": "code_edit-ja-long_16k",
@@ -48,13 +50,14 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "複数ファイルの修正案を実装可能な差分として示し、境界条件とテスト、既存利用者への影響を具体的に説明してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
+    "prompt": "ページ境界で出力末尾を保存する際、有効な ring を渡した場合には ring の保存成功も必須とする仕様に変更します。失敗後は capture を再試行または取り消せることが必要です。 複数ファイルの修正案を実装可能な差分として示し、境界条件とテスト、既存利用者への影響を具体的に説明してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。 資料の PrefixCache と save を手掛かりにし、観測できる挙動と仮説を区別してください。",
     "context_file": "long_16k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "ring 保存失敗時に checkpoint と capture の所有権を個別に追跡する",
+      "失敗時の所有権と解放順を一貫して扱う",
+      "入力と期待結果を含む検証例を示す"
+    ],
+    "reference_prompt_tokens": 16432
   },
   {
     "id": "code_edit-en-short_2k",
@@ -67,13 +70,14 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "Propose an implementable multi-file patch, including tests, boundary cases and compatibility implications. Give a substantial, detailed answer with concrete evidence and multiple examples.",
+    "prompt": "The caller treats the size of emitted_tokens as the number to send, including when no output budget remains. Cover both a zero budget and EOS midway through the generated sequence. Propose an implementable multi-file patch, including tests, boundary cases and compatibility implications. Give a substantial, detailed answer with concrete evidence and multiple examples. Ground the answer in admit_request and spec_bound_result from the excerpts, distinguishing observed behavior from hypotheses.",
     "context_file": "short_2k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "Trace zero budget and early EOS with concrete token sequences",
+      "Account consistently for ownership and release on failure",
+      "Give a validation case with inputs and expected outcomes"
+    ],
+    "reference_prompt_tokens": 2083
   },
   {
     "id": "code_edit-en-mid_8k",
@@ -86,13 +90,14 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "Propose an implementable multi-file patch, including tests, boundary cases and compatibility implications. Give a substantial, detailed answer with concrete evidence and multiple examples.",
+    "prompt": "While saving GDN state, the convolution copy has been enqueued and the recurrent-state copy fails. The caller must never restore a partially saved snapshot. Propose an implementable multi-file patch, including tests, boundary cases and compatibility implications. Give a substantial, detailed answer with concrete evidence and multiple examples. Ground the answer in admit_request and spec_gdn_snapshot from the excerpts, distinguishing observed behavior from hypotheses.",
     "context_file": "mid_8k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "Distinguish enqueue order from completion and identify which state can be used after failure",
+      "Account consistently for ownership and release on failure",
+      "Give a validation case with inputs and expected outcomes"
+    ],
+    "reference_prompt_tokens": 8031
   },
   {
     "id": "code_edit-en-long_16k",
@@ -105,13 +110,14 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "Propose an implementable multi-file patch, including tests, boundary cases and compatibility implications. Give a substantial, detailed answer with concrete evidence and multiple examples.",
+    "prompt": "Change the contract for saving an output tail at a page boundary. When a valid ring is supplied, saving that ring must also succeed. The caller must be able to retry or cancel the capture after failure. Propose an implementable multi-file patch, including tests, boundary cases and compatibility implications. Give a substantial, detailed answer with concrete evidence and multiple examples. Ground the answer in PrefixCache and save from the excerpts, distinguishing observed behavior from hypotheses.",
     "context_file": "long_16k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "Track checkpoint and capture ownership separately when saving the ring fails",
+      "Account consistently for ownership and release on failure",
+      "Give a validation case with inputs and expected outcomes"
+    ],
+    "reference_prompt_tokens": 16408
   },
   {
     "id": "code_review-ja-short_2k",
@@ -124,13 +130,14 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "提示コードをレビューし、再現条件、根拠となる箇所、影響、修正案と回帰テストを優先度順に詳述してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
+    "prompt": "出力の残り枠がゼロのとき、呼び出し側が emitted_tokens の要素数をそのまま送信件数として扱います。残り枠がゼロの場合と生成途中の EOS の両方を検討してください。 提示コードをレビューし、再現条件、根拠となる箇所、影響、修正案と回帰テストを優先度順に詳述してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。 資料の admit_request と spec_bound_result を手掛かりにし、観測できる挙動と仮説を区別してください。",
     "context_file": "short_2k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "残り枠ゼロと途中 EOS を具体的なトークン列で追跡する",
+      "失敗時の所有権と解放順を一貫して扱う",
+      "入力と期待結果を含む検証例を示す"
+    ],
+    "reference_prompt_tokens": 2117
   },
   {
     "id": "code_review-ja-mid_8k",
@@ -143,13 +150,14 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "提示コードをレビューし、再現条件、根拠となる箇所、影響、修正案と回帰テストを優先度順に詳述してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
+    "prompt": "GDN 状態の保存で畳み込み側の非同期コピーを投入した直後、再帰状態側のコピーが失敗しました。呼び出し側が片方だけの保存結果を復元に使わないようにしてください。 提示コードをレビューし、再現条件、根拠となる箇所、影響、修正案と回帰テストを優先度順に詳述してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。 資料の admit_request と spec_gdn_snapshot を手掛かりにし、観測できる挙動と仮説を区別してください。",
     "context_file": "mid_8k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "2回の非同期コピーの順序と失敗後に利用できる状態を区別する",
+      "失敗時の所有権と解放順を一貫して扱う",
+      "入力と期待結果を含む検証例を示す"
+    ],
+    "reference_prompt_tokens": 8074
   },
   {
     "id": "code_review-ja-long_16k",
@@ -162,13 +170,14 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "提示コードをレビューし、再現条件、根拠となる箇所、影響、修正案と回帰テストを優先度順に詳述してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
+    "prompt": "ページ境界で出力末尾を保存する際、有効な ring を渡した場合には ring の保存成功も必須とする仕様に変更します。失敗後は capture を再試行または取り消せることが必要です。 提示コードをレビューし、再現条件、根拠となる箇所、影響、修正案と回帰テストを優先度順に詳述してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。 資料の PrefixCache と save を手掛かりにし、観測できる挙動と仮説を区別してください。",
     "context_file": "long_16k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "ring 保存失敗時に checkpoint と capture の所有権を個別に追跡する",
+      "失敗時の所有権と解放順を一貫して扱う",
+      "入力と期待結果を含む検証例を示す"
+    ],
+    "reference_prompt_tokens": 16436
   },
   {
     "id": "code_review-en-short_2k",
@@ -181,13 +190,14 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "Review the code, identify concrete defects with evidence, reproductions, impact, fixes and regression tests in priority order. Give a substantial, detailed answer with concrete evidence and multiple examples.",
+    "prompt": "The caller treats the size of emitted_tokens as the number to send, including when no output budget remains. Cover both a zero budget and EOS midway through the generated sequence. Review the code, identify concrete defects with evidence, reproductions, impact, fixes and regression tests in priority order. Give a substantial, detailed answer with concrete evidence and multiple examples. Ground the answer in admit_request and spec_bound_result from the excerpts, distinguishing observed behavior from hypotheses.",
     "context_file": "short_2k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "Trace zero budget and early EOS with concrete token sequences",
+      "Account consistently for ownership and release on failure",
+      "Give a validation case with inputs and expected outcomes"
+    ],
+    "reference_prompt_tokens": 2088
   },
   {
     "id": "code_review-en-mid_8k",
@@ -200,13 +210,14 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "Review the code, identify concrete defects with evidence, reproductions, impact, fixes and regression tests in priority order. Give a substantial, detailed answer with concrete evidence and multiple examples.",
+    "prompt": "While saving GDN state, the convolution copy has been enqueued and the recurrent-state copy fails. The caller must never restore a partially saved snapshot. Review the code, identify concrete defects with evidence, reproductions, impact, fixes and regression tests in priority order. Give a substantial, detailed answer with concrete evidence and multiple examples. Ground the answer in admit_request and spec_gdn_snapshot from the excerpts, distinguishing observed behavior from hypotheses.",
     "context_file": "mid_8k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "Distinguish enqueue order from completion and identify which state can be used after failure",
+      "Account consistently for ownership and release on failure",
+      "Give a validation case with inputs and expected outcomes"
+    ],
+    "reference_prompt_tokens": 8036
   },
   {
     "id": "code_review-en-long_16k",
@@ -219,13 +230,14 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "Review the code, identify concrete defects with evidence, reproductions, impact, fixes and regression tests in priority order. Give a substantial, detailed answer with concrete evidence and multiple examples.",
+    "prompt": "Change the contract for saving an output tail at a page boundary. When a valid ring is supplied, saving that ring must also succeed. The caller must be able to retry or cancel the capture after failure. Review the code, identify concrete defects with evidence, reproductions, impact, fixes and regression tests in priority order. Give a substantial, detailed answer with concrete evidence and multiple examples. Ground the answer in PrefixCache and save from the excerpts, distinguishing observed behavior from hypotheses.",
     "context_file": "long_16k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "Track checkpoint and capture ownership separately when saving the ring fails",
+      "Account consistently for ownership and release on failure",
+      "Give a validation case with inputs and expected outcomes"
+    ],
+    "reference_prompt_tokens": 16413
   },
   {
     "id": "design_debug-ja-short_2k",
@@ -238,13 +250,14 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "提示コードを基に障害を切り分ける設計を示し、仮説、観測方法、所有権、並行性、復旧手順と検証計画を詳述してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
+    "prompt": "出力の残り枠がゼロのとき、呼び出し側が emitted_tokens の要素数をそのまま送信件数として扱います。残り枠がゼロの場合と生成途中の EOS の両方を検討してください。 提示コードを基に障害を切り分ける設計を示し、仮説、観測方法、所有権、並行性、復旧手順と検証計画を詳述してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。 資料の admit_request と spec_bound_result を手掛かりにし、観測できる挙動と仮説を区別してください。",
     "context_file": "short_2k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "残り枠ゼロと途中 EOS を具体的なトークン列で追跡する",
+      "失敗時の所有権と解放順を一貫して扱う",
+      "入力と期待結果を含む検証例を示す"
+    ],
+    "reference_prompt_tokens": 2126
   },
   {
     "id": "design_debug-ja-mid_8k",
@@ -257,13 +270,14 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "提示コードを基に障害を切り分ける設計を示し、仮説、観測方法、所有権、並行性、復旧手順と検証計画を詳述してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
+    "prompt": "GDN 状態の保存で畳み込み側の非同期コピーを投入した直後、再帰状態側のコピーが失敗しました。呼び出し側が片方だけの保存結果を復元に使わないようにしてください。 提示コードを基に障害を切り分ける設計を示し、仮説、観測方法、所有権、並行性、復旧手順と検証計画を詳述してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。 資料の admit_request と spec_gdn_snapshot を手掛かりにし、観測できる挙動と仮説を区別してください。",
     "context_file": "mid_8k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "2回の非同期コピーの順序と失敗後に利用できる状態を区別する",
+      "失敗時の所有権と解放順を一貫して扱う",
+      "入力と期待結果を含む検証例を示す"
+    ],
+    "reference_prompt_tokens": 8083
   },
   {
     "id": "design_debug-ja-long_16k",
@@ -276,13 +290,14 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "提示コードを基に障害を切り分ける設計を示し、仮説、観測方法、所有権、並行性、復旧手順と検証計画を詳述してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
+    "prompt": "ページ境界で出力末尾を保存する際、有効な ring を渡した場合には ring の保存成功も必須とする仕様に変更します。失敗後は capture を再試行または取り消せることが必要です。 提示コードを基に障害を切り分ける設計を示し、仮説、観測方法、所有権、並行性、復旧手順と検証計画を詳述してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。 資料の PrefixCache と save を手掛かりにし、観測できる挙動と仮説を区別してください。",
     "context_file": "long_16k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "ring 保存失敗時に checkpoint と capture の所有権を個別に追跡する",
+      "失敗時の所有権と解放順を一貫して扱う",
+      "入力と期待結果を含む検証例を示す"
+    ],
+    "reference_prompt_tokens": 16445
   },
   {
     "id": "design_debug-en-short_2k",
@@ -295,13 +310,14 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "Develop a debugging and architecture plan covering hypotheses, observations, ownership, concurrency, recovery and verification. Give a substantial, detailed answer with concrete evidence and multiple examples.",
+    "prompt": "The caller treats the size of emitted_tokens as the number to send, including when no output budget remains. Cover both a zero budget and EOS midway through the generated sequence. Develop a debugging and architecture plan covering hypotheses, observations, ownership, concurrency, recovery and verification. Give a substantial, detailed answer with concrete evidence and multiple examples. Ground the answer in admit_request and spec_bound_result from the excerpts, distinguishing observed behavior from hypotheses.",
     "context_file": "short_2k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "Trace zero budget and early EOS with concrete token sequences",
+      "Account consistently for ownership and release on failure",
+      "Give a validation case with inputs and expected outcomes"
+    ],
+    "reference_prompt_tokens": 2084
   },
   {
     "id": "design_debug-en-mid_8k",
@@ -314,13 +330,14 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "Develop a debugging and architecture plan covering hypotheses, observations, ownership, concurrency, recovery and verification. Give a substantial, detailed answer with concrete evidence and multiple examples.",
+    "prompt": "While saving GDN state, the convolution copy has been enqueued and the recurrent-state copy fails. The caller must never restore a partially saved snapshot. Develop a debugging and architecture plan covering hypotheses, observations, ownership, concurrency, recovery and verification. Give a substantial, detailed answer with concrete evidence and multiple examples. Ground the answer in admit_request and spec_gdn_snapshot from the excerpts, distinguishing observed behavior from hypotheses.",
     "context_file": "mid_8k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "Distinguish enqueue order from completion and identify which state can be used after failure",
+      "Account consistently for ownership and release on failure",
+      "Give a validation case with inputs and expected outcomes"
+    ],
+    "reference_prompt_tokens": 8032
   },
   {
     "id": "design_debug-en-long_16k",
@@ -333,13 +350,14 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "Develop a debugging and architecture plan covering hypotheses, observations, ownership, concurrency, recovery and verification. Give a substantial, detailed answer with concrete evidence and multiple examples.",
+    "prompt": "Change the contract for saving an output tail at a page boundary. When a valid ring is supplied, saving that ring must also succeed. The caller must be able to retry or cancel the capture after failure. Develop a debugging and architecture plan covering hypotheses, observations, ownership, concurrency, recovery and verification. Give a substantial, detailed answer with concrete evidence and multiple examples. Ground the answer in PrefixCache and save from the excerpts, distinguishing observed behavior from hypotheses.",
     "context_file": "long_16k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "Track checkpoint and capture ownership separately when saving the ring fails",
+      "Account consistently for ownership and release on failure",
+      "Give a validation case with inputs and expected outcomes"
+    ],
+    "reference_prompt_tokens": 16409
   },
   {
     "id": "tech_prose-ja-short_2k",
@@ -352,13 +370,14 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "提示コードの処理と設計上の制約を読者向けに詳しく解説し、具体例、失敗時の挙動、検証方法と未確認事項を区別してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
+    "prompt": "出力の残り枠がゼロのとき、呼び出し側が emitted_tokens の要素数をそのまま送信件数として扱います。残り枠がゼロの場合と生成途中の EOS の両方を検討してください。 提示コードの処理と設計上の制約を読者向けに詳しく解説し、具体例、失敗時の挙動、検証方法と未確認事項を区別してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。 資料の admit_request と spec_bound_result を手掛かりにし、観測できる挙動と仮説を区別してください。",
     "context_file": "short_2k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "残り枠ゼロと途中 EOS を具体的なトークン列で追跡する",
+      "失敗時の所有権と解放順を一貫して扱う",
+      "入力と期待結果を含む検証例を示す"
+    ],
+    "reference_prompt_tokens": 2123
   },
   {
     "id": "tech_prose-ja-mid_8k",
@@ -371,13 +390,14 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "提示コードの処理と設計上の制約を読者向けに詳しく解説し、具体例、失敗時の挙動、検証方法と未確認事項を区別してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
+    "prompt": "GDN 状態の保存で畳み込み側の非同期コピーを投入した直後、再帰状態側のコピーが失敗しました。呼び出し側が片方だけの保存結果を復元に使わないようにしてください。 提示コードの処理と設計上の制約を読者向けに詳しく解説し、具体例、失敗時の挙動、検証方法と未確認事項を区別してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。 資料の admit_request と spec_gdn_snapshot を手掛かりにし、観測できる挙動と仮説を区別してください。",
     "context_file": "mid_8k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "2回の非同期コピーの順序と失敗後に利用できる状態を区別する",
+      "失敗時の所有権と解放順を一貫して扱う",
+      "入力と期待結果を含む検証例を示す"
+    ],
+    "reference_prompt_tokens": 8080
   },
   {
     "id": "tech_prose-ja-long_16k",
@@ -390,13 +410,14 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "提示コードの処理と設計上の制約を読者向けに詳しく解説し、具体例、失敗時の挙動、検証方法と未確認事項を区別してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
+    "prompt": "ページ境界で出力末尾を保存する際、有効な ring を渡した場合には ring の保存成功も必須とする仕様に変更します。失敗後は capture を再試行または取り消せることが必要です。 提示コードの処理と設計上の制約を読者向けに詳しく解説し、具体例、失敗時の挙動、検証方法と未確認事項を区別してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。 資料の PrefixCache と save を手掛かりにし、観測できる挙動と仮説を区別してください。",
     "context_file": "long_16k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "ring 保存失敗時に checkpoint と capture の所有権を個別に追跡する",
+      "失敗時の所有権と解放順を一貫して扱う",
+      "入力と期待結果を含む検証例を示す"
+    ],
+    "reference_prompt_tokens": 16442
   },
   {
     "id": "tech_prose-en-short_2k",
@@ -409,13 +430,14 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "Write a detailed technical explanation of the code, its constraints, concrete examples, failure modes, verification and uncertainties. Give a substantial, detailed answer with concrete evidence and multiple examples.",
+    "prompt": "The caller treats the size of emitted_tokens as the number to send, including when no output budget remains. Cover both a zero budget and EOS midway through the generated sequence. Write a detailed technical explanation of the code, its constraints, concrete examples, failure modes, verification and uncertainties. Give a substantial, detailed answer with concrete evidence and multiple examples. Ground the answer in admit_request and spec_bound_result from the excerpts, distinguishing observed behavior from hypotheses.",
     "context_file": "short_2k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "Trace zero budget and early EOS with concrete token sequences",
+      "Account consistently for ownership and release on failure",
+      "Give a validation case with inputs and expected outcomes"
+    ],
+    "reference_prompt_tokens": 2087
   },
   {
     "id": "tech_prose-en-mid_8k",
@@ -428,13 +450,14 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "Write a detailed technical explanation of the code, its constraints, concrete examples, failure modes, verification and uncertainties. Give a substantial, detailed answer with concrete evidence and multiple examples.",
+    "prompt": "While saving GDN state, the convolution copy has been enqueued and the recurrent-state copy fails. The caller must never restore a partially saved snapshot. Write a detailed technical explanation of the code, its constraints, concrete examples, failure modes, verification and uncertainties. Give a substantial, detailed answer with concrete evidence and multiple examples. Ground the answer in admit_request and spec_gdn_snapshot from the excerpts, distinguishing observed behavior from hypotheses.",
     "context_file": "mid_8k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "Distinguish enqueue order from completion and identify which state can be used after failure",
+      "Account consistently for ownership and release on failure",
+      "Give a validation case with inputs and expected outcomes"
+    ],
+    "reference_prompt_tokens": 8035
   },
   {
     "id": "tech_prose-en-long_16k",
@@ -447,13 +470,14 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "Write a detailed technical explanation of the code, its constraints, concrete examples, failure modes, verification and uncertainties. Give a substantial, detailed answer with concrete evidence and multiple examples.",
+    "prompt": "Change the contract for saving an output tail at a page boundary. When a valid ring is supplied, saving that ring must also succeed. The caller must be able to retry or cancel the capture after failure. Write a detailed technical explanation of the code, its constraints, concrete examples, failure modes, verification and uncertainties. Give a substantial, detailed answer with concrete evidence and multiple examples. Ground the answer in PrefixCache and save from the excerpts, distinguishing observed behavior from hypotheses.",
     "context_file": "long_16k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "Track checkpoint and capture ownership separately when saving the ring fails",
+      "Account consistently for ownership and release on failure",
+      "Give a validation case with inputs and expected outcomes"
+    ],
+    "reference_prompt_tokens": 16412
   },
   {
     "id": "multi_turn-ja-short_2k",
@@ -466,13 +490,27 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "継続中の技術対話として、提示コードの理解を整理し、考えられる設計変更を比較し、段階的な実装と検証の提案を詳述してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
     "context_file": "short_2k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "残り枠ゼロと途中 EOS を具体的なトークン列で追跡する",
+      "失敗時の所有権と解放順を一貫して扱う",
+      "入力と期待結果を含む検証例を示す"
+    ],
+    "messages": [
+      {
+        "role": "user",
+        "content": "出力の残り枠がゼロのとき、呼び出し側が emitted_tokens の要素数をそのまま送信件数として扱います。残り枠がゼロの場合と生成途中の EOS の両方を検討してください。 運用担当者向けに、資料中の admit_request と spec_bound_result に関係する状態管理の調査計画を作ってください。"
+      },
+      {
+        "role": "assistant",
+        "content": "まず、リクエストの状態遷移を時系列に並べ、所有者と解放の責任を表にします。その後、異常終了時に観測する項目を決めます。"
+      },
+      {
+        "role": "user",
+        "content": "追加条件です。運用中のサービスは再起動できません。先ほどの計画を更新し、資料のコードを根拠に、障害の切り分け手順、各仮説を棄却できる観測、修正後の回帰テストを具体例付きで詳しく説明してください。"
+      }
+    ],
+    "reference_prompt_tokens": 2171
   },
   {
     "id": "multi_turn-ja-mid_8k",
@@ -485,13 +523,27 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "継続中の技術対話として、提示コードの理解を整理し、考えられる設計変更を比較し、段階的な実装と検証の提案を詳述してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
     "context_file": "mid_8k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "2回の非同期コピーの順序と失敗後に利用できる状態を区別する",
+      "失敗時の所有権と解放順を一貫して扱う",
+      "入力と期待結果を含む検証例を示す"
+    ],
+    "messages": [
+      {
+        "role": "user",
+        "content": "GDN 状態の保存で畳み込み側の非同期コピーを投入した直後、再帰状態側のコピーが失敗しました。呼び出し側が片方だけの保存結果を復元に使わないようにしてください。 運用担当者向けに、資料中の admit_request と spec_gdn_snapshot に関係する状態管理の調査計画を作ってください。"
+      },
+      {
+        "role": "assistant",
+        "content": "まず、リクエストの状態遷移を時系列に並べ、所有者と解放の責任を表にします。その後、異常終了時に観測する項目を決めます。"
+      },
+      {
+        "role": "user",
+        "content": "追加条件です。運用中のサービスは再起動できません。先ほどの計画を更新し、資料のコードを根拠に、障害の切り分け手順、各仮説を棄却できる観測、修正後の回帰テストを具体例付きで詳しく説明してください。"
+      }
+    ],
+    "reference_prompt_tokens": 8128
   },
   {
     "id": "multi_turn-ja-long_16k",
@@ -504,13 +556,27 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "継続中の技術対話として、提示コードの理解を整理し、考えられる設計変更を比較し、段階的な実装と検証の提案を詳述してください。 具体的な根拠と複数の事例を示し、十分に詳細な長い回答を作成してください。",
     "context_file": "long_16k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "ring 保存失敗時に checkpoint と capture の所有権を個別に追跡する",
+      "失敗時の所有権と解放順を一貫して扱う",
+      "入力と期待結果を含む検証例を示す"
+    ],
+    "messages": [
+      {
+        "role": "user",
+        "content": "ページ境界で出力末尾を保存する際、有効な ring を渡した場合には ring の保存成功も必須とする仕様に変更します。失敗後は capture を再試行または取り消せることが必要です。 運用担当者向けに、資料中の PrefixCache と save に関係する状態管理の調査計画を作ってください。"
+      },
+      {
+        "role": "assistant",
+        "content": "まず、リクエストの状態遷移を時系列に並べ、所有者と解放の責任を表にします。その後、異常終了時に観測する項目を決めます。"
+      },
+      {
+        "role": "user",
+        "content": "追加条件です。運用中のサービスは再起動できません。先ほどの計画を更新し、資料のコードを根拠に、障害の切り分け手順、各仮説を棄却できる観測、修正後の回帰テストを具体例付きで詳しく説明してください。"
+      }
+    ],
+    "reference_prompt_tokens": 16490
   },
   {
     "id": "multi_turn-en-short_2k",
@@ -523,13 +589,27 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "Continue a technical discussion by explaining the code, comparing design alternatives, and proposing staged implementation and validation. Give a substantial, detailed answer with concrete evidence and multiple examples.",
     "context_file": "short_2k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "Trace zero budget and early EOS with concrete token sequences",
+      "Account consistently for ownership and release on failure",
+      "Give a validation case with inputs and expected outcomes"
+    ],
+    "messages": [
+      {
+        "role": "user",
+        "content": "The caller treats the size of emitted_tokens as the number to send, including when no output budget remains. Cover both a zero budget and EOS midway through the generated sequence. Plan an investigation of state ownership around admit_request and spec_bound_result using the attached source excerpts."
+      },
+      {
+        "role": "assistant",
+        "content": "I will reconstruct the request lifecycle, map owners to cleanup responsibilities, and identify observable failure paths."
+      },
+      {
+        "role": "user",
+        "content": "The service must now stay online throughout the investigation. Revise your earlier plan under this constraint. Use evidence from the excerpts, explain how each hypothesis can be falsified, and give detailed regression tests and examples for the proposed changes."
+      }
+    ],
+    "reference_prompt_tokens": 2130
   },
   {
     "id": "multi_turn-en-mid_8k",
@@ -542,13 +622,27 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "Continue a technical discussion by explaining the code, comparing design alternatives, and proposing staged implementation and validation. Give a substantial, detailed answer with concrete evidence and multiple examples.",
     "context_file": "mid_8k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "Distinguish enqueue order from completion and identify which state can be used after failure",
+      "Account consistently for ownership and release on failure",
+      "Give a validation case with inputs and expected outcomes"
+    ],
+    "messages": [
+      {
+        "role": "user",
+        "content": "While saving GDN state, the convolution copy has been enqueued and the recurrent-state copy fails. The caller must never restore a partially saved snapshot. Plan an investigation of state ownership around admit_request and spec_gdn_snapshot using the attached source excerpts."
+      },
+      {
+        "role": "assistant",
+        "content": "I will reconstruct the request lifecycle, map owners to cleanup responsibilities, and identify observable failure paths."
+      },
+      {
+        "role": "user",
+        "content": "The service must now stay online throughout the investigation. Revise your earlier plan under this constraint. Use evidence from the excerpts, explain how each hypothesis can be falsified, and give detailed regression tests and examples for the proposed changes."
+      }
+    ],
+    "reference_prompt_tokens": 8078
   },
   {
     "id": "multi_turn-en-long_16k",
@@ -561,12 +655,26 @@
     "top_p": 0.95,
     "top_k": 20,
     "thinking": true,
-    "prompt": "Continue a technical discussion by explaining the code, comparing design alternatives, and proposing staged implementation and validation. Give a substantial, detailed answer with concrete evidence and multiple examples.",
     "context_file": "long_16k.txt",
     "rubric": [
-      "evidence",
-      "correctness",
-      "concrete validation"
-    ]
+      "Track checkpoint and capture ownership separately when saving the ring fails",
+      "Account consistently for ownership and release on failure",
+      "Give a validation case with inputs and expected outcomes"
+    ],
+    "messages": [
+      {
+        "role": "user",
+        "content": "Change the contract for saving an output tail at a page boundary. When a valid ring is supplied, saving that ring must also succeed. The caller must be able to retry or cancel the capture after failure. Plan an investigation of state ownership around PrefixCache and save using the attached source excerpts."
+      },
+      {
+        "role": "assistant",
+        "content": "I will reconstruct the request lifecycle, map owners to cleanup responsibilities, and identify observable failure paths."
+      },
+      {
+        "role": "user",
+        "content": "The service must now stay online throughout the investigation. Revise your earlier plan under this constraint. Use evidence from the excerpts, explain how each hypothesis can be falsified, and give detailed regression tests and examples for the proposed changes."
+      }
+    ],
+    "reference_prompt_tokens": 16455
   }
 ]

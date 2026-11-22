@@ -67,6 +67,9 @@ GROUPS = OrderedDict([
         "test_plamo3_template.py",
         "test_inference_budget.py",
     ]),
+    ("bench", [
+        "test_shelf_bench_suite.py",
+    ]),
     ("commonized-runtime", [
         "test_commonized_runtime_e2e.py",
     ]),
