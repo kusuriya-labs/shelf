@@ -34,14 +34,17 @@ class Ops {
     Param param(const std::string &key) const;
     Mat linear(const std::string &name, Mat input);
     Mat norm(Mat x, const std::string &key, float eps = 1e-5f);
+    Mat norm_from(Mat x, int first, int width, const std::string &key, float eps = 1e-5f);
     Mat slice(Mat x, int first, int width);
     Mat join(Mat a, Mat b);
     Mat add(Mat a, Mat b);
+    void add_into(Mat a, Mat b, Mat out);
     Mat swiglu(Mat gate, Mat up, bool clip);
     Mat embed(const std::vector<int> &ids, bool expand);
     Mat collapse(Mat x, const std::string &prefix, float *&post);
     Mat expand(Mat x, Mat y, const float *post);
     Mat rope(Mat x, int heads, int start, float theta);
+    Mat rope_from(Mat x, int first, int width, int heads, int start, float theta);
     void copy(void *dest, const void *src, size_t bytes, hipMemcpyKind kind);
     int *indices(const std::vector<int> &ids);
 };

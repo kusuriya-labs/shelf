@@ -266,8 +266,7 @@ struct Target {
             auto a = op.norm(x, prefix + "input_layernorm.weight");
             auto y = op.add(x, attention(op, prefix, sources[i], start, a, select, true));
             auto f = feedforward(op, prefix + "mlp", op.norm(y, prefix + "post_attention_layernorm.weight"));
-            auto next = op.add(y, f);
-            checked(hipMemcpyAsync(x.p, next.p, next.bytes(), hipMemcpyDeviceToDevice));
+            op.add_into(y, f, x);
             op.arena.cursor = save;
         }
         x = op.norm(x, p + "final_norm.weight");
@@ -348,8 +347,7 @@ void decoder_layer(Ops &op, int layer, int start, Mat x, const std::vector<int> 
     Mat a = op.collapse(x, p + "hc_attn_layer.hc_pre.hc_", post);
     a = op.norm(a, p + "input_layernorm.weight");
     a = attention(op, p, layer, start, a, selection, false);
-    Mat z = op.expand(x, a, post);
-    checked(hipMemcpyAsync(x.p, z.p, z.bytes(), hipMemcpyDeviceToDevice));
+    op.expand(x, a, post);
     op.arena.cursor = save;
     if (op.gpu.tp_size == 1 && op.rank == 0 && op.gpu.expert_begin[0]) {
         checked(hipStreamSynchronize(nullptr));
@@ -363,8 +361,7 @@ void decoder_layer(Ops &op, int layer, int start, Mat x, const std::vector<int> 
         f = op.norm(feedforward(op, p + "mlp", f), p + "mlp.post_fc2_norm.weight");
     else
         f = moe(op, layer, f);
-    z = op.expand(x, f, post);
-    checked(hipMemcpyAsync(x.p, z.p, z.bytes(), hipMemcpyDeviceToDevice));
+    op.expand(x, f, post);
     op.arena.cursor = save;
     if (op.gpu.tp_size == 1 && op.rank == 0 && op.gpu.expert_begin[0]) {
         checked(hipStreamSynchronize(nullptr));

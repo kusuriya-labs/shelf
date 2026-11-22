@@ -51,6 +51,35 @@ __global__ void normalize(Mat x, Param weight, Mat y, float eps) {
         y.p[base + c] =
             f32_to_bf16_rne_device(round_bf16(value(x, base + c) * inv) * (weight.p ? read(weight, c) : 1.f));
 }
+__global__ void normalize_from(Mat x, Param weight, Mat y, float eps, int first, int width) {
+    __shared__ float scratch[32];
+    size_t bx = size_t(blockIdx.x) * x.cols + first, by = size_t(blockIdx.x) * width;
+    float sum = 0;
+    for (int c = threadIdx.x; c < width; c += blockDim.x) {
+        float v = value(x, bx + c);
+        sum += v * v;
+    }
+    float inv = rsqrtf(blocksum(sum, scratch) / width + eps);
+    for (int c = threadIdx.x; c < width; c += blockDim.x)
+        y.p[by + c] =
+            f32_to_bf16_rne_device(round_bf16(value(x, bx + c) * inv) * (weight.p ? read(weight, c) : 1.f));
+}
+__global__ void rotary_from(Mat x, Mat y, int heads, int start, float theta, int first) {
+    size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= size_t(y.rows) * y.cols)
+        return;
+    int row = i / y.cols, width = y.cols / heads, c = i % width;
+    size_t src = size_t(row) * x.cols + first + c;
+    if (c < width - 64) {
+        y.p[i] = x.p[src];
+        return;
+    }
+    int j = c - (width - 64);
+    float phase = (start + row) * powf(theta, -float(j / 2) / 32);
+    float co = bf16_bits_to_f32(f32_to_bf16_rne_device(cosf(phase)));
+    float si = bf16_bits_to_f32(f32_to_bf16_rne_device(sinf(phase)));
+    y.p[i] = f32_to_bf16_rne_device(value(x, src) * co + ((j & 1) ? 1.f : -1.f) * value(x, src ^ 1) * si);
+}
 __global__ void select_cols(Mat x, Mat y, int first) {
     size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i < size_t(y.rows) * y.cols)
@@ -105,12 +134,12 @@ __global__ void hc_reduce(Mat x, Mat y, const float *gates, int count) {
             __fadd_rn(acc, __fmul_rn(gates[row * count + h], value(x, size_t(row) * x.cols + h * y.cols + c)));
     y.p[i] = f32_to_bf16_rne_device(acc);
 }
-__global__ void hc_expand(Mat x, Mat y, const float *post, Mat z) {
+__global__ void hc_expand(Mat x, Mat y, const float *post) {
     size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= size_t(x.rows) * x.cols)
         return;
     int r = i / x.cols, h = (i / y.cols) % 4;
-    z.p[i] = f32_to_bf16_rne_device(
+    x.p[i] = f32_to_bf16_rne_device(
         __fadd_rn(value(x, i), __fmul_rn(post[r * 8 + 4 + h], value(y, size_t(r) * y.cols + i % y.cols))));
 }
 __global__ void rotary(Mat x, Mat y, int heads, int start, float theta) {
@@ -222,6 +251,13 @@ Mat Ops::norm(Mat x, const std::string &key, float eps) {
     checked(hipGetLastError());
     return y;
 }
+Mat Ops::norm_from(Mat x, int first, int width, const std::string &key, float eps) {
+    Mat y = mat(x.rows, width);
+    Param w = key.empty() ? Param{} : param(key);
+    normalize_from<<<x.rows, 256>>>(x, w, y, eps, first, width);
+    checked(hipGetLastError());
+    return y;
+}
 Mat Ops::slice(Mat x, int first, int width) {
     Mat y = mat(x.rows, width);
     select_cols<<<grid(y), 256>>>(x, y, first);
@@ -282,10 +318,19 @@ Mat Ops::collapse(Mat x, const std::string &prefix, float *&post) {
     return y;
 }
 Mat Ops::expand(Mat x, Mat y, const float *post) {
-    Mat z = mat(x.rows, x.cols);
-    hc_expand<<<grid(z), 256>>>(x, y, post, z);
+    hc_expand<<<grid(x), 256>>>(x, y, post);
     checked(hipGetLastError());
-    return z;
+    return x;
+}
+void Ops::add_into(Mat a, Mat b, Mat out) {
+    element<<<grid(a), 256>>>(a, b, out, 0);
+    checked(hipGetLastError());
+}
+Mat Ops::rope_from(Mat x, int first, int width, int heads, int start, float theta) {
+    Mat y = mat(x.rows, width);
+    rotary_from<<<grid(y), 256>>>(x, y, heads, start, theta, first);
+    checked(hipGetLastError());
+    return y;
 }
 Mat Ops::rope(Mat x, int heads, int start, float theta) {
     Mat y = mat(x.rows, x.cols);
