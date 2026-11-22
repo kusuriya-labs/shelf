@@ -85,7 +85,7 @@ def build_compute_argv(opts) -> list[str]:
     if getattr(opts, "placement", None):
         argv = [opts.compute, "hy4", "serve", "--model-dir", opts.model_dir,
                 "--engram-dir", opts.engram_dir or opts.model_dir, "--placement", opts.placement,
-                "--max-seq-len", str(opts.max_seq_len), "--chunk", "1024",
+                "--max-seq-len", str(opts.max_seq_len), "--chunk", str(opts.prefill_chunk),
                 "--max-concurrent-requests", str(opts.max_concurrent_requests)]
         if opts.expert_parallel > 1 or opts.tensor_parallel > 1:
             argv += ["--expert-parallel", str(opts.expert_parallel)]
@@ -655,6 +655,10 @@ def parse_args(argv=None):
     parser.add_argument("--verify-weights", action="store_true",
                         help="verify quantized payload CRC32 on load")
     opts = parser.parse_args(argv)
+    if opts.prefill_chunk is None:
+        opts.prefill_chunk = 1024 if opts.placement else 4096
+    if opts.placement and not 1 <= opts.prefill_chunk <= 4096:
+        parser.error("Hy4 の --prefill-chunk は 1〜4096 で指定してください")
 
     devices = [part.strip() for part in opts.device.split(",") if part.strip()]
     if not devices or any(not device.isdigit() for device in devices):
@@ -680,7 +684,7 @@ def parse_args(argv=None):
         parser.error("--max-seq-len must be >= 1")
     if not 16 <= opts.max_num_batched_tokens <= 8192:
         parser.error("--max-num-batched-tokens must be between 16 and 8192")
-    if opts.prefill_chunk is not None and not 16 <= opts.prefill_chunk <= 8192:
+    if not opts.placement and not 16 <= opts.prefill_chunk <= 8192:
         parser.error("--prefill-chunk must be between 16 and 8192")
     if opts.max_concurrent_requests < 1:
         parser.error("--max-concurrent-requests must be >= 1")

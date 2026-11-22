@@ -87,7 +87,7 @@ hipError_t launch_exl3_mul24_recon(
 // one 256-byte 16x16 tile per (n tile, k tile), lane l holding its eight weights. A WMMA B
 // fragment (32 lanes x 8 bytes) is then one contiguous 256-byte read.
 hipError_t launch_exl3_mul24_recon_wmma(
-    const uint16_t* trellis, uint32_t bits, int8_t* dense, uint32_t n, uint32_t k, hipStream_t stream);
+    const uint16_t* trellis, uint32_t bits, int8_t* dense, uint32_t n, uint32_t k, hipStream_t stream, bool input_k_major = false);
 
 
 // (128 output columns each).

@@ -107,7 +107,7 @@ __global__ void __launch_bounds__(256) exl3_mul24_rowfinish_kernel(
 // 256-byte read; otherwise the output is [n][k] (k contiguous) for a hipBLASLt int8 GEMM with A
 // transposed. One wave per 16x16 tile, the same lane / window / decode as the gemm kernel: lane l
 // holds column n = l % 16 and the eight k rows 8 * (l / 16) .. +7 of the tile.
-template <int BITS, bool kTileMajor>
+template <int BITS, bool kTileMajor, bool InputKMajor = false>
 __global__ void __launch_bounds__(256) exl3_mul24_recon_kernel(
     const uint32_t* __restrict__ trellis,
     int8_t* __restrict__ dense,
@@ -120,7 +120,8 @@ __global__ void __launch_bounds__(256) exl3_mul24_recon_kernel(
     const uint32_t base_bit = (lane * 8u * BITS + BITS + kBits - 16u) % kBits;
     const uint32_t off = base_bit & 31u;
     const uint32_t i0 = base_bit >> 5u;
-    const uint32_t* tile = trellis + (static_cast<size_t>(nt) * (k >> 4u) + kt) * kWords;
+    size_t tile_index = InputKMajor ? static_cast<size_t>(kt) * gridDim.y + nt : static_cast<size_t>(nt) * (k >> 4u) + kt;
+    const uint32_t* tile = trellis + tile_index * kWords;
     const uint32_t w0 = tile[i0];
     const uint32_t w1 = tile[(i0 + 1u) % kWords];
     const uint32_t w2 = tile[(i0 + 2u) % kWords];
@@ -189,7 +190,19 @@ hipError_t launch_exl3_mul24_recon(const uint16_t* trellis, uint32_t bits, int8_
 }
 
 hipError_t launch_exl3_mul24_recon_wmma(const uint16_t* trellis, uint32_t bits, int8_t* dense, uint32_t n, uint32_t k,
-                                        hipStream_t stream) {
+                                        hipStream_t stream, bool input_k_major) {
+    if (input_k_major) {
+        if ((n % 16u) || (k % 128u)) return hipErrorInvalidValue;
+        const dim3 grid(k / 128u, n / 16u);
+        auto words = reinterpret_cast<const uint32_t *>(trellis);
+        if (bits == 4)
+            exl3_mul24_recon_kernel<4, true, true><<<grid, 256, 0, stream>>>(words, dense, k);
+        else if (bits == 6)
+            exl3_mul24_recon_kernel<6, true, true><<<grid, 256, 0, stream>>>(words, dense, k);
+        else
+            return hipErrorInvalidValue;
+        return hipGetLastError();
+    }
     return launch_recon<true>(trellis, bits, dense, n, k, stream);
 }
 

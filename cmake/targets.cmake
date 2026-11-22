@@ -39,11 +39,19 @@ target_include_directories(shelf_io SYSTEM PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/
 target_link_libraries(shelf_io PUBLIC shelf_core hip::host)
 target_compile_options(shelf_io PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
+add_library(shelf_exl3_prefill STATIC
+    src/shelf/kernels/optimized/linear/exl3_family/mul24/prefill.hip
+    src/shelf/kernels/optimized/linear/exl3_family/mul24/prefill_wmma.hip
+)
+target_link_libraries(shelf_exl3_prefill PRIVATE shelf_core hip::host)
+set_target_properties(shelf_exl3_prefill PROPERTIES POSITION_INDEPENDENT_CODE ON)
+shelf_set_hip_archs(shelf_exl3_prefill)
+
 add_library(shelf_hy4_wmma OBJECT src/shelf/models/hy4_flash/wmma.hip src/shelf/models/hy4_flash/mla_prefill.hip)
 target_link_libraries(shelf_hy4_wmma PRIVATE shelf_core hip::host)
 set_target_properties(shelf_hy4_wmma PROPERTIES HIP_ARCHITECTURES gfx1201 POSITION_INDEPENDENT_CODE ON)
 add_library(shelf_hy4_flash SHARED src/shelf/models/hy4_flash/linear.hip $<TARGET_OBJECTS:shelf_hy4_wmma>)
-target_link_libraries(shelf_hy4_flash PRIVATE shelf_core hip::host)
+target_link_libraries(shelf_hy4_flash PRIVATE shelf_core hip::host shelf_exl3_prefill)
 set_target_properties(shelf_hy4_flash PROPERTIES HIP_ARCHITECTURES gfx1201)
 shelf_set_rocm_rpath(shelf_hy4_flash)
 set_property(TARGET shelf_hy4_flash APPEND PROPERTY BUILD_RPATH "${SHELF_LIBCXX_LLVM_ROOT}/lib")
@@ -124,8 +132,6 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/linear/exl3_family/mul24/decode.hip
     src/shelf/kernels/optimized/linear/exl3_family/mul24/projection.hip
     src/shelf/kernels/optimized/linear/exl3_family/mul24/projection_prefill.hip
-    src/shelf/kernels/optimized/linear/exl3_family/mul24/prefill.hip
-    src/shelf/kernels/optimized/linear/exl3_family/mul24/prefill_wmma.hip
     src/shelf/kernels/optimized/linear/exl3_family/mul24/workspace.cpp
     src/shelf/kernels/optimized/linear/exl3_family/mul24/split_plan.cpp
     src/shelf/kernels/optimized/linear/exl3_family/variant.cpp
@@ -230,7 +236,7 @@ add_library(shelf_kernels_optimized STATIC ${SHELF_OPTIMIZED_KERNEL_SOURCES})
 target_compile_features(shelf_kernels_optimized PRIVATE cxx_std_20)
 target_include_directories(shelf_kernels_optimized PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(shelf_kernels_optimized PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(shelf_kernels_optimized PUBLIC shelf_gpu shelf_runtime shelf_inference_state shelf_kernels_fused)
+target_link_libraries(shelf_kernels_optimized PUBLIC shelf_exl3_prefill shelf_gpu shelf_runtime shelf_inference_state shelf_kernels_fused)
 target_compile_options(shelf_kernels_optimized PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 shelf_set_hip_archs(shelf_kernels_optimized)
 

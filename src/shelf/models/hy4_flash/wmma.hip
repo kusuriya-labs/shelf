@@ -209,7 +209,7 @@ hipError_t shelf_hy4_wmma(const int8_t *codes, const float *scales, const uint32
 }
 
 namespace {
-template <bool Mixed, bool Decode = false>
+template <bool Mixed, bool Decode = false, bool Prefill = false>
 __global__ void expert_batch(const int8_t *codes, const float *scales, const Hy4ExpertProjection *matrices,
                              const Hy4Route *routes, const Hy4ExpertBatch *batches, float *partial, int k,
                              int n, const int *count = nullptr, int capacity = 0) {
@@ -229,6 +229,18 @@ __global__ void expert_batch(const int8_t *codes, const float *scales, const Hy4
     size_t first = batch.first;
     auto matrix = matrices[3 * routes[first].expert];
     auto weight = matrix.trellis;
+    if constexpr (Prefill) {
+        if (matrix.bits == 4) {
+            shelf::kernel::exl3_detail::mul24::group_body<4, 2, false, 4, false, true, true>(
+                codes + first * k, scales + first * (k / 128), k, k / 128, weight, partial + first * n, batch.count,
+                nullptr, n, k, k / 128, 1, blockIdx.x, 0);
+        } else {
+            shelf::kernel::exl3_detail::mul24::group_body<3, 2, false, 4, false, true>(
+                codes + first * k, scales + first * (k / 128), k, k / 128, weight, partial + first * n, batch.count,
+                nullptr, n, k, k / 128, 1, blockIdx.x, 0);
+        }
+        return;
+    }
     if constexpr (Decode) {
         if (k == 1536 && n == 1536 && matrix.bits == 4) {
             if (batch.count == 1)
@@ -266,7 +278,13 @@ hipError_t shelf_hy4_wmma_experts(const int8_t *codes, const float *scales, cons
 
 hipError_t shelf_hy4_wmma_decode(const int8_t *codes, const float *scales, const Hy4ExpertProjection *matrices,
                                  const Hy4Route *routes, const int *count, float *partial, int capacity,
-                                 int k, int n, int projections, hipStream_t stream, const Hy4ExpertBatch *batches, const int *num_batches) {
+                                 int k, int n, int projections, hipStream_t stream, const Hy4ExpertBatch *batches,
+                                 const int *num_batches, bool prefill) {
+    if (prefill) {
+        expert_batch<true, true, true><<<dim3(n / 64, std::min(capacity, 512 + capacity / 32), projections), 128, 0, stream>>>(
+            codes, scales, matrices, routes, batches, partial, k, n, num_batches, capacity);
+        return hipGetLastError();
+    }
     const int groups = batches ? std::min(capacity, 512 + capacity / 16) : capacity;
     expert_batch<true, true><<<dim3(n / 64, groups, projections), 128, 0, stream>>>(
         codes, scales, matrices, routes, batches, partial, k, n, batches ? num_batches : count, capacity);
