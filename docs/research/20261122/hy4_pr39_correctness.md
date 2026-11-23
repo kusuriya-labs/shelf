@@ -4,7 +4,7 @@
 
 ## 1. EP 転送
 
-**ACCEPT**。受信側 stream の `hipMemcpyPeerAsync` を使う 2 か所を受信側 GPU の読み出し kernel に置き換えた。対象は MoE の転送と TP/EP の加算前転送である。送信元の書き込み完了と、受信完了までの送信元バッファの寿命を既存の event で保証する。送信先、送信元、バイト数の取り違えは見つからなかった。
+`5d516cb4` で受信側 stream の `hipMemcpyPeerAsync` を使う 2 か所を受信側 GPU の読み出し kernel に置き換えた。対象は MoE の転送と TP/EP の加算前転送である。物理 R9700 ×4 ではこの変更後も peer のみ失敗した。[PR #39 の実機報告](https://github.com/kusuriya-labs/shelf/pull/39)
 
 旧実装で peer access が有効でも転送後に routing が破損する実機での切り分けは[以前の調査](../20261120/hy4_rotate_output_investigation.md)にある。単一 GPU 内の論理 rank 試験では PCIe や SDMA の物理障害を再現できない。異なるカード間での修正後の読み出しは実機での追試が必要である。
 
@@ -14,6 +14,35 @@
 cmake --build build --target test_hy4_graph
 flock /tmp/r9700.lock build/tests/test_hy4_graph "$BODY" "$DFLY" transport "$OWNERS"
 ```
+
+### EP-1　記録中の event の再使用
+
+**ACCEPT**。eager の転送は、rank の組と方向ごとに 2 組の ready / ack を交互に使う。GPU が最初の組を処理中でも、ホストは 3 回目の転送を投入できた。ローカル expert 用の ready / done は毎層同じ組を使っていた。HIP は記録中の event への再記録を未定義としている。各組の再使用前に、その組で最後に記録した event の完了を待つようにした。転送では peer と host の場合は ack、push の場合は ready が該当する。[ROCm 10.2 の event 仕様](https://rocm.docs.amd.com/projects/HIP/en/docs-10.2.0/reference/hip_runtime_api/modules/event_management.html)
+
+R9700 1 台、論理 EP=4、peer、Graph と DFly 無効、20 token 入力で、各記録の直前に `hipEventQuery` を入れた。表は `hipErrorNotReady` の回数と記録回数。B=1 と B=8 は各スロットで 4 token を生成した。修正後は同じ全条件で未完了の再記録が 0 回だった。
+
+| 修正前の実行 | 転送 ready | 転送 ack | local ready / done 合計 |
+|---|---:|---:|---:|
+| prefill のみ | 0/246 | 0/246 | 使用なし |
+| B=1 | 594/984 | 594/984 | 222/246 |
+| B=8 | 594/2706 | 594/2706 | 222/246 |
+
+`logical_ranks` の worker にも個別の射影表を確保し、未所有 expert のエントリをゼロにして、実機と同じ所有条件で照合した。物理 GPU と重み本体は共有している。論理 EP=3・4、3 転送方式、DFly の有無、バッチ数 1・2・4・8・16 の 60 条件で全スロットの生成列が一致した。
+
+### 物理 4 枚での切り分け
+
+PR #39 の通常 prefill は各 MoE 層で rank 0 の picks を D2H して stream を同期し、その後で CPU が経路を検査する。上記の 20 token prefill だけでも記録中の event の再使用は観測されなかった。PR #42 の `gather_rotate_pair` では実行 rank が所有しない expert が route に入ると、そのエントリの gate / up の `suh` が null になる。実機の報告には fault 時の route、命令 PC、両端の転送内容がなく、どの値が最初に壊れたかは未確定である。[PR #42 の実機報告](https://github.com/kusuriya-labs/shelf/pull/42)
+
+PR #42 の `3303d2d3` では通常 prefill の計画も GPU 上で作る。既存の `prefillbench 20 20 4` を peer、論理 EP=4 で実行し、同様に記録直前の状態を調べた。scatter の `Residency::transfer` では ready と ack の各 123 回中 99 回、返却部分和を直接読む `prefill_moe` では ready と ack の各 123 回中 111 回が未完了だった。後者は `Residency::transfer` を通らず、常に添字 0 の event を使う。PR #42 に反映する際には、この専用経路でも前回の event の完了を保証する必要がある。
+
+まず実機で、モデルを載せずに全方向の peer 読み出しを試す。送信側 kernel は同じ領域へ毎回異なる値を書き、受信側も同じ領域を繰り返し使う。試験は 8 回分の受信内容を期待値と照合し、最初の不一致で方向・転送回数・offset を表示する。
+
+```bash
+cmake --build build --target test_hy4_peer_transfer
+ROCR_VISIBLE_DEVICES=0,1,2,3 flock /tmp/r9700.lock build/tests/test_hy4_peer_transfer
+```
+
+全方向で一致して推論だけが失敗した場合は、同じ入力・配置で Graph を無効にした peer と host を比較する。診断用ビルドでは、転送元と転送先それぞれの stream 上で、バッファの再使用前に送信直前・受信直後の内容を保存する。最初に異なる層・方向について、PR #39 では decode の plan と latent、通常 prefill の latent と返却部分和を比較する。PR #42 の prefill はその rank の mask、有効な choice と latent 行だけを比較する。省略された領域の古い内容は期待値の対象外である。転送内容が一致したら、gather の直前で count・row・expert・owner と当該 rank の gate / up の suh を確認する。
 
 ## 2. Attention の 16 行境界
 

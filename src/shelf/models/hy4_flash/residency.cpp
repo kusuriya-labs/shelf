@@ -332,8 +332,10 @@ void Residency::transfer(void *dst, int destination, const void *src, int source
         const int p = parity[source][destination];
         hipEvent_t ready_event = ready[source][destination][p];
         hipEvent_t ack_event = ack[destination][source][p];
+        const bool source_writes = push && !host;
+        check(hipEventSynchronize(source_writes ? ready_event : ack_event));
         parity[source][destination] = p ^ 1;
-        if (!host && push) {
+        if (source_writes) {
             check(hipSetDevice(physical[destination]));
             check(hipEventRecord(ack_event, compute[destination]));
             check(hipSetDevice(physical[source]));

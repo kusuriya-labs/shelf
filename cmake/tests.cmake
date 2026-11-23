@@ -804,6 +804,8 @@ shelf_add_test(NAME test_ngram_quantization SOURCE unit/test_ngram_quantization.
 shelf_add_test(NAME test_qwen4exp_ngram SOURCE unit/test_qwen4exp_ngram.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES shelf_qwen4exp shelf_quant_ngram)
 shelf_add_test(NAME test_hy4_session SOURCE unit/test_hy4_session.cpp LABELS "cpu;required" LIBRARIES shelf_hy4_model)
 shelf_add_test(NAME test_hy4_routes SOURCE unit/test_hy4_routes.cpp LABELS "cpu;required" LIBRARIES shelf_core hip::host)
+shelf_add_test(NAME test_hy4_peer_transfer SOURCE unit/test_hy4_peer_transfer.cpp LABELS "gpu1;optional" GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_hy4_model)
+target_link_options(test_hy4_peer_transfer PRIVATE "LINKER:--wrap=hipEventRecord")
 
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
