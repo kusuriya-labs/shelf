@@ -66,7 +66,7 @@ __device__ __forceinline__ void decode_biased(const uint32_t* tile, uint32_t lan
 }
 
 template <uint32_t kGroups, uint32_t kNTiles, uint32_t BITS, bool kPairK>
-__global__ __launch_bounds__(kThreads) void gemm_mul24_grouped_kernel(Exl3GemmArgs args) {
+__device__ __forceinline__ void gemm_mul24_grouped_body(Exl3GemmArgs args) {
     constexpr uint32_t kOutBlock = kOutBlockBase * kNTiles;
     constexpr uint32_t kNTilesPerBlock = kOutBlock / 16u;
     constexpr uint32_t kRows = kRowTile * kGroups;
@@ -299,6 +299,31 @@ __global__ __launch_bounds__(kThreads) void gemm_mul24_grouped_kernel(Exl3GemmAr
     }
 }
 
+template <uint32_t kGroups, uint32_t kNTiles, uint32_t BITS, bool kPairK>
+__global__ __launch_bounds__(kThreads)
+__attribute__((amdgpu_num_vgpr(184)))
+void gemm_mul24_grouped_kernel(Exl3GemmArgs args) {
+    gemm_mul24_grouped_body<kGroups, kNTiles, BITS, kPairK>(args);
+}
+
+template <uint32_t kGroups, uint32_t kNTiles, uint32_t BITS, bool kPairK>
+__global__ __launch_bounds__(kThreads)
+__attribute__((amdgpu_num_vgpr(120)))
+void gemm_mul24_grouped_kernel_gate(Exl3GemmArgs args) {
+    gemm_mul24_grouped_body<kGroups, kNTiles, BITS, kPairK>(args);
+}
+
+template <uint32_t kGroups, uint32_t kNTiles, uint32_t BITS, bool kPairK>
+hipError_t launch_one(const Exl3GemmArgs& args, dim3 grid, hipStream_t stream) {
+    if constexpr (kNTiles == 1u)
+        gemm_mul24_grouped_kernel_gate<kGroups, kNTiles, BITS, kPairK>
+            <<<grid, kThreads, 0, stream>>>(args);
+    else
+        gemm_mul24_grouped_kernel<kGroups, kNTiles, BITS, kPairK>
+            <<<grid, kThreads, 0, stream>>>(args);
+    return hipGetLastError();
+}
+
 template <uint32_t kGroups, uint32_t kNTiles>
 hipError_t launch_bits(const Exl3GemmArgs& args, dim3 grid, hipStream_t stream) {
     // Pairing two K chunks halves the stage barriers. It pays off when the K loop is long
@@ -306,11 +331,8 @@ hipError_t launch_bits(const Exl3GemmArgs& args, dim3 grid, hipStream_t stream) 
     const bool pair_k = (args.k / 128u) >= 8u;
 #define SHELF_MUL24_BITS(B) \
     case B: \
-        if (pair_k) \
-            gemm_mul24_grouped_kernel<kGroups, kNTiles, B, true><<<grid, kThreads, 0, stream>>>(args); \
-        else \
-            gemm_mul24_grouped_kernel<kGroups, kNTiles, B, false><<<grid, kThreads, 0, stream>>>(args); \
-        break
+        return pair_k ? launch_one<kGroups, kNTiles, B, true>(args, grid, stream) \
+                      : launch_one<kGroups, kNTiles, B, false>(args, grid, stream);
     switch (args.ka) {
         SHELF_MUL24_BITS(1u);
         SHELF_MUL24_BITS(2u);
