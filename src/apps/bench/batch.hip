@@ -144,7 +144,7 @@ RunResult run_pass(shelf::qwen35::Executor& executor,
                    shelf::state::SequenceSlotPool& seq_pool,
                    shelf::state::GdnStatePool& gdn_pool,
                    shelf::state::PagedKVPool& kv_pool,
-                   shelf::qwen35::runtime::ContinuousBatcher& batcher,
+                   shelf::runtime::ContinuousBatcher& batcher,
                    const BatchOptions& opts,
                    hipStream_t stream) {
     RunResult out;
@@ -369,7 +369,7 @@ int run_batch(int argc, char** argv) {
         gdn_pool->conv_dim(), gdn_pool->conv_dim_padded(), gdn_pool->conv_history(),
         gdn_pool->num_v_heads(), gdn_pool->head_k(), gdn_pool->head_v());
 
-    shelf::qwen35::runtime::ContinuousBatcherConfig cfg;
+    shelf::runtime::ContinuousBatcherConfig cfg;
     cfg.max_num_batched_tokens = sched_tokens;
     cfg.max_scheduled_requests = 1;
     cfg.max_seq_len = seq_len;
@@ -377,8 +377,8 @@ int run_batch(int argc, char** argv) {
     cfg.eos_token_ids = tc.stop_tokens;
 
     auto run_one = [&]() -> RunResult {
-        shelf::qwen35::runtime::ContinuousBatcherConfig c = cfg;
-        shelf::qwen35::runtime::ContinuousBatcher batcher(
+        shelf::runtime::ContinuousBatcherConfig c = cfg;
+        shelf::runtime::ContinuousBatcher batcher(
             *executor, *seq_pool, *gdn_pool, *kv_pool, c, stream);
         if (tp_coordinator != nullptr) batcher.set_tp_batch_hook(tp_coordinator.get());
         return run_pass(*executor, *seq_pool, *gdn_pool, *kv_pool, batcher, opts, stream);
