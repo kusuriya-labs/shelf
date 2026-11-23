@@ -344,6 +344,7 @@ void Residency::transfer(void *dst, int destination, const void *src, int source
     const int p = parity[source][destination];
     hipEvent_t ready_event = ready[source][destination][p];
     hipEvent_t ack_event = ack[destination][source][p];
+    check(hipEventSynchronize(push && !host ? ready_event : ack_event));
     parity[source][destination] = p ^ 1;
     if (!host && push) {
         check(hipSetDevice(physical[destination]));
@@ -368,6 +369,7 @@ void Residency::transfer(void *dst, int destination, const void *src, int source
         check(hipEventRecord(ack_event, compute[destination]));
         check(hipSetDevice(physical[source]));
         check(hipStreamWaitEvent(compute[source], ack_event, 0));
+
         check(hipSetDevice(physical[destination]));
     }
     if (expert_begin[0])
