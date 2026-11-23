@@ -30,6 +30,7 @@ public:
 
     MoeExpertCache(const MoeExpertCache&) = delete;
     MoeExpertCache& operator=(const MoeExpertCache&) = delete;
+    ~MoeExpertCache();
 
     bool enabled() const noexcept { return weights_ != nullptr; }
 
@@ -51,8 +52,8 @@ private:
         std::uint64_t score = 0;
     };
 
-    Status swap(std::uint32_t layer, std::uint32_t host_slot, std::uint32_t vram_slot,
-                hipStream_t stream);
+    Status swap_batch(const Move* moves, std::size_t count, hipStream_t stream);
+    Status prepare_stage(std::size_t count);
     std::uint64_t swap_bytes() const;
     void plan();
     void log_oracle() const;
@@ -75,6 +76,15 @@ private:
 
     std::vector<Move> pending_;
     std::size_t pending_head_ = 0;
+
+    struct StagePlane {
+        void* codes = nullptr;
+        void* scales = nullptr;
+        void* ref = nullptr;
+    };
+    StagePlane stage_[3];
+    std::size_t stage_count_ = 0;
+    std::size_t stage_bytes_[3][3] = {};
 
     std::vector<std::uint32_t> freq_acc_;    // [layers][experts]
     std::vector<std::uint32_t> step_freq_;   // [layers][experts]

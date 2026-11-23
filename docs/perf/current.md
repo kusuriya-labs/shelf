@@ -774,6 +774,47 @@ qualified baseline ではない。TP は expert matrix split のため、この 
 - 現在の build で TP=2 を指定すると、routed expert の N / K が 128 の倍数にならないため
   `EXL3 expert TP requires N/128 and K/128 to be divisible by tp_size` で失敗する。
 
+## 2026-11-23 Problem #41 P0 の reference run（Flash-Next EXL3）
+
+issue #41 の P0-1（MTP verify 方式）と P0-2（expert 交換）の比較測定である。
+qualified baseline ではない。経緯と採否判断は
+[../research/20261123/issue41_p0_verify_and_expert_swap.md](../research/20261123/issue41_p0_verify_and_expert_swap.md)
+に置く。
+
+### MTP verify 方式
+
+- commit `72dce8a7` の worktree、`-DSHELF_HIP_GRAPH=OFF`
+- `models/kusuriya-labs/Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw`、TP=2（`--device 2,3`）、
+  bf16 KV、prefix cache なし、greedy、自然文 48 token prompt
+- `--mtp --mtp-drafts 3 --mtp-window 4096 --mtp-sink 64 --max-seq-len 1024`
+- command: `shelf-compute --serve-stdio --mtp --mtp-drafts 3 --mtp-window 4096
+  --max-seq-len 1024 --device 2,3 --tensor-parallel 2`
+
+| verify | c | decode tok/s | MTP_BATCH |
+| --- | ---: | ---: | --- |
+| target-only | 1 | 34.84 | - |
+| safe serial（既定） | 1 | 32.30 | `chunks=47 emitted=47` |
+| fused（`SHELF_MTP_FUSED_VERIFY=1`） | 1 | 43.88 | `chunks=26 emitted=47` |
+| fused | 2 | 60.51 合計 / 37.52 per-stream | `chunks=18 emitted=62` |
+
+生成列は c=1 の 3 方式で一致した。HIP graph 有効の build では c=1 の fused が
+`hipEventSynchronize: operation not permitted when stream is capturing` で失敗する。
+
+### expert 交換のバッチ化
+
+- HEAD（`75ff82de`）、`models/kusuriya-labs/Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw`
+- TP=1 / EP=1、`SHELF_MOE_HOST_EXPERTS=448`、bf16 KV、prefix cache なし
+- 4096 token prompt、`--max-num-batched-tokens 4096`、greedy
+- command: `shelf-compute --serve-stdio --device 2 --max-seq-len 8192
+  --max-num-batched-tokens 4096 --moe-host-experts 448`
+
+| 4096 prefill | 変更前 ms | 変更後 ms |
+| --- | ---: | ---: |
+| 1 本目（交換 2,562 組） | 4724.5 / 4768.2 / 4815.5 / 4822.9 / 4832.6 | 3995.2 / 4000.2 / 4005.7 / 4020.7 |
+| 2 本目以降（交換なし） | 2398.2 / 2401.8 / 2407.3 | 2397.0 / 2405.5 / 2408.8 |
+
+decode は 17.0 tok/s で変更前後ともに同じ。生成 48 token の列も一致した。
+
 ## 2026-11-05 EXL3 W16A16 decode / prefill
 
 `models/Qwen3.8-27B-exl3`（mul1、4 bpw、lm_head 6 bpw）を TP1 / bf16 KV / GPU 1 枚で

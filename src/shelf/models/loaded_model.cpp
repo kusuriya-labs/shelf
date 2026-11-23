@@ -81,6 +81,7 @@ Result<LoadedModel> LoadedModel::load(
     }
     if (family_result.value() == ModelFamily::Qwen4Exp) {
         shelf::qwen4exp::Qwen4ExpLoadOptions load_options;
+        load_options.load_mtp = load_mtp;
         if (const char* host_experts = std::getenv("SHELF_MOE_HOST_EXPERTS")) {
             load_options.moe_host_experts =
                 static_cast<std::uint32_t>(std::strtoul(host_experts, nullptr, 10));

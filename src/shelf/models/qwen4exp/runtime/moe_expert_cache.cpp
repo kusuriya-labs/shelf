@@ -12,6 +12,8 @@ using shelf::weights::MatrixWeight;
 
 namespace {
 
+constexpr std::size_t kSwapBatch = 16u;
+
 std::uint32_t env_u32(const char* name, std::uint32_t fallback) {
     const char* value = std::getenv(name);
     if (value == nullptr || *value == '\0') return fallback;
@@ -36,6 +38,14 @@ Status sync(hipStream_t stream, const char* what) {
 }
 
 }  // namespace
+
+MoeExpertCache::~MoeExpertCache() {
+    for (auto& plane : stage_) {
+        if (plane.codes != nullptr) hipHostFree(plane.codes);
+        if (plane.scales != nullptr) hipHostFree(plane.scales);
+        if (plane.ref != nullptr) hipHostFree(plane.ref);
+    }
+}
 
 MoeExpertCache::MoeExpertCache(const Qwen4ExpRankWeights& weights) : weights_(&weights) {
     layers_ = static_cast<std::uint32_t>(weights.layers.size());
@@ -152,12 +162,13 @@ Status MoeExpertCache::step(hipStream_t stream) {
         : std::min<std::size_t>(pending_.size(),
                                 pending_head_ + static_cast<std::size_t>(budget_));
     while (pending_head_ < drain_limit) {
-        if (!batched && !pcie_.try_acquire(move_bytes)) break;
-        const Move move = pending_[pending_head_];
-        st = swap(move.layer, move.host_slot, move.vram_slot, stream);
+        const std::size_t chunk =
+            batched ? std::min<std::size_t>(drain_limit - pending_head_, kSwapBatch) : 1u;
+        if (!batched && !pcie_.try_acquire(move_bytes * chunk)) break;
+        st = swap_batch(pending_.data() + pending_head_, chunk, stream);
         if (!st.ok()) return st;
-        ++pending_head_;
-        ++swaps_;
+        pending_head_ += chunk;
+        swaps_ += chunk;
     }
 
     ++step_;
@@ -297,104 +308,252 @@ void MoeExpertCache::log_oracle() const {
     std::fflush(stderr);
 }
 
-Status MoeExpertCache::swap(std::uint32_t layer, std::uint32_t host_slot,
-                            std::uint32_t vram_slot, hipStream_t stream) {
-    const Qwen4ExpMoeWeights& mlp = weights_->layers[layer].mlp;
-    const MatrixWeight* vram_planes[] = {&mlp.gate_experts, &mlp.up_experts,
-                                         &mlp.down_experts};
-    const MatrixWeight* host_planes[] = {&mlp.gate_experts_host,
-                                         &mlp.up_experts_host,
-                                         &mlp.down_experts_host};
-    for (std::uint32_t index = 0; index < 3u; ++index) {
-        const MatrixWeight& vram = *vram_planes[index];
-        const MatrixWeight& host = *host_planes[index];
-        const bool exl3 = vram.encoding == weights::MatrixEncoding::Exl3;
-        const gpu::Tensor& scales_plane = exl3 ? vram.exl3_suh : vram.scales;
-        const gpu::Tensor& ref_plane = exl3 ? vram.exl3_svh : vram.row_ref;
-        const std::uint64_t vram_scales_stride = exl3 ? vram.exl3_suh_batch_stride_bytes
-                                                      : vram.scales_batch_stride_bytes;
-        const std::uint64_t host_scales_stride = exl3 ? host.exl3_suh_batch_stride_bytes
-                                                      : host.scales_batch_stride_bytes;
-        const std::uint64_t ref_stride =
-            exl3 ? vram.exl3_svh_batch_stride_bytes : static_cast<std::uint64_t>(vram.rows);
-        if (vram.codes.ndim() == 0u || scales_plane.ndim() == 0u ||
-            ref_plane.ndim() == 0u || host.host_codes == nullptr ||
-            host.host_scales == nullptr || host.host_row_ref == nullptr) {
-            return Status::invalid_state("moe cache swap plane is incomplete", __FILE__,
-                                         __LINE__);
+Status MoeExpertCache::prepare_stage(std::size_t count) {
+    if (weights_ == nullptr || weights_->layers.empty()) return Status::make_ok();
+    if (stage_count_ >= count) return Status::make_ok();
+    std::size_t bytes[3][3] = {};
+    for (const auto& layer : weights_->layers) {
+        const MatrixWeight* planes[] = {&layer.mlp.gate_experts, &layer.mlp.up_experts,
+                                        &layer.mlp.down_experts};
+        for (std::uint32_t index = 0; index < 3u; ++index) {
+            const MatrixWeight& vram = *planes[index];
+            const bool exl3 = vram.encoding == weights::MatrixEncoding::Exl3;
+            bytes[index][0] = std::max<std::size_t>(
+                bytes[index][0], vram.codes_batch_stride_bytes);
+            bytes[index][1] = std::max<std::size_t>(
+                bytes[index][1], static_cast<std::size_t>(
+                                     exl3 ? vram.exl3_suh_batch_stride_bytes
+                                          : vram.scales_batch_stride_bytes));
+            bytes[index][2] = std::max<std::size_t>(
+                bytes[index][2], static_cast<std::size_t>(
+                                     exl3 ? vram.exl3_svh_batch_stride_bytes
+                                          : static_cast<std::uint64_t>(vram.rows)));
         }
-        std::uint8_t* vram_codes =
-            vram.codes.data<std::uint8_t>() + static_cast<std::size_t>(vram_slot) *
-                                                  vram.codes_batch_stride_bytes;
-        std::uint8_t* host_codes =
-            const_cast<std::uint8_t*>(static_cast<const std::uint8_t*>(host.host_codes)) +
-            static_cast<std::size_t>(host_slot) * host.codes_batch_stride_bytes;
-        std::uint8_t* vram_scales =
-            scales_plane.data<std::uint8_t>() +
-            static_cast<std::size_t>(vram_slot) * vram_scales_stride;
-        std::uint8_t* host_scales =
-            const_cast<std::uint8_t*>(static_cast<const std::uint8_t*>(host.host_scales)) +
-            static_cast<std::size_t>(host_slot) * host_scales_stride;
-        std::uint8_t* vram_ref =
-            ref_plane.data<std::uint8_t>() +
-            static_cast<std::size_t>(vram_slot) * ref_stride;
-        std::uint8_t* host_ref =
-            const_cast<std::uint8_t*>(static_cast<const std::uint8_t*>(host.host_row_ref)) +
-            static_cast<std::size_t>(host_slot) * ref_stride;
+    }
+    for (std::uint32_t index = 0; index < 3u; ++index) {
+        stage_bytes_[index][0] = bytes[index][0];
+        stage_bytes_[index][1] = bytes[index][1];
+        stage_bytes_[index][2] = bytes[index][2];
+        void* next[3] = {nullptr, nullptr, nullptr};
+        void** slots[3] = {&stage_[index].codes, &stage_[index].scales,
+                           &stage_[index].ref};
+        for (std::uint32_t part = 0; part < 3u; ++part) {
+            const std::size_t size = count * bytes[index][part];
+            if (size == 0u) continue;
+            const hipError_t error = hipHostMalloc(&next[part], size, hipHostMallocDefault);
+            if (error != hipSuccess) {
+                for (std::uint32_t done = 0; done < part; ++done) {
+                    if (next[done] != nullptr) hipHostFree(next[done]);
+                }
+                return Status::hip_error("moe cache stage allocate",
+                                         hipGetErrorString(error), __FILE__, __LINE__);
+            }
+        }
+        for (std::uint32_t part = 0; part < 3u; ++part) {
+            if (*slots[part] != nullptr) hipHostFree(*slots[part]);
+            *slots[part] = next[part];
+        }
+    }
+    stage_count_ = count;
+    return Status::make_ok();
+}
 
-        const std::size_t codes_bytes = vram.codes_batch_stride_bytes;
-        const std::size_t scales_bytes = static_cast<std::size_t>(vram_scales_stride);
-        const std::size_t ref_bytes = static_cast<std::size_t>(ref_stride);
-        std::vector<std::uint8_t> demoted_codes(codes_bytes);
-        std::vector<std::uint8_t> demoted_scales(scales_bytes);
-        std::vector<std::uint8_t> demoted_ref(ref_bytes);
+Status MoeExpertCache::swap_batch(const Move* moves, std::size_t count,
+                                  hipStream_t stream) {
+    if (count == 0u) return Status::make_ok();
+    Status st = prepare_stage(count);
+    if (!st.ok()) return st;
 
-        Status st = copy_async(demoted_codes.data(), vram_codes, codes_bytes,
-                               hipMemcpyDeviceToHost, stream, "moe cache demote codes");
-        if (!st.ok()) return st;
-        st = copy_async(demoted_scales.data(), vram_scales, scales_bytes,
-                        hipMemcpyDeviceToHost, stream, "moe cache demote scales");
-        if (!st.ok()) return st;
-        st = copy_async(demoted_ref.data(), vram_ref, ref_bytes,
-                        hipMemcpyDeviceToHost, stream, "moe cache demote row_ref");
-        if (!st.ok()) return st;
-        st = sync(stream, "moe cache demote");
-        if (!st.ok()) return st;
+    for (std::size_t i = 0; i < count; ++i) {
+        const Qwen4ExpMoeWeights& mlp = weights_->layers[moves[i].layer].mlp;
+        const MatrixWeight* vram_planes[] = {&mlp.gate_experts, &mlp.up_experts,
+                                             &mlp.down_experts};
+        for (std::uint32_t index = 0; index < 3u; ++index) {
+            const MatrixWeight& vram = *vram_planes[index];
+            const bool exl3 = vram.encoding == weights::MatrixEncoding::Exl3;
+            const gpu::Tensor& scales_plane = exl3 ? vram.exl3_suh : vram.scales;
+            const gpu::Tensor& ref_plane = exl3 ? vram.exl3_svh : vram.row_ref;
+            const std::uint64_t vram_scales_stride =
+                exl3 ? vram.exl3_suh_batch_stride_bytes : vram.scales_batch_stride_bytes;
+            const std::uint64_t ref_stride =
+                exl3 ? vram.exl3_svh_batch_stride_bytes
+                     : static_cast<std::uint64_t>(vram.rows);
+            if (vram.codes.ndim() == 0u || scales_plane.ndim() == 0u ||
+                ref_plane.ndim() == 0u) {
+                return Status::invalid_state("moe cache swap plane is incomplete", __FILE__,
+                                             __LINE__);
+            }
+            std::uint8_t* vram_codes =
+                vram.codes.data<std::uint8_t>() +
+                static_cast<std::size_t>(moves[i].vram_slot) *
+                    vram.codes_batch_stride_bytes;
+            std::uint8_t* vram_scales =
+                scales_plane.data<std::uint8_t>() +
+                static_cast<std::size_t>(moves[i].vram_slot) * vram_scales_stride;
+            std::uint8_t* vram_ref =
+                ref_plane.data<std::uint8_t>() +
+                static_cast<std::size_t>(moves[i].vram_slot) * ref_stride;
+            std::uint8_t* stage_codes = static_cast<std::uint8_t*>(
+                stage_[index].codes) + i * stage_bytes_[index][0];
+            std::uint8_t* stage_scales = static_cast<std::uint8_t*>(
+                stage_[index].scales) + i * stage_bytes_[index][1];
+            std::uint8_t* stage_ref = static_cast<std::uint8_t*>(
+                stage_[index].ref) + i * stage_bytes_[index][2];
+            st = copy_async(stage_codes, vram_codes, vram.codes_batch_stride_bytes,
+                            hipMemcpyDeviceToHost, stream, "moe cache demote codes");
+            if (!st.ok()) return st;
+            st = copy_async(stage_scales, vram_scales,
+                            static_cast<std::size_t>(vram_scales_stride),
+                            hipMemcpyDeviceToHost, stream, "moe cache demote scales");
+            if (!st.ok()) return st;
+            st = copy_async(stage_ref, vram_ref, static_cast<std::size_t>(ref_stride),
+                            hipMemcpyDeviceToHost, stream, "moe cache demote row_ref");
+            if (!st.ok()) return st;
+        }
+    }
+    st = sync(stream, "moe cache demote");
+    if (!st.ok()) return st;
 
-        st = copy_async(vram_codes, host_codes, codes_bytes, hipMemcpyHostToDevice, stream,
-                        "moe cache promote codes");
-        if (!st.ok()) return st;
-        st = copy_async(vram_scales, host_scales, scales_bytes, hipMemcpyHostToDevice,
-                        stream, "moe cache promote scales");
-        if (!st.ok()) return st;
-        st = copy_async(vram_ref, host_ref, ref_bytes, hipMemcpyHostToDevice, stream,
-                        "moe cache promote row_ref");
-        if (!st.ok()) return st;
-        st = sync(stream, "moe cache promote");
-        if (!st.ok()) return st;
+    for (std::size_t i = 0; i < count; ++i) {
+        const Qwen4ExpMoeWeights& mlp = weights_->layers[moves[i].layer].mlp;
+        const MatrixWeight* vram_planes[] = {&mlp.gate_experts, &mlp.up_experts,
+                                             &mlp.down_experts};
+        const MatrixWeight* host_planes[] = {&mlp.gate_experts_host,
+                                             &mlp.up_experts_host,
+                                             &mlp.down_experts_host};
+        for (std::uint32_t index = 0; index < 3u; ++index) {
+            const MatrixWeight& vram = *vram_planes[index];
+            const MatrixWeight& host = *host_planes[index];
+            const bool exl3 = vram.encoding == weights::MatrixEncoding::Exl3;
+            const gpu::Tensor& scales_plane = exl3 ? vram.exl3_suh : vram.scales;
+            const gpu::Tensor& ref_plane = exl3 ? vram.exl3_svh : vram.row_ref;
+            const std::uint64_t vram_scales_stride =
+                exl3 ? vram.exl3_suh_batch_stride_bytes : vram.scales_batch_stride_bytes;
+            const std::uint64_t host_scales_stride =
+                exl3 ? host.exl3_suh_batch_stride_bytes : host.scales_batch_stride_bytes;
+            const std::uint64_t ref_stride =
+                exl3 ? vram.exl3_svh_batch_stride_bytes
+                     : static_cast<std::uint64_t>(vram.rows);
+            if (host.host_codes == nullptr || host.host_scales == nullptr ||
+                host.host_row_ref == nullptr) {
+                return Status::invalid_state("moe cache host plane is incomplete",
+                                             __FILE__, __LINE__);
+            }
+            std::uint8_t* vram_codes =
+                vram.codes.data<std::uint8_t>() +
+                static_cast<std::size_t>(moves[i].vram_slot) *
+                    vram.codes_batch_stride_bytes;
+            std::uint8_t* vram_scales =
+                scales_plane.data<std::uint8_t>() +
+                static_cast<std::size_t>(moves[i].vram_slot) * vram_scales_stride;
+            std::uint8_t* vram_ref =
+                ref_plane.data<std::uint8_t>() +
+                static_cast<std::size_t>(moves[i].vram_slot) * ref_stride;
+            std::uint8_t* host_codes =
+                const_cast<std::uint8_t*>(
+                    static_cast<const std::uint8_t*>(host.host_codes)) +
+                static_cast<std::size_t>(moves[i].host_slot) *
+                    host.codes_batch_stride_bytes;
+            std::uint8_t* host_scales =
+                const_cast<std::uint8_t*>(
+                    static_cast<const std::uint8_t*>(host.host_scales)) +
+                static_cast<std::size_t>(moves[i].host_slot) * host_scales_stride;
+            std::uint8_t* host_ref =
+                const_cast<std::uint8_t*>(
+                    static_cast<const std::uint8_t*>(host.host_row_ref)) +
+                static_cast<std::size_t>(moves[i].host_slot) * ref_stride;
+            st = copy_async(vram_codes, host_codes, vram.codes_batch_stride_bytes,
+                            hipMemcpyHostToDevice, stream, "moe cache promote codes");
+            if (!st.ok()) return st;
+            st = copy_async(vram_scales, host_scales,
+                            static_cast<std::size_t>(vram_scales_stride),
+                            hipMemcpyHostToDevice, stream, "moe cache promote scales");
+            if (!st.ok()) return st;
+            st = copy_async(vram_ref, host_ref, static_cast<std::size_t>(ref_stride),
+                            hipMemcpyHostToDevice, stream, "moe cache promote row_ref");
+            if (!st.ok()) return st;
+        }
+    }
+    st = sync(stream, "moe cache promote");
+    if (!st.ok()) return st;
 
-        std::memcpy(host_codes, demoted_codes.data(), codes_bytes);
-        std::memcpy(host_scales, demoted_scales.data(), scales_bytes);
-        std::memcpy(host_ref, demoted_ref.data(), ref_bytes);
+    for (std::size_t i = 0; i < count; ++i) {
+        const Qwen4ExpMoeWeights& mlp = weights_->layers[moves[i].layer].mlp;
+        const MatrixWeight* vram_planes[] = {&mlp.gate_experts, &mlp.up_experts,
+                                             &mlp.down_experts};
+        const MatrixWeight* host_planes[] = {&mlp.gate_experts_host,
+                                             &mlp.up_experts_host,
+                                             &mlp.down_experts_host};
+        for (std::uint32_t index = 0; index < 3u; ++index) {
+            const MatrixWeight& vram = *vram_planes[index];
+            const MatrixWeight& host = *host_planes[index];
+            const bool exl3 = vram.encoding == weights::MatrixEncoding::Exl3;
+            const std::uint64_t host_scales_stride =
+                exl3 ? host.exl3_suh_batch_stride_bytes : host.scales_batch_stride_bytes;
+            const std::uint64_t ref_stride =
+                exl3 ? vram.exl3_svh_batch_stride_bytes
+                     : static_cast<std::uint64_t>(vram.rows);
+            const std::size_t codes_bytes = vram.codes_batch_stride_bytes;
+            const std::size_t scales_bytes = static_cast<std::size_t>(host_scales_stride);
+            const std::size_t ref_bytes = static_cast<std::size_t>(ref_stride);
+            std::uint8_t* host_codes =
+                const_cast<std::uint8_t*>(
+                    static_cast<const std::uint8_t*>(host.host_codes)) +
+                static_cast<std::size_t>(moves[i].host_slot) *
+                    host.codes_batch_stride_bytes;
+            std::uint8_t* host_scales =
+                const_cast<std::uint8_t*>(
+                    static_cast<const std::uint8_t*>(host.host_scales)) +
+                static_cast<std::size_t>(moves[i].host_slot) * host_scales_stride;
+            std::uint8_t* host_ref =
+                const_cast<std::uint8_t*>(
+                    static_cast<const std::uint8_t*>(host.host_row_ref)) +
+                static_cast<std::size_t>(moves[i].host_slot) * ref_stride;
+            std::memcpy(host_codes,
+                        static_cast<std::uint8_t*>(stage_[index].codes) +
+                            i * stage_bytes_[index][0],
+                        codes_bytes);
+            std::memcpy(host_scales,
+                        static_cast<std::uint8_t*>(stage_[index].scales) +
+                            i * stage_bytes_[index][1],
+                        scales_bytes);
+            std::memcpy(host_ref,
+                        static_cast<std::uint8_t*>(stage_[index].ref) +
+                            i * stage_bytes_[index][2],
+                        ref_bytes);
+        }
+
+        const std::size_t vram_index =
+            static_cast<std::size_t>(moves[i].layer) * vram_experts_ + moves[i].vram_slot;
+        const std::size_t host_index =
+            static_cast<std::size_t>(moves[i].layer) * host_experts_ + moves[i].host_slot;
+        const std::int32_t evicted = vram_expert_[vram_index];
+        const std::int32_t admitted = host_expert_[host_index];
+        vram_expert_[vram_index] = admitted;
+        host_expert_[host_index] = evicted;
+        const std::size_t map_base =
+            static_cast<std::size_t>(moves[i].layer) * experts_;
+        map_host_[map_base + admitted] = static_cast<std::int32_t>(moves[i].vram_slot);
+        map_host_[map_base + evicted] = -1 - static_cast<std::int32_t>(moves[i].host_slot);
     }
 
-    const std::size_t vram_index =
-        static_cast<std::size_t>(layer) * vram_experts_ + vram_slot;
-    const std::size_t host_index =
-        static_cast<std::size_t>(layer) * host_experts_ + host_slot;
-    const std::int32_t evicted = vram_expert_[vram_index];
-    const std::int32_t admitted = host_expert_[host_index];
-    vram_expert_[vram_index] = admitted;
-    host_expert_[host_index] = evicted;
-    const std::size_t map_base = static_cast<std::size_t>(layer) * experts_;
-    map_host_[map_base + admitted] = static_cast<std::int32_t>(vram_slot);
-    map_host_[map_base + evicted] = -1 - static_cast<std::int32_t>(host_slot);
-
-    Status st = copy_async(weights_->expert_slot_map.data<std::int32_t>() + map_base,
-                           map_host_.data() + map_base,
-                           static_cast<std::size_t>(experts_) * sizeof(std::int32_t),
-                           hipMemcpyHostToDevice, stream, "moe cache map upload");
-    if (!st.ok()) return st;
+    for (std::size_t i = 0; i < count; ++i) {
+        bool seen = false;
+        for (std::size_t j = 0; j < i; ++j) {
+            if (moves[j].layer == moves[i].layer) {
+                seen = true;
+                break;
+            }
+        }
+        if (seen) continue;
+        const std::size_t map_base =
+            static_cast<std::size_t>(moves[i].layer) * experts_;
+        st = copy_async(weights_->expert_slot_map.data<std::int32_t>() + map_base,
+                        map_host_.data() + map_base,
+                        static_cast<std::size_t>(experts_) * sizeof(std::int32_t),
+                        hipMemcpyHostToDevice, stream, "moe cache map upload");
+        if (!st.ok()) return st;
+    }
     return Status::make_ok();
 }
 

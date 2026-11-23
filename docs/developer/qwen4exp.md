@@ -149,6 +149,10 @@ lm_head (final norm なし)
   （`--pcie-frac`）の範囲内で消化する。`--moe-cache-min-gain`（既定 150）が交換を採る
   最小の頻度差、`--moe-cache-rebalance-steps`（既定 4）が再評価の間隔、
   `--moe-cache-decay`（既定 4096）が frequency を 0.7 倍にする閾値である。
+  交換は最大 16 組をまとめて実行する。demote（VRAM→host）と promote（host→VRAM）は
+  それぞれ全組を非同期転送してから 1 回だけ stream sync し、staging には
+  `hipHostMalloc` の pinned 領域を再利用する。slot map は交換後に対象層ごとに
+  1 回だけ upload する。
 - PLE は layer 1 の attention site の前に注入する。key_proj / value_proj /
   norm_key / norm_query / norm_conv / short conv を使う。
 
