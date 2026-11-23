@@ -48,6 +48,28 @@ struct HyperApplyArgs {
     uint32_t output_stride = 0;
 };
 
+inline constexpr uint32_t kHyperUpMixMaxHc = 8u;
+
+// Fused up projection + gated mean. up_weight is [hc * hidden, k] BF16 and input is
+// [rows, k] BF16. Each hidden index computes its hc dot products, rounds each to BF16
+// (the value the unfused up GEMM would have stored), then applies the same sigmoid gate
+// and 1/hc mean as HyperMixArgs.
+struct HyperUpMixArgs {
+    const void* up_weight = nullptr;
+    const void* input = nullptr;
+    const void* normed = nullptr;
+    void* output = nullptr;
+    uint32_t rows = 0;
+    uint32_t hc = 0;
+    uint32_t hidden = 0;
+    uint32_t k = 0;
+    uint32_t input_stride = 0;
+    uint32_t normed_stride = 0;
+    uint32_t output_stride = 0;
+    uint32_t sigmoid_gate = 1;
+};
+
+hipError_t launch_hyper_up_mix(const HyperUpMixArgs& args, hipStream_t stream);
 hipError_t launch_hyper_mix(const HyperMixArgs& args, hipStream_t stream);
 hipError_t launch_hyper_inject(const HyperInjectArgs& args, hipStream_t stream);
 hipError_t launch_hyper_apply(const HyperApplyArgs& args, hipStream_t stream);

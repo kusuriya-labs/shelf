@@ -43,6 +43,59 @@ __global__ __launch_bounds__(kBlock) void hyper_mix_kernel(HyperMixArgs args) {
     }
 }
 
+constexpr uint32_t kUpMixWarps = 8u;
+constexpr uint32_t kUpMixThreads = kUpMixWarps * 32u;
+constexpr uint32_t kUpMixMaxHc = kHyperUpMixMaxHc;
+
+__device__ __forceinline__ float bf16_round_f32(float value) {
+    return __uint_as_float(static_cast<std::uint32_t>(
+                               __bfloat16_as_ushort(__float2bfloat16(value)))
+                           << 16);
+}
+
+__global__ __launch_bounds__(kUpMixThreads) void hyper_up_mix_kernel(HyperUpMixArgs args) {
+    const uint32_t row = blockIdx.y;
+    const uint32_t warp = threadIdx.x >> 5u;
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t i = blockIdx.x * kUpMixWarps + warp;
+    if (row >= args.rows || i >= args.hidden) return;
+    const shelf::bf16_t* input = static_cast<const shelf::bf16_t*>(args.input) +
+                                 static_cast<std::uint64_t>(row) * args.input_stride;
+    const shelf::bf16_t* up = static_cast<const shelf::bf16_t*>(args.up_weight);
+    float gate_sum[kUpMixMaxHc];
+    #pragma unroll
+    for (uint32_t h = 0u; h < kUpMixMaxHc; ++h) gate_sum[h] = 0.0f;
+    for (uint32_t kk = lane; kk < args.k; kk += 32u) {
+        const float x = bf16_load(input + kk);
+        #pragma unroll
+        for (uint32_t h = 0u; h < kUpMixMaxHc; ++h) {
+            if (h < args.hc)
+                gate_sum[h] += bf16_load(up +
+                    static_cast<std::uint64_t>(h * args.hidden + i) * args.k + kk) * x;
+        }
+    }
+    #pragma unroll
+    for (uint32_t off = 16u; off > 0u; off >>= 1u) {
+        #pragma unroll
+        for (uint32_t h = 0u; h < kUpMixMaxHc; ++h)
+            gate_sum[h] += __shfl_down(gate_sum[h], off, 32);
+    }
+    if (lane != 0u) return;
+    const shelf::bf16_t* normed = static_cast<const shelf::bf16_t*>(args.normed) +
+                                  static_cast<std::uint64_t>(row) * args.normed_stride;
+    float total = 0.0f;
+    #pragma unroll
+    for (uint32_t h = 0u; h < kUpMixMaxHc; ++h) {
+        if (h >= args.hc) break;
+        const float g = bf16_round_f32(gate_sum[h]);
+        const float gate = (args.sigmoid_gate != 0u) ? (1.0f / (1.0f + __expf(-g))) : g;
+        total += gate * bf16_load(normed + h * args.hidden + i);
+    }
+    shelf::bf16_t* out = static_cast<shelf::bf16_t*>(args.output) +
+                         static_cast<std::uint64_t>(row) * args.output_stride;
+    out[i] = bf16_store(total / static_cast<float>(args.hc));
+}
+
 // Scale(1/hc) -> Sigmoid -> Scale(2) in one pass.
 __global__ __launch_bounds__(kBlock) void hyper_inject_kernel(HyperInjectArgs args) {
     const uint32_t row = blockIdx.x;
@@ -77,6 +130,24 @@ __global__ __launch_bounds__(kBlock) void hyper_apply_kernel(HyperApplyArgs args
 }
 
 }  // namespace
+
+hipError_t launch_hyper_up_mix(const HyperUpMixArgs& args, hipStream_t stream) {
+    if (args.up_weight == nullptr || args.input == nullptr || args.normed == nullptr ||
+        args.output == nullptr) {
+        return hipErrorInvalidValue;
+    }
+    if (args.rows == 0u || args.hc == 0u || args.hidden == 0u || args.k == 0u) {
+        return hipErrorInvalidValue;
+    }
+    if (args.hc > kUpMixMaxHc) return hipErrorInvalidValue;
+    if (args.input_stride < args.k || args.normed_stride < args.hc * args.hidden ||
+        args.output_stride < args.hidden) {
+        return hipErrorInvalidValue;
+    }
+    const dim3 grid((args.hidden + kUpMixWarps - 1u) / kUpMixWarps, args.rows);
+    hyper_up_mix_kernel<<<grid, kUpMixThreads, 0, stream>>>(args);
+    return hipGetLastError();
+}
 
 hipError_t launch_hyper_mix(const HyperMixArgs& args, hipStream_t stream) {
     if (args.gate == nullptr || args.normed == nullptr || args.output == nullptr) {

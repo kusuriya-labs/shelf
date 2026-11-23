@@ -153,3 +153,25 @@ attention へ渡す mask を外す。planner の key にも 1 bit 足した。A/
   - 中央値 **+6.3 %**（30.9 → 29.1 ms/token）
 - 生成 24 token は on / off で一致した。可視長が budget を超える場合は従来どおり
   mask を保持する（`test_paged_attention_plan_splits` に境界の check を追加）。
+
+## 7. 適用: hyper up GEMM + gate の融合
+
+`hyper_mix_kernel` は 1 CTA / row で動き（decode rows=1 では GPU 全体で 1 CTA）、
+up GEMM の出力 10240 を一度 materialize してから読む。この 2 launch を
+`hyper_up_mix_kernel` 1 launch に融合した。hidden index ごとに hc 本の dot を
+1 warp で計算し、各 dot を BF16 に丸めてから sigmoid gate と 1/hc 平均を適用する
+（丸めは unfused の up GEMM が store する値と同じ）。
+
+- 配置: `src/shelf/kernels/fused/hyper_connection.hip` / `include/.../hyper_connection.h`
+- matcher: `try_launch_linear_hyper_up_mix`（LINEAR_BF16 の直後が HYPER_MIX で、
+  入力が一致し、両方が ExactRows のときだけ融合）。`SHELF_DISABLE_HYPER_UP_MIX=1`
+  で戻せる。
+- 正しさ: logits 17,879,040 値の **max abs diff 0.0**、生成 16 token も一致。
+- 性能: kernel 合計は up 1.394 + mix 1.612 = 3.006 ms/token から
+  up+mix 1.926 ms/token へ **−1.08 ms/token**。E2E interleaved A/B 3 ペアは
+  off 34.95 / 34.75 / 34.61、on 34.91 / 35.10 / 35.16 tok/s（中央値 **+1.0 %**）。
+  kernel の削減が wall にそのまま出ないのは、greedy の per-token sync の遊休に
+  一部が吸収されるためである。
+- hyper_mix / hyper_apply の hidden tile 分割（256 / 512 / 1024 / 1 CTA）は
+  E2E で差がなかった（35.23〜35.40 tok/s）。1 launch あたり 45〜60 KB の
+  latency 律速で、CTA 数を増やしても短くならない。tile 変更は採用しなかった。

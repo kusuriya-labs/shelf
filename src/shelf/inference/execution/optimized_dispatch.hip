@@ -17,6 +17,7 @@
 #include <shelf/kernels/optimized/linear/fp8.h>
 #include <shelf/kernels/optimized/linear/mxfp4.h>
 #include <shelf/kernels/fused/bf16_linear_pair.h>
+#include <shelf/kernels/fused/hyper_connection.h>
 #include <shelf/kernels/optimized/linear/bf16.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
 #include <shelf/inference/execution/hyper_connection_dispatch.h>
@@ -926,6 +927,77 @@ Result<OptimizedLaunchResult> try_launch_linear_bf16_pair(
         return Status::hip_error("bf16 pair gemm launch", hipGetErrorString(herr),
                                  __FILE__, __LINE__);
     record_physical_launch(1);
+    record_optimized_op();
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 2u};
+}
+
+
+Result<OptimizedLaunchResult> try_launch_linear_hyper_up_mix(
+    const ::shelf::runtime::Program& program,
+    size_t dispatch_index,
+    HostExecutionContext& ctx,
+    hipStream_t stream) {
+    const auto miss = OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
+    static const bool enabled = std::getenv("SHELF_DISABLE_HYPER_UP_MIX") == nullptr;
+    if (!enabled) return miss;
+    if (dispatch_index + 1u >= program.dispatches.size()) return miss;
+    const auto& b0 = program.dispatches[dispatch_index];
+    const auto& b1 = program.dispatches[dispatch_index + 1u];
+    if (b0.kernel_id != ::shelf::runtime::KernelId::LINEAR_BF16 ||
+        b1.kernel_id != ::shelf::runtime::KernelId::HYPER_MIX)
+        return miss;
+    if (b0.input_count != 1u || b0.output_count != 1u || b1.input_count != 2u ||
+        b1.output_count != 1u)
+        return miss;
+    if (b1.input_slots[0] != b0.output_slots[0]) return miss;
+    const uint32_t hc = b1.group_size;
+    const uint32_t hidden = b1.flags;
+    if (hc == 0u || hidden == 0u || hc > ::shelf::kernel::kHyperUpMixMaxHc) return miss;
+    PhysicalBf16Launch l{};
+    const Result<PhysicalResolveStatus> resolved = resolve_bf16_physical(program, b0, ctx, l);
+    if (!resolved.ok()) return resolved.status();
+    if (resolved.value() != PhysicalResolveStatus::Applicable) return miss;
+    if (l.variant != PhysicalBf16Variant::ExactRows) return miss;
+    if (l.rows == 0u || l.rows > ::shelf::kernel::kBf16GemmExactRowsKernelMax) return miss;
+    if (l.out_features != hc * hidden) return miss;
+    auto gate = resolve_host_value(program, ::shelf::runtime::ValueId{b1.input_slots[0]}, ctx);
+    if (!gate.ok()) return gate.status();
+    auto normed = resolve_host_value(program, ::shelf::runtime::ValueId{b1.input_slots[1]}, ctx);
+    if (!normed.ok()) return normed.status();
+    auto out = resolve_host_value(program, ::shelf::runtime::ValueId{b1.output_slots[0]}, ctx);
+    if (!out.ok()) return out.status();
+    if (gate.value().dtype != ValueDType::BF16 || normed.value().dtype != ValueDType::BF16 ||
+        out.value().dtype != ValueDType::BF16)
+        return miss;
+    if (gate.value().feature_count != hc * hidden || normed.value().feature_count != hc * hidden ||
+        out.value().feature_count != hidden)
+        return miss;
+    if (gate.value().row_domain != normed.value().row_domain ||
+        gate.value().row_domain != out.value().row_domain)
+        return miss;
+    if (gate.value().ptr != reinterpret_cast<const void*>(l.output) ||
+        normed.value().ptr == nullptr || out.value().ptr == nullptr)
+        return miss;
+    if (rows_for(out.value(), ctx) != l.rows) return miss;
+    ::shelf::kernel::HyperUpMixArgs args{};
+    args.up_weight = reinterpret_cast<const void*>(l.weight);
+    args.input = reinterpret_cast<const void*>(l.input);
+    args.normed = normed.value().ptr;
+    args.output = out.value().ptr;
+    args.rows = l.rows;
+    args.hc = hc;
+    args.hidden = hidden;
+    args.k = l.k;
+    args.input_stride = l.input_row_stride;
+    args.normed_stride = normed.value().row_stride;
+    args.output_stride = out.value().row_stride;
+    args.sigmoid_gate = b1.compute_spec != 0u ? 1u : 0u;
+    const hipError_t herr = ::shelf::kernel::launch_hyper_up_mix(args, stream);
+    if (herr == hipErrorNotSupported) return miss;
+    if (herr != hipSuccess)
+        return Status::hip_error("hyper up+mix launch", hipGetErrorString(herr), __FILE__,
+                                 __LINE__);
+    record_physical_launch(1u);
     record_optimized_op();
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 2u};
 }
@@ -2046,6 +2118,9 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             auto pair = try_launch_linear_bf16_pair(program, dispatch_index, ctx, stream);
             if (!pair.ok() || pair.value().kind == OptimizedLaunchKind::Launched)
                 return pair;
+            auto up_mix = try_launch_linear_hyper_up_mix(program, dispatch_index, ctx, stream);
+            if (!up_mix.ok() || up_mix.value().kind == OptimizedLaunchKind::Launched)
+                return up_mix;
             return try_launch_linear_bf16(program, b, ctx, stream);
         }
         case KernelId::LINEAR_INT8_W32:
