@@ -57,6 +57,7 @@ cmake --build build --parallel
 
 - [docs/developer/README.md](docs/developer/README.md) — 開発者向け（アーキテクチャ・ランタイム・量子化・カーネル・テスト契約）
 - [docs/perf/README.md](docs/perf/README.md) — 性能・ベンチマーク（現在の性能値・測定手順・品質評価）
+  - [Qwen3.8-27B 推論エンジン比較レポート（R9700 単体）](docs/perf/engine-compare-qwen38-27b-r9700.md)
 - [docs/research/README.md](docs/research/README.md) — R&D 記録（実験経緯・採否判断・棄却根拠）
 
 ## Contributors

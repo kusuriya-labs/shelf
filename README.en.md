@@ -59,6 +59,7 @@ The canonical references for supported features, design specifications, and perf
 
 - [docs/developer/README.md](docs/developer/README.md) — Developer documentation (architecture, runtime, quantization, kernels, and test contracts)
 - [docs/perf/README.md](docs/perf/README.md) — Performance and benchmarks (current numbers, methodology, and quality evaluation)
+  - [Qwen3.8-27B Inference Engine Comparison Report (Single R9700)](docs/perf/engine-compare-qwen38-27b-r9700.en.md)
 - [docs/research/README.md](docs/research/README.md) — R&D records (experiment logs, adoption decisions, and rejection rationale)
 
 ## Contributors

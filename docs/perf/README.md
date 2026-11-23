@@ -3,6 +3,7 @@
 このdirectoryは **現在の性能値・再現条件・測定方法** のみを置く。
 
 - [current.md](current.md) — 現在再現可能な performance baseline（未計測の場合はその状態を書く）
+- [engine-compare-qwen38-27b-r9700.md](engine-compare-qwen38-27b-r9700.md)（[English](engine-compare-qwen38-27b-r9700.en.md)） — AMD Radeon AI PRO R9700 単体での Qwen3.8-27B 推論エンジン比較レポート（2026-11-23）
 - [methodology.md](methodology.md) — 今後も使う測定原則・4 トラック統一ベンチマーク仕様（A/B/C/D）・GPU 排他（`/tmp/*.lock`）・品質比較手順
 - [exl3-int8-prefill-quality.md](exl3-int8-prefill-quality.md) — EXL3-INT8 mul24 prefill A/B の品質と速度
 - [quality-bf16/README.md](quality-bf16/README.md) — Qwen3.8-27B の BF16 基準品質測定と [結果一覧](quality-bf16/results.md)
