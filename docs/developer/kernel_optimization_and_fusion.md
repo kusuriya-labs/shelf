@@ -61,6 +61,71 @@
 - standalone ベンチのランキングは L3 再利用で反転しうる（単一重みバッファ等）。
   順位は kernel trace と interleaved E2E で判定する。
 
+### VGPR capacity とレジスタ予算
+
+compiler の gfx1100 / gfx1201 の VGPR capacity は **1536 VGPR/SIMD**、
+wave32、allocation granule 24、上限 **16 wave/SIMD** である。占用 wave は
+
+```text
+slots          = ceil(VGPR / 24) * 24
+waves_per_simd = min(16, floor(1536 / slots))
+```
+
+で決まる。granule の境界を跨ぐと wave が段状に落ちる。
+
+| VGPR | slots | waves/SIMD |
+| ---: | ---: | ---: |
+| 1–96 | 96 | 16 |
+| 97–120 | 120 | 12 |
+| 121–144 | 144 | 10 |
+| 145–168 | 168 | 9 |
+| 169–192 | 192 | 8 |
+| 193–216 | 216 | 7 |
+| 217–240 | 240 | 6 |
+| 241–264 | 264 | 5 |
+
+- **96 VGPR までは 16 wave/SIMD を維持できる。** この範囲は「無料のレジスタ
+  予算」であり、loop unroll、ILP、再利用データの保持に使ってよい。
+- 97–120 は 12 wave/SIMD、121–144 は 10 wave/SIMD。境界の直上にいる
+  カーネルは、境界の下へ落とすことで wave を増やせる（例: 128 → 120 で
+  10 → 12）。
+- 実機の co-residency は別途 47,104 dwords/SIMD（granule 8）で測っている。
+  compiler の 1536 は「ここまで載せても wave が減らない」設計境界、実機値は
+  安全側の下限として使う。最終的な同時 resident wave は trace で確認する。
+- **拘束条件は register / LDS / wave 上限 / grid の min。** VGPR を増やす前に、
+  LDS と grid が拘束していないかを確認する。GDN のように LDS が 1 block/CU を
+  決めている場合、VGPR を下げても block は増えない。この VGPR 法則は
+  LDS、thread/workgroup、barrier の制約を含まない。
+
+#### 何をレジスタに載せるか
+
+載せてよいもの:
+
+- K/N tile をまたいで再利用する重み係数（expert の suh/svh、scale、bias、
+  dequant 定数）と、ループ不変の index / pointer。
+- 出力 tile の accumulator / partial sum。LDS や VRAM への中間書き戻しを
+  消せるなら、tile が収まる限りレジスタに保持する。
+- 同じ入力を複数の出力 tile で読む場合の入力 fragment（activation code、
+  WMMA fragment）。L1 / LDS の再読を消す目的に限る。
+
+載せないもの:
+
+- 1 回しか読まない streaming 重み。DRAM 律速では register cache は効果がなく、
+  wave を落とすだけ。
+- スレッド間で共有する値。LDS の方が安い。
+- spill を誘発する大きな per-thread 配列。scratch への spill は LDS / global
+  より遅いので、境界を跨いでまで載せない。
+
+手順:
+
+1. trace の VGPR から slots と waves/SIMD を計算する。
+2. VGPR < 96 かつ LDS / grid が許すなら、無料予算を unroll / ILP / 再利用に使う。
+3. VGPR が境界の直上なら、`__launch_bounds__` の min-blocks か
+   `amdgpu_num_vgpr` で境界の下へ落とし、wave が増えるか trace で確認する。
+4. 律速が ① DRAM なら VGPR を増やさない。②③ で初めて register 予算を使う。
+5. 変更後は trace の VGPR / LDS / scratch と interleaved A/B で判定する。
+   static ISA だけで採否を決めない。
+
 ### 選定表
 
 kernel 家族ごとに「share、実効 GB/s、資源値、occupancy 拘束条件、
@@ -93,6 +158,8 @@ kernel 家族ごとに「share、実効 GB/s、資源値、occupancy 拘束条�
    判定する（①で律速なら occupancy レバーは効かない）。occupancy 段階が
    変わらない低減は、unroll 余地・spill 回避としてのみ効く。
    occupancy 段階の有無は資源対比表で必ず示す。
+   逆に VGPR が 96 以下で wave 上限に達しているカーネルは、granule 境界まで
+   レジスタを使ってよい（上記「VGPR capacity とレジスタ予算」）。
 4. **高効率な命令（WMMA / packed dot 等）に置き換える。** 常に resource
    対比を併記する（高効率命令は VGPR を増やし occupancy を落としうる）。
    累加順が変わる命令は数値規則（原則 4）の適用対象。share の大きい
