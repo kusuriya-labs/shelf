@@ -218,65 +218,119 @@ __global__ void __launch_bounds__(kScanThreads) moe_slot_scan_kernel(
         s_total[e] = expert_total;
     }
     __syncthreads();
-    if (tid == 0u) {
-        uint32_t slots = 0u;
-        uint32_t groups = 0u;
-        uint32_t hit_groups = 0u;
-        uint32_t miss_groups = 0u;
-        const bool split = hit_count != nullptr;
-        uint32_t prev_hit_slot = ~0u;
-        uint32_t prev_miss_slot = ~0u;
-        for (uint32_t e = 0u; e < experts; ++e) {
-            const uint32_t expert_total = s_total[e];
-            const int32_t location = expert_slot != nullptr ? expert_slot[e]
-                                                            : static_cast<int32_t>(e);
-            expert_row_begin[e] = slots;
-            expert_group_begin[e] = groups;
-            uint32_t at = slots;
-            for (uint32_t tl = 0u; tl < tiles; ++tl) {
-                tile_base[static_cast<size_t>(e) * tiles + tl] = at;
-                at += tile_counts[static_cast<size_t>(e) * tiles + tl];
-            }
-            for (uint32_t done = 0u; done < expert_total; done += kGroupRows) {
-                if (groups >= group_capacity)
-                    break;
-                const uint32_t rows_here =
-                    expert_total - done < kGroupRows ? expert_total - done : kGroupRows;
-                group_expert[groups] = e;
-                group_rows[groups] = rows_here;
-                if (split) {
-                    if (location >= 0) {
-                        const uint32_t slot = static_cast<uint32_t>(location);
-                        if (slot != prev_hit_slot) {
-                            hit_expert_group_begin[slot] = hit_groups;
-                            prev_hit_slot = slot;
-                        }
-                        hit_slot[hit_groups] = slot;
-                        hit_rows[hit_groups] = rows_here;
-                        hit_base[hit_groups] = groups;
-                        ++hit_groups;
-                    } else {
-                        const uint32_t slot = static_cast<uint32_t>(-1 - location);
-                        if (slot != prev_miss_slot) {
-                            miss_expert_group_begin[slot] = miss_groups;
-                            prev_miss_slot = slot;
-                        }
-                        miss_slot[miss_groups] = slot;
-                        miss_rows[miss_groups] = rows_here;
-                        miss_base[miss_groups] = groups;
-                        ++miss_groups;
-                    }
-                }
-                ++groups;
-            }
-            slots += expert_total;
-        }
-        expert_row_begin[experts] = slots;
-        expert_group_begin[experts] = groups;
-        group_count[0] = groups;
+    __shared__ uint32_t s_rows[kScanThreads];
+    __shared__ uint32_t s_all[kScanThreads];
+    __shared__ uint32_t s_hit[kScanThreads];
+    __shared__ uint32_t s_miss[kScanThreads];
+    __shared__ uint32_t s_slot_hit[kMoeRouterMaxExperts];
+    __shared__ uint32_t s_slot_miss[kMoeRouterMaxExperts];
+    const bool split = hit_count != nullptr;
+    constexpr uint32_t kPerThread = (kMoeRouterMaxExperts + kScanThreads - 1u) / kScanThreads;
+    for (uint32_t e = tid; e < kMoeRouterMaxExperts; e += kScanThreads) {
+        s_slot_hit[e] = ~0u;
+        s_slot_miss[e] = ~0u;
+    }
+    uint32_t local_rows = 0u;
+    uint32_t local_all = 0u;
+    uint32_t local_hit = 0u;
+    uint32_t local_miss = 0u;
+    for (uint32_t q = 0u; q < kPerThread; ++q) {
+        const uint32_t e = tid * kPerThread + q;
+        if (e >= experts) break;
+        const uint32_t expert_total = s_total[e];
+        const uint32_t groups_here = expert_total / kGroupRows +
+            (expert_total % kGroupRows != 0u ? 1u : 0u);
+        const int32_t location = expert_slot != nullptr ? expert_slot[e]
+                                                        : static_cast<int32_t>(e);
+        local_rows += expert_total;
+        local_all += groups_here;
         if (split) {
-            hit_count[0] = hit_groups;
-            miss_count[0] = miss_groups;
+            if (location >= 0) local_hit += groups_here;
+            else local_miss += groups_here;
+        }
+    }
+    if (tid < kScanThreads) {
+        s_rows[tid] = local_rows;
+        s_all[tid] = local_all;
+        s_hit[tid] = local_hit;
+        s_miss[tid] = local_miss;
+    }
+    __syncthreads();
+    for (uint32_t off = 1u; off < kScanThreads; off <<= 1u) {
+        const uint32_t r = tid >= off ? s_rows[tid - off] : 0u;
+        const uint32_t a = tid >= off ? s_all[tid - off] : 0u;
+        const uint32_t hh = tid >= off ? s_hit[tid - off] : 0u;
+        const uint32_t mm = tid >= off ? s_miss[tid - off] : 0u;
+        __syncthreads();
+        s_rows[tid] += r;
+        s_all[tid] += a;
+        s_hit[tid] += hh;
+        s_miss[tid] += mm;
+        __syncthreads();
+    }
+    uint32_t rows_off = tid == 0u ? 0u : s_rows[tid - 1u];
+    uint32_t group_off = tid == 0u ? 0u : s_all[tid - 1u];
+    uint32_t hit_off = tid == 0u ? 0u : s_hit[tid - 1u];
+    uint32_t miss_off = tid == 0u ? 0u : s_miss[tid - 1u];
+    for (uint32_t q = 0u; q < kPerThread; ++q) {
+        const uint32_t e = tid * kPerThread + q;
+        if (e >= experts) break;
+        const uint32_t expert_total = s_total[e];
+        const int32_t location = expert_slot != nullptr ? expert_slot[e]
+                                                        : static_cast<int32_t>(e);
+        expert_row_begin[e] = rows_off;
+        expert_group_begin[e] = group_off < group_capacity ? group_off : group_capacity;
+        uint32_t at = rows_off;
+        for (uint32_t tl = 0u; tl < tiles; ++tl) {
+            tile_base[static_cast<size_t>(e) * tiles + tl] = at;
+            at += tile_counts[static_cast<size_t>(e) * tiles + tl];
+        }
+        uint32_t gidx = group_off;
+        for (uint32_t done = 0u; done < expert_total; done += kGroupRows) {
+            if (gidx >= group_capacity) break;
+            const uint32_t rows_here =
+                expert_total - done < kGroupRows ? expert_total - done : kGroupRows;
+            group_expert[gidx] = e;
+            group_rows[gidx] = rows_here;
+            if (split) {
+                if (location >= 0) {
+                    const uint32_t slot = static_cast<uint32_t>(location);
+                    hit_slot[hit_off] = slot;
+                    hit_rows[hit_off] = rows_here;
+                    hit_base[hit_off] = gidx;
+                    atomicMin(&s_slot_hit[slot], hit_off);
+                    ++hit_off;
+                } else {
+                    const uint32_t slot = static_cast<uint32_t>(-1 - location);
+                    miss_slot[miss_off] = slot;
+                    miss_rows[miss_off] = rows_here;
+                    miss_base[miss_off] = gidx;
+                    atomicMin(&s_slot_miss[slot], miss_off);
+                    ++miss_off;
+                }
+            }
+            ++gidx;
+        }
+        rows_off += expert_total;
+        group_off += expert_total / kGroupRows +
+            (expert_total % kGroupRows != 0u ? 1u : 0u);
+    }
+    __syncthreads();
+    for (uint32_t e = tid; e < experts; e += kScanThreads) {
+        if (split) {
+            if (s_slot_hit[e] != ~0u) hit_expert_group_begin[e] = s_slot_hit[e];
+            if (s_slot_miss[e] != ~0u) miss_expert_group_begin[e] = s_slot_miss[e];
+        }
+    }
+    if (tid == 0u) {
+        expert_row_begin[experts] = s_rows[kScanThreads - 1u];
+        const uint32_t groups_total = s_all[kScanThreads - 1u];
+        expert_group_begin[experts] = groups_total < group_capacity ? groups_total
+                                                                   : group_capacity;
+        group_count[0] = expert_group_begin[experts];
+        if (split) {
+            hit_count[0] = s_hit[kScanThreads - 1u];
+            miss_count[0] = s_miss[kScanThreads - 1u];
         }
     }
     __syncthreads();

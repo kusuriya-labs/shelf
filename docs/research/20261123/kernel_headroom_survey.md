@@ -175,3 +175,33 @@ up GEMM の出力 10240 を一度 materialize してから読む。この 2 laun
 - hyper_mix / hyper_apply の hidden tile 分割（256 / 512 / 1024 / 1 CTA）は
   E2E で差がなかった（35.23〜35.40 tok/s）。1 launch あたり 45〜60 KB の
   latency 律速で、CTA 数を増やしても短くならない。tile 変更は採用しなかった。
+
+## 8. 適用: MoE slot scan の並列化
+
+`moe_slot_scan_kernel` は expert ごとの row / group の prefix と group 配列の構築を
+`tid == 0` の 1 thread で行っていた。expert 数（512）と group 数の prefix を
+256 thread の 2 要素/thread の block scan（row / 全 group / hit group / miss group の
+4 本を同じ barrier で進める）に変え、group の書き込みも expert ごとに並列化した。
+hit / miss の `expert_group_begin` は slot ごとの最小 index を `atomicMin` で求める。
+
+- decode の `moe_slot_scan` 1 launch は **23.6 → 3.79 µs**（trace、ctx 512）。
+  48 launch/token で約 0.95 ms/token の削減に相当する。
+- E2E は同じ binary を逐次入れ替えた A/B で 35.17 → 35.38 tok/s（+0.6 %）。
+  kernel の削減が wall にそのまま出ないのは、greedy の per-token sync の遊休に
+  吸収されるためである。
+- 正しさ: `test_moe_router` に hit / miss を含む split scan の検証を追加
+  （group の被覆、slot 対応、expert 順、group row の初期化）。required 231/231。
+  EP=2 の 2048 token prefill で offload なし / host 128 の生成 8 token が一致した。
+
+## 9. レビュー指摘の評価
+
+- **HyperConnection の並列性**: `hyper_mix` は rows=1 で 1 CTA だったが、up GEMM と
+  の融合（§7）で hidden index ごとに 1 warp、320 CTA の kernel になった。
+  `hyper_mix` / `hyper_apply` 単体の hidden tile 分割（256 / 512 / 1024 / 1 CTA）は
+  E2E で差がなく（35.23〜35.40 tok/s）、1 launch 45〜60 KB の latency 律速だった。
+- **EXL3 grouped の activation 回転**: 回転と量子化は N tile の block ごとに実行され、
+  N=640 では同一 expert・同一入力に対して出力 tile 数だけ繰り返される。2-stage
+  producer との比較は未実施である。次に `exl3_mul24_rotate_quantize_f4` を 1 回だけ
+  実行し、回転を除いた grouped GEMM と組み合わせる microbench を作る。
+  group fuse 3 / 4 は既存研究で VGPR 増加のため棄却済みなので、tile 拡大では追わない。
+- **MoE slot scan**: §8 で並列化した（compact plan 専用経路は不要だった）。

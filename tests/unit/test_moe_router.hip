@@ -555,6 +555,147 @@ void run_unsafe_logits_case(const Buffers& b, hipStream_t stream) {
 
 }  // namespace
 
+void check_split_scan(Buffers& b, hipStream_t stream) {
+    constexpr uint32_t kRows = 16u;
+    constexpr uint32_t kExperts = 64u;
+    constexpr uint32_t kTopK = 4u;
+    constexpr uint32_t kVram = 32u;
+    const uint32_t tiles = moe_slot_tile_count(kRows);
+    const uint32_t slots = kRows * kTopK;
+    const uint32_t groups_bound = moe_group_count_upper_bound(kRows, kExperts, kTopK);
+    const uint32_t row_capacity = moe_group_row_capacity(kRows, kExperts, kTopK);
+
+    int32_t* slot_map = dalloc<int32_t>(kExperts);
+    uint32_t* hit_slot = dalloc<uint32_t>(groups_bound);
+    uint32_t* hit_rows = dalloc<uint32_t>(groups_bound);
+    uint32_t* hit_base = dalloc<uint32_t>(groups_bound);
+    uint32_t* hit_count = dalloc<uint32_t>(1);
+    uint32_t* miss_slot = dalloc<uint32_t>(groups_bound);
+    uint32_t* miss_rows = dalloc<uint32_t>(groups_bound);
+    uint32_t* miss_base = dalloc<uint32_t>(groups_bound);
+    uint32_t* miss_count = dalloc<uint32_t>(1);
+    uint32_t* hit_begin = dalloc<uint32_t>(kExperts + 1u);
+    uint32_t* miss_begin = dalloc<uint32_t>(kExperts + 1u);
+
+    std::vector<int32_t> host_slot(kExperts);
+    for (uint32_t e = 0; e < kExperts; ++e)
+        host_slot[e] = e < kVram ? static_cast<int32_t>(e)
+                                 : -1 - static_cast<int32_t>(e - kVram);
+    h2d(slot_map, host_slot);
+
+    const std::vector<float> logits =
+        make_logits(kRows, kExperts, kTopK, 77u, false);
+    h2d(b.logits, logits);
+    if (hipMemset(b.tile_counts, 0, static_cast<std::size_t>(kExperts) * tiles * sizeof(uint32_t)) !=
+        hipSuccess) {
+        check(false, "split scan: memset tile counts");
+        return;
+    }
+    if (launch_moe_router(b.logits, kExperts, b.sel_expert, b.sel_weight, b.tile_counts, kRows,
+                          kExperts, kTopK, 0u, kExperts, b.error_word, stream) != hipSuccess) {
+        check(false, "split scan: router launch");
+        return;
+    }
+    if (shelf::kernel::launch_moe_slot_scan_split(
+            b.tile_counts, b.expert_row_begin, b.tile_base, b.expert_group_begin,
+            b.group_expert, b.group_rows, b.group_count, b.row_token, slot_map, hit_slot,
+            hit_rows, hit_base, hit_count, miss_slot, miss_rows, miss_base, miss_count,
+            hit_begin, miss_begin, kRows, kExperts, kTopK, stream) != hipSuccess) {
+        check(false, "split scan: launch");
+        return;
+    }
+    if (hipStreamSynchronize(stream) != hipSuccess) {
+        check(false, "split scan: sync");
+        return;
+    }
+
+    const auto row_begin = d2h(b.expert_row_begin, kExperts + 1u);
+    const auto group_begin = d2h(b.expert_group_begin, kExperts + 1u);
+    const auto group_expert = d2h(b.group_expert, groups_bound);
+    const auto group_rows = d2h(b.group_rows, groups_bound);
+    const auto row_token = d2h(b.row_token, row_capacity);
+    const uint32_t group_count = d2h(b.group_count, 1u).at(0);
+    const uint32_t hc = d2h(hit_count, 1u).at(0);
+    const uint32_t mc = d2h(miss_count, 1u).at(0);
+    const auto h_slot = d2h(hit_slot, hc);
+    const auto h_base = d2h(hit_base, hc);
+    const auto h_begin = d2h(hit_begin, kExperts + 1u);
+    const auto m_slot = d2h(miss_slot, mc);
+    const auto m_base = d2h(miss_base, mc);
+    const auto m_begin = d2h(miss_begin, kExperts + 1u);
+
+    check(group_count == hc + mc, "split scan: hit + miss covers group count");
+    check(group_begin[kExperts] == group_count, "split scan: expert group end");
+    check(row_begin[kExperts] <= row_capacity, "split scan: row capacity");
+
+    std::vector<int> covered(group_count, 0);
+    for (uint32_t h = 0; h < hc; ++h) {
+        if (h_base[h] < group_count) ++covered[h_base[h]];
+    }
+    for (uint32_t m = 0; m < mc; ++m) {
+        if (m_base[m] < group_count) ++covered[m_base[m]];
+    }
+    bool once = true;
+    for (uint32_t g = 0; g < group_count; ++g)
+        once = once && covered[g] == 1;
+    check(once, "split scan: every group appears in exactly one of hit/miss");
+
+    bool slot_ok = true;
+    for (uint32_t h = 0; h < hc; ++h) {
+        const uint32_t g = h_base[h];
+        if (g >= group_count) { slot_ok = false; continue; }
+        slot_ok = slot_ok && host_slot[group_expert[g]] == static_cast<int32_t>(h_slot[h]);
+    }
+    for (uint32_t m = 0; m < mc; ++m) {
+        const uint32_t g = m_base[m];
+        if (g >= group_count) { slot_ok = false; continue; }
+        slot_ok = slot_ok && host_slot[group_expert[g]] == -1 - static_cast<int32_t>(m_slot[m]);
+    }
+    check(slot_ok, "split scan: hit/miss slot matches the expert map");
+
+    bool begin_ok = true;
+    for (uint32_t e = 0; e < kExperts; ++e) {
+        const uint32_t first_group = group_begin[e];
+        const uint32_t last_group = group_begin[e + 1u];
+        for (uint32_t g = first_group; g < last_group; ++g)
+            begin_ok = begin_ok && group_expert[g] == e;
+        if (host_slot[e] >= 0) {
+            const uint32_t slot = static_cast<uint32_t>(host_slot[e]);
+            if (first_group < last_group)
+                begin_ok = begin_ok && h_begin[slot] < hc &&
+                           h_base[h_begin[slot]] == first_group;
+        } else {
+            const uint32_t slot = static_cast<uint32_t>(-1 - host_slot[e]);
+            if (first_group < last_group)
+                begin_ok = begin_ok && m_begin[slot] < mc &&
+                           m_base[m_begin[slot]] == first_group;
+        }
+    }
+    check(begin_ok, "split scan: expert groups stay contiguous and ordered");
+    check(row_begin[kExperts] == d2h(b.expert_row_begin + kExperts, 1u).at(0),
+          "split scan: row total is stable");
+
+    bool rows_ok = true;
+    for (uint32_t g = 0; g < group_count; ++g) {
+        const uint32_t base = g * shelf::kernel::kMxfp4GemmRowTile;
+        for (uint32_t r = 0; r < group_rows[g]; ++r)
+            rows_ok = rows_ok && row_token[base + r] >= 0;
+        for (uint32_t r = group_rows[g]; r < shelf::kernel::kMxfp4GemmRowTile; ++r)
+            rows_ok = rows_ok && base + r >= row_capacity ? true : row_token[base + r] < 0;
+    }
+    check(rows_ok, "split scan: group rows map to tokens and the padding is -1");
+
+    (void)slots;
+    (void)m_slot;
+    for (void* p : {static_cast<void*>(slot_map), static_cast<void*>(hit_slot),
+                    static_cast<void*>(hit_rows), static_cast<void*>(hit_base),
+                    static_cast<void*>(hit_count), static_cast<void*>(miss_slot),
+                    static_cast<void*>(miss_rows), static_cast<void*>(miss_base),
+                    static_cast<void*>(miss_count), static_cast<void*>(hit_begin),
+                    static_cast<void*>(miss_begin)})
+        (void)hipFree(p);
+}
+
 int main() {
     std::printf("=== MoE router / group plan (GPU) ===\n");
     int device_count = 0;
@@ -622,6 +763,7 @@ int main() {
 
     run_unsafe_logits_case(b, stream);
     run_expert_axis_split_case(b, stream);
+    check_split_scan(b, stream);
 
     shelf::gpu::discard_cleanup_result(hipFree(b.logits));
     shelf::gpu::discard_cleanup_result(hipFree(b.error_word));
