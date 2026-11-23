@@ -274,3 +274,47 @@ fused の gate+down と、producer + pre-rotated gate/down の合計を比べた
   この test で producer の capacity を group 数として渡していた bug を見つけ、
   行数 (`activation_max_rows`) を渡すよう修正した。
 - required 231/231 PASS。
+
+## 12. 再サーベイ（pre-rotation 適用後）
+
+§11 の build（`98b5af54`）で、2048 token を 512 token の 4 chunk で prefill した
+trace を取り直した（EP=2、bf16 KV、`shelf-bench tg --mode forward --context 2048
+--tokens 1 --prefill-chunk 512 --warmup 0 --device 2,3`）。数値は 2 rank 合計の
+GPU 時間で、share は prefill 区間の合計に対する割合である。帯域は rank あたり。
+
+| kernel | ms | share | 帯域 / 律速 |
+| --- | ---: | ---: | --- |
+| `gemm_mul24_grouped<2,1,3,true>`（gate + up） | 288.4 | 24.8 % | 551 GB/s（dequant ALU + DRAM） |
+| `gemm_mul24_grouped<2,2,3,false>`（down） | 110.3 | 9.5 % | 725 GB/s（dequant ALU） |
+| `gdn_recurrence_wmma_lossy` | 85.1 | 7.3 % | 逐次 scan、VGPR 224 / LDS 35 KB |
+| `exl3_mul24_rowfinish` | 53.0 | 4.6 % | launch / 命令 |
+| `exl3_mul24_rowstat` | 46.8 | 4.0 % | launch / 命令 |
+| hipBLASLt BBS（hyper down/up） | 38.3 + 36.5 | 6.4 % | skinny GEMM |
+| `exl3_mul24_rotate_out_i32_f4` | 38.3 | 3.3 % | 命令 |
+| `exl3_grouped_activate`（producer） | 29.7 | 2.6 % | 帯域 690 GB/s |
+| `hyper_mix` | 29.1 | 2.5 % | launch |
+| `exl3_mul24_rotate_quantize_f4` | 27.2 | 2.3 % | 命令 |
+| `moe_combine` | 26.9 | 2.3 % | barrier / launch |
+| `attention_paged_prefill` | 26.0 | 2.2 % | WMMA compute |
+| `exl3_mul24_recon` / `rowslot` | 20.5 + 12.2 | 2.8 % | 命令 |
+| `shelf_swiglu_bf16` | 21.2 | 1.8 % | launch |
+
+- grouped は回転を外したことで **551 / 725 GB/s** まで上がった。gate + up は
+  DRAM 640 GB/s に対して ~86 % なので、同じ chunk のまま kernel 内部を詰める余地は
+  小さい。次に効くのは rows を増やして expert weight の再読を減らす方向（chunk 8192）。
+- いま残っている最大の cluster は **dense EXL3 の前後処理**
+  （rowfinish + rowstat + rotate_out + rotate_quantize = 14.2 %）。いずれも 1 launch
+  15〜21 µs で、GEMM 本体ではなく prologue / epilogue の launch と中間書き戻しが
+  主体である。GEMM への融合、または rotate_quantize を producer に寄せる余地がある。
+- 次点は **GDN recurrence 7.3 %**。VGPR 224 / LDS 35 KB で 3 block/CU に制限されて
+  おり、scan の並列性を上げる余地がある。
+- **hyper** は up + mix を multi-row prefill でも融合できれば `hyper_mix` 2.5 % と
+  up GEMM の一部を削れる。LT は hipBLASLt が既に最速で、置換対象ではない。
+- producer 2.6 % は down 側を SwiGLU に融合すれば 1 read と 1 launch を消せる。
+- decode（同じ trace の最終 1 token、2 rank 合計）は gate 29.5 %、`hyper_up_mix`
+  8.4 %、BF16 pair 7.4 %、dense EXL3 6.1 %、`group_gemm` 5.6 %、down 4.9 % で、
+  §2 の順位から大きな変化はない。decode は pre-rotation の対象外（128 row 未満）。
+
+次の実装候補は、share と launch 単価から **dense EXL3 の rowfinish / rowstat /
+rotate_out の GEMM 融合**とする。採用判定は §11 と同じく、bit 一致または許容される
+near-tie flip、interleaved A/B、required suite で行う。
