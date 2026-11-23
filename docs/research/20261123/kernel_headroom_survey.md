@@ -782,3 +782,9 @@ verify は平均 81.45 → 77.38 ms（−5.0 %）、round 126.16 → 122.90 ms�
 decode は 118.64 → **121.77 tok/s（+2.6 %）**。生成 16 token は 4 run すべて一致。
 rows ≤ 8 で既定 on、`SHELF_HYPER_UP_MIX_ROWS=0` で戻せる。rows ≥ 9（prefill、
 混合 batch）は従来カーネルのままで、拡張は次の候補。required 231/231 PASS。
+
+prefill（rows > 8）への拡張も試した。2048 token / 512 chunk の 4 chunk で
+`hyper_up_mix` は rows タイル無し 4.00 ms、8 行タイル 3.94 ms（−1.6 %）、
+GPU 合計は 1,129.7 → 1,131.4 ms で誤差。prefill では `hyper_up_mix` 自体が
+0.35 % しかなく、拡張は採らない（rows ≤ 8 のまま）。prefill 側の hyper は
+別 kernel の `hyper_mix`（同じ trace で約 29 ms）が本体で、こちらは未着手。
