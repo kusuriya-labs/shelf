@@ -1,4 +1,5 @@
 #include "compute_cli.h"
+#include "arena_budget.h"
 #include <shelf/kernels/kv_types.h>
 #include <shelf/runtime/dflash2_config.h>
 
@@ -83,8 +84,8 @@ void compute_usage(const char* prog) {
     printf("  --input-ids-file PATH  whitespace separated or PSKLDTOK binary prompt token ids\n");
     printf("  --max-new-tokens N     max tokens to generate (default 32)\n");
     printf("  --max-seq-len N        max sequence length (default 512)\n");
-    printf("  --arena-gib N|auto|-N  arena capacity in GiB; auto = free VRAM minus 0.5 GiB,\n"
-           "                         -N = total VRAM minus N GiB\n");
+    printf("  --arena-gib N|auto|-N  arena GiB: N - 0.3 (N > 0.3); -N = total VRAM\n"
+           "                         minus (N + 0.3); auto = free VRAM minus 0.5 GiB\n");
     printf("                         (default auto)\n");
     printf("  --page-tokens N        paged KV page size in tokens (default 16)\n");
     printf("  --max-concurrent-requests N  max in-flight requests (default 4)\n");
@@ -278,9 +279,9 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
                 char* end = nullptr;
                 errno = 0;
                 const double gib = std::strtod(value, &end);
-                if (errno != 0 || end == value || *end != '\0' || !std::isfinite(gib) ||
-                    gib == 0.0) {
-                    fprintf(stderr, "bad --arena-gib (expected N, -N or auto)\n");
+                std::size_t bytes = 0;
+                if (errno != 0 || end == value || *end != '\0' || !arena_budget_bytes(gib, bytes)) {
+                    fprintf(stderr, "bad --arena-gib (expected N > 0.3, -N or auto; adjusted capacity must be representable)\n");
                     return kComputeParseError;
                 }
                 arena_gib_auto = false;

@@ -29,7 +29,7 @@ Shelf がビルド・実行対象とするのは **`gfx1201`（RDNA4）のみ**�
 
 | 構成の目安 | 想定 GPU | 推奨される使い方 |
 | --- | --- | --- |
-| **16 GiB VRAM**（表示共有時は実効約 15 GiB） | RX 9070 XT など | Qwen3.8-27B **EXL3-INT8 3.05bpw** + `--kv-cache-dtype octave:c5v5` + `--arena-gib 14` + `--prefill-chunk 512` で 128Ki コンテキスト（投機なし）。詳細は [recipes/qwen3.8-27b-128k-16gib.md](recipes/qwen3.8-27b-128k-16gib.md) |
+| **16 GiB VRAM**（表示共有時は実効約 15 GiB） | RX 9070 XT など | Qwen3.8-27B **EXL3-INT8 3.05bpw** + `--kv-cache-dtype octave:c5v5` + `--arena-gib 14` + `--prefill-chunk 512` で 128Ki コンテキストを目指す（投機なし、新仕様では未検証）。詳細は [recipes/qwen3.8-27b-128k-16gib.md](recipes/qwen3.8-27b-128k-16gib.md) |
 | **32 GiB VRAM** | Radeon AI PRO R9700 | Qwen3.8-27B **EXL3-INT8 4bpw** + DFlash2 投機 + `octave:c5v5` で 128Ki コンテキスト・4 並列。BF16 / FP8 KV も余裕をもって利用可能 |
 | **マルチ GPU（2〜8 枚）** | R9700 × 2 / 4 / 8 | 27B FP8（単一 32 GiB に収まらないため TP=2）や Qwen3.8-Flash-Next（MoE、TP / EP / PP 併用）。詳細は [multi-gpu.md](multi-gpu.md) |
 
@@ -39,8 +39,8 @@ Shelf がビルド・実行対象とするのは **`gfx1201`（RDNA4）のみ**�
 ### `--arena-gib` と KV キャッシュの消費量
 
 - `--arena-gib auto`（既定）: 起動時の空き VRAM（`hipMemGetInfo`）から **0.5 GiB**（512 MiB）を引いた値を arena 容量とする。
-- `--arena-gib -N`: 総 VRAM から `N` GiB を引いた値を使う。
-- `--arena-gib N`: arena 容量を `N` GiB に固定する（再現測定や 16 GiB 運用向け）。
+- `--arena-gib -N`: 総 VRAM から `N + 0.3` GiB を引いた値を使う。
+- `--arena-gib N`: arena 容量を `N - 0.3` GiB に固定する（`N > 0.3`）（再現測定や 16 GiB 運用向け）。
 - arena 内では model weights → drafter（使用時）→ working set reserve（`--prefill-chunk` / `--max-num-batched-tokens` に応じて決まる）→ prefix cache capture slot を確保した**残りをすべて KV pool に割り当てる**。`embed_tokens` と prefix checkpoint 本体は pinned host RAM に置くため VRAM を消費しない。起動時の `MEMORY_PLAN`（stderr）で実際の内訳と収容可能 token 数を確認できる。
 
 **Qwen3.8-27B（full-attention 16 層・KV heads 4・head_dim 256）の KV キャッシュ消費量目安:**
