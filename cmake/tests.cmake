@@ -824,9 +824,8 @@ target_include_directories(test_hy4_flash_layer SYSTEM PRIVATE "${CMAKE_SOURCE_D
 shelf_set_rocm_rpath(test_hy4_flash_layer)
 set_property(TARGET test_hy4_flash_layer APPEND PROPERTY BUILD_RPATH "${SHELF_LIBCXX_LLVM_ROOT}/lib")
 
-add_executable(test_hy4_graph EXCLUDE_FROM_ALL ${CMAKE_SOURCE_DIR}/tests/kernels/test_hy4_graph.cpp
-    ${CMAKE_SOURCE_DIR}/tests/kernels/hy4_checkpoint_checks.cpp)
-target_link_libraries(test_hy4_graph PRIVATE shelf_hy4_model shelf_quant_reference)
+add_executable(test_hy4_graph EXCLUDE_FROM_ALL ${CMAKE_SOURCE_DIR}/tests/kernels/test_hy4_graph.cpp)
+target_link_libraries(test_hy4_graph PRIVATE shelf_hy4_model)
 target_link_options(test_hy4_graph PRIVATE "LINKER:--wrap=hipGraphInstantiate")
 shelf_set_rocm_rpath(test_hy4_graph)
 set_property(TARGET test_hy4_graph APPEND PROPERTY BUILD_RPATH "${SHELF_LIBCXX_LLVM_ROOT}/lib")

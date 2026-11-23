@@ -66,44 +66,21 @@ sliding 層では別の境界も修正した。位置 511 以降に 8〜15 行�
 | 20 | 14321 | 55053 | 0.121735 | 2.24450 |
 | 32 | 1823 | 1823 | 0.111520 | 2.12131 |
 
-単一 R9700 での層別照合は次のように再実行できる。各層で単独の token 処理とチャンク処理の hidden state をビット照合し、全入力位置の logits を保存する。
-
-```bash
-for ep in 3 4; do
-  SHELF_HY4_EP_TRANSPORT=peer flock /tmp/r9700.lock build/tests/test_hy4_graph \
-    "$BODY" "$DFLY" layers "owners-$ep.json" "$IDS" "layers-$ep.bin"
-done
-```
-
 16 token の同一入力から各スロットで 4 token を生成する検査も行った。最初に、router が選んだ各層固有の実 expert 重みをオンデマンド転送して参照列と利用集合を採取した。次の実行では、この入力に使用する expert を実配置表どおりの独立した論理 rank の領域に常駐させた。固定重みは全て元の checkpoint を使い、実行中に利用集合外の expert を選んだ回数を GPU で検査した。
 
 EP=3・4、push / peer / host、DFly2 有効・無効、B=1・2・4・8・16 の 60 条件すべてで全スロットの生成 ID は参照列と一致した。単一スロットの Graph 設定を別途切り替えた 24 条件も、初回の全 logits と生成列が一致した。peer で Engram 先読みを無効にした追加 20 条件でも全スロットの生成列が一致した。利用集合外の参照は 0 件。生成列は EP=3 が `715 17707 67337 11`、EP=4 が `587 269 10044 6896` だった。これらは同一カード内の転送と stream の検査である。
 
 ## 3. 起動ごとに観測された外れ値
 
-**継続調査**。報告者の 32 token 入力では、absorbed のみの chunk=8 と 15 に同じ外れ値のハッシュが現れた。この現象を tiled 固有の race とする説明を棄却した。
+**原因を特定**。実機検証者の報告では、DDR5 4800 MT/s の 2DPC・2R 混在、非 ECC のホストメモリ構成で bit 6 の反転が発生し、3600 MT/s では再現しなくなった。切り分け専用の `hy4_checkpoint_checks.cpp` と `test_hy4_graph` の `upload` / `layers` 診断経路は削除した。報告者の 32 token 入力では、absorbed のみの chunk=8 と 15 に同じ外れ値のハッシュが現れた。この現象を tiled 固有の race とする説明を棄却した。
 
 TP=1 の初期化を監査した。重みの登録順は shard と tensor 名から決まり、rank ごとの領域を順番に確保する。アップロード順は配置時に記録した順序で固定されている。16 MiB の pinned buffer からの H2D は同期コピーを使う。expert の配置表・射影表の転送後に各 rank で fold を実行し、`hipDeviceSynchronize` が完了してから推論に入る。Engram の非同期先読みはこの後に開始する。20・32 token の先頭 prefill では sparse top-k 選択の開始位置 2048 に達しない。複数 query タイルは別々の行に書き、末尾タイルの無効な query lane にはゼロの fragment を与える。MoE では 6 行以下と 7 行以上で plan の作成方式が切り替わるため、両側を別々に検査した。
 
-基準コミットを独立に 16 プロセス起動し、32 token を chunk=8・15・16・32 で処理した。論理 EP=4、host 転送、Engram 先読みを交互に有効・無効とした。各プロセスで重み領域と fold の出力先を転送前に 0x7f または 0xff で埋め、各 forward 前には作業域、KV、index を埋めた。この試験は第 1 層の expert を共有する。転送した 7,125 tensor の全 6,575,455,606 バイトがホストと一致し、47 個の fold 結果の結合ハッシュは全起動で同じだった。旧版でも各 chunk の全 logits は起動間で 16/16 一致した。修正後の同条件でも独立した 16 起動、さらに 1 プロセス内 8 反復で各回の全 logits を保存した。chunk=8・15・16・32 のハッシュはすべて一致した。別途、47 射影の全 FP16 要素を CPU で復号・変換して照合した。別の試験では 4 論理 rank それぞれに独立した重み領域・stream を確保し、実装の rank 別アップロードを通した。起動時の読み戻しや poison を挟まずに最初の forward を測定し、host・push と Engram 先読み設定を交互に変えた。基準コミット、修正版とも独立した 16 起動のハッシュは `c7a6751a004c` で一致した。これらの結果から報告者の外れ値の原因を特定することはできない。
+基準コミットを独立に 16 プロセス起動し、32 token を chunk=8・15・16・32 で処理した。論理 EP=4、host 転送、Engram 先読みを交互に有効・無効とした。各プロセスで重み領域と fold の出力先を転送前に 0x7f または 0xff で埋め、各 forward 前には作業域、KV、index を埋めた。この試験は第 1 層の expert を共有する。転送した 7,125 tensor の全 6,575,455,606 バイトがホストと一致し、47 個の fold 結果の結合ハッシュは全起動で同じだった。旧版でも各 chunk の全 logits は起動間で 16/16 一致した。修正後の同条件でも独立した 16 起動、さらに 1 プロセス内 8 反復で各回の全 logits を保存した。chunk=8・15・16・32 のハッシュはすべて一致した。別途、47 射影の全 FP16 要素を CPU で復号・変換して照合した。別の試験では 4 論理 rank それぞれに独立した重み領域・stream を確保し、実装の rank 別アップロードを通した。起動時の読み戻しや poison を挟まずに最初の forward を測定し、host・push と Engram 先読み設定を交互に変えた。基準コミット、修正版とも独立した 16 起動のハッシュは `c7a6751a004c` で一致した。これらの試験だけでは報告者の外れ値の原因を特定できなかった。
 
 実配置表については、1 台に rank 分を順次載せ替え、EP=3・4 とも GPU 常駐対象の全 79,430,516,086 バイトを checkpoint と照合した。各構成で不一致は 0 バイト。配置・射影表および 47 個の fold 結果も CPU 基準と一致した。ホスト常駐の Engram 表はこのバイト数に含まれない。
 
 付属 tokenizer の 32 token では、全 expert を使える層単位の実行を正解とし、実際に選ばれた層固有の expert 重みを論理 rank ごとに常駐させても初回 logits が一致するかを検査した。EP=3 の利用集合は 6,241 個、EP=4 は 6,243 個。独立起動では host / push、Engram 先読みの有無、予約領域の既定値 / 0x7f / 0xff を切り替えた。半数は計測用 GPU カーネルも読み戻しも挟まず最初の forward を実行した。基準コミットは各 EP で独立 16 起動 × chunk=8・15、最終版は各 EP で独立 16 起動 × chunk=1・8・15・16・20・32 を検査した。両版合わせて 64 プロセス、保存した全 256 件の logits は、各 EP の全重みによる参照とビット一致した。SHA-256 の先頭 12 桁は EP=3 が `32e3c8fc16db`、EP=4 が `c0db93be2ff2`。この入力と単一物理カードでは、旧版の段階から外れ値を再現できなかった。
-
-実機では次の例で、**外れ値を出した同じプロセス**のデータを取得できる。`BODY` には FP8 Engram の 4 表も置く。`OWNERS` と `ROCR_VISIBLE_DEVICES` は検証する実機の配置に合わせる。各起動の初回 logits は、層別の同期や転送内容の読み戻しより先に保存する。層ごとのハッシュは、同期を加えた再実行の logits が初回と一致したときに比較する。
-
-```bash
-cmake --build build --target test_hy4_graph
-for chunk in 8 15; do
-  for i in $(seq 1 32); do
-    SHELF_HY4_GRAPH=0 SHELF_HY4_EP_TRANSPORT=host \
-      flock /tmp/r9700.lock build/tests/test_hy4_graph "$BODY" "$DFLY" upload \
-      "$OWNERS" "$IDS" "$chunk" "logits-$chunk-$i.bin" >"trace-$chunk-$i.log" 2>&1 || break
-  done
-done
-sha256sum logits-*.bin
-```
 
 ## 4. EP 数と greedy ID
 
