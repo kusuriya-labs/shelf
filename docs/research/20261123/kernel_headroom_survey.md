@@ -788,3 +788,8 @@ prefill（rows > 8）への拡張も試した。2048 token / 512 chunk の 4 chu
 GPU 合計は 1,129.7 → 1,131.4 ms で誤差。prefill では `hyper_up_mix` 自体が
 0.35 % しかなく、拡張は採らない（rows ≤ 8 のまま）。prefill 側の hyper は
 別 kernel の `hyper_mix`（同じ trace で約 29 ms）が本体で、こちらは未着手。
+
+並行リクエスト（DFlash2、conc=4、32 token、device 2,3）でも rows タイルの全 rows 拡張を
+A/B した。aggregate は 43.62 / 43.22（off）対 43.20 / 43.42（on）tok/s で **neutral**。
+serve の fused verify は rows が 28 程度になり、従来カーネルでも同じ weight を L3 から
+共有できるため差が出ない。prefill と同じく rows ≤ 8 のガードを維持する。
