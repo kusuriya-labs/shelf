@@ -475,8 +475,8 @@ def arena_gib_value(text: str):
         value = float(text)
     except ValueError as exc:
         raise argparse.ArgumentTypeError("expected N, -N or auto") from exc
-    if value == 0 or value != value or value in (float("inf"), float("-inf")):
-        raise argparse.ArgumentTypeError("expected N, -N or auto")
+    if value == 0 or 0 < value <= 0.3 or value != value or value in (float("inf"), float("-inf")):
+        raise argparse.ArgumentTypeError("expected N > 0.3, -N or auto")
     return int(value) if value.is_integer() else value
 
 
@@ -534,8 +534,8 @@ def parse_args(argv=None):
 
     parser.add_argument("--arena-gib", type=arena_gib_value, default="auto",
                         metavar="N|auto|-N",
-                        help="GPU arena capacity in GiB; auto = free VRAM minus 0.5 GiB, "
-                             "-N = total VRAM minus N GiB (default auto)")
+                        help="arena GiB: N - 0.3 (N > 0.3); -N = total VRAM minus "
+                             "(N + 0.3); auto = free VRAM minus 0.5 GiB (default auto)")
     parser.add_argument("--device", default="0",
                         help="comma separated GPU devices, one per rank; "
                              "count must match pipeline_parallel * expert_parallel * "

@@ -1,4 +1,5 @@
 #include "compute_runtime.h"
+#include "arena_budget.h"
 #include "private_target_weights.h"
 
 #include <shelf/core/memory/size_format.h>
@@ -225,6 +226,8 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
             return Status::insufficient_memory(
                 "arena capacity is zero", __FILE__, __LINE__);
         }
+        fprintf(stderr, "ARENA fixed: capacity=%s (includes 0.3 GiB external overhead adjustment)\n",
+                gpu::format_gib(memory_capacity).c_str());
     } else if (!auto_arena) {
         std::size_t free_bytes = 0;
         std::size_t total_bytes = 0;
@@ -234,11 +237,10 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
                                      __LINE__);
         }
         const std::size_t margin = config_.arena_bytes;
-        if (total_bytes == 0u || margin >= total_bytes) {
+        if (!arena_total_minus(total_bytes, margin, memory_capacity)) {
             return Status::invalid_argument(
-                "--arena-gib margin exceeds the total VRAM", __FILE__, __LINE__);
+                "--arena-gib margin including 0.3 GiB overhead must be less than total VRAM", __FILE__, __LINE__);
         }
-        memory_capacity = total_bytes - margin;
         fprintf(stderr, "ARENA total-minus: total=%s margin=%s capacity=%s\n",
                 gpu::format_gib(total_bytes).c_str(),
                 gpu::format_gib(margin).c_str(),

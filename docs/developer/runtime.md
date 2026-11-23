@@ -232,7 +232,7 @@ KV と drafter を引いた残りへ縮小する。128 MiB を下回る場合は
 page を共有するため、縮小・無効化の対象にしない。
 
 縮小は stderr に 1 行ずつ出す。`--arena-gib N` は measurement の再現用であり、
-N GiB を固定値として使う（auto の縮小はしない）。TP では rank ごとに同じ表を
+N - 0.3 GiB を固定値として使う（auto の縮小はしない）。TP では rank ごとに同じ表を
 `MEMORY_PLAN mode=auto tp=N rank=R` の見出しで出す。
 
 ```text

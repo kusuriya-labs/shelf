@@ -90,6 +90,11 @@ endfunction()
 # required — self-contained contract / correctness tests
 # ---------------------------------------------------------------------------
 
+shelf_add_test(NAME test_arena_budget SOURCE unit/test_arena_budget.cpp LABELS "cpu;required")
+target_include_directories(test_arena_budget PRIVATE "${CMAKE_SOURCE_DIR}/src")
+add_test(NAME test_server_arena_gib COMMAND python3 "${_SHELF_TESTS_ROOT}/unit/test_server_arena_gib.py")
+set_tests_properties(test_server_arena_gib PROPERTIES LABELS "cpu;required")
+
 shelf_add_test(NAME test_safetensors_writer SOURCE unit/test_safetensors_writer.cpp LABELS "cpu;required" LIBRARIES shelf_io)
 shelf_add_test(NAME test_expert_slice_fixture SOURCE unit/test_expert_slice_fixture.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES shelf_weights shelf_io)
 shelf_add_test(NAME test_expert_slice_load SOURCE unit/test_expert_slice_load.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_weights shelf_kernels_correctness shelf_qwen35_kernels_optimized)
@@ -351,6 +356,8 @@ shelf_add_test(NAME test_stochastic_topk SOURCE kernels/optimized/test_stochasti
 add_custom_target(
     shelf-required-tests
     DEPENDS
+        shelf-compute
+        test_arena_budget
         test_safetensors_writer
         test_expert_slice_fixture
         test_expert_slice_load
@@ -511,10 +518,6 @@ set_tests_properties(test_compute_decode_backend_reject_non_hip PROPERTIES
                      PASS_REGULAR_EXPRESSION "bad --decode-backend"
                      FAIL_REGULAR_EXPRESSION "model-dir required")
 
-# ---------------------------------------------------------------------------
-# --arena-gib accepts `auto` and rejects 0. Both decisions happen before any
-# GPU query / model load.
-# ---------------------------------------------------------------------------
 add_test(NAME test_compute_arena_gib_auto
          COMMAND $<TARGET_FILE:shelf-compute> --arena-gib auto)
 set_tests_properties(test_compute_arena_gib_auto PROPERTIES
@@ -527,6 +530,23 @@ add_test(NAME test_compute_arena_gib_reject_zero
 set_tests_properties(test_compute_arena_gib_reject_zero PROPERTIES
                      LABELS "cpu;required"
                      PASS_REGULAR_EXPRESSION "bad --arena-gib")
+
+foreach(value IN ITEMS 0.1 0.3)
+    string(REPLACE "." "_" suffix "${value}")
+    add_test(NAME test_compute_arena_gib_reject_${suffix}
+             COMMAND $<TARGET_FILE:shelf-compute> --arena-gib ${value})
+    set_tests_properties(test_compute_arena_gib_reject_${suffix} PROPERTIES
+                         LABELS "cpu;required" PASS_REGULAR_EXPRESSION "bad --arena-gib")
+endforeach()
+foreach(value IN ITEMS 0.31 2 -2)
+    string(REPLACE "." "_" suffix "${value}")
+    string(REPLACE "-" "minus_" suffix "${suffix}")
+    add_test(NAME test_compute_arena_gib_accept_${suffix}
+             COMMAND $<TARGET_FILE:shelf-compute> --arena-gib ${value})
+    set_tests_properties(test_compute_arena_gib_accept_${suffix} PROPERTIES
+                         LABELS "cpu;required" PASS_REGULAR_EXPRESSION "model-dir required"
+                         FAIL_REGULAR_EXPRESSION "bad --arena-gib")
+endforeach()
 
 # ---------------------------------------------------------------------------
 # --rope-factor accepts auto | 1 | 2 | 4 and rejects anything else before any

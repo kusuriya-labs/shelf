@@ -1,4 +1,5 @@
 #include "compute_cli.h"
+#include "arena_budget.h"
 #include "single_request.h"
 #include "stdio_server.h"
 
@@ -83,14 +84,13 @@ int main(int argc, char** argv) {
     if (opt.arena_gib_auto) {
         config.arena_mode = shelf::app::ArenaBudgetMode::Auto;
         config.arena_bytes = 0u;
-    } else if (opt.arena_gib < 0.0) {
-        config.arena_mode = shelf::app::ArenaBudgetMode::TotalMinus;
-        config.arena_bytes = static_cast<std::size_t>(
-            -opt.arena_gib * 1024.0 * 1024.0 * 1024.0);
     } else {
-        config.arena_mode = shelf::app::ArenaBudgetMode::Fixed;
-        config.arena_bytes = static_cast<std::size_t>(
-            opt.arena_gib * 1024.0 * 1024.0 * 1024.0);
+        config.arena_mode = opt.arena_gib < 0.0
+            ? shelf::app::ArenaBudgetMode::TotalMinus : shelf::app::ArenaBudgetMode::Fixed;
+        if (!shelf::app::arena_budget_bytes(opt.arena_gib, config.arena_bytes)) {
+            fprintf(stderr, "bad --arena-gib: adjusted capacity is invalid\n");
+            return 1;
+        }
     }
     config.page_tokens = static_cast<uint32_t>(opt.page_tokens);
     config.devices = opt.devices;
