@@ -69,14 +69,27 @@ void logical_ranks(Residency &gpu, int ranks) {
                 if (host)
                     checked(hipHostMalloc(&gpu.small_staging[r][other], gpu.transfer_packet_bytes(), hipHostMallocPortable));
                 for (int p = 0; p < 2; ++p) {
-                    checked(hipEventCreateWithFlags(&gpu.ready[r][other][p], hipEventDisableTiming));
-                    checked(hipEventCreateWithFlags(&gpu.ack[r][other][p], hipEventDisableTiming));
+                    constexpr unsigned flags = hipEventDisableTiming | hipEventReleaseToSystem;
+                    checked(hipEventCreateWithFlags(&gpu.ready[r][other][p], flags));
+                    checked(hipEventCreateWithFlags(&gpu.ack[r][other][p], flags));
                 }
             }
     for (auto &layer : gpu.model.owners)
         for (int e = 0; e < 512; ++e)
             layer[e] = e % ranks;
     checked(hipMemcpy(gpu.moe_owners[0], gpu.model.owners.data(), sizeof(Owners), hipMemcpyHostToDevice));
+    if (ranks > 1) {
+        std::vector<Hy4ExpertProjection> all(Residency::matrix_bytes / sizeof(Hy4ExpertProjection));
+        checked(hipMemcpy(all.data(), gpu.matrices[0], Residency::matrix_bytes, hipMemcpyDeviceToHost));
+        for (int r = 0; r < ranks; ++r) {
+            auto table = all;
+            for (size_t layer = 0; layer < gpu.model.owners.size(); ++layer)
+                for (int e = 0; e < 512; ++e)
+                    if (gpu.model.owners[layer][e] != r)
+                        std::fill_n(table.data() + (layer * 512 + e) * 3, 3, Hy4ExpertProjection{});
+            checked(hipMemcpy(gpu.matrices[r], table.data(), Residency::matrix_bytes, hipMemcpyHostToDevice));
+        }
+    }
 }
 
 void reset_history(Residency &gpu) {

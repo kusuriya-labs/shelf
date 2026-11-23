@@ -210,6 +210,7 @@ Mat decode_moe(Ops &op, int layer, const std::string &prefix, Mat x, Mat latent,
         if (segment) capture->begin(rank);
         local_stream = op.stream;
     } else {
+        checked(hipEventSynchronize(gpu.local_done[rank]));
         checked(hipEventRecord(gpu.local_ready[rank], op.stream));
         checked(hipStreamWaitEvent(local_stream, gpu.local_ready[rank], 0));
     }
