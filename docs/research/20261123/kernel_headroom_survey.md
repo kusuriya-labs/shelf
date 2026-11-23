@@ -659,7 +659,7 @@ prompt 150 token、生成 16 token、greedy。
 | --- | ---: | ---: | --- | --- |
 | grouped gate `<2,1,3>` | 23.7 % | 39 GB/s | ③ レイテンシ / 並列不足 | GEMM 統合、命令昇格、decode 用 M 分割 |
 | `hyper_up_mix` | 13.2 % | — | ③（44 µs × 580 launch） | up GEMM との融合、tile 増 |
-| GDN `wmma_verify_lossy` | 8.1 % | 43 GB/s | ③（LDS 35,840 → 1 block/CU） | LDS ステージで occupancy 4 倍 |
+| GDN `wmma_verify_lossy` | 8.1 % | 43 GB/s | ③（LDS 35,840 → 1 block/CU） | LDS ステージで 1 → 3 block/CU（v32 は 4） |
 | grouped down `<2,2,3>` | 5.9 % | 下記 | ③ | gate と同じ |
 | dense EXL3 `<5,1>` | 4.9 % | — | ③ | rows を増やす（MTP / batch） |
 | `dflash2_topk_merge` | 5.5 % | — | ④/overlay | 壁時計には出ない（実測 neutral） |
@@ -672,6 +672,9 @@ prompt 150 token、生成 16 token、greedy。
 - したがって §2 の優先順位「share 大 × ②③ × occupancy / 命令昇格 / 同期消去」では、
   **GDN verify の LDS 削減**が最初に検証すべきレバーになる。lossy 本体では
   64 行ステージで LDS 19,456 → 14,336 B、3 → 4 block/CU、−4.3 % を実測済み。
+- verify は 64-wide のため、64 行ステージ後も LDS 18,432 B（`S[64][68]` 17,408 +
+  extras）で 3 block/CU 止まり。4 block には 16,384 B 以下が必要で、padding の
+  調整では届かない。v32 幅（kWv=32、128 thread）への移植が次の段になる。
 - 次点は grouped gate の ③。7 行では wave が足りないため、prefill で負けた
   n_tiles=1 の判断を decode に持ち込まない（decode は n_tiles を増やす方向）。
 - `dflash2_topk_merge` は参照実装（1 thread/row）を hierarchical に替えても
@@ -686,3 +689,49 @@ serve 経路と同じく、EP/TP では rank ごとの `local_kv_heads` で
 `MtpDrafterInput` を作り、`drafter_config.local_kv_heads` と
 `MtpGdnRankBinding` の `local_kv_heads` / `tp_rank` / `mtp_input` を設定する
 （`9dbb1d42`）。
+
+### GDN verify の LDS staging を採用（1 → 3 block/CU）
+
+`recurrence.hip` の body に `kStage` を追加し、verify の serial 経路で 64 k 行ずつ
+ステージする。`dT` は v32 と同じく `W` の前進代入で置き換え、`LdsSmem` も
+`LdsSmem<kStage>` にして `S[128]` を `S[64]` に落とした。
+
+| 項目 | 変更前 | 変更後 |
+| --- | ---: | ---: |
+| kernel | `wmma_verify_lossy` | `wmma_verify_lossy_stage` |
+| VGPR | 224 | **192** |
+| LDS | 35,840 B | **18,432 B** |
+| block/CU | 1 | **3** |
+| verify kernel（8 token trace） | 7.57 / 7.59 ms | **7.17 ms（−5.3 %）** |
+
+interleaved A/B（DFlash2 EXL3、device 2,3、16 token）:
+
+| run | verify GPU ms | round ms | tok/s |
+| --- | ---: | ---: | ---: |
+| off | 81.32 | 126.98 | 117.87 |
+| **on** | 81.22 | 125.90 | **118.88** |
+| off | 81.60 | 126.21 | 118.60 |
+| **on** | **80.77** | 126.56 | 118.26 |
+
+verify は平均 81.46 → 81.00 ms（−0.6 %）、decode は 118.24 → 118.57 tok/s（+0.3 %）。
+生成 16 token は 4 run すべて一致。既定 on、`SHELF_GDN_VERIFY_STAGE=0` で戻せる。
+`test_gdn_recurrence`（baseline / stage、chunk off 含む）PASS、required 231/231 PASS。
+
+- 4 block/CU には届かない。verify は 64-wide で `S[64][68]` 単体が 17,408 B、
+  extras 込みで 18,432 B となり、4 block の境界 16,384 B を超える。VGPR 192 は
+  8 wave/SIMD で 4 block 可能なので、律速は LDS。次は verify の v32 化。
+
+### 非投機と spec の最適化適用状況
+
+| 最適化 | 非投機 decode | spec verify / commit |
+| --- | --- | --- |
+| grouped gate 120 VGPR | 入っている | 入っている（同じ kernel） |
+| grouped down 184 VGPR | 入っている | 入っている |
+| MOE_COMBINE sigmoid 融合 | 入っている | 入っている |
+| GDN v32（128 thread、LDS 14 KB、4 block/CU） | 入っている | **入っていない**（verify は serial 64-wide、commit は別 body） |
+| GDN verify の LDS ステージ（3 block/CU） | — | 今回追加（既定 on） |
+| GDN commit の LDS ステージ | — | **未適用** |
+| pre-rotation / SwiGLU producer | 入っていない（rows<128） | 入っていない（rows=7） |
+
+GDN だけ verify / commit が別実装で、v32 と LDS ステージの恩恵を受けていなかった。
+verify は今回埋めた。commit と verify の v32 化が残る。
