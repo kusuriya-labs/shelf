@@ -1691,10 +1691,16 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
         build_serve_rank_bindings(runtime);
     const std::vector<shelf::qwen35::runtime::DFlash2GdnRankBinding>* serve_rank_ptr =
         serve_rank_bindings.empty() ? nullptr : &serve_rank_bindings;
+    auto* tp = runtime.tp_coordinator();
+    const auto* tp_rank0_model =
+        tp != nullptr && tp->tp_size() > 0 ? tp->rank(0).rank_model() : nullptr;
+    const bool target_lm_head_sharded =
+        runtime.config().tp > 1 ||
+        (tp_rank0_model != nullptr && tp_rank0_model->lm_head() != nullptr &&
+         tp_rank0_model->lm_head()->partition.has_value());
     const shelf::weights::MatrixWeight* private_lm_head = nullptr;
     const shelf::weights::MatrixWeight* private_embed = nullptr;
-    if (runtime.config().tp > 1) {
-        auto* tp = runtime.tp_coordinator();
+    if (target_lm_head_sharded) {
         if (tp != nullptr && tp->tp_size() > 0) {
             auto& rank0 = tp->rank(0);
             const auto* q4 = rank0.rank_model() != nullptr
@@ -1737,13 +1743,12 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
         const uint32_t batch_max_rows = std::min<uint32_t>(
             runtime.config().dflash2_sessions() * session_rows,
             shelf::qwen35::runtime::kDFlash2SpecMaxVerifyRows);
-        const bool serve_tp_sharded = runtime.config().tp > 1;
+        const bool serve_tp_sharded = target_lm_head_sharded;
         std::vector<const shelf::weights::MatrixWeight*> head_shards;
         uint32_t head_vocab_offset = 0;
         uint32_t head_local_vocab = 0;
         shelf::kernel::EmbeddingShardTable embed_config_shards{};
         if (serve_tp_sharded) {
-            auto* tp = runtime.tp_coordinator();
             bool sharded = tp != nullptr;
             for (int r = 0; sharded && r < tp->tp_size(); ++r) {
                 const auto* head =

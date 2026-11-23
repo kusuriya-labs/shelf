@@ -562,9 +562,14 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
 
     shelf::weights::MatrixWeight* private_lm_head = nullptr;
     shelf::weights::MatrixWeight* private_embed = nullptr;
-    const bool tp_sharded = runtime.config().tp > 1;
+    auto* tp = runtime.tp_coordinator();
+    const auto* tp_rank0_model =
+        tp != nullptr && tp->tp_size() > 0 ? tp->rank(0).rank_model() : nullptr;
+    const bool tp_sharded =
+        runtime.config().tp > 1 ||
+        (tp_rank0_model != nullptr && tp_rank0_model->lm_head() != nullptr &&
+         tp_rank0_model->lm_head()->partition.has_value());
     if (tp_sharded) {
-        auto* tp = runtime.tp_coordinator();
         if (tp == nullptr || tp->tp_size() == 0) {
             fprintf(stderr, "private target weights unavailable\n");
             return 1;
@@ -589,7 +594,6 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
     uint32_t head_vocab_offset = 0;
     uint32_t head_local_vocab = 0;
     if (tp_sharded) {
-        auto* tp = runtime.tp_coordinator();
         bool sharded = tp != nullptr;
         for (int r = 0; sharded && r < tp->tp_size(); ++r) {
             const auto* head = tp->rank(static_cast<std::size_t>(r)).rank_model()->lm_head();
