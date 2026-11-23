@@ -319,14 +319,14 @@ GPU 時間で、share は prefill 区間の合計に対する割合である。�
 rotate_out の GEMM 融合**とする。採用判定は §11 と同じく、bit 一致または許容される
 near-tie flip、interleaved A/B、required suite で行う。
 
-## 13. opt-in 採用: dense EXL3 の row 前処理を 1 launch に融合
+## 13. 既定採用: dense EXL3 の row 前処理を 1 launch に融合
 
 dense A 経路の `rowstat` + `rowslot` + `rowfinish` を、atomic で slot を詰める
 `exl3_mul24_rowprepare_kernel` 1 launch に融合した。実装は
 `src/shelf/kernels/fused/exl3/row_prepare.hip`、宣言は
-`include/shelf/kernels/fused/exl3/row_prepare.h` に置く。既定は従来の 3 kernel 経路で、
-`SHELF_EXL3_ROW_FUSE=1` のときだけ使う。env 判定はホスト側で 1 回だけ行い、
-GPU kernel には分岐を入れない。
+`include/shelf/kernels/fused/exl3/row_prepare.h` に置く。既定は融合経路で、`SHELF_DISABLE_EXL3_ROW_FUSE=1` または
+`SHELF_EXL3_ROW_FUSE=0` のときだけ従来の 3 kernel 経路に戻る。env 判定は
+ホスト側で 1 回だけ行い、GPU kernel には分岐を入れない。
 
 ### specialized 測定
 
@@ -348,11 +348,10 @@ GPU kernel には分岐を入れない。
 
 ### wall
 
-| 条件 | 既定 ms | opt-in ms |
+| 条件 | 融合なし ms | 融合（既定）ms |
 | --- | ---: | ---: |
-| 7002 token、host experts 0（3 回） | 2042.7 / 2045.1 / 2051.0 | 1990.8 / 2007.6 / 2018.5 |
-| 7002 token、host experts 96（2 回） | 2459.1 / 2464.0 | 2459.3 / 2432.6 |
+| 7002 token、host experts 0 | 2035.6 / 2047.9 | **1987.7 / 2016.3** |
+| 7002 token、host experts 96 | 2459.1 / 2464.0 | 2459.3 / 2432.6 |
 
-host experts 0 では **約 2.0 %** 速い。host 96 では一回は同等、一回は −1.3 % で、
-悪化はしていない。生成 16 token は既定 / opt-in で一致した。既定 off の opt-in と
-するが、wall でも勝つ条件があるため、次に既定化を再検討してよい。
+host experts 0 では **約 2.0 %** 速い。host 96 では同等〜−1.3 % で悪化しない。
+生成 16 token は両経路で一致したため、既定を融合経路にする。

@@ -9,7 +9,9 @@ namespace shelf::kernel {
 // One launch for the dense EXL3 row preparation: compute the row peak / squared sum,
 // append flagged rows to a compact plane with an atomic slot, and re-round the other rows
 // in place. `count` must be zero before the launch; the dense path lets rotate_quantize's
-// reset_count do it. Slot order is arbitrary (rotate_out scatters by slot).
+// reset_count do it. Slot order is arbitrary (rotate_out scatters by slot). The dense path
+// uses it by default; SHELF_DISABLE_EXL3_ROW_FUSE=1 or SHELF_EXL3_ROW_FUSE=0 falls back
+// to the three-kernel chain.
 hipError_t launch_exl3_mul24_rowscale_fused(
     int8_t* codes, const float* scales, float* rowscale, int32_t* slots, uint32_t* count,
     int8_t* codes_f, float* scales_f, uint32_t rows, uint32_t cap, uint32_t k,
