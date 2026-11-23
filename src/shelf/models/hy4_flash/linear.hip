@@ -1,4 +1,5 @@
 #include <shelf/models/hy4_flash/moe_graph_plan.h>
+#include <shelf/kernels/optimized/linear/exl3_mul24.h>
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/decode.h>
 #include <shelf/quantization/exl3/exl3_int8.h>
 
@@ -9,7 +10,8 @@ hipError_t shelf_hy4_wmma_experts(const int8_t *, const float *, const Hy4Expert
                                   const Hy4ExpertBatch *, int, float *, bool, int, int, hipStream_t);
 hipError_t shelf_hy4_wmma_decode(const int8_t *codes, const float *scales, const Hy4ExpertProjection *matrices,
                                  const Hy4Route *routes, const int *count, float *partial, int capacity,
-                                 int k, int n, int projections, hipStream_t stream, const Hy4ExpertBatch *batches, const int *num_batches);
+                                 int k, int n, int projections, hipStream_t stream, const Hy4ExpertBatch *batches,
+                                 const int *num_batches, bool prefill);
 namespace {
 using namespace shelf::kernel::exl3_detail;
 using namespace shelf::kernel::exl3_detail::mul24;
@@ -149,11 +151,11 @@ __global__ void rotate_output_swiglu_quant(const float *partial0, const float *p
 }
 }
 
-extern "C" hipError_t shelf_hy4_linear(const uint16_t *input, const uint16_t *suh, const uint16_t *svh,
+hipError_t shelf_hy4_linear_workspace(const uint16_t *input, const uint16_t *suh, const uint16_t *svh,
                                        const uint32_t *trellis, int8_t *codes, float *scales, float *partial,
                                        uint16_t *output, int rows, int input_width, int output_width,
                                        int padded_input, int padded_output, int bits, hipStream_t stream,
-                                       int splits) {
+                                       int splits, int8_t *expanded) {
     if (!input || !suh || !svh || !trellis || !codes || !scales || !partial || !output || rows < 1 ||
         rows > 65535 || input_width < 1 || output_width < 1 || padded_input < input_width ||
         padded_output < output_width || padded_input % 128 || padded_output % 128 || (bits != 4 && bits != 6))
@@ -176,14 +178,31 @@ extern "C" hipError_t shelf_hy4_linear(const uint16_t *input, const uint16_t *su
         status = hipGetLastError();
         if (status != hipSuccess)
             return status;
-        status = shelf_hy4_wmma(codes, scales, trellis, partial, rows, padded_input, padded_output, bits, stream,
-                                 splits);
+        if (expanded) {
+            status = shelf::kernel::launch_exl3_mul24_recon_wmma(reinterpret_cast<const uint16_t *>(trellis),
+                                                                 bits, expanded, padded_output, padded_input, stream, true);
+            if (status == hipSuccess)
+                status = shelf::kernel::launch_exl3_mul24_prefill_wmma(codes, scales, padded_input, padded_input / 32,
+                                                                       expanded, partial, rows, padded_output,
+                                                                       padded_input, stream, splits);
+        } else {
+            status = shelf_hy4_wmma(codes, scales, trellis, partial, rows, padded_input, padded_output, bits, stream, splits);
+        }
         if (status != hipSuccess)
             return status;
     }
     rotate_output<<<dim3(padded_output / 128, rows), 32, 0, stream>>>(
         partial, svh, output, output_width, padded_output, nullptr, 0, nullptr, nullptr, splits);
     return hipGetLastError();
+}
+
+extern "C" hipError_t shelf_hy4_linear(const uint16_t *input, const uint16_t *suh, const uint16_t *svh,
+                                       const uint32_t *trellis, int8_t *codes, float *scales, float *partial,
+                                       uint16_t *output, int rows, int input_width, int output_width,
+                                       int padded_input, int padded_output, int bits, hipStream_t stream,
+                                       int splits) {
+    return shelf_hy4_linear_workspace(input, suh, svh, trellis, codes, scales, partial, output, rows, input_width,
+                                      output_width, padded_input, padded_output, bits, stream, splits, nullptr);
 }
 
 extern "C" hipError_t shelf_hy4_expert_linear(const uint16_t *x, const Hy4ExpertProjection *matrices,
@@ -229,9 +248,10 @@ hipError_t shelf_hy4_head(const uint16_t *x, const uint16_t *suh, const uint16_t
 hipError_t shelf_hy4_expert_decode(const uint16_t *latent, const Hy4ExpertProjection *matrices,
                                    const Hy4Route *routes, const int *count, int capacity, int intermediate,
                                    int8_t *codes, float *scales, float *partial, uint16_t *output,
-                                   hipStream_t stream, const Hy4ExpertBatch *batches, const int *num_batches) {
+                                   hipStream_t stream, const Hy4ExpertBatch *batches, const int *num_batches, bool prefill) {
     if (!latent || !matrices || !routes || !count || !codes || !scales || !partial || !output ||
-        capacity < 1 || capacity > 16 * shelf::hy4::Hy4GroupedPlan::max_rows ||
+        (prefill && !batches) || bool(batches) != bool(num_batches) ||
+        capacity < 1 || capacity > 16 * (prefill ? shelf::hy4::expert_tile_rows : shelf::hy4::Hy4GroupedPlan::max_rows) ||
         (intermediate != 768 && intermediate != 1536))
         return hipErrorInvalidValue;
     constexpr int width = 1536;
@@ -244,7 +264,7 @@ hipError_t shelf_hy4_expert_decode(const uint16_t *latent, const Hy4ExpertProjec
     if (status != hipSuccess)
         return status;
     status = shelf_hy4_wmma_decode(codes, scales, matrices, routes, count, partial, capacity,
-                                   width, intermediate, 2, stream, batches, num_batches);
+                                   width, intermediate, 2, stream, batches, num_batches, prefill);
     if (status != hipSuccess)
         return status;
     rotate_output_swiglu_quant<<<dim3(intermediate / 128, capacity), 32, 0, stream>>>(
@@ -253,10 +273,18 @@ hipError_t shelf_hy4_expert_decode(const uint16_t *latent, const Hy4ExpertProjec
     if (status != hipSuccess)
         return status;
     status = shelf_hy4_wmma_decode(codes, scales, matrices + 2, routes, count, partial, capacity,
-                                   intermediate, width, 1, stream, batches, num_batches);
+                                   intermediate, width, 1, stream, batches, num_batches, prefill);
     if (status != hipSuccess)
         return status;
     rotate_output<<<dim3(width / 128, capacity), 32, 0, stream>>>(
         partial, nullptr, output, width, width, matrices + 2, 3, nullptr, routes, 1, count);
     return hipGetLastError();
+}
+
+hipError_t shelf_hy4_expert_decode(const uint16_t *latent, const Hy4ExpertProjection *matrices,
+                                   const Hy4Route *routes, const int *count, int capacity, int intermediate,
+                                   int8_t *codes, float *scales, float *partial, uint16_t *output,
+                                   hipStream_t stream, const Hy4ExpertBatch *batches, const int *num_batches) {
+    return shelf_hy4_expert_decode(latent, matrices, routes, count, capacity, intermediate, codes,
+                                        scales, partial, output, stream, batches, num_batches, false);
 }

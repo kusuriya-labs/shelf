@@ -4,9 +4,22 @@
 #include <bit>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <numeric>
 #include <stdexcept>
+
+namespace shelf::hy4 {
+void verify_hy4_upload(Residency &gpu);
+void benchmark_hy4_decode(Residency &gpu);
+void benchmark_hy4_index(Residency &gpu);
+void check_hy4_prefill_capacity(Residency &gpu, int rows);
+void benchmark_hy4_prefill(Residency &gpu, int rows);
+void benchmark_hy4_moe(Residency &gpu);
+void benchmark_hy4_steps(Residency &gpu);
+void verify_hy4_layers(Residency &gpu, const Path &input, const Path &dump);
+bool trace_hy4_prefill(Residency &gpu, const Path &input, int chunk, const Path &dump);
+}
 
 namespace {
 int remaining_instantiations = 0;
@@ -37,23 +50,19 @@ void logical_ranks(Residency &gpu, int ranks) {
     gpu.ranks = gpu.ep_size = ranks;
     for (int r = 1; r < ranks; ++r) {
         gpu.physical[r] = 0;
-        constexpr size_t work = 64 << 20, bytes = work + Residency::matrix_bytes;
-        auto result = gpu::GpuArena::create(0, bytes);
+        gpu.matrices[r] = gpu.matrices[0];
+        auto result = gpu::GpuArena::create(0, 512 << 20);
         if (!result.ok())
             throw std::runtime_error(result.status().message());
         gpu.arenas.push_back(result.release());
-        auto memory = gpu.arenas.back().allocate_aligned(bytes, 256);
+        auto memory = gpu.arenas.back().allocate_aligned(512 << 20, 256);
         if (!memory.ok())
             throw std::runtime_error(memory.status().message());
-        Region buffer{static_cast<uint8_t *>(memory.value().data()), bytes};
-        gpu.reserve_experts(r, buffer);
-        gpu.workspace[r] = {static_cast<uint8_t *>(buffer.next(work)), work};
+        gpu.workspace[r] = {static_cast<uint8_t *>(memory.value().data()), 512 << 20};
         checked(hipStreamCreateWithFlags(&gpu.compute[r], hipStreamNonBlocking));
     }
     const auto transport = std::getenv("SHELF_HY4_EP_TRANSPORT");
     const bool host = transport && std::string_view(transport) == "host";
-    if (host && ranks > 1)
-        checked(hipHostMalloc(&gpu.staging, max_prefill_chunk * 3072u * 2u, hipHostMallocPortable));
     for (int r = 0; r < ranks; ++r)
         for (int other = 0; other < ranks; ++other)
             if (other != r) {
@@ -241,18 +250,27 @@ void compare_batches(const Path &body, const Path &draft, int ranks) {
         for (const auto &prompt : prompts)
             baseline.push_back(generate_batch(gpu, {prompt}, {count}, {}).front());
         model.has_draft = true;
-        for (int batch : {2, 4, 8, 16}) {
-            if (slots == 4) break;
+        for (int batch = 2; slots == 16 && batch <= 16; ++batch) {
+            if (ranks != 1 && batch != 2 && batch != 4 && batch != 8 && batch != 16) continue;
             std::vector<std::vector<int>> inputs;
             for (int i = 0; i < batch; ++i)
                 inputs.push_back(prompts[i % prompts.size()]);
-            auto results = generate_batch(gpu, inputs, std::vector<int>(batch, count), {});
-            for (int i = 0; i < batch; ++i)
-                if (results.at(i) != baseline[i % prompts.size()])
-                    throw std::runtime_error("バッチ生成が単独実行と異なります: B=" + std::to_string(batch) +
-                                             " slot=" + std::to_string(i));
-            printf("ep=%d draft=%d batch=%d greedy=%d/%d\n", ranks, speculate, batch, batch, batch);
-            fflush(stdout);
+            for (bool graph : {false, true}) {
+                setenv("SHELF_HY4_GRAPH", graph ? "1" : "0", 1);
+                setenv("SHELF_HY4_DRAFT_GRAPH", graph ? "1" : "0", 1);
+                auto target_before = gpu.target_replays, draft_before = gpu.draft_replays;
+                auto results = generate_batch(gpu, inputs, std::vector<int>(batch, count), {});
+                for (int i = 0; i < batch; ++i)
+                    if (results.at(i) != baseline[i % prompts.size()])
+                        throw std::runtime_error("バッチ生成が単独実行と異なります: B=" + std::to_string(batch) +
+                                                 " slot=" + std::to_string(i));
+                bool active = graph && graph_topology(ranks, 1, gpu.push, gpu.graph_room, gpu.peer);
+                if ((gpu.target_replays > target_before) != active ||
+                    (gpu.draft_replays > draft_before) != (active && speculate))
+                    throw std::runtime_error("バッチ Graph の起動条件が異なります");
+                printf("ep=%d draft=%d graph=%d batch=%d greedy=%d/%d\n", ranks, speculate, graph, batch, batch, batch);
+                fflush(stdout);
+            }
         }
         if (slots == 4) {
             std::vector<int> near_end(29, 802);
@@ -287,8 +305,80 @@ void compare_batches(const Path &body, const Path &draft, int ranks) {
                     throw std::runtime_error("スロット再利用後の生成 ID が異なります");
             printf("ep=%d session=pass draft_rounds=%zu\n", ranks, session.draft_rounds());
         }
+        if (slots == 4 && gpu.push) {
+            std::vector<std::vector<int>> inputs{prompts[0], prompts[1]};
+            std::vector<std::vector<int>> expected{baseline[0], baseline[1]};
+            for (bool draft_only : {true, false}) {
+                setenv("SHELF_HY4_GRAPH", draft_only ? "0" : "1", 1);
+                setenv("SHELF_HY4_DRAFT_GRAPH", draft_only ? "1" : "0", 1);
+                auto target_before = gpu.target_replays, draft_before = gpu.draft_replays;
+                if (generate_batch(gpu, inputs, {count, count}, {}) != expected ||
+                    (gpu.target_replays > target_before) == draft_only ||
+                    (gpu.draft_replays > draft_before) != draft_only)
+                    throw std::runtime_error("バッチ Graph の個別切り替えが異なります");
+            }
+            if (ranks == 1) {
+                Hy4BatchOptions options{16, 0.7f, 0, 20, 0.95f};
+                for (uint64_t seed : {117, 277}) {
+                    options.seed = seed;
+                    std::vector<std::vector<int>> sampled;
+                    for (bool graph : {false, true}) {
+                        setenv("SHELF_HY4_GRAPH", graph ? "1" : "0", 1);
+                        setenv("SHELF_HY4_DRAFT_GRAPH", graph ? "1" : "0", 1);
+                        auto ids = generate_batch(gpu, inputs, {6, 6}, options);
+                        if (!graph) sampled = ids;
+                        else if (ids != sampled)
+                            throw std::runtime_error("バッチ Graph のサンプリング結果が異なります");
+                    }
+                }
+            }
+            for (bool fail_draft : {true, false}) {
+                setenv("SHELF_HY4_GRAPH", fail_draft ? "0" : "1", 1);
+                setenv("SHELF_HY4_DRAFT_GRAPH", fail_draft ? "1" : "0", 1);
+                std::string errors;
+                for (auto &plan : gpu.target_graphs) plan.release(gpu, errors);
+                for (auto &plan : gpu.draft_graphs) plan.release(gpu, errors);
+                if (!errors.empty()) throw std::runtime_error(errors);
+                remaining_instantiations = fail_draft ? 1 : (ranks == 1 ? 2 : 3);
+                auto target_before = gpu.target_replays, draft_before = gpu.draft_replays;
+                if (generate_batch(gpu, inputs, {count, count}, {}) != expected ||
+                    !(fail_draft ? gpu.draft_capture_failed : gpu.target_capture_failed) ||
+                    gpu.target_replays != target_before || gpu.draft_replays != draft_before)
+                    throw std::runtime_error("バッチ capture 失敗後の eager 復帰が異なります");
+            }
+        }
         gpu.shutdown();
     }
+    setenv("SHELF_HY4_BATCH_DFLY", "1", 1);
+    for (auto &owners : model.owners) owners.fill(0);
+    Residency gpu(model, 2070, 2);
+    auto status = gpu.reserve();
+    if (!status.ok()) throw std::runtime_error(status.message());
+    gpu.upload();
+    logical_ranks(gpu, ranks);
+    Hy4BatchOptions options{128};
+    std::vector<std::vector<int>> inputs{std::vector<int>(2047), std::vector<int>(2053)};
+    for (auto &input : inputs)
+        for (size_t i = 0; i < input.size(); ++i) input[i] = 100 + int(i % 7);
+    std::vector<std::vector<int>> expected;
+    for (bool graph : {false, true}) {
+        setenv("SHELF_HY4_GRAPH", graph ? "1" : "0", 1);
+        setenv("SHELF_HY4_DRAFT_GRAPH", graph ? "1" : "0", 1);
+        if (!graph)
+            for (auto &input : inputs)
+                expected.push_back(generate_batch(gpu, {input}, {6}, options).front());
+        auto target_before = gpu.target_replays, draft_before = gpu.draft_replays;
+        std::vector<std::vector<int>> generated(2);
+        Hy4BatchSession session(gpu, [&](int id, int token) { generated[id].push_back(token); },
+                                 [](int, const auto &, const char *) {});
+        for (int i = 0; i < 2; ++i) session.admit({i, inputs[i], 6, options});
+        while (session.active() || session.queued()) session.step();
+        if (generated != expected)
+            throw std::runtime_error("位置 2047・2053 混在時の生成 ID が異なります");
+        if (graph && gpu.push && (gpu.target_replays == target_before || gpu.draft_replays == draft_before))
+            throw std::runtime_error("疎な attention でバッチ Graph が起動しませんでした");
+    }
+    gpu.shutdown();
 }
 
 std::vector<float> prefill_logits(Residency &gpu, const std::vector<int> &prompt, int chunk) {
@@ -394,6 +484,19 @@ void compare_transports(const Path &body, const Path &draft, int ranks, const Ow
 }
 
 }
+extern "C" hipError_t __real_hipEventRecord(hipEvent_t, hipStream_t);
+extern "C" hipError_t __wrap_hipEventRecord(hipEvent_t event, hipStream_t stream) {
+    if (std::getenv("SHELF_HY4_CHECK_EVENT_REUSE")) {
+        auto status = hipEventQuery(event);
+        if (status == hipErrorNotReady) {
+            std::fprintf(stderr, "完了前の event が再使用されました\n");
+            return hipErrorIllegalState;
+        }
+        if (status != hipSuccess)
+            return status;
+    }
+    return __real_hipEventRecord(event, stream);
+}
 extern "C" hipError_t __real_hipGraphInstantiate(hipGraphExec_t *, hipGraph_t, hipGraphNode_t *, char *, size_t);
 extern "C" hipError_t __wrap_hipGraphInstantiate(hipGraphExec_t *exec, hipGraph_t graph, hipGraphNode_t *node,
                                                  char *log, size_t length) {
@@ -403,6 +506,96 @@ extern "C" hipError_t __wrap_hipGraphInstantiate(hipGraphExec_t *exec, hipGraph_
 }
 int main(int argc, char **argv) {
     try {
+        bool micro = argc == 3 && std::string_view(argv[2]) == "microbench";
+        bool moe = argc == 3 && std::string_view(argv[2]) == "moebench";
+        bool steps = (argc == 5 || argc == 6) && std::string_view(argv[3]) == "stepbench";
+        if (argc == 7 && std::string_view(argv[2]) == "prefillbench") {
+            int length = std::stoi(argv[3]), chunk = std::stoi(argv[4]), ranks = std::stoi(argv[5]);
+            if (length < 1 || length > 131072 || chunk < 1 || chunk > max_prefill_chunk || ranks < 1 || ranks > 4)
+                throw std::invalid_argument("prefill 計測の引数が範囲外です");
+            Checkpoint model(argv[1], argv[1], {}, Owners{}, 1, 1);
+            share_expert_weights(model);
+            Residency gpu(model, length + 1);
+            auto status = gpu.reserve();
+            if (!status.ok()) throw std::runtime_error(status.message());
+            gpu.upload();
+            logical_ranks(gpu, ranks);
+            if (std::string_view(argv[6]) == "index") {
+                benchmark_hy4_index(gpu);
+            } else if (std::string_view(argv[6]) == "capacity") {
+                check_hy4_prefill_capacity(gpu, chunk);
+            } else if (std::string_view(argv[6]) == "moe") {
+                benchmark_hy4_prefill(gpu, chunk);
+            } else {
+                std::vector<int> ids(length);
+                for (int i = 0; i < length; ++i) ids[i] = 100 + i * 37 % 128;
+                generate(gpu, ids, 1, chunk, 0.f, 0, argv[6]);
+            }
+            gpu.shutdown();
+            return 0;
+        }
+        if (micro || moe || steps) {
+            Path draft = steps && std::string_view(argv[2]) != "-" ? Path(argv[2]) : Path{};
+            Checkpoint model(argv[1], argv[1], draft, Owners{}, 1, 1);
+            share_expert_weights(model);
+            Residency gpu(model, 128, steps ? std::stoi(argv[4]) : 1);
+            auto status = gpu.reserve();
+            if (!status.ok()) throw std::runtime_error(status.message());
+            gpu.upload();
+            if (steps) {
+                int ranks = argc == 6 ? std::stoi(argv[5]) : 3;
+                if (ranks < 1 || ranks > 4) throw std::invalid_argument("論理 EP は 1〜4 です");
+                logical_ranks(gpu, ranks);
+                benchmark_hy4_steps(gpu);
+            } else if (moe) {
+                benchmark_hy4_moe(gpu);
+            } else {
+                benchmark_hy4_decode(gpu);
+            }
+            gpu.shutdown();
+            return 0;
+        }
+        if (argc == 7 && std::string_view(argv[3]) == "layers") {
+            auto owners = read_owners(argv[4]);
+            int ranks = 1;
+            for (const auto &layer : owners)
+                ranks = std::max(ranks, 1 + *std::max_element(layer.begin(), layer.end()));
+            Checkpoint model(argv[1], argv[1], argv[2], Owners{}, 1, 1);
+            share_expert_weights(model);
+            Residency gpu(model, 64);
+            auto status = gpu.reserve();
+            if (!status.ok())
+                throw std::runtime_error(status.message());
+            gpu.upload();
+            logical_ranks(gpu, ranks);
+            model.owners = owners;
+            checked(hipMemcpy(gpu.moe_owners[0], owners.data(), sizeof(owners), hipMemcpyHostToDevice));
+            verify_hy4_layers(gpu, argv[5], argv[6]);
+            gpu.shutdown();
+            return 0;
+        }
+        if ((argc == 4 || argc == 5 || argc == 8) && std::string_view(argv[3]) == "upload") {
+            int count = 1;
+            checked(hipGetDeviceCount(&count));
+            bool shared = argc == 4 || std::string_view(argv[4]) == "-";
+            if (shared && count != 1)
+                throw std::runtime_error("複数 GPU の検証には配置表を指定してください");
+            Owners owners = shared ? Owners{} : read_owners(argv[4]);
+            Checkpoint model(argv[1], argv[1], argv[2], owners, count, 1);
+            if (shared)
+                share_expert_weights(model);
+            Residency gpu(model, argc == 8 ? 4096 : 64);
+            auto status = gpu.reserve();
+            if (!status.ok())
+                throw std::runtime_error(status.message());
+            gpu.upload();
+            bool match = argc != 8 || trace_hy4_prefill(gpu, argv[5], std::stoi(argv[6]), argv[7]);
+            verify_hy4_upload(gpu);
+            gpu.shutdown();
+            if (!match)
+                throw std::runtime_error("初回の logits と層別照合時の logits が異なります");
+            return 0;
+        }
         if ((argc == 4 || argc == 5) && std::string_view(argv[3]) == "transport") {
             if (argc == 5) {
                 int count = 0;
@@ -417,9 +610,11 @@ int main(int argc, char **argv) {
         }
         if (argc != 3 && (argc != 4 || std::string_view(argv[3]) != "batch"))
             return 2;
-        for (int ranks : {1, 3, 4})
-            if (argc == 4) compare_batches(argv[1], argv[2], ranks);
-            else compare(argv[1], argv[2], ranks);
+        if (argc == 4) {
+            for (int ranks : {1, 2, 3, 4}) compare_batches(argv[1], argv[2], ranks);
+        } else {
+            for (int ranks : {1, 3, 4}) compare(argv[1], argv[2], ranks);
+        }
         return 0;
     } catch (const std::exception &e) {
         fprintf(stderr, "%s\n", e.what());

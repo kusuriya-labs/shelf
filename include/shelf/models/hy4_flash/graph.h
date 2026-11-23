@@ -2,6 +2,7 @@
 
 #include <hip/hip_runtime_api.h>
 #include <array>
+#include <cstdint>
 #include <string>
 
 namespace shelf::hy4 {
@@ -19,17 +20,27 @@ inline bool graph_topology(int ep, int tp, bool push, bool room, const std::arra
     return true;
 }
 
+struct BatchGraphLane {
+    int sparse_slot = -1, dense_rows = 0;
+    float temperature = 0, top_p = 0;
+    int top_k = 0;
+    bool operator==(const BatchGraphLane &) const = default;
+};
+
 struct GraphKey {
     int rows, dense_rows, bucket;
     bool verify;
     size_t workspace;
     float temperature, top_p;
     int top_k;
+    int batch = 0;
+    const uint16_t *state = nullptr;
+    std::array<BatchGraphLane, 16> lanes{};
     bool operator==(const GraphKey &) const = default;
 };
 
 struct GraphLayer {
-    hipGraphExec_t scatter{};
+    hipGraphExec_t scatter{}, local{};
     std::array<hipGraphExec_t, 4> expert{};
 };
 
@@ -38,6 +49,7 @@ struct GraphPlan {
     std::array<GraphLayer, 41> layers{};
     hipGraphExec_t entry{}, tail{};
     float *logits{};
+    uint16_t *hidden{};
     size_t cursor{};
     void launch(Residency &gpu) const;
     void release(Residency &gpu, std::string &errors);

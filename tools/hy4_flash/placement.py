@@ -30,7 +30,7 @@ def routing_counts(work):
     return layers
 
 
-def assign(capacity, speed, counts, base=None, expert_bytes=EXPERT_BYTES):
+def assign(capacity, speed, counts, base=None, expert_bytes=EXPERT_BYTES, balance_experts=False):
     if not 1 <= len(capacity) <= 4 or min(capacity) < 0 or len(speed) != len(capacity) or min(speed) <= 0:
         raise ValueError("1〜4 rank の空き容量と帯域が必要です")
     base = base if base is not None else [0] * len(capacity)
@@ -41,9 +41,11 @@ def assign(capacity, speed, counts, base=None, expert_bytes=EXPERT_BYTES):
     if sum(slots) < total:
         raise MemoryError(f"expert 用の枠が不足しています: {sum(slots)} / {total}")
     quota = [0] * len(capacity)
+    quota_weights = [9 * speed[0], *(10 * value for value in speed[1:])]
     for _ in range(total):
         rank = min((r for r in range(len(capacity)) if quota[r] < slots[r]),
-                   key=lambda r: (base[r] + (quota[r] + 1) * expert_bytes, r))
+                   key=lambda r: (quota[r] + 1) / quota_weights[r] if balance_experts
+                   else base[r] + (quota[r] + 1) * expert_bytes)
         quota[rank] += 1
     result = []
     for layer, histogram in enumerate(counts):
@@ -104,6 +106,8 @@ def main():
     p.add_argument("--workspace", type=float, nargs="+", default=None)
     p.add_argument("--tokens", type=int, default=2097152)
     p.add_argument("--max-concurrent-requests", type=int, default=1)
+    p.add_argument("--balance-experts", action=argparse.BooleanOptionalAction, default=None,
+                   help="容量上限内で routed expert 数を均等側に寄せる（複数スロットで既定）")
     p.add_argument("--tensor-parallel", type=int, default=1)
     p.add_argument("--safety-gib", type=float, default=0.5)
     p.add_argument("--output", type=Path)
@@ -131,7 +135,7 @@ def main():
                  if name.endswith(".self_attn.kv_b_proj.weight"))
     matrix_bytes = 41 * 512 * 3 * 40
     expert_bytes = EXPERT_BYTES // args.tensor_parallel
-    graph_bytes = GRAPH_HEADROOM if args.tensor_parallel == 1 and args.max_concurrent_requests == 1 else 0
+    graph_bytes = GRAPH_HEADROOM if args.tensor_parallel == 1 else 0
     base = [int(w * GIB) + matrix_bytes + graph_bytes for w in args.workspace]
     routing_bytes = 41 * 512 * 4 + 256
     if args.tensor_parallel > 1:
@@ -142,7 +146,8 @@ def main():
         base[0] += routing_bytes + fixed + draft + kv + indexer + folded
     capacities = [int(c * GIB) - used - int(args.safety_gib * GIB)
                   for c, used in zip(args.capacity, base)]
-    owners = assign(capacities, [1] * len(capacities), routing_counts(args.work), base, expert_bytes)
+    balance = args.max_concurrent_requests > 1 if args.balance_experts is None else args.balance_experts
+    owners = assign(capacities, [1] * len(capacities), routing_counts(args.work), base, expert_bytes, balance)
     rank_experts = [sum(row.count(r) for row in owners) for r in range(len(capacities))]
     print(json.dumps(dict(fixed_bytes=fixed, draft_bytes=draft, kv_bytes=kv, index_bytes=indexer,
                           folded_bytes=folded, routing_bytes=routing_bytes, matrix_bytes=matrix_bytes, graph_bytes_per_rank=graph_bytes, safety_gib=args.safety_gib,

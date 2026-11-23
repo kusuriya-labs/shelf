@@ -24,53 +24,74 @@ void launch(const int8_t *codes, const float *scales, const uint32_t *weight, fl
 }
 }
 namespace {
-template <int Bits, bool OutFused>
+template <int Bits, bool OutFused, bool Pair = false, bool Compact = false>
 __global__ void __launch_bounds__(256u) gemm_fused(
     const uint16_t *input, const uint16_t *suh, const uint16_t *svh, uint16_t *output, const uint32_t *trellis,
     float *partial, int rows, int input_width, int output_width, int padded_input, int padded_output, int row_chunk,
-    int splits) {
+    int splits, const uint16_t *up_suh = nullptr, const uint32_t *up_trellis = nullptr) {
+    if constexpr (Compact) {
+        rows = row_chunk = 6;
+        input_width = padded_input = 3072;
+        output_width = padded_output = 1536;
+        splits = 8;
+    }
+    if constexpr (Pair) {
+        if (blockIdx.z) {
+            suh = up_suh;
+            trellis = up_trellis;
+            partial += size_t(rows) * padded_output * splits;
+        }
+    }
     using namespace shelf::kernel::exl3_detail;
     using namespace shelf::kernel::exl3_detail::mul24;
     extern __shared__ uint8_t shared[];
     auto codes = reinterpret_cast<int8_t *>(shared);
     const uint32_t groups = padded_input / 128u;
     const uint32_t gps = (groups + splits - 1u) / splits;
-    auto scales = reinterpret_cast<float *>(shared + size_t(row_chunk) * padded_input);
+    const uint32_t local_groups = Compact ? gps : groups;
+    const uint32_t code_stride = local_groups * 128;
+    auto scales = reinterpret_cast<float *>(shared + size_t(row_chunk) * code_stride);
     const uint32_t lane = threadIdx.x & 31u, wave = threadIdx.x >> 5u;
     constexpr uint32_t waves = 8u;
     const uint32_t tiles = padded_output / 128u;
     const uint32_t tile = blockIdx.x % tiles, split = blockIdx.x / tiles;
     const uint32_t g0 = split * gps, g1 = groups < g0 + gps ? groups : g0 + gps;
-    const int row0 = int(blockIdx.y) * row_chunk;
-    const int cr = rows - row0 < row_chunk ? rows - row0 : row_chunk;
-    for (int m = 0; m < cr; ++m) {
-        for (uint32_t g = g0 + wave; g < g1; g += waves) {
-            const uint32_t col = g * 128u + lane * 4u;
-            float v[4];
-            for (int i = 0; i < 4; ++i) {
-                int c = int(g * 128u) + int(lane * 4u) + i;
-                v[i] = c < input_width ? bf16_bits_to_f32(input[size_t(row0 + m) * input_width + c]) *
-                                             f16_bits_to_f32(suh[c])
-                                       : 0.0f;
-            }
-            fwht128(v[0], v[1], v[2], v[3], lane);
-            float peak = 0;
-            for (float &x : v) {
-                x *= kInvSqrt128;
-                peak = fmaxf(peak, fabsf(x));
-            }
-            for (int mask = 16; mask; mask /= 2)
-                peak = fmaxf(peak, __shfl_xor(peak, mask, 32));
-            const float scale = peak / 127.0f;
-            uint32_t packed = 0;
-            for (int i = 0; i < 4; ++i) {
-                int8_t q = scale ? int8_t(rintf(v[i] / scale)) : 0;
-                packed |= uint32_t(uint8_t(q)) << (8 * i);
-            }
-            *reinterpret_cast<uint32_t *>(codes + size_t(m) * padded_input + col) = packed;
-            if (!lane)
-                scales[size_t(m) * groups + g] = scale;
+    const int row0 = Compact ? 0 : int(blockIdx.y) * row_chunk;
+    const int cr = Compact ? 6 : min(rows - row0, row_chunk);
+    auto rotate = [&](int m, uint32_t g) {
+        const uint32_t local_group = Compact ? g - g0 : g;
+        float v[4];
+        for (int i = 0; i < 4; ++i) {
+            int c = int(g * 128u) + int(lane * 4u) + i;
+            v[i] = c < input_width ? bf16_bits_to_f32(input[size_t(row0 + m) * input_width + c]) *
+                                         f16_bits_to_f32(suh[c])
+                                   : 0.0f;
         }
+        fwht128(v[0], v[1], v[2], v[3], lane);
+        float peak = 0;
+        for (float &x : v) {
+            x *= kInvSqrt128;
+            peak = fmaxf(peak, fabsf(x));
+        }
+        for (int mask = 16; mask; mask /= 2)
+            peak = fmaxf(peak, __shfl_xor(peak, mask, 32));
+        const float scale = peak / 127.0f;
+        uint32_t packed = 0;
+        for (int i = 0; i < 4; ++i) {
+            int8_t q = scale ? int8_t(rintf(v[i] / scale)) : 0;
+            packed |= uint32_t(uint8_t(q)) << (8 * i);
+        }
+        *reinterpret_cast<uint32_t *>(codes + size_t(m) * code_stride + local_group * 128 + lane * 4) = packed;
+        if (!lane)
+            scales[size_t(m) * local_groups + local_group] = scale;
+    };
+    if constexpr (Compact) {
+        for (uint32_t part = wave; part < 6 * 3; part += waves)
+            rotate(part / 3, g0 + part % 3);
+    } else {
+        for (int m = 0; m < cr; ++m)
+            for (uint32_t g = g0 + wave; g < g1; g += waves)
+                rotate(m, g);
     }
     __syncthreads();
     shelf::kernel::PlamoExl3Projection ep{};
@@ -80,10 +101,56 @@ __global__ void __launch_bounds__(256u) gemm_fused(
         ep.out_stride = output_width;
     }
     float *yprime = partial + (size_t(row0) + size_t(split) * (rows - cr)) * padded_output;
+    if constexpr (Compact) {
+        trellis += size_t(g0) * 128 * padded_output * Bits / 32;
+        yprime += size_t(split) * cr * padded_output;
+    }
     shelf::kernel::exl3_detail::mul24::group_body<Bits, 1, OutFused, waves, OutFused, true>(
-        codes, scales, padded_input, groups, trellis, yprime, cr, nullptr, padded_output, padded_input, gps, 1u,
-        tile, split, &ep);
+        codes, scales, code_stride, local_groups, trellis, yprime, cr, nullptr, padded_output, code_stride, gps, 1u,
+        tile, Compact ? 0 : split, &ep);
 }
+__global__ void shared_swiglu(const float *partial, const uint16_t *gate_svh, const uint16_t *up_svh,
+                              uint16_t *output) {
+    using namespace shelf::kernel::exl3_detail;
+    using namespace shelf::kernel::exl3_detail::mul24;
+    int row = blockIdx.y, col = blockIdx.x * 128 + threadIdx.x * 4;
+    size_t plane = size_t(gridDim.y) * 1536;
+    auto gate = partial + row * 1536 + col;
+    auto up = gate + 8 * plane;
+    float g[4], u[4];
+    for (int i = 0; i < 4; ++i) {
+        g[i] = gate[i];
+        u[i] = up[i];
+        for (int split = 1; split < 8; ++split) {
+            g[i] += gate[split * plane + i];
+            u[i] += up[split * plane + i];
+        }
+    }
+    fwht128(g[0], g[1], g[2], g[3], threadIdx.x);
+    fwht128(u[0], u[1], u[2], u[3], threadIdx.x);
+    for (int i = 0; i < 4; ++i) {
+        float a = round_bf16(g[i] * kInvSqrt128 * f16_bits_to_f32(gate_svh[col + i]));
+        float b = round_bf16(u[i] * kInvSqrt128 * f16_bits_to_f32(up_svh[col + i]));
+        output[row * 1536 + col + i] = f32_to_bf16_rne_device(round_bf16(a / (1.f + expf(-a))) * b);
+    }
+}
+
+}
+hipError_t shelf_hy4_shared_gate_up(const uint16_t *input, Hy4ExpertProjection gate, Hy4ExpertProjection up,
+                                    float *partial, uint16_t *output, int rows, hipStream_t stream) {
+    auto supported = [](const Hy4ExpertProjection &matrix) {
+        return matrix.suh && matrix.svh && matrix.trellis && matrix.bits == 4 && matrix.k == 3072 && matrix.n == 1536;
+    };
+    if (!input || !output || !partial || rows < 1 || rows > 16 || !supported(gate) || !supported(up))
+        return hipErrorInvalidValue;
+    size_t shared = size_t(rows) * (3072 + 24 * sizeof(float));
+    gemm_fused<4, false, true><<<dim3(12 * 8, 1, 2), 256, shared, stream>>>(
+        input, gate.suh, nullptr, nullptr, gate.trellis, partial, rows, 3072, 1536, 3072, 1536, rows, 8,
+        up.suh, up.trellis);
+    auto status = hipGetLastError();
+    if (status != hipSuccess) return status;
+    shared_swiglu<<<dim3(12, rows), 32, 0, stream>>>(partial, gate.svh, up.svh, output);
+    return hipGetLastError();
 }
 hipError_t shelf_hy4_linear_fused_gemm(const uint16_t *input, const uint16_t *suh, const uint16_t *svh,
                                        const uint32_t *trellis, float *partial, uint16_t *output, int rows,
@@ -104,7 +171,12 @@ hipError_t shelf_hy4_linear_fused_gemm(const uint16_t *input, const uint16_t *su
     const size_t shared = size_t(row_chunk) * per_row;
     const uint32_t tiles = padded_output / 128u;
     const dim3 grid(tiles * splits, (rows + row_chunk - 1) / row_chunk);
-    if (out_fused) {
+    if (bits == 4 && rows == 6 && splits == 8 && input_width == 3072 && padded_input == 3072 &&
+        output_width == 1536 && padded_output == 1536) {
+        gemm_fused<4, false, false, true><<<grid, 256, rows * gps * 132, stream>>>(
+            input, suh, svh, output, trellis, partial, rows, input_width, output_width, padded_input,
+            padded_output, row_chunk, splits);
+    } else if (out_fused) {
         if (bits == 4)
             gemm_fused<4, true><<<grid, 256, shared, stream>>>(
                 input, suh, svh, output, trellis, partial, rows, input_width, output_width, padded_input,
@@ -137,7 +209,7 @@ hipError_t shelf_hy4_wmma(const int8_t *codes, const float *scales, const uint32
 }
 
 namespace {
-template <bool Mixed, bool Decode = false>
+template <bool Mixed, bool Decode = false, bool Prefill = false>
 __global__ void expert_batch(const int8_t *codes, const float *scales, const Hy4ExpertProjection *matrices,
                              const Hy4Route *routes, const Hy4ExpertBatch *batches, float *partial, int k,
                              int n, const int *count = nullptr, int capacity = 0) {
@@ -157,6 +229,31 @@ __global__ void expert_batch(const int8_t *codes, const float *scales, const Hy4
     size_t first = batch.first;
     auto matrix = matrices[3 * routes[first].expert];
     auto weight = matrix.trellis;
+    if constexpr (Prefill) {
+        if (matrix.bits == 4) {
+            shelf::kernel::exl3_detail::mul24::group_body<4, 2, false, 4, false, true, true>(
+                codes + first * k, scales + first * (k / 128), k, k / 128, weight, partial + first * n, batch.count,
+                nullptr, n, k, k / 128, 1, blockIdx.x, 0);
+        } else {
+            shelf::kernel::exl3_detail::mul24::group_body<3, 2, false, 4, false, true>(
+                codes + first * k, scales + first * (k / 128), k, k / 128, weight, partial + first * n, batch.count,
+                nullptr, n, k, k / 128, 1, blockIdx.x, 0);
+        }
+        return;
+    }
+    if constexpr (Decode) {
+        if (k == 1536 && n == 1536 && matrix.bits == 4) {
+            if (batch.count == 1)
+                shelf::kernel::exl3_detail::mul24::group_body<4, 1, false, 4, false, true>(
+                    codes + first * 1536, scales + first * 12, 1536, 12, weight, partial + first * 1536, 1,
+                    nullptr, 1536, 1536, 12, 1, blockIdx.x, 0);
+            else
+                shelf::kernel::exl3_detail::mul24::group_body<4, 1, false, 4, false, true, true>(
+                    codes + first * 1536, scales + first * 12, 1536, 12, weight, partial + first * 1536, batch.count,
+                    nullptr, 1536, 1536, 12, 1, blockIdx.x, 0);
+            return;
+        }
+    }
     if (Mixed && matrix.bits == 3)
         shelf::kernel::exl3_detail::mul24::group_body<3, 1, false, 4, false, true>(
             codes + first * k, scales + first * (k / 128), k, k / 128, weight, partial + first * n, batch.count,
@@ -181,7 +278,13 @@ hipError_t shelf_hy4_wmma_experts(const int8_t *codes, const float *scales, cons
 
 hipError_t shelf_hy4_wmma_decode(const int8_t *codes, const float *scales, const Hy4ExpertProjection *matrices,
                                  const Hy4Route *routes, const int *count, float *partial, int capacity,
-                                 int k, int n, int projections, hipStream_t stream, const Hy4ExpertBatch *batches, const int *num_batches) {
+                                 int k, int n, int projections, hipStream_t stream, const Hy4ExpertBatch *batches,
+                                 const int *num_batches, bool prefill) {
+    if (prefill) {
+        expert_batch<true, true, true><<<dim3(n / 64, std::min(capacity, 512 + capacity / 32), projections), 128, 0, stream>>>(
+            codes, scales, matrices, routes, batches, partial, k, n, num_batches, capacity);
+        return hipGetLastError();
+    }
     const int groups = batches ? std::min(capacity, 512 + capacity / 16) : capacity;
     expert_batch<true, true><<<dim3(n / 64, groups, projections), 128, 0, stream>>>(
         codes, scales, matrices, routes, batches, partial, k, n, batches ? num_batches : count, capacity);

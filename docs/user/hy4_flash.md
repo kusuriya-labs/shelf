@@ -16,11 +16,17 @@ build/shelf-compute hy4 reserve --model-dir /path/to/model --engram-dir /path/to
 
 予約に必要な容量が不足する場合はエラーで停止する。予約長を 1Mi に変更する場合は、配置表も `--tokens 1048576` で再生成する。静的容量と前提は[調査記録](../research/20261119/hy4_r9700_capacity.md)を参照。
 
+## Prefill のチャンク長
+
+EP で長い入力を処理する場合、compute では `--chunk 2048` または `--chunk 4096`、server では `--prefill-chunk 2048` または `--prefill-chunk 4096` を指定できる。Hy4 server の既定値は 1024 で、指定できる範囲は 1〜4096 である。チャンク長だけを変更する場合は同じ配置表を使える。TP を併用すると、実行時に最大 1024 行ずつ処理する。
+
+長文の Indexer を従来の scalar 演算と照合する場合は `SHELF_HY4_INDEX_WMMA=0` を指定する。
+
 ## HIP Graph の切り替え
 
-TP=1、EP=1〜4 で push 転送を使用し、すべての GPU 間で peer access が有効な場合、decode 1 行と verify 1〜6 行で層ごとの HIP Graph を使用する。単一リクエストの DFly2 は、候補 5 個を 1 回の Graph 起動で生成する。Target は `SHELF_HY4_GRAPH=0`、DFly2 は `SHELF_HY4_DRAFT_GRAPH=0` で個別に eager 実行へ切り替えられる。
+TP=1、EP=1〜4 で push 転送を使用し、すべての GPU 間で peer access が有効な場合、バッチ decode と verify に層ごとの HIP Graph を使用する。DFly2 は最大 16 スロットの候補を 1 回の Graph 起動で生成し、Target がスロットごとに最大 6 行を検証する。初回のバッチ形状では Graph を作成し、同じ形状と対応するコンテキスト長では再利用する。Target は `SHELF_HY4_GRAPH=0`、DFly2 は `SHELF_HY4_DRAFT_GRAPH=0` で個別に eager 実行へ切り替えられる。
 
-`placement.py` は単一スロット、TP=1 の各 rank の `peak_estimate` に Graph 用の 256 MiB を含める。実行時は、重み、KV、作業域の予約後にこの余裕を確保できる場合に Graph を有効にする。余裕不足、capture 失敗、EP のプロファイル取得時は eager 実行を使用する。
+`placement.py` は TP=1 の各 rank の `peak_estimate` に Graph 用の 256 MiB を含める。実行時は、重み、KV、作業域の予約後にこの余裕を確保できる場合に Graph を有効にする。余裕不足、capture 失敗、EP のプロファイル取得時は eager 実行を使用する。単一スロットの DFly2 は rank 0 で完結し、TP=1 では peer / host 転送時にも Graph を使用できる。
 
 ## EP=2 × TP=2 の例
 
@@ -67,7 +73,9 @@ export SHELF_HY4_ENGRAM_MLOCK=1
 
 `shelf-server --max-concurrent-requests N` は TP=1、EP=1〜4 で 1〜16 件を同時に保持する。既定値は 4 件である。compute を直接起動する場合は `shelf-compute hy4 serve --max-concurrent-requests N` を使う。こちらの既定値は 1 件である。`--max-seq-len` はスロットごとの予約長を表す。配置試算と実行には同じ予約長とスロット数を指定する。
 
-`--dfly-dir` を指定すると、複数スロットでも DFly2 の候補をまとめて生成・検証する。`SHELF_HY4_BATCH_DFLY=0` で複数スロットの投機を無効にできる。単一リクエストの Target Graph と DFly2 Graph の切り替えは上記の「HIP Graph の切り替え」を参照する。
+`placement.py` は複数スロットで `--balance-experts` を既定にする。容量と安全余裕を守りながら、共有 expert を実行する rank 0 の routed expert 数を、他の同型 GPU の約 9 割にする。4 台では rank 0 の目安が 23.1% となる。`--no-balance-experts` は各 rank の合計使用量を均等側へ寄せる。単一スロットではこちらが既定である。
+
+`--dfly-dir` を指定すると、複数スロットでも DFly2 の候補をまとめて生成・検証する。`SHELF_HY4_BATCH_DFLY=0` で複数スロットの投機を無効にできる。Target Graph と DFly2 Graph の切り替えは上記の「HIP Graph の切り替え」を参照する。
 
 ### R9700 を 3 台または 4 台使った照合
 

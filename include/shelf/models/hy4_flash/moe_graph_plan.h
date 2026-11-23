@@ -4,6 +4,8 @@
 #include <cstddef>
 
 namespace shelf::hy4 {
+inline constexpr int expert_tile_rows = 1024;
+
 struct alignas(16) Hy4MoePlan {
     static constexpr int max_rows = 6;
     static constexpr int choices = 16;

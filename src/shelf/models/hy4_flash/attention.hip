@@ -1,4 +1,5 @@
 #include <hip/hip_fp16.h>
+#include <rocprim/block/block_scan.hpp>
 #include <shelf/models/hy4_flash/attention.h>
 #include <shelf/models/hy4_flash/absorbed.h>
 #include <shelf/kernels/fused/detail/octave_common.h>
@@ -270,8 +271,9 @@ __global__ void save_pending(Mat k, int start, uint16_t *pending, const Hy4StepP
     int row = k.rows - 1 - blockIdx.x;
     pending[((start + row) % 12) * 128 + threadIdx.x] = k.p[row * 128 + threadIdx.x];
 }
+template <bool Refine = false>
 __global__ void index_scores(Mat q, Mat weights, const uint16_t *groups, int first, int start, int stride,
-                             float *scores, const Hy4StepParams *params) {
+                             float *scores, const Hy4StepParams *params, const float *bounds = nullptr) {
     start = step_at(start, params);
     int row = first + blockIdx.y;
     int count = (start + row) / 4;
@@ -279,6 +281,10 @@ __global__ void index_scores(Mat q, Mat weights, const uint16_t *groups, int fir
     int lane = threadIdx.x % 32;
     if (group >= count || group >= stride)
         return;
+    if constexpr (Refine) {
+        float score = scores[size_t(blockIdx.y) * stride + group];
+        if (score < bounds[2 * blockIdx.y] || score > bounds[2 * blockIdx.y + 1]) return;
+    }
     float sum = 0;
     for (int h = 0; h < 16; ++h) {
         float dot = 0;
@@ -291,6 +297,53 @@ __global__ void index_scores(Mat q, Mat weights, const uint16_t *groups, int fir
     if (!lane)
         scores[size_t(blockIdx.y) * stride + group] = sum;
 }
+using IndexFragment = short __attribute__((ext_vector_type(8)));
+using IndexSum = float __attribute__((ext_vector_type(8)));
+
+__device__ IndexFragment index_fragment(const uint16_t *src) {
+    auto lo = *reinterpret_cast<const uint2 *>(src);
+    auto hi = *reinterpret_cast<const uint2 *>(src + 8);
+    uint4 packed{lo.x, lo.y, hi.x, hi.y};
+    return __builtin_bit_cast(IndexFragment, packed);
+}
+
+__global__ void index_scores_wmma(Mat q, Mat weights, const uint16_t *groups, int first, int start,
+                                  int stride, float *scores) {
+    int row = first + blockIdx.y, count = min(stride, (start + row) / 4);
+    int lane = threadIdx.x % 32, half = lane / 16, col = lane % 16;
+    int tile = blockIdx.x * 64 + threadIdx.x / 32 * 16;
+    if (tile >= count) return;
+    int group = tile + col;
+    const uint16_t *query = q.p + (size_t(row) * 16 + col) * 128 + half * 4;
+    const uint16_t *key = groups + size_t(min(group, count - 1)) * 128 + half * 4;
+    IndexSum dots{};
+#pragma unroll
+    for (int k = 0; k < 128; k += 16)
+        dots = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12(index_fragment(query + k),
+                                                                  index_fragment(key + k), dots);
+    float sum = 0;
+#pragma unroll
+    for (int h = 0; h < 8; ++h)
+        sum += fmaxf(dots[h], 0.f) * bv(weights, row, half * 8 + h);
+    sum += __shfl_xor(sum, 16, 32);
+    if (!half && group < count)
+        scores[size_t(blockIdx.y) * stride + group] = sum;
+}
+
+__global__ void index_key_peak(const uint16_t *keys, unsigned *peak, int elements) {
+    __shared__ unsigned waves[8];
+    unsigned bits = 0;
+    for (int j = blockIdx.x * 256 + threadIdx.x; j < elements; j += gridDim.x * 256)
+        bits = max(bits, unsigned(keys[j] & 0x7fffu));
+    for (int d = 16; d; d /= 2)
+        bits = max(bits, __shfl_down(bits, d));
+    if (!(threadIdx.x % 32)) waves[threadIdx.x / 32] = bits;
+    __syncthreads();
+    if (!threadIdx.x) {
+        for (int i = 1; i < 8; ++i) bits = max(bits, waves[i]);
+        atomicMax(peak, bits);
+    }
+}
 __global__ void index_topk(const float *scores, int first, int start, int stride, int *selected,
                            const Hy4StepParams *params) {
     __shared__ uint32_t histogram[256], state[4];
@@ -300,6 +353,26 @@ __global__ void index_topk(const float *scores, int first, int start, int stride
     count = min(count, (unsigned)stride);
     ::shelf::kernel::detail::radix_select<3>(scores + size_t(row) * stride, count, 511, histogram, state,
                                              selected + row * 511, nullptr, 0);
+}
+__global__ void index_bounds(Mat q, Mat w, const float *scores, int first, int start, int stride, float *bounds) {
+    __shared__ uint32_t histogram[256], state[4];
+    unsigned rank = 511;
+    int row = blockIdx.x, count = min(stride, (start + first + row) / 4);
+    auto prefix = ::shelf::kernel::detail::radix_score_prefix<2>(scores + size_t(row) * stride, count, rank, histogram, state);
+    float peak = 0;
+    for (int i = threadIdx.x; i < 2048; i += 256)
+        peak = fmaxf(peak, fabsf(bv(q, first + row, i)));
+    peak = reduce<true>(peak, reinterpret_cast<float *>(histogram), 256);
+    if (!threadIdx.x) {
+        float weight = 0;
+        for (int h = 0; h < 16; ++h)
+            weight += fabsf(bv(w, first + row, h));
+        float key = bf16_bits_to_f32(reinterpret_cast<unsigned *>(bounds)[2 * gridDim.x]);
+        float margin = ldexpf(128.f * weight * peak * key, -14);
+        auto value = [](unsigned bits) { return __uint_as_float((bits & 0x80000000u) ? bits ^ 0x80000000u : ~bits); };
+        bounds[2 * row] = value(prefix) - margin;
+        bounds[2 * row + 1] = value(prefix | 0xffffu) + margin;
+    }
 }
 __global__ void contiguous_offsets(int *offsets, int n, int stride, int pos0, bool sliding, int first, int row_offset,
                                    const Hy4StepParams *params) {
@@ -370,15 +443,24 @@ __global__ void sparse_group_ids(int *mask, int rows, int width, int *meta, int 
         mask[g] = v;
     }
     __syncthreads();
-    if (!threadIdx.x) {
-        int count = 0;
-        for (int g = 0; g < width; ++g) {
-            int present = mask[g];
-            mask[g] = present ? count * 4 : -1;
-            count += present;
-        }
-        meta[512] = count * 4;
+    using Scan = rocprim::block_scan<int, 256>;
+    __shared__ typename Scan::storage_type scan;
+    int span = (width + 255) / 256;
+    int first = min(int(threadIdx.x) * span, width);
+    int end = min(first + span, width);
+    int count = 0;
+    for (int g = first; g < end; ++g)
+        count += mask[g];
+    int prefix;
+    Scan().exclusive_scan(count, prefix, 0, scan);
+    int total = prefix + count;
+    for (int g = first; g < end; ++g) {
+        int present = mask[g];
+        mask[g] = present ? prefix * 4 : -1;
+        prefix += present;
     }
+    if (threadIdx.x == 255)
+        meta[512] = total * 4;
     __syncthreads();
     for (int g = threadIdx.x; g < width; g += blockDim.x)
         if (mask[g] >= 0)
@@ -483,21 +565,17 @@ Selection select(Ops &op, const std::string &p, int layer, int start, Mat x, Mat
             Mat w = op.linear(p + "head_weight_projection", x);
             int stride = std::max(512, (bucket - 1) / 4);
             int batch = std::min(16, x.rows - begin);
-            auto buffer = static_cast<float *>(op.arena.next(size_t(stride) * batch * 4));
+            auto buffer = static_cast<float *>(op.arena.next(index_workspace_floats(batch, stride) * sizeof(float)));
             if (!op.gpu.sparse_top[op.rank][layer]) {
-                size_t rows = max_prefill_chunk + (op.gpu.batch_draft ? 6 * op.gpu.max_slots : 0);
+                size_t rows = op.gpu.prefill_rows() + (op.gpu.batch_draft ? 6 * op.gpu.max_slots : 0);
                 op.gpu.sparse_top[op.rank][layer] = static_cast<int *>(op.reserve_persistent(rows * 511 * sizeof(int)));
             }
             auto top = op.gpu.sparse_top[op.rank][layer];
             op.sparse_last_layer[layer] = x.rows - 1;
             for (int row = begin; row < x.rows; row += batch) {
                 int rows = std::min(batch, x.rows - row);
-                index_scores<<<dim3((stride + 3) / 4, rows), 128, 0, op.stream>>>(q, w, groups, row, start, stride,
-                                                                                  buffer, op.params);
-                checked(hipGetLastError());
-                index_topk<<<rows, 256, 0, op.stream>>>(buffer, row, start, stride, top + size_t(row) * 511,
-                                                        op.params);
-                checked(hipGetLastError());
+                index_select(q, w, groups, row, rows, start, stride, buffer, top + size_t(row) * 511,
+                             op.params, op.gpu.index_wmma && !op.params && q.rows > 6 && start + row >= 4096, op.stream);
             }
         }
     }
@@ -508,6 +586,26 @@ Selection select(Ops &op, const std::string &p, int layer, int start, Mat x, Mat
     }
     return selected;
 }
+}
+void index_select(Mat q, Mat weights, const uint16_t *groups, int first, int rows, int start, int stride,
+                  float *scores, int *selected, const Hy4StepParams *params, bool wmma, hipStream_t stream) {
+    if (wmma) {
+        auto bounds = scores + size_t(rows) * stride;
+        auto peak = reinterpret_cast<unsigned *>(bounds + 2 * rows);
+        checked(hipMemsetAsync(peak, 0, sizeof(unsigned), stream));
+        int elements = std::min(stride, (start + first + rows - 1) / 4) * 128;
+        index_key_peak<<<std::min(256, (elements + 255) / 256), 256, 0, stream>>>(groups, peak, elements);
+        index_scores_wmma<<<dim3((stride + 63) / 64, rows), 128, 0, stream>>>(q, weights, groups, first, start, stride, scores);
+        index_bounds<<<rows, 256, 0, stream>>>(q, weights, scores, first, start, stride, bounds);
+        index_scores<true><<<dim3((stride + 3) / 4, rows), 128, 0, stream>>>(
+            q, weights, groups, first, start, stride, scores, nullptr, bounds);
+    } else {
+        index_scores<<<dim3((stride + 3) / 4, rows), 128, 0, stream>>>(
+            q, weights, groups, first, start, stride, scores, params);
+    }
+    checked(hipGetLastError());
+    index_topk<<<rows, 256, 0, stream>>>(scores, first, start, stride, selected, params);
+    checked(hipGetLastError());
 }
 Mat attention_inner(Ops &op, const std::string &p, int layer, int start, Mat hidden, Mat qres, Mat q, Mat lat,
                     Mat rot, Mat gate, Selection &selected, bool draft, int heads, bool sliding, bool index_ready = false) {
@@ -532,7 +630,7 @@ Mat attention_inner(Ops &op, const std::string &p, int layer, int start, Mat hid
     for (int i = 0; i < hidden.rows;) {
         size_t save = op.arena.cursor;
         bool chunk_contiguous = contiguous;
-        int n = hidden.rows - i;
+        int n = std::min(1024, hidden.rows - i);
         if (!contiguous && !draft) {
             if (i < begin) {
                 chunk_contiguous = true;
@@ -704,6 +802,7 @@ Mat attention_batch(Ops &op, const std::string &prefix, int layer, const std::ve
         };
         if (sparse(first)) {
             op.slot = slots[first];
+            if (op.capture) op.params = &op.gpu.batch_input->step.lanes[first / block_rows];
             Selection selected;
             Mat row = attention_inner(op, p, layer, positions[first], hidden.row(first, block_rows),
                                       qres.row(first, block_rows), q.row(first, block_rows), lat.row(first, block_rows),
@@ -714,6 +813,7 @@ Mat attention_batch(Ops &op, const std::string &prefix, int layer, const std::ve
                 checked(hipMemcpyAsync(op.gpu.sparse_top_slot(layer, op.slot), op.gpu.sparse_top[op.rank][layer],
                                        size_t(block_rows) * 511 * sizeof(int), hipMemcpyDeviceToDevice, op.stream));
             }
+            op.params = nullptr;
             op.arena.cursor = mark;
             first += block_rows;
             continue;
@@ -722,6 +822,7 @@ Mat attention_batch(Ops &op, const std::string &prefix, int layer, const std::ve
         while (last < hidden.rows && !sparse(last)) last += block_rows;
         int rows = last - first;
         int stride = *std::max_element(positions.begin() + first, positions.begin() + last) + 1;
+        if (op.capture) stride = std::min(op.max_kv_len, 2048 + block_rows);
         if (sliding) stride = std::min(stride, 511 + block_rows);
         int blocks = rows / block_rows;
         Mat a = op.mat(blocks * stride, 512), b = op.mat(blocks * stride, 64);

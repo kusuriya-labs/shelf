@@ -3,6 +3,7 @@
 #include <shelf/models/hy4_flash/generate.h>
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/decode.h>
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cstdio>
 #include <fstream>
@@ -152,7 +153,7 @@ GraphPlan *capture_cached(Ops &op, std::array<GraphPlan, N> &slots, size_t &vict
         throw std::runtime_error(errors);
     GraphCapture capture(op.gpu, slot);
     auto last = std::to_array(op.sparse_last_layer);
-    op.params = &op.gpu.graph_input->step;
+    op.params = key.batch ? nullptr : &op.gpu.graph_input->step;
     op.max_kv_len = key.bucket;
     op.capture = &capture;
     try {
@@ -167,6 +168,7 @@ GraphPlan *capture_cached(Ops &op, std::array<GraphPlan, N> &slots, size_t &vict
         (void)hipGetLastError();
         fprintf(stderr, "Hy4 Graph の capture に失敗したため eager に切り替えます: %s\n", e.what());
     }
+    if (key.batch) op.slot = 0;
     op.params = nullptr;
     op.capture = nullptr;
     op.max_kv_len = 0;
@@ -189,7 +191,7 @@ Target::Target(Residency &gpu, float temp, uint64_t rng, int k, float p, int ran
         target_probs = static_cast<float *>(op.arena.next(6 * 120832 * 4));
         draft_probs = static_cast<float *>(op.arena.next(5 * 120832 * 4));
     }
-    checked(hipMemsetAsync(gpu.moe_counts[rank], 0, 4 * sizeof(uint64_t), op.stream));
+    checked(hipMemsetAsync(gpu.moe_counts[rank], 0, 12 * sizeof(uint64_t), op.stream));
     if (gpu.tp_size == 1)
         gpu.routed_rows.fill(0);
     else
@@ -202,14 +204,21 @@ Target::Target(Residency &gpu, float temp, uint64_t rng, int k, float p, int ran
     state = op.mat(gpu.batch_draft ? 6 * gpu.max_slots : 6, 3072);
     base = op.arena.cursor;
     bool room = gpu.graph_room && !gpu.expert_begin[rank];
-    target_graph = graph_topology(gpu.ep_size, gpu.tp_size, gpu.push, room, gpu.peer) && graph_enabled("SHELF_HY4_GRAPH");
-    draft_graph = gpu.tp_size == 1 && gpu.model.has_draft && room && graph_enabled("SHELF_HY4_DRAFT_GRAPH");
-    if ((target_graph || draft_graph) && !gpu.graph_input) {
-        gpu.graph_input = static_cast<GraphInput *>(op.reserve_persistent(sizeof(GraphInput)));
+    bool topology = graph_topology(gpu.ep_size, gpu.tp_size, gpu.push, room, gpu.peer);
+    target_graph = topology && graph_enabled("SHELF_HY4_GRAPH");
+    bool draft_available = gpu.max_slots == 1 ? gpu.model.has_draft : gpu.batch_draft;
+    draft_graph = draft_available && graph_enabled("SHELF_HY4_DRAFT_GRAPH") &&
+        (gpu.max_slots == 1 ? gpu.tp_size == 1 && room : topology);
+    if ((target_graph || draft_graph) && !gpu.graph_input && !gpu.batch_input) {
+        if (gpu.max_slots > 1)
+            gpu.batch_input = static_cast<BatchGraphInput *>(op.reserve_persistent(sizeof(BatchGraphInput)));
+        else
+            gpu.graph_input = static_cast<GraphInput *>(op.reserve_persistent(sizeof(GraphInput)));
         if (gpu.tokens > 2048)
             for (int layer = 0; layer < 42; ++layer)
                 if (gpu.index_keys[0][layer] && !gpu.sparse_top[0][layer])
-                    gpu.sparse_top[0][layer] = static_cast<int *>(op.reserve_persistent(size_t(max_prefill_chunk) * 511 * sizeof(int)));
+                    gpu.sparse_top[0][layer] = static_cast<int *>(op.reserve_persistent(
+                        size_t(gpu.prefill_rows() + (gpu.batch_draft ? gpu.max_slots * 6 : 0)) * 511 * sizeof(int)));
     }
 }
 float *Target::head_logits(Mat hidden) {
@@ -304,7 +313,7 @@ std::vector<int> Target::forward(const std::vector<int> &ids, bool verify, bool 
         throw std::runtime_error("token ID が範囲外です");
     auto &gpu = op.gpu;
     op.arena.cursor = base;
-    if (target_graph && !gpu.target_capture_failed && need_head && Hy4MoePlan::supports(rows) && (verify || rows == 1)) {
+    if (gpu.graph_input && target_graph && !gpu.target_capture_failed && need_head && Hy4MoePlan::supports(rows) && (verify || rows == 1)) {
         const int dense = std::clamp(2048 - start, 0, rows);
         int bucket = std::max(2048, (start + rows + 1023) / 1024 * 1024);
         GraphKey key{rows, dense, bucket, verify, base, 0, 0, 0};
@@ -420,7 +429,7 @@ std::vector<int> Target::propose(int anchor) {
     if (anchor < 0 || anchor >= 120832)
         throw std::runtime_error("token ID が範囲外です");
     auto &gpu = op.gpu;
-    if (gpu.draft_capture_failed || !draft_graph)
+    if (!gpu.graph_input || gpu.draft_capture_failed || !draft_graph)
         return draft_steps(anchor, nullptr);
     int start = history.size();
     bool dense = start <= 2048;
@@ -505,6 +514,7 @@ void decoder_layer(Ops &op, int layer, int start, Mat x, const std::vector<int> 
         else
             prior = history;
         engram(op, layer, x, prior, ids);
+        if (x.rows > Hy4GroupedPlan::max_rows) op.arena.cursor = save;
     }
     float *post;
     Mat a = op.collapse_norm(x, p + "hc_attn_layer.hc_pre.hc_", post, p + "input_layernorm.weight");
@@ -534,6 +544,8 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
     if (ids.empty() || !count || ids.size() + count > gpu.tokens || gpu.tokens > 1048576 || chunk < 1 ||
         chunk > max_prefill_chunk)
         throw std::runtime_error("入力・出力長または prefill chunk が範囲外です");
+    if (gpu.tp_size > 1)
+        chunk = std::min(chunk, tp_prefill_rows);
     if (top_k < 0 || top_k > 64 || !(top_p > 0 && top_p <= 1) || (temperature > 0 && top_p < 1 && !top_k))
         throw std::invalid_argument("top_k は 0〜64、top_p を使う場合は top_k が必要です");
     struct Lane {
@@ -712,15 +724,20 @@ struct BatchStats {
 };
 struct BatchLayout {
     std::vector<int> slots, positions;
+    std::vector<const std::vector<int> *> priors;
     int *device_slots, *device_positions;
     BatchLayout(Ops &op, const std::vector<BatchLane> &lanes, int rows) {
-        for (auto &lane : lanes)
+        for (auto &lane : lanes) {
+            priors.push_back(&lane.history);
             for (int i = 0; i < rows; ++i) {
                 slots.push_back(lane.slot);
                 positions.push_back(int(lane.history.size()) + i);
             }
-        device_slots = op.indices(slots);
-        device_positions = op.indices(positions);
+        }
+        device_slots = static_cast<int *>(op.arena.next(2 * slots.size() * sizeof(int)));
+        device_positions = device_slots + slots.size();
+        checked(hipMemcpyAsync(device_slots, slots.data(), slots.size() * sizeof(int), hipMemcpyHostToDevice, op.stream));
+        checked(hipMemcpyAsync(device_positions, positions.data(), positions.size() * sizeof(int), hipMemcpyHostToDevice, op.stream));
     }
 };
 __global__ void gather_block_rows(Mat src, Mat out, const int *slots, int offset) {
@@ -753,20 +770,55 @@ void sample_batch(Ops &op, const std::vector<BatchLane> &lanes, float *logits, i
             probabilities<<<rows, 256, 0, op.stream>>>(row, probs, o.temperature);
             checked(hipGetLastError());
         }
-        best_ids<<<rows, 256, 0, op.stream>>>(row, ids + r * rows, int(lane.history.size()) + (stage ? stage : 1),
-                                             o.seed ^ (stage ? 0x735a7ec51b09ull : 0), o.temperature);
+        auto params = op.capture ? &op.gpu.batch_input->step.lanes[r] : nullptr;
+        int position = (params ? 0 : int(lane.history.size())) + (stage ? stage : 1);
+        uint64_t seed = (params ? 0 : o.seed) ^ (stage ? 0x735a7ec51b09ull : 0);
+        best_ids<<<rows, 256, 0, op.stream>>>(row, ids + r * rows, position, seed, o.temperature, nullptr, params);
         checked(hipGetLastError());
     }
 }
-std::vector<int> propose_batch(Target &target, const std::vector<BatchLane> &lanes, const BatchLayout &layout) {
-    Ops &op = target.op;
-    const int batch = lanes.size();
-    std::vector<int> ids(batch * 6, 120009), anchors;
-    for (int r = 0; r < batch; ++r) {
-        ids[r * 6] = lanes[r].generated.back();
-        anchors.push_back(ids[r * 6]);
+GraphKey batch_graph_key(Target &target, const std::vector<BatchLane> &lanes, int rows, bool draft) {
+    GraphKey key{};
+    key.batch = lanes.size();
+    key.rows = rows;
+    key.workspace = target.op.arena.cursor;
+    key.state = target.state.p;
+    int end = 0;
+    for (int i = 0; i < key.batch; ++i) {
+        const auto &lane = lanes[i];
+        int start = lane.history.size();
+        end = std::max(end, start + rows);
+        if (draft ? start > 2048 : start + rows > 2048) {
+            key.lanes[i].sparse_slot = lane.slot;
+            key.lanes[i].dense_rows = std::clamp(2048 - start, 0, rows);
+        }
+        if (draft) {
+            key.lanes[i].temperature = lane.options.temperature;
+            key.lanes[i].top_p = lane.options.top_p;
+            key.lanes[i].top_k = lane.options.top_k;
+        }
     }
-    Mat x = op.embed(ids, false);
+    key.bucket = end <= 2048 ? int(std::bit_ceil(unsigned(end))) : (end + 1023) / 1024 * 1024;
+    return key;
+}
+BatchGraphParams batch_step(Ops &op, const std::vector<BatchLane> &lanes, const std::vector<int> &ids, bool draft) {
+    BatchGraphParams step{};
+    std::copy(ids.begin(), ids.end(), step.ids);
+    for (size_t i = 0; i < lanes.size(); ++i) {
+        step.anchors[i] = lanes[i].generated.back();
+        auto &params = step.lanes[i];
+        params.position = lanes[i].history.size();
+        params.rows = ids.size() / lanes.size();
+        params.seed = lanes[i].options.seed;
+        if (draft) params.draft_last = op.gpu.sparse_last[lanes[i].slot][sources[0]];
+    }
+    return step;
+}
+int *draft_batch_steps(Target &target, const std::vector<BatchLane> &lanes, const BatchLayout &layout,
+                       const std::vector<int> &ids, const std::vector<int> &anchors) {
+    Ops &op = target.op;
+    int batch = lanes.size();
+    Mat x = op.capture ? op.embed_device(op.gpu.batch_input->step.ids, ids.size(), false) : op.embed(ids, false);
     const std::string p = "model.dfly_layers.";
     auto gather = [&](Mat src, const int *slots, int offset) {
         Mat out = op.mat(batch, 3072);
@@ -793,8 +845,8 @@ std::vector<int> propose_batch(Target &target, const std::vector<BatchLane> &lan
     }
     x = op.norm(x, p + "final_norm.weight");
     const std::string correction = p + "hidden_correction";
-    auto device = static_cast<int *>(op.arena.next(5 * batch * sizeof(int)));
-    int *previous = op.indices(anchors);
+    auto device = op.capture ? op.gpu.batch_input->candidates : static_cast<int *>(op.arena.next(5 * batch * sizeof(int)));
+    int *previous = op.capture ? op.gpu.batch_input->step.anchors : op.indices(anchors);
     mark = op.arena.cursor;
     for (int i = 1; i <= 5; ++i) {
         Mat hidden = gather(x, nullptr, i);
@@ -806,6 +858,33 @@ std::vector<int> propose_batch(Target &target, const std::vector<BatchLane> &lan
         sample_batch(op, lanes, target.head_logits(corrected), previous, 1, i);
         op.arena.cursor = mark;
     }
+    return device;
+}
+std::vector<int> propose_batch(Target &target, const std::vector<BatchLane> &lanes, const BatchLayout &layout) {
+    Ops &op = target.op;
+    auto &gpu = op.gpu;
+    const int batch = lanes.size();
+    std::vector<int> ids(batch * 6, 120009), anchors;
+    for (int r = 0; r < batch; ++r) {
+        ids[r * 6] = lanes[r].generated.back();
+        anchors.push_back(ids[r * 6]);
+    }
+    BatchGraphParams step;
+    int *device = nullptr;
+    if (gpu.batch_input && target.draft_graph && !gpu.draft_capture_failed) {
+        auto key = batch_graph_key(target, lanes, 6, true);
+        auto plan = capture_cached(op, gpu.draft_graphs, gpu.draft_victim, gpu.draft_capture_failed, key,
+            [&](GraphPlan &) { draft_batch_steps(target, lanes, layout, ids, anchors); });
+        op.arena.cursor = key.workspace;
+        if (plan) {
+            step = batch_step(op, lanes, ids, true);
+            checked(hipMemcpyAsync(&gpu.batch_input->step, &step, sizeof(step), hipMemcpyHostToDevice, op.stream));
+            checked(hipGraphLaunch(plan->tail, op.stream));
+            ++gpu.draft_replays;
+            device = gpu.batch_input->candidates;
+        }
+    }
+    if (!device) device = draft_batch_steps(target, lanes, layout, ids, anchors);
     std::vector<int> candidates(5 * batch);
     op.copy(candidates.data(), device, candidates.size() * sizeof(int), hipMemcpyDeviceToHost);
     if (std::find(candidates.begin(), candidates.end(), -1) != candidates.end())
@@ -815,15 +894,13 @@ std::vector<int> propose_batch(Target &target, const std::vector<BatchLane> &lan
             ids[r * 6 + i + 1] = candidates[i * batch + r];
     return ids;
 }
-Mat verify_batch(Target &target, const std::vector<BatchLane> &lanes, const BatchLayout &layout,
+Mat verify_batch(Target &target, const BatchLayout &layout,
                  const std::vector<int> &ids, int rows) {
     Ops &op = target.op;
     auto &gpu = op.gpu;
     auto now = std::chrono::steady_clock::now;
-    const auto &[slots, positions, device_slots, device_positions] = layout;
-    std::vector<const std::vector<int> *> priors;
-    for (auto &lane : lanes) priors.push_back(&lane.history);
-    Mat x = op.embed(ids, true);
+    const auto &[slots, positions, priors, device_slots, device_positions] = layout;
+    Mat x = op.capture ? op.embed_device(gpu.batch_input->step.ids, ids.size(), true) : op.embed(ids, true);
     size_t mark = op.arena.cursor;
     for (int layer = 0; layer < 42; ++layer) {
         auto start = now();
@@ -846,6 +923,10 @@ Mat verify_batch(Target &target, const std::vector<BatchLane> &lanes, const Batc
                        : moe(op, layer, f);
         op.expand(x, f, post);
         op.arena.cursor = mark;
+        if (!layer && op.capture) {
+            op.capture->finish(op.capture->plan.entry);
+            op.capture->begin(0);
+        }
         if (gpu.expert_begin[0]) {
             checked(hipStreamSynchronize(op.stream));
             gpu.ffn_ms += std::chrono::duration<double, std::milli>(now() - start).count();
@@ -879,9 +960,43 @@ void decode_batch(Target &target, std::vector<BatchLane> &lanes, BatchStats &sta
     } else {
         for (auto &lane : lanes) ids.push_back(lane.generated.back());
     }
-    Mat h = verify_batch(target, lanes, layout, ids, rows);
+    BatchGraphParams step;
+    std::array<std::vector<uint8_t>, 4> engrams;
+    Mat h{};
+    float *logits = nullptr;
+    if (gpu.batch_input && target.target_graph && !gpu.target_capture_failed) {
+        auto key = batch_graph_key(target, lanes, rows, false);
+        auto plan = capture_cached(op, gpu.target_graphs, gpu.target_victim, gpu.target_capture_failed, key,
+            [&](GraphPlan &slot) {
+                Mat hidden = verify_batch(target, layout, ids, rows);
+                slot.hidden = hidden.p;
+                slot.logits = target.head_logits(hidden);
+                slot.cursor = op.arena.cursor;
+            });
+        op.arena.cursor = key.workspace;
+        if (plan) {
+            step = batch_step(op, lanes, ids, false);
+            checked(hipMemcpyAsync(&gpu.batch_input->step, &step, sizeof(step), hipMemcpyHostToDevice, op.stream));
+            checked(hipGraphLaunch(plan->entry, op.stream));
+            for (int g = 0; g < 4; ++g) {
+                auto &packed = engrams[g];
+                packed = gather_batch_engram(gpu.model, 1 + 10 * g, layout.priors, ids);
+                checked(hipMemcpyAsync(gpu.batch_input->engram + g * packed.size(), packed.data(), packed.size(),
+                                       hipMemcpyHostToDevice, op.stream));
+            }
+            plan->launch(gpu);
+            ++gpu.target_replays;
+            op.arena.cursor = plan->cursor;
+            h = {plan->hidden, int(ids.size()), 3072};
+            logits = plan->logits;
+        }
+    }
+    if (!logits) {
+        h = verify_batch(target, layout, ids, rows);
+        logits = target.head_logits(h);
+    }
     auto device = static_cast<int *>(op.arena.next(ids.size() * sizeof(int)));
-    sample_batch(op, lanes, target.head_logits(h), device, rows, 0);
+    sample_batch(op, lanes, logits, device, rows, 0);
     std::vector<int> next(ids.size());
     op.copy(next.data(), device, next.size() * sizeof(int), hipMemcpyDeviceToHost);
     if (std::find(next.begin(), next.end(), -1) != next.end())

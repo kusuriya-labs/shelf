@@ -106,14 +106,51 @@ class Hy4FlashTests(unittest.TestCase):
                     self.assertEqual(result["free_after"][rank], (32 << 30) - (512 << 20) - peak)
                     self.assertGreater(result["free_after"][rank], 0)
 
+    def test_batch_expert_balance(self):
+        experts = dict.fromkeys(range(41 * 512), EXPERT_BYTES)
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            storage = {f"model.layers.{i}.self_attn.kv_b_proj.weight":
+                       {"original_shape": [512, 14336 if i == 0 or i % 4 == 1 else 28672]} for i in range(42)}
+            (directory / "config.json").write_text(json.dumps({"quantization_config": {"linear_storage": storage}}))
+            for ranks in (3, 4):
+                for tokens, slots in ((2097152, 1), (4096, 16), (8192, 16)):
+                    results = []
+                    for flags in (["--no-balance-experts"], []):
+                        argv = ["placement.py", tmp, "--draft", tmp, "--tokens", str(tokens),
+                                "--max-concurrent-requests", str(slots), "--capacity", *(["32"] * ranks), *flags]
+                        output = io.StringIO()
+                        with patch.object(sys, "argv", argv), patch.object(placement, "checkpoint_sizes",
+                                side_effect=[(4329651680, experts), (424428112, {})]), contextlib.redirect_stdout(output):
+                            placement.main()
+                        result = json.loads(output.getvalue())
+                        self.assertGreaterEqual(min(result["free_after"]), 0)
+                        self.assertLessEqual(max(result["peak_estimate"]), (32 << 30) - (512 << 20))
+                        results.append(result["rank_experts"])
+                    if slots == 1:
+                        self.assertEqual(*results)
+                    else:
+                        before, after = results
+                        self.assertEqual(sum(after), 41 * 512)
+                        self.assertLess(max(after), max(before))
+                        self.assertAlmostEqual(after[0] / max(after), 0.9, places=3)
+
+    def test_balanced_routing_frequency(self):
+        histogram = [1 + ((e * 193) % 512) for e in range(512)]
+        owners = assign([512 * EXPERT_BYTES] * 4, [1] * 4, [histogram], balance_experts=True)[0]
+        loads = [sum(cost for cost, rank in zip(histogram, owners) if rank == i) for i in range(4)]
+        self.assertAlmostEqual(loads[0] / max(loads), 1.0, delta=0.025)
+        self.assertLess(max(loads[1:]) - min(loads[1:]), 512)
+
     def test_ep_capacity(self):
         budgets = [n * EXPERT_BYTES for n in (2, 1022, 0)]
-        rows = assign(budgets, [2, 1, 1], [list(range(512))] * 2)
-        for row in rows:
-            self.assertEqual(row.count(0), 1)
-            self.assertEqual(row[511], 0)
-        with self.assertRaises(MemoryError):
-            assign([0, 0, 0], [2, 1, 1], [[1] * 512])
+        for balance in (False, True):
+            rows = assign(budgets, [2, 1, 1], [list(range(512))] * 2, balance_experts=balance)
+            for row in rows:
+                self.assertEqual(row.count(0), 1)
+                self.assertEqual(row[511], 0)
+            with self.assertRaises(MemoryError):
+                assign([0, 0, 0], [2, 1, 1], [[1] * 512], balance_experts=balance)
 
 
 if __name__ == "__main__":

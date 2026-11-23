@@ -23,8 +23,9 @@ struct Target {
 
     float *head_logits(Mat hidden);
 
-  private:
     bool target_graph = false, draft_graph = false;
+
+  private:
     void sample(float *logits, int rows, int position, uint64_t rng, int *ids, float *distribution,
                 const Hy4StepParams *params = nullptr);
     std::vector<int> predict(Mat hidden, int position, bool draft = false, const Path &dump = {},

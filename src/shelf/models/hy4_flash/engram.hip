@@ -116,7 +116,7 @@ static Mat apply_engram(Ops &op, int layer, Mat x, const uint8_t *memory, const 
     auto project = [&](const std::string &key) { return op.linear(p + key, embed); };
     constexpr float eps = 1.1920928955e-7f;
     auto values = op.norm_bias(project("value_proj"), bf("value_proj.bias"), p + "unified_pre_gamma", eps);
-    auto token_ids = op.capture ? op.params->ids : op.indices(ids);
+    auto token_ids = op.capture ? (op.batch_decode ? op.gpu.batch_input->step.ids : op.params->ids) : op.indices(ids);
     for (int i = 0; i < 4; ++i) {
         auto s = std::to_string(i);
         auto k = op.norm_bias(project("key_projs." + s), bf("key_projs." + s + ".bias"),
@@ -142,16 +142,25 @@ Mat engram(Ops &op, int layer, Mat x, const std::vector<int> &prior, const std::
     }
     return apply_engram(op, layer, x, memory, ids);
 }
-Mat engram_batch(Ops &op, int layer, Mat x, const std::vector<const std::vector<int> *> &priors,
-                 const std::vector<int> &ids) {
+std::vector<uint8_t> gather_batch_engram(const Checkpoint &model, int layer,
+        const std::vector<const std::vector<int> *> &priors, const std::vector<int> &ids) {
     const int rows = ids.size() / priors.size();
     std::vector<uint8_t> packed;
-    packed.reserve(size_t(x.rows) * 16 * 98);
+    packed.reserve(ids.size() * 16 * 98);
     for (size_t slot = 0; slot < priors.size(); ++slot) {
         auto first = ids.begin() + slot * rows;
-        auto lane = gather_engram(op.gpu.model, layer, rows, {first, first + rows}, *priors[slot]);
+        auto lane = gather_engram(model, layer, rows, {first, first + rows}, *priors[slot]);
         packed.insert(packed.end(), lane.begin(), lane.end());
     }
+    return packed;
+}
+Mat engram_batch(Ops &op, int layer, Mat x, const std::vector<const std::vector<int> *> &priors,
+                 const std::vector<int> &ids) {
+    if (op.capture) {
+        auto memory = op.gpu.batch_input->engram + (layer - 1) / 10 * x.rows * 16 * 98;
+        return apply_engram(op, layer, x, memory, ids);
+    }
+    auto packed = gather_batch_engram(op.gpu.model, layer, priors, ids);
     auto memory = static_cast<uint8_t *>(op.arena.next(packed.size()));
     op.copy(memory, packed.data(), packed.size(), hipMemcpyHostToDevice);
     return apply_engram(op, layer, x, memory, ids);

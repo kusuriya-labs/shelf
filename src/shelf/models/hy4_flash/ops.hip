@@ -296,11 +296,12 @@ Mat Ops::linear(const std::string &name, Mat x) {
     while (splits < 16 && (pn / 64) * splits < 128 && (pk / 128) % (2 * splits) == 0)
         splits *= 2;
     auto partial = static_cast<float *>(arena.next(size_t(x.rows) * pn * 4 * splits));
-    checked(shelf_hy4_linear(x.p, static_cast<const uint16_t *>(param(name + ".suh").p),
+    auto expanded = x.rows >= 256 ? static_cast<int8_t *>(arena.next(size_t(pk) * pn)) : nullptr;
+    checked(shelf_hy4_linear_workspace(x.p, static_cast<const uint16_t *>(param(name + ".suh").p),
                              static_cast<const uint16_t *>(param(name + ".svh").p),
                              static_cast<const uint32_t *>(param(name + ".trellis").p), codes, scales, partial,
                              y.p, x.rows, x.cols, y.cols, pk, pn, it->spec.shape[2] / 16, stream,
-                             splits));
+                             splits, expanded));
     if (gpu.model.row_parallel(name, rank))
         gpu.tp_sum(y.p, rank, y.bytes());
     arena.cursor = save;
