@@ -1,4 +1,5 @@
 #include <hip/hip_fp16.h>
+#include <rocprim/block/block_scan.hpp>
 #include <shelf/models/hy4_flash/attention.h>
 #include <shelf/models/hy4_flash/absorbed.h>
 #include <shelf/kernels/fused/detail/octave_common.h>
@@ -442,15 +443,24 @@ __global__ void sparse_group_ids(int *mask, int rows, int width, int *meta, int 
         mask[g] = v;
     }
     __syncthreads();
-    if (!threadIdx.x) {
-        int count = 0;
-        for (int g = 0; g < width; ++g) {
-            int present = mask[g];
-            mask[g] = present ? count * 4 : -1;
-            count += present;
-        }
-        meta[512] = count * 4;
+    using Scan = rocprim::block_scan<int, 256>;
+    __shared__ typename Scan::storage_type scan;
+    int span = (width + 255) / 256;
+    int first = min(int(threadIdx.x) * span, width);
+    int end = min(first + span, width);
+    int count = 0;
+    for (int g = first; g < end; ++g)
+        count += mask[g];
+    int prefix;
+    Scan().exclusive_scan(count, prefix, 0, scan);
+    int total = prefix + count;
+    for (int g = first; g < end; ++g) {
+        int present = mask[g];
+        mask[g] = present ? prefix * 4 : -1;
+        prefix += present;
     }
+    if (threadIdx.x == 255)
+        meta[512] = total * 4;
     __syncthreads();
     for (int g = threadIdx.x; g < width; g += blockDim.x)
         if (mask[g] >= 0)
