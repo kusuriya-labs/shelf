@@ -891,3 +891,107 @@ conc=8、64 token 生成での drafts 比較:
 drafts を増やしても accepted は増えない（MTP block の受理が飽和）。drafts 2 を
 維持する。DFlash2 との差（conc=8 で 136 vs 123 tok/s）は batching ではなく
 drafter の受理数（DFlash2 は 6.75/slot/round、MTP は約 1.4/slot/round）による。
+
+### DFlash2 verify を kernel trace で再分解（conc=8、62 行）
+
+`docs/developer/kernel_optimization_and_fusion.md` §1 の手順に戻り、DFlash2 serve の
+conc=8（verify 62 行）を rocprofv3 1.4.1 の kernel-trace で取り直した。
+条件は device 0,1、EP=2、`octave:c5v5`、8 セッション × 16 token、prompt は 8 本とも
+同一（受理 6.75 / 7）。decode window は 22,130–23,190 ms（1.047 s）で、
+dispatch 73,694（両 rank 合計）、GPU 時間 1,389.2 ms、busy 66.3 %。
+stage は round 89.2 ms、verify_gpu 74.6 ms、draft_gpu 10.6 ms、verify 62 行/round。
+
+| 家族 | ms（両 rank） | share | dispatch | 1 call |
+| --- | ---: | ---: | ---: | ---: |
+| EXL3 grouped MoE（gate/up） | 383.4 | 27.6 % | 2,304 | 166 µs |
+| EXL3 dense GEMM | 194.1 | 14.0 % | 5,594 | 35 µs |
+| EXL3 grouped MoE（down） | 130.5 | 9.4 % | 1,152 | 113 µs |
+| BF16 GEMM（hipBLASLt） | 115.1 | 8.3 % | 5,080 | 23 µs |
+| other（PLE / scatter / descriptor 等） | 97.5 | 7.0 % | 7,088 | 14 µs |
+| BF16 GEMM（exact rows / pair） | 74.7 | 5.4 % | 4,150 | 18 µs |
+| hyper connection | 72.0 | 5.2 % | 6,936 | 10 µs |
+| GDN（v32 + verify chunk + conv + commit） | 70.2 | 5.1 % | 1,760 | 40 µs |
+| elementwise | 55.6 | 4.0 % | 11,174 | 5 µs |
+| EXL3 rotate / epilogue | 46.8 | 3.4 % | 11,188 | 4 µs |
+| MoE bookkeeping | 38.6 | 2.8 % | 3,456 | 11 µs |
+| EXL3 grouped activate | 33.0 | 2.4 % | 2,016 | 16 µs |
+| norm | 30.0 | 2.2 % | 6,054 | 5 µs |
+| attention（octave paged） | 26.5 | 1.9 % | 1,258 | 21 µs |
+| TP transport | 18.4 | 1.3 % | 3,484 | 5 µs |
+
+主要 kernel 単体（VGPR / LDS は trace 値）:
+
+| kernel | ms | share | n | VGPR | LDS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `gemm_mul24_grouped_kernel_gate<2,1,3,true>` | 375.0 | 27.0 % | 2,256 | 120 | 17,408 |
+| `gemm_mul24_grouped_kernel<2,2,3,false>` | 127.6 | 9.2 % | 1,128 | 184 | 21,504 |
+| `exl3_mul24_gemm_kernel<4,4,true,true>` | 117.8 | 8.5 % | 2,845 | 192 | 0 |
+| `exl3_mul24_gemm_kernel<5,4,false,true>` | 50.1 | 3.6 % | 988 | 232 | 0 |
+| `gemm_bf16_exact_rows_kernel<16>` | 48.5 | 3.5 % | 2,030 | 112 | 0 |
+| `shelf_gdn_recurrence_wmma_lossy_v32` | 40.8 | 2.9 % | 720 | 248 | 14,336 |
+| hipBLASLt MT128x256x32 | 36.5 | 2.6 % | 970 | 256 | 26,624 |
+| `shelf_swiglu_bf16` | 28.5 | 2.1 % | 2,834 | 24 | 0 |
+| hipBLASLt MT32x32x256 | 28.8 | 2.1 % | 970 | 256 | 17,408 |
+
+- GDN は 62 行の verify で `wmma_lossy_v32`（LDS 14,336 B、36 layer × 約 10 forward）が
+  主経路で、`verify_chunk_lossy` は約 2 forward に限られる。以前の「verify は 64-wide で
+  1 → 3 block/CU、v32 化が次の段」は conc=1 の話で、複数セッションの batch verify では
+  既に v32 が選ばれる。
+- **grouped gate が単独で 27 %**。占有は register（120 VGPR → 12 wave/SIMD）で、
+  LDS 17,408 B は 7 block/CU まで許す。
+- decode 全体の dispatch は rank あたり 3,070 / round（round 89 ms、1 本 29 µs 平均）で、
+  4 µs 級の rotate / elementwise / norm が dispatch 数では 6 割を占める。
+- GPU busy は 66 % で、round 境界（`fillBufferUnAligned` / `prepare_batch_descriptor`
+  の直前）に 5〜20 ms の host gap が毎 round 出る。verify の wall の約 3 割は
+  launch / host である。
+
+#### 律速分類（§2）
+
+- **grouped gate は ① ではない。** 1 layer あたり local expert 選択は約 40
+  （8 session × 10 expert の半分）で、gate/up の weight は 1.25 MB/expert →
+  2.4 GB/round/rank。15.8 ms/round で **152 GB/s**（DRAM 636 の 24 %）であり、
+  GEMV の並列不足（③）と dequant（②）の混合である。
+- 同じ kernel でも、8 session が同一 prompt のときは expert union が 10 に縮み、
+  weight は 0.30 GB/round = **19 GB/s** になる。traffic が corpus で 8 倍変わるため、
+  gate の採否は多様 prompt 側で判定する。
+- dense EXL3（12.1 %）と BF16 GEMM（13.7 %）は rows=62 で weight が
+  セッション間で amortize されており、conc=1 の rows=8 より session あたり 1/8 で済む。
+  batch verify の効果はここに出ている。
+- **④ は残っている。** dispatch 3,070/round に対して GPU は 66 % しか埋まらない。
+
+#### HIP graph はこの構成では使えない（実測）
+
+- `verify_graph` の既定は `declared_model_type == "qwen3_5"` を要求する。
+  この checkpoint は `qwen4_exp` なので verify は graph 対象外になる。
+- `SHELF_GRAPH_VERIFY=1` でも capture されない。`SHELF_GRAPH_WHY=1` の実測:
+  `role=2 R=1 N=7 eligible=0 active=0 taps=5 model=qwen4_exp tp=10 ext=1`。
+  `ext=1` は PLE の `external_input_preparer`、`tp=10` は EP collective の
+  TP schedule で、後者は host barrier を含むため capture できない。
+- したがってこの構成の launch 削減は kernel 融合でしか取れない。
+
+#### レバー候補（分母 89.2 ms/round）
+
+| 候補 | 根拠 | 見積り | 判定 |
+| --- | --- | --- | --- |
+| grouped gate の VGPR 120 → 96 | 27.0 %、12 → 16 wave/SIMD | occupancy +1 block | **棄却（−1.3 %）** |
+| gate の M>32 再読を kGroups=4 で畳む | M=62 で weight を 2 回読む | 同一 prompt で −8 % 相当、多様 prompt は occupancy 減 | 次候補（corpus 依存） |
+| EXL3 rotate / epilogue（11,188 dispatch、3.4 %）の融合 | dispatch の 15 % | 1 launch 4 µs × 削減数 | 次候補（splits>1 の reduction が障壁） |
+| MoE bookkeeping 融合（2.8 %） | router / combine / slot scan | −1〜2 % | 効果小 |
+| HIP graph | 上記 blocker | — | 不可 |
+
+#### grouped gate の VGPR 96 は棄却
+
+`gemm_mul24_grouped_kernel_gate` の `amdgpu_num_vgpr(120)` を 96 に下げ、
+12 → 16 wave/SIMD（block/CU 6 → 7）を狙った。interleaved A/B は 8 セッション・
+異なる prompt・128 token 上限（短い prefill を含む wall の aggregate）、
+3 pair（base / v96 / v96 / base の順で各 pair を実行）:
+
+| 構成 | aggregate tok/s（5 run、初回 cold を除く） | 中央値 |
+| --- | --- | ---: |
+| base（120 VGPR） | 159.66 / 159.58 / 159.87 / 159.81 / 158.55 | 159.66 |
+| v96 | 158.03 / 156.65 / 157.57 / 157.62 / 157.77 / 157.60 | **157.62（−1.3 %）** |
+
+生成は両者 70 token で一致。単発 CLI の 16 token も `19,11,220,...,24` で一致した。
+trace で確認すると v96 は **scratch 48〜84 B を spill しており**（120 では 0）、
+gate は occupancy より wave あたりの仕事量（ILP）で律速している。
+レジスタを削ると spill が乗って負けるため、120 VGPR を維持する。
