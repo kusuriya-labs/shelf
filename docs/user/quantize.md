@@ -46,6 +46,18 @@ python tools/quantize/shelf_quantize.py validate /path/to/output
 
 目安として、R9700 の `Qwen3.5-2B-BF16` を 4.0 bpw、既定 calibration、8 スレッドで変換した実測では、形式検査まで 16 分 40 秒、VRAM の観測最大約 9.6 GB、作業領域の観測最大約 15.6 GB、出力約 2.6 GB、ホストメモリの最大 RSS 約 33.4 GB だった。使用量は 2 秒間隔の観測値である。出力の整形時には出力先に一時的なコピーも作られるため、出力先にも余裕を持たせる。モデルや環境によって必要量と所要時間は変わる。
 
+### DFlash2 drafter の変換
+
+`DFlash2DraftModel`（DFlash2 drafter）は通常の `convert` の対象外であり、target の tap hidden state を使う calibration も行えない。代わりに `convert-draft` を使う。`fc` と各層の Q/K/V/O/gate/up/down の 36 linear だけを EXL3-INT8 にし、norm・dynamic convolution・candidate selector などは BF16 のままコピーする。calibration は行わず、Hessian を持たない fallback 経路で量子化する。
+
+```bash
+python tools/quantize/shelf_quantize.py convert-draft \
+  --model models/incoai/Qwen3.8-Flash-Next-DFlash2 \
+  --output /path/to/output --bpw 4.0
+```
+
+`--bpw` は 1 以上 8 以下の整数、`--seed` は 0 以上の整数、`--device` は使用する GPU の番号を指定する。変換後は `convert` と同じく形式検査が実行され、`quantize_report.json` が出力先に作られる。
+
 ### Ngram4 / Ngram5 の同時変換
 
 N-gram table を持つ対応 checkpoint では、変換コマンドに `--ngram ngram4` または `--ngram ngram5` を追加すると、table も量子化して同じ出力に含めて検査する（N-gram の対象 tensor がない checkpoint には指定しない）。事前に C 共有ライブラリをビルドしておく。

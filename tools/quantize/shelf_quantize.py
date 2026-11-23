@@ -88,6 +88,121 @@ def convert(args):
     (args.output / 'quantize_report.json').write_text(json.dumps(report, indent=2, ensure_ascii=False) + '\n')
 
 
+DRAFT_ARCHITECTURE = 'DFlash2DraftModel'
+DRAFT_LINEAR_SUFFIXES = (
+    '.self_attn.q_proj.weight', '.self_attn.k_proj.weight',
+    '.self_attn.v_proj.weight', '.self_attn.o_proj.weight',
+    '.mlp.gate_proj.weight', '.mlp.up_proj.weight', '.mlp.down_proj.weight',
+)
+
+
+def is_draft_linear(name):
+    return name == 'fc.weight' or name.endswith(DRAFT_LINEAR_SUFFIXES)
+
+
+def convert_draft(args):
+    with (args.model / 'config.json').open() as f:
+        config = json.load(f)
+    if config.get('architectures') != [DRAFT_ARCHITECTURE]:
+        raise ValueError(f'DFlash2DraftModel ではありません: {config.get("architectures")}')
+    if 'quantization_config' in config:
+        raise ValueError('既に量子化された checkpoint です')
+    if not args.bpw.is_integer() or not 1 <= args.bpw <= 8:
+        raise ValueError('bpw は 1 以上 8 以下の整数にしてください')
+    if args.output.exists():
+        raise FileExistsError(args.output)
+
+    import torch
+    from safetensors import safe_open
+    from safetensors.torch import save_file
+    from exllamav3.modules.quant.exl3_lib.quantize import quantize_exl3
+
+    info = verify_extension()
+    started = datetime.now(timezone.utc).isoformat()
+    device = f'cuda:{args.device}'
+    shards = sorted(args.model.glob('*.safetensors'))
+    if not shards:
+        raise FileNotFoundError(f'.safetensors がありません: {args.model}')
+    out = {}
+    expected = set()
+    produced = set()
+    quantized = 0
+    for shard in shards:
+        with safe_open(shard, framework='pt', device='cpu') as source:
+            for name in source.keys():
+                if name in expected:
+                    raise ValueError(f'重複した tensor: {name}')
+                expected.add(name)
+                tensor = source.get_tensor(name)
+                if not is_draft_linear(name):
+                    out[name] = tensor.contiguous()
+                    produced.add(name)
+                    continue
+                weight = tensor.t().contiguous().float()
+                k, n = weight.shape
+                if k % 128 or n % 128:
+                    raise ValueError(f'128 の倍数でない linear: {name} {tuple(weight.shape)}')
+                H_data = {
+                    'H': torch.empty(k, k, dtype=torch.float32, device='meta'),
+                    'first_key': name,
+                    'count': 0,
+                    'finalized': False,
+                    'num_total': 0,
+                    'inf_nan': torch.zeros(2, dtype=torch.long, device=device),
+                    'device': torch.device(device),
+                    'L': None,
+                }
+                quant_args = {
+                    'seed': quantized + args.seed,
+                    'K': int(args.bpw),
+                    'devices': [device],
+                    'device_ratios': None,
+                    'apply_out_scales': True,
+                    'mul1': True,
+                }
+                _, error, tensors = quantize_exl3(
+                    weight, H_data, quant_args, False,
+                    progress_str=f' -- <step>: {name}',
+                )
+                del weight
+                prefix = name[: -len('.weight')]
+                out[prefix + '.trellis'] = tensors['trellis'].to('cpu').contiguous()
+                out[prefix + '.suh'] = tensors['suh'].to('cpu').contiguous()
+                out[prefix + '.svh'] = tensors['svh'].to('cpu').contiguous()
+                out[prefix + '.mul1'] = tensors['mul1'].to('cpu').contiguous()
+                produced.add(name)
+                quantized += 1
+                print(
+                    f' -- Quantized: {name}  k={k} n={n}  bpw={quant_args["K"]}  '
+                    f'rmse={error:.6f}  [{quantized}]',
+                    flush=True,
+                )
+    if produced != expected:
+        raise ValueError(f'tensor が一致しません: {sorted(expected ^ produced)}')
+
+    args.output.mkdir(parents=True)
+    save_file(out, str(args.output / 'model.safetensors'))
+    config['quantization_config'] = {
+        'quant_method': 'exl3',
+        'version': '1.5.0',
+        'bits': args.bpw,
+        'codebook': 'exl3-int8',
+        'multiplier': info['multiplier'],
+        'calibration': None,
+        'out_scales': 'always',
+    }
+    (args.output / 'config.json').write_text(json.dumps(config, indent=2) + '\n')
+    run(sys.executable, QUANT / 'validate_exl3.py', args.output)
+    report = {'model': str(args.model.resolve()), 'output': str(args.output.resolve()),
+              'bpw': args.bpw, 'seed': args.seed, 'device': args.device,
+              'calibration': None, 'quantized_linears': quantized,
+              'shelf_commit': subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip(),
+              'source_commit': 'b922ccbd558237b13cc2e3bb25b87bc7cb2cbfe3',
+              'pytorch': torch.__version__, 'rocm': torch.version.hip, 'extension': info,
+              'started_at': started, 'finished_at': datetime.now(timezone.utc).isoformat()}
+    (args.output / 'quantize_report.json').write_text(json.dumps(report, indent=2, ensure_ascii=False) + '\n')
+
+
 def quality(args):
     with (args.reference / 'config.json').open() as f:
         config = json.load(f)
@@ -119,6 +234,12 @@ def main():
     c.add_argument('--calibration', type=Path)
     c.add_argument('--cal-rows', type=int)
     c.add_argument('--cal-cols', type=int)
+    d = sub.add_parser('convert-draft', help='DFlash2 drafter を calibration なしで量子化')
+    for name in ('model', 'output'):
+        d.add_argument('--' + name, type=Path, required=True)
+    d.add_argument('--bpw', type=float, required=True)
+    d.add_argument('--seed', type=int, default=0)
+    d.add_argument('--device', type=int, default=0)
     v = sub.add_parser('validate', help='bundle を検証')
     v.add_argument('bundle', type=Path)
     q = sub.add_parser('quality', help='BF16 と KLD / top-1 を比較')
@@ -138,6 +259,10 @@ def main():
         if args.threads < 1 or args.seed < 0:
             p.error('threads は正数、seed は 0 以上にしてください')
         convert(args)
+    elif args.command == 'convert-draft':
+        if args.seed < 0 or args.device < 0:
+            p.error('seed と device は 0 以上にしてください')
+        convert_draft(args)
     else:
         quality(args)
 
