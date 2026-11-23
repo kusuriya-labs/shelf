@@ -869,3 +869,25 @@ batch 経路を追うと 2 段階で壊れていた。
 生成 16 token は一致、required 231/231 PASS。既定は batched backbone +
 batched select。`SHELF_DFLASH2_PROPOSE_BATCH=0` で単発 proposal、
 `SHELF_DFLASH2_SELECT_BATCH=0` で request ごとの select に戻せる。
+
+### MTP の batched drafter / verify は既に最適化済み
+
+DFlash2 で直した「batch proposal/select の上書き」に相当する問題が MTP にあるかを
+確認した。MTP は `mtp_draft_batch` が全 slot の drafter forward を 1 回にまとめ、
+`mtp_fused_verify_enabled()` が **既定 on**（env 未設定で true）なので target verify も
+1 round 1 回に融合している。conc=8 の stats は
+`max_active=8`、`max_verify_per_round=1`、`round_ms=60` で、DFlash2 型の
+distributor 上書きも無い（MTP は target executor の sampling を使う）。
+
+conc=8、64 token 生成での drafts 比較:
+
+| drafts | aggregate | rounds | accepted | draft_forwards | round_ms |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 122.2 | 31 | 232 | 31 | 56.0 |
+| **2** | **123.2** | 27 | 272 | 54 | 61.7 |
+| 4 | 109.2 | 13 | 144 | 48 | 75.5 |
+| 6 | 102.3 | 13 | 144 | 69 | 88.3 |
+
+drafts を増やしても accepted は増えない（MTP block の受理が飽和）。drafts 2 を
+維持する。DFlash2 との差（conc=8 で 136 vs 123 tok/s）は batching ではなく
+drafter の受理数（DFlash2 は 6.75/slot/round、MTP は約 1.4/slot/round）による。
