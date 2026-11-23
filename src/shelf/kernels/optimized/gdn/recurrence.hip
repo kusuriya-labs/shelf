@@ -860,6 +860,8 @@ bool gdn_recurrence_lossy_enabled() {
     return enabled;
 }
 
+extern "C" __global__ void shelf_gdn_recurrence_wmma_lossy_v32(GdnRecurrenceArgs a);
+
 hipError_t launch_gdn_recurrence_f32_wmma(
     const GdnRecurrenceArgs& args, hipStream_t stream) {
     if (args.head_k != gdngfx12::kWk) return hipErrorInvalidValue;
@@ -876,6 +878,17 @@ hipError_t launch_gdn_recurrence_f32_wmma(
     const uint64_t grid_x = static_cast<uint64_t>(args.num_requests) * args.num_v_heads * vgroups;
     if (grid_x == 0u) return hipErrorInvalidValue;
     const GdnRecurrenceArgs a = args;
+    static const bool v32 = [] {
+        const char* v = std::getenv("SHELF_GDN_V32");
+        return v == nullptr || v[0] == '\0' || v[0] != '0';
+    }();
+    if (v32 && gdn_recurrence_lossy_enabled() && args.head_v % 32u == 0u) {
+        const uint32_t vg32 = args.head_v / 32u;
+        const uint64_t grid32 = static_cast<uint64_t>(args.num_requests) * args.num_v_heads * vg32;
+        shelf_gdn_recurrence_wmma_lossy_v32<<<dim3(static_cast<uint32_t>(grid32)),
+                                              128u, 0, stream>>>(a);
+        return hipGetLastError();
+    }
     const dim3 grid(static_cast<uint32_t>(grid_x));
     if (gdn_recurrence_lossy_enabled())
         shelf_gdn_recurrence_wmma_lossy<<<grid, gdngfx12::kWthreads, 0, stream>>>(a);

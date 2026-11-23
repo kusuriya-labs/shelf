@@ -495,3 +495,36 @@ down の N tile も 1 にして 120 VGPR / 3 block/CU を狙えるか試した�
 1024 / 2048 token の pre-rotated down は **1.837 / 3.003 ms**（producer 込み
 1.873 / 3.066 ms）で、既定の n_tiles=2 / VGPR 184 の **1.245 / 2.573 ms**
 （1.261 / 2.636 ms）より **47.6 % / 16.7 % 遅い**。down は n_tiles=2 のままにする。
+
+## 18. GDN recurrence の v32 分割（state 16 KB、3 block/CU）
+
+GDN recurrence は `kWv=64`、`S[128][68]` = 34,816 B、LDS 合計 35,840 B で
+1 block/CU に固定されていた。v 幅を 32 にすると payload は
+`128 × 32 × 4 = 16 KB`、LDS 合計 19,456 B になり、LDS の 64 KB 予算で
+3 block/CU が可能になる。
+
+試作は 2 段階:
+
+- 256 thread（8 warp、state を 2 k × 1 v、chunk は warp 0..3）: grid は 2 倍に
+  なるが chunk 区間で 4 warp が遊ぶ。GDN 97.3 ms（VGPR 192 / LDS 19,456）、
+  64-wide の 87.3 ms より遅い。
+- 128 thread（4 warp、state を 2 k × 2 v、chunk は 4 warp 全部）:
+  GDN **83.9 ms**（VGPR 224 / LDS 19,456 / scratch 0）。64-wide 比 **−3.9 %**。
+
+128 thread 版は warp あたりの state tile を 2 k × 2 v に戻し、
+`kt0 = warp * 2`、`vt0 = 0` とする。chunk の `(mt, nt)` は
+`(warp & 1, warp >> 1)` で 32×32 を 4 warp が過不足なく分担する。
+LDS は 19,456 B で 3 block/CU、VGPR 224（granule 240）は 6 wave/SIMD なので
+拘束は LDS の 3 block。4 block には state を 16,384 B 以下にする必要があり、
+bank conflict 回避の padding を入れると届かない。
+
+E2E は neutral:
+
+| 条件 | 64-wide | v32 |
+| --- | ---: | ---: |
+| prefill 7002 ms（5 回平均） | 1848.8 | 1856.1 |
+| decode MTP2 tok/s | 64.1 / 61.5 | 61.6 / 64.1 |
+
+生成 16 token は一致、required 231/231 PASS。`SHELF_GDN_V32=0` で
+従来の 64-wide 経路に戻せる。head_v が 32 の倍数なら適用し、
+`hv64`（`head_v=64`、vgroups=2）のテストを追加した。

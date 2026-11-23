@@ -117,6 +117,7 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/activation_quantize.hip
     src/shelf/kernels/optimized/kv_append.hip
     src/shelf/kernels/optimized/gdn/recurrence.hip
+    src/shelf/kernels/optimized/gdn/recurrence_v32.hip
     src/shelf/kernels/optimized/gdn/conv1d.hip
     src/shelf/kernels/optimized/sampling.hip
     src/shelf/kernels/optimized/stochastic_sampling.hip
