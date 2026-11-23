@@ -370,3 +370,48 @@ dense A 経路の `rowstat` + `rowslot` + `rowfinish` を、atomic で slot を�
 
 host experts 0 では **約 2.0 %** 速い。host 96 では同等〜−1.3 % で悪化しない。
 生成 16 token は両経路で一致したため、既定を融合経路にする。
+
+## 15. GDN recurrence の occupancy 実験（棄却）と rows の再確認
+
+### GDN 2 block/CU
+
+GDN の state は `128 × 64 × 4 = 32 KB` の LDS を 1 block で使い、全体は
+35 KB である。2 block/CU には state だけで 64 KB 必要なので、単純な LDS 削減では
+届かない。それでも `kSp` を 68 → 64、lossy kernel の VGPR 上限を
+`amdgpu_num_vgpr(128)` にして試した（2048 token prefill trace）。
+
+| 項目 | 既定 | 実験 |
+| --- | ---: | ---: |
+| LDS | 35,840 B | 33,792 B |
+| VGPR | 224 | **224（上限は実効せず）** |
+| scratch | 0 | 0 |
+| GDN kernel | 85.1 ms | **88.0 ms（+3.4%）** |
+
+LDS はまだ 32 KB を超え、VGPR も 224 のままで 2 block/CU にならず、kSp の変更だけが
+遅くなった。revert した。次の GDN レバーは value group を 64 → 32 に割って
+state を 16 KB にし、block 数と 2 block/CU を同時に取る設計変更になる。
+
+### MTP drafts
+
+3162 token prefill + 64 token 生成、greedy、EP=2。
+
+| drafts | decode tok/s |
+| ---: | ---: |
+| 2 | **61.7** |
+| 3 | 54.1 |
+| 4 | 51.9 |
+
+run.sh の drafts 2 が最速で、増やすと遅い。
+
+### concurrent batch
+
+3162 token prompt、drafts 2、`max_num_batched_tokens` 8192。
+
+| conc | aggregate tok/s | per-stream |
+| ---: | ---: | ---: |
+| 1 | 23.41 | 23.41 |
+| 2 | 33.04 | 16.52 |
+| 4 | **39.59** | 9.90 |
+
+aggregate は conc 4 が最良で、server の既定 `--max-concurrent-requests 4` のままにする。
+required 231/231 PASS。
