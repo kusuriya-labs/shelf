@@ -8,12 +8,6 @@
 #include <numeric>
 #include <stdexcept>
 
-namespace shelf::hy4 {
-void verify_hy4_upload(Residency &gpu);
-void verify_hy4_layers(Residency &gpu, const Path &input, const Path &dump);
-bool trace_hy4_prefill(Residency &gpu, const Path &input, int chunk, const Path &dump);
-}
-
 namespace {
 int remaining_instantiations = 0;
 using namespace shelf;
@@ -394,47 +388,6 @@ extern "C" hipError_t __wrap_hipGraphInstantiate(hipGraphExec_t *exec, hipGraph_
 }
 int main(int argc, char **argv) {
     try {
-        if (argc == 7 && std::string_view(argv[3]) == "layers") {
-            auto owners = read_owners(argv[4]);
-            int ranks = 1;
-            for (const auto &layer : owners)
-                ranks = std::max(ranks, 1 + *std::max_element(layer.begin(), layer.end()));
-            Checkpoint model(argv[1], argv[1], argv[2], Owners{}, 1, 1);
-            share_expert_weights(model);
-            Residency gpu(model, 64);
-            auto status = gpu.reserve();
-            if (!status.ok())
-                throw std::runtime_error(status.message());
-            gpu.upload();
-            logical_ranks(gpu, ranks);
-            model.owners = owners;
-            checked(hipMemcpy(gpu.moe_owners[0], owners.data(), sizeof(owners), hipMemcpyHostToDevice));
-            verify_hy4_layers(gpu, argv[5], argv[6]);
-            gpu.shutdown();
-            return 0;
-        }
-        if ((argc == 4 || argc == 5 || argc == 8) && std::string_view(argv[3]) == "upload") {
-            int count = 1;
-            checked(hipGetDeviceCount(&count));
-            bool shared = argc == 4 || std::string_view(argv[4]) == "-";
-            if (shared && count != 1)
-                throw std::runtime_error("複数 GPU の検証には配置表を指定してください");
-            Owners owners = shared ? Owners{} : read_owners(argv[4]);
-            Checkpoint model(argv[1], argv[1], argv[2], owners, count, 1);
-            if (shared)
-                share_expert_weights(model);
-            Residency gpu(model, argc == 8 ? 4096 : 64);
-            auto status = gpu.reserve();
-            if (!status.ok())
-                throw std::runtime_error(status.message());
-            gpu.upload();
-            bool match = argc != 8 || trace_hy4_prefill(gpu, argv[5], std::stoi(argv[6]), argv[7]);
-            verify_hy4_upload(gpu);
-            gpu.shutdown();
-            if (!match)
-                throw std::runtime_error("初回の logits と層別照合時の logits が異なります");
-            return 0;
-        }
         if ((argc == 4 || argc == 5) && std::string_view(argv[3]) == "transport") {
             if (argc == 5) {
                 int count = 0;
