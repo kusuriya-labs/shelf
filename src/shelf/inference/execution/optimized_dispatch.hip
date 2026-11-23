@@ -2082,6 +2082,27 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_with_boundary(
     return try_launch_linear_exl3_mul24(program, b, ctx, stream, producer, gdn_producer, attn_producer);
 }
 
+Result<OptimizedLaunchResult> try_launch_swiglu_moe_down(
+    const ::shelf::runtime::Program& program, size_t i, size_t end,
+    HostExecutionContext& ctx, hipStream_t stream) {
+    const OptimizedLaunchResult miss{OptimizedLaunchKind::NotApplicable};
+    static const bool enabled = std::getenv("SHELF_DISABLE_SWIGLU_MOE_DOWN") == nullptr &&
+        std::getenv("SHELF_OP_DUMP") == nullptr && std::getenv("SHELF_OP_SYNC") == nullptr &&
+        std::getenv("SHELF_LINEAR_INPUT_DUMP") == nullptr;
+    if (!enabled || ctx.value_trace || ctx.layer_override_count || i + 1u >= end) return miss;
+    const auto& swiglu = program.dispatches[i];
+    const auto& down = program.dispatches[i + 1u];
+    if (swiglu.kernel_id != ::shelf::runtime::KernelId::SWIGLU ||
+        down.kernel_id != ::shelf::runtime::KernelId::LINEAR_EXL3_INT8_GROUPED)
+        return miss;
+    if (swiglu.input_count != 2u || swiglu.output_count != 1u ||
+        down.input_count != 1u || down.output_count != 1u ||
+        down.input_slots[0] != swiglu.output_slots[0])
+        return miss;
+    if (!moe_swiglu_fusion_available(program, down, ctx)) return miss;
+    return OptimizedLaunchResult{OptimizedLaunchKind::Skipped, 1u};
+}
+
 Result<OptimizedLaunchResult> try_launch_optimized(
     const ::shelf::runtime::Program& program,
     size_t dispatch_index,
@@ -2190,6 +2211,10 @@ Result<OptimizedLaunchResult> try_launch_optimized(
                 program, dispatch_index, dispatch_end, ctx, stream);
             if (!mxfp4.ok() || mxfp4.value().kind == OptimizedLaunchKind::Launched)
                 return mxfp4;
+            auto moe_down = try_launch_swiglu_moe_down(program, dispatch_index,
+                                                       dispatch_end, ctx, stream);
+            if (!moe_down.ok() || moe_down.value().kind == OptimizedLaunchKind::Launched)
+                return moe_down;
             static const bool rq_enabled = std::getenv("SHELF_DISABLE_SWIGLU_RQ") == nullptr &&
                 std::getenv("SHELF_OP_DUMP") == nullptr && std::getenv("SHELF_OP_SYNC") == nullptr &&
                 std::getenv("SHELF_LINEAR_INPUT_DUMP") == nullptr &&

@@ -552,3 +552,37 @@ v32（`kSp=36`、`S[128][36]`）は LDS 19,456 B で 3 block/CU だった。stat
   拘束しない。
 - `test_gdn_recurrence` PASS（hv64 含む）、required 231/231 PASS。
 
+## 20. SwiGLU を MoE down producer に融合する
+
+MoE の routed expert は `gate/up grouped GEMM → SwiGLU → down producer → down GEMM`
+と進む。SwiGLU の出力が down 以外に消費されない層では、down producer が
+`SwiGLU(gate, up)` を直接回転・量子化できる（`launch_exl3_grouped_swiglu_activate`）。
+
+- 判定は **状態を持たない**。SwiGLU 側は「次の grouped down の入力が自分の出力で、
+  他に消費者がない」ことを確認して dispatch を 1 つ skip し、down 側は
+  program から producer を再発見して同じ判定を使う。
+- ホスト `ctx` にマーカーを置く方式は、並行リクエストでマーカーが競合して
+  非決定的に落ちたため採用しない（`limit 3` の純粋融合が 4 回中 2 回だけ失敗した）。
+- SwiGLU の積は **BF16 に丸めてから** 回転に入れる。保存経路は SwiGLU が BF16 を
+  書いて producer が読むため、丸めないと codes/scales が一致しない。dense の
+  `producer_rotate_rows` も同じ位置で丸めている。
+- down の INT8 codes 面は、allocator が gate/up の面を再利用することがある。
+  その場合 producer が読む gate/up を自分で上書きして NaN になるため、
+  **codes 面と gate/up 面が重ならないこと**を融合条件に含める。重なる層は
+  SwiGLU を書き、通常の producer 経路に戻す。
+
+2048 token prefill trace（2 rank 合計、EP=2）:
+
+| 項目 | 融合 off | 融合 on |
+| --- | ---: | ---: |
+| `shelf_swiglu_bf16` | 37.92 ms / 1,438 | **22.34 ms / 1,058** |
+| `exl3_grouped_activate_kernel<true>` | 0 | 6.77 ms / 380 |
+| `exl3_grouped_activate_kernel<false>` | 30.85 ms / 1,151 | 26.51 ms / 771 |
+| GPU 合計 | 1,162.2 ms | **1,144.1 ms（−1.5 %）** |
+
+- 380 launch を削減。prefill 7002 token は 1,882.8 → 1,881.9 ms（neutral）、
+  decode MTP2 は 60.6 / 63.1 tok/s（neutral）。
+- `test_exl3_mul24_grouped` に「SwiGLU 出力を保存して回転」と「gate/up から直接回転」の
+  codes / scales ビット一致検査を追加（group rows / token rows / split）。
+- 生成 16 token 一致、required 231/231 PASS。`SHELF_DISABLE_SWIGLU_MOE_DOWN=1` で
+  融合を無効にできる。

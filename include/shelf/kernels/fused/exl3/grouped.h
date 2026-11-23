@@ -29,4 +29,24 @@ hipError_t launch_exl3_grouped_activate(
     uint64_t suh_batch_stride,
     hipStream_t stream);
 
+// Same pre-rotation, but the row value is SwiGLU(gate, up) instead of a stored BF16 row.
+hipError_t launch_exl3_grouped_swiglu_activate(
+    const void* gate,
+    const void* up,
+    const void* suh,
+    void* codes,
+    float* scales,
+    const uint32_t* group_expert,
+    const uint32_t* group_rows,
+    const uint32_t* group_count,
+    const uint32_t* group_row_base,
+    const int32_t* row_token,
+    uint32_t row_capacity,
+    uint32_t k,
+    uint32_t gate_row_stride,
+    uint32_t up_row_stride,
+    uint32_t bf16_intermediate,
+    uint64_t suh_batch_stride,
+    hipStream_t stream);
+
 }  // namespace shelf::kernel

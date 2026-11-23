@@ -58,6 +58,45 @@ struct MoePlanView {
     uint32_t row_capacity = 0;
 };
 
+// The INT8 activation plane a grouped EXL3 dispatch rotates into, when the row budget and
+// workspace allow it.
+struct MoePreRotatePlane {
+    uint8_t* codes = nullptr;
+    float* scales = nullptr;
+};
+
+bool moe_pre_rotate_plane(const ::shelf::runtime::Program& program,
+                          const ::shelf::runtime::DispatchBinding& b,
+                          HostExecutionContext& ctx,
+                          MoePreRotatePlane& out);
+
+// A SWIGLU that produces this dispatch's single input and is consumed only by it, so the
+// grouped projection can compute SwiGLU in its rotation instead of reading a stored row.
+struct MoeSwigluProducer {
+    bool found = false;
+    const void* gate = nullptr;
+    const void* up = nullptr;
+    void* out = nullptr;
+    uint32_t gate_row_stride = 0;
+    uint32_t up_row_stride = 0;
+    uint32_t out_row_stride = 0;
+    uint32_t rows = 0;
+    uint32_t features = 0;
+    bool bf16_intermediate = false;
+};
+
+MoeSwigluProducer moe_find_swiglu_producer(
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
+    HostExecutionContext& ctx);
+
+// True when the grouped projection can rotate SwiGLU(gate, up) directly: the producer is
+// exclusive, the pre-rotation plane fits, and that plane does not alias the gate/up rows
+// (which the rotation would otherwise overwrite while reading them).
+bool moe_swiglu_fusion_available(const ::shelf::runtime::Program& program,
+                                 const ::shelf::runtime::DispatchBinding& b,
+                                 HostExecutionContext& ctx);
+
 // The group rows a batch of ctx.actual_rows tokens produces, from the plan geometry the
 // binding carries. A kernel that works on group-row values uses this instead of the token
 // row count.

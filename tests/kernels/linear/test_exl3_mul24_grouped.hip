@@ -1,5 +1,6 @@
 #include <shelf/kernels/fused/exl3/decode.h>
 #include <shelf/kernels/fused/exl3/grouped.h>
+#include <shelf/kernels/optimized/elementwise.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
 #include <shelf/quantization/exl3/exl3_int8.h>
@@ -273,7 +274,59 @@ bool run_case(const Case& c, uint32_t seed) {
         pre_exact = bad == 0;
         if (!pre_exact) std::printf("%s: pre-rotated rows differ (%zu rows)\n", c.name, bad);
     }
-    const bool ok = err <= tol && untouched_bad == 0 && pre_exact;
+    // The SwiGLU producer must land on the same codes/scales as writing SwiGLU to a plane and
+    // rotating that plane, for both token-row and group-row gathers.
+    bool swiglu_exact = true;
+    {
+        std::mt19937 srng(seed * 7u + 3u);
+        std::normal_distribution<float> snd(0.0f, 1.0f);
+        std::vector<uint16_t> gate(input.size()), up(input.size()), swiglu(input.size());
+        for (size_t i = 0; i < input.size(); ++i) {
+            gate[i] = shelf::f32_to_bf16_rne(snd(srng));
+            up[i] = shelf::f32_to_bf16_rne(snd(srng));
+        }
+        Dev<uint16_t> d_gate(gate.size()), d_up(up.size()), d_swiglu(swiglu.size());
+        HIP_OK(hipMemcpy(d_gate.p, gate.data(), gate.size() * 2, hipMemcpyHostToDevice));
+        HIP_OK(hipMemcpy(d_up.p, up.data(), up.size() * 2, hipMemcpyHostToDevice));
+        HIP_OK(kernel::launch_swiglu_bf16(
+            reinterpret_cast<const shelf::bf16_t*>(d_gate.p), k,
+            reinterpret_cast<const shelf::bf16_t*>(d_up.p), k,
+            reinterpret_cast<shelf::bf16_t*>(d_swiglu.p), k, plane_rows, k, nullptr, false));
+        Dev<uint8_t> d_codes_a(static_cast<size_t>(plane_rows) * k);
+        Dev<float> d_scales_a(static_cast<size_t>(plane_rows) * (k / 128u));
+        Dev<uint8_t> d_codes_b(static_cast<size_t>(plane_rows) * k);
+        Dev<float> d_scales_b(static_cast<size_t>(plane_rows) * (k / 128u));
+        HIP_OK(kernel::launch_exl3_grouped_activate(
+            d_swiglu.p, d_suh.p, d_codes_a.p, d_scales_a.p, d_ge.p, d_gr.p, d_gc.p, nullptr,
+            c.token_rows ? d_rt.p : nullptr, plane_rows, k, k,
+            static_cast<uint64_t>(k) * 2u, nullptr));
+        HIP_OK(kernel::launch_exl3_grouped_swiglu_activate(
+            d_gate.p, d_up.p, d_suh.p, d_codes_b.p, d_scales_b.p, d_ge.p, d_gr.p, d_gc.p,
+            nullptr, c.token_rows ? d_rt.p : nullptr, plane_rows, k, k, k, 0u,
+            static_cast<uint64_t>(k) * 2u, nullptr));
+        HIP_OK(hipDeviceSynchronize());
+        std::vector<uint8_t> ca(static_cast<size_t>(plane_rows) * k), cb(ca.size());
+        std::vector<float> sa(static_cast<size_t>(plane_rows) * (k / 128u)), sb(sa.size());
+        HIP_OK(hipMemcpy(ca.data(), d_codes_a.p, ca.size(), hipMemcpyDeviceToHost));
+        HIP_OK(hipMemcpy(cb.data(), d_codes_b.p, cb.size(), hipMemcpyDeviceToHost));
+        HIP_OK(hipMemcpy(sa.data(), d_scales_a.p, sa.size() * 4, hipMemcpyDeviceToHost));
+        HIP_OK(hipMemcpy(sb.data(), d_scales_b.p, sb.size() * 4, hipMemcpyDeviceToHost));
+        bool same_codes = true, same_scales = true;
+        for (uint32_t row = 0; row < plane_rows; ++row) {
+            if (!row_written[row]) continue;
+            if (std::memcmp(ca.data() + static_cast<size_t>(row) * k,
+                            cb.data() + static_cast<size_t>(row) * k, k) != 0)
+                same_codes = false;
+            const size_t so = static_cast<size_t>(row) * (k / 128u);
+            if (std::memcmp(sa.data() + so, sb.data() + so, (k / 128u) * 4u) != 0)
+                same_scales = false;
+        }
+        swiglu_exact = same_codes && same_scales;
+        if (!swiglu_exact)
+            std::printf("%s: swiglu producer differs (codes=%d scales=%d)\n", c.name,
+                        static_cast<int>(same_codes), static_cast<int>(same_scales));
+    }
+    const bool ok = err <= tol && untouched_bad == 0 && pre_exact && swiglu_exact;
     std::printf("%s: bits=%u k=%u n=%u groups=%u max_ref=%g err_int8=%g tol=%g untouched_bad=%zu %s\n",
                 c.name, bits, k, n, group_count, max_ref, err, tol, untouched_bad,
                 ok ? "ok" : "FAIL");

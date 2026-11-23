@@ -3,8 +3,10 @@
 #include <shelf/inference/execution/moe_dispatch.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/program_executor.h>
+#include <shelf/inference/execution/physical_launch.h>
 #include <shelf/kernels/optimized/linear/mxfp4.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
+#include <shelf/kernels/optimized/elementwise.h>
 #include <shelf/kernels/fused/moe/combine.h>
 #include <shelf/kernels/fused/moe/router.h>
 #include <shelf/runtime/program/int8_activation_workspace.h>
@@ -304,10 +306,120 @@ Result<OptimizedLaunchResult> try_launch_moe_grouped_linear(const Program& progr
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
+namespace {
+bool span_overlap(uintptr_t a0, uintptr_t a1, uintptr_t b0, uintptr_t b1) {
+    return a0 < b1 && b0 < a1;
+}
+}
+
+bool moe_swiglu_fusion_available(const ::shelf::runtime::Program& program,
+                                 const ::shelf::runtime::DispatchBinding& b,
+                                 HostExecutionContext& ctx) {
+    const MoeSwigluProducer producer = moe_find_swiglu_producer(program, b, ctx);
+    if (!producer.found) return false;
+    MoePreRotatePlane plane;
+    if (!moe_pre_rotate_plane(program, b, ctx, plane)) return false;
+    const uint64_t plane_elems = static_cast<uint64_t>(b.activation_max_rows);
+    const uintptr_t c0 = reinterpret_cast<uintptr_t>(plane.codes);
+    const uintptr_t c1 = c0 + plane_elems * b.activation_kp;
+    const uintptr_t g0 = reinterpret_cast<uintptr_t>(producer.gate);
+    const uintptr_t g1 = g0 + plane_elems * producer.gate_row_stride * 2u;
+    const uintptr_t u0 = reinterpret_cast<uintptr_t>(producer.up);
+    const uintptr_t u1 = u0 + plane_elems * producer.up_row_stride * 2u;
+    return !span_overlap(c0, c1, g0, g1) && !span_overlap(c0, c1, u0, u1);
+}
+
+bool moe_pre_rotate_plane(const ::shelf::runtime::Program& program,
+                          const ::shelf::runtime::DispatchBinding& b,
+                          HostExecutionContext& ctx, MoePreRotatePlane& out) {
+    out = MoePreRotatePlane{};
+    static const bool disabled = [] {
+        const char* v = std::getenv("SHELF_DISABLE_EXL3_GROUPED_PREROTATE");
+        return v != nullptr && v[0] != '\0';
+    }();
+    if (disabled || ctx.workspace == nullptr || ctx.weights == nullptr) return false;
+    if (b.weight_index >= ctx.weight_count) return false;
+    const WeightSlot e = ctx.weights[b.weight_index];
+    if (b.workspace_slot == ::shelf::runtime::kNoWorkspace ||
+        b.workspace_slot >= program.workspace.ranges.size() ||
+        b.activation_max_rows == 0u || b.activation_kp != e.cols)
+        return false;
+    const Result<MoePlanView> plan = resolve_moe_plan(program, b, ctx);
+    if (!plan.ok()) return false;
+    if (plan.value().tokens * plan.value().top_k < 128u) return false;
+    const uint64_t code_bytes =
+        static_cast<uint64_t>(b.activation_max_rows) * b.activation_kp;
+    const uint64_t scale_bytes = static_cast<uint64_t>(b.activation_max_rows) *
+                                 (b.activation_kp / 128u) * sizeof(float);
+    const uint64_t aligned = (code_bytes + 255ull) & ~std::uint64_t{255ull};
+    const auto& range = program.workspace.ranges[b.workspace_slot];
+    if (range.bytes < aligned + scale_bytes) return false;
+    out.codes = ctx.workspace + range.offset;
+    out.scales = reinterpret_cast<float*>(out.codes + aligned);
+    return true;
+}
+
+MoeSwigluProducer moe_find_swiglu_producer(
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
+    HostExecutionContext& ctx) {
+    MoeSwigluProducer out;
+    if (b.input_count != 1u) return out;
+    const uint32_t slot = b.input_slots[0];
+    const Result<HostResolvedValue> dst = resolve_host_value(program, ValueId{slot}, ctx);
+    if (!dst.ok() || dst.value().ptr == nullptr) return out;
+    size_t b_index = program.dispatches.size();
+    for (size_t idx = 0; idx < program.dispatches.size(); ++idx)
+        if (&program.dispatches[idx] == &b) { b_index = idx; break; }
+    const DispatchBinding* src = nullptr;
+    size_t src_index = 0;
+    for (size_t idx = 0; idx < b_index; ++idx) {
+        const auto& d = program.dispatches[idx];
+        if (d.kernel_id == KernelId::SWIGLU && d.output_count == 1u &&
+            d.output_slots[0] == slot) {
+            src = &d;
+            src_index = idx;
+        }
+    }
+    if (src == nullptr) return out;
+    for (size_t idx = src_index + 1u; idx < program.dispatches.size(); ++idx) {
+        const auto& d = program.dispatches[idx];
+        if (&d == &b) continue;
+        for (uint32_t k = 0; k < d.input_count; ++k)
+            if (d.input_slots[k] == slot) return out;
+    }
+    const ::shelf::runtime::ValueBinding* vb = program.find_value(ValueId{slot});
+    if (vb == nullptr ||
+        (vb->storage != ::shelf::runtime::ValueStorage::WORKSPACE &&
+         vb->storage != ::shelf::runtime::ValueStorage::WORKSPACE_VIEW))
+        return out;
+    PhysicalElementwiseLaunch elem{};
+    const auto resolved = resolve_elementwise_physical(program, *src, ctx, elem);
+    if (!resolved.ok() || resolved.value() != PhysicalResolveStatus::Applicable ||
+        elem.profile != ElementwiseProfile::SwigluBf16 || elem.rows == 0u ||
+        elem.features == 0u || !elem.in0 || !elem.in1 || !elem.out0 ||
+        elem.in0_stride < elem.features || elem.in1_stride < elem.features ||
+        elem.out0_stride < elem.features)
+        return out;
+    if (reinterpret_cast<const void*>(elem.out0) != dst.value().ptr) return out;
+    out.found = true;
+    out.gate = reinterpret_cast<const void*>(elem.in0);
+    out.up = reinterpret_cast<const void*>(elem.in1);
+    out.out = reinterpret_cast<void*>(elem.out0);
+    out.gate_row_stride = elem.in0_stride;
+    out.up_row_stride = elem.in1_stride;
+    out.out_row_stride = elem.out0_stride;
+    out.rows = elem.rows;
+    out.features = elem.features;
+    out.bf16_intermediate = elem.aux != 0u;
+    return out;
+}
+
 Result<OptimizedLaunchResult> try_launch_moe_grouped_exl3(const Program& program,
                                                           const DispatchBinding& b,
                                                           HostExecutionContext& ctx,
                                                           hipStream_t stream) {
+    const MoeSwigluProducer swiglu = moe_find_swiglu_producer(program, b, ctx);
     const Result<MoePlanView> plan = resolve_moe_plan(program, b, ctx);
     if (!plan.ok()) return plan.status();
     if (b.output_count != 1u || b.input_count != 1u)
@@ -376,29 +488,26 @@ Result<OptimizedLaunchResult> try_launch_moe_grouped_exl3(const Program& program
     // One INT8 activation plane per projection: rotating once here replaces the rotation
     // every N-tile block would otherwise repeat. Decode-sized routing keeps the fused
     // rotation because a second launch costs more than it saves.
-    static const bool pre_rotate_disabled = [] {
-        const char* v = std::getenv("SHELF_DISABLE_EXL3_GROUPED_PREROTATE");
-        return v != nullptr && v[0] != '\0';
-    }();
-    const uint32_t routed_rows = plan.value().tokens * plan.value().top_k;
-    uint8_t* pre_codes = nullptr;
-    float* pre_scales = nullptr;
-    if (!pre_rotate_disabled && routed_rows >= 128u &&
-        b.workspace_slot != ::shelf::runtime::kNoWorkspace &&
-        b.workspace_slot < program.workspace.ranges.size() && b.activation_max_rows != 0u &&
-        b.activation_kp == e.cols) {
-        const uint64_t code_bytes =
-            static_cast<uint64_t>(b.activation_max_rows) * b.activation_kp;
-        const uint64_t scale_bytes = static_cast<uint64_t>(b.activation_max_rows) *
-                                     (b.activation_kp / 128u) * sizeof(float);
-        const uint64_t aligned = (code_bytes + 255ull) & ~std::uint64_t{255ull};
-        const auto& range = program.workspace.ranges[b.workspace_slot];
-        if (range.bytes >= aligned + scale_bytes) {
-            pre_codes = ctx.workspace + range.offset;
-            pre_scales = reinterpret_cast<float*>(pre_codes + aligned);
-        }
-    }
+    MoePreRotatePlane pre_plane;
+    (void)moe_pre_rotate_plane(program, b, ctx, pre_plane);
+    uint8_t* const pre_codes = pre_plane.codes;
+    float* const pre_scales = pre_plane.scales;
 
+    static const bool swiglu_fusion_enabled =
+        std::getenv("SHELF_DISABLE_SWIGLU_MOE_DOWN") == nullptr;
+    const bool fused_swiglu = swiglu_fusion_enabled && swiglu.found &&
+                               pre_codes != nullptr &&
+                               moe_swiglu_fusion_available(program, b, ctx);
+    if (swiglu.found && !fused_swiglu) {
+        const hipError_t werr = ::shelf::kernel::launch_swiglu_bf16(
+            static_cast<const shelf::bf16_t*>(swiglu.gate), swiglu.gate_row_stride,
+            static_cast<const shelf::bf16_t*>(swiglu.up), swiglu.up_row_stride,
+            static_cast<shelf::bf16_t*>(swiglu.out), swiglu.out_row_stride,
+            swiglu.rows, swiglu.features, stream, swiglu.bf16_intermediate);
+        if (werr != hipSuccess)
+            return Status::hip_error("fused swiglu write", hipGetErrorString(werr),
+                                     __FILE__, __LINE__);
+    }
     auto launch_plane = [&](const WeightSlot& plane, const uint32_t* group_expert,
                             const uint32_t* group_rows, const uint32_t* group_count,
                             const uint32_t* group_row_base,
@@ -413,10 +522,18 @@ Result<OptimizedLaunchResult> try_launch_moe_grouped_exl3(const Program& program
         a.group_row_base = group_row_base;
         a.expert_group_begin = expert_group_begin;
         if (pre_codes != nullptr) {
-            const hipError_t perr = ::shelf::kernel::launch_exl3_grouped_activate(
-                in.ptr, plane.exl3_suh, pre_codes, pre_scales, group_expert, group_rows,
-                group_count, group_row_base, args.row_token, b.activation_max_rows, e.cols,
-                in.row_stride, plane.exl3_suh_batch_stride_bytes, stream);
+            const hipError_t perr = fused_swiglu
+                ? ::shelf::kernel::launch_exl3_grouped_swiglu_activate(
+                      swiglu.gate, swiglu.up, plane.exl3_suh, pre_codes,
+                      pre_scales, group_expert, group_rows, group_count, group_row_base,
+                      args.row_token, b.activation_max_rows, e.cols,
+                      swiglu.gate_row_stride, swiglu.up_row_stride,
+                      swiglu.bf16_intermediate ? 1u : 0u,
+                      plane.exl3_suh_batch_stride_bytes, stream)
+                : ::shelf::kernel::launch_exl3_grouped_activate(
+                      in.ptr, plane.exl3_suh, pre_codes, pre_scales, group_expert, group_rows,
+                      group_count, group_row_base, args.row_token, b.activation_max_rows,
+                      e.cols, in.row_stride, plane.exl3_suh_batch_stride_bytes, stream);
             if (perr != hipSuccess) return perr;
             a.pre_rotated_codes = pre_codes;
             a.pre_rotated_scales = pre_scales;

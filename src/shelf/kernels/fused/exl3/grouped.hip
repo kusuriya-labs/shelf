@@ -362,9 +362,23 @@ namespace {
 constexpr uint32_t kActivateWarps = 8u;
 constexpr uint32_t kActivateThreads = kActivateWarps * 32u;
 
+__device__ __forceinline__ float exl3_swiglu_value(
+    float g, float u, bool bf16_intermediate) {
+    float a = g / (1.0f + (bf16_intermediate ? __expf(-g) : expf(-g)));
+    if (bf16_intermediate) a = __bfloat162float(__float2bfloat16(a));
+    return __bfloat162float(__float2bfloat16(u * a));
+}
+
 // One warp per grouped row: rotate + INT8 quantize the token row with the expert's suh.
+// kSwiglu reads gate/up and applies SwiGLU in place of the BF16 input row.
+template <bool kSwiglu>
 __global__ void __launch_bounds__(kActivateThreads) exl3_grouped_activate_kernel(
     const shelf::bf16_t* __restrict__ input,
+    const shelf::bf16_t* __restrict__ gate,
+    const shelf::bf16_t* __restrict__ up,
+    uint32_t gate_row_stride,
+    uint32_t up_row_stride,
+    uint32_t bf16_intermediate,
     const uint16_t* __restrict__ suh,
     uint8_t* __restrict__ codes,
     float* __restrict__ scales,
@@ -393,6 +407,8 @@ __global__ void __launch_bounds__(kActivateThreads) exl3_grouped_activate_kernel
     const uint32_t expert = group_expert[group];
     const uint16_t* suh_e = suh + static_cast<size_t>(expert) * suh_batch_stride / sizeof(uint16_t);
     const shelf::bf16_t* src = input + static_cast<uint64_t>(token) * input_row_stride;
+    const shelf::bf16_t* gate_row = gate + static_cast<uint64_t>(token) * gate_row_stride;
+    const shelf::bf16_t* up_row = up + static_cast<uint64_t>(token) * up_row_stride;
     const uint32_t chunks = k / 128u;
     for (uint32_t c = 0u; c < chunks; ++c) {
         const uint32_t k_base = c * 128u;
@@ -401,10 +417,18 @@ __global__ void __launch_bounds__(kActivateThreads) exl3_grouped_activate_kernel
         const float s1 = __half2float(__ushort_as_half(suh_e[k_base + lane * 4u + 1u]));
         const float s2 = __half2float(__ushort_as_half(suh_e[k_base + lane * 4u + 2u]));
         const float s3 = __half2float(__ushort_as_half(suh_e[k_base + lane * 4u + 3u]));
-        float v0 = bf16_value(src + off + 0u) * s0;
-        float v1 = bf16_value(src + off + 1u) * s1;
-        float v2 = bf16_value(src + off + 2u) * s2;
-        float v3 = bf16_value(src + off + 3u) * s3;
+        float v0, v1, v2, v3;
+        if constexpr (kSwiglu) {
+            v0 = exl3_swiglu_value(bf16_value(gate_row + off + 0u), bf16_value(up_row + off + 0u), bf16_intermediate != 0u) * s0;
+            v1 = exl3_swiglu_value(bf16_value(gate_row + off + 1u), bf16_value(up_row + off + 1u), bf16_intermediate != 0u) * s1;
+            v2 = exl3_swiglu_value(bf16_value(gate_row + off + 2u), bf16_value(up_row + off + 2u), bf16_intermediate != 0u) * s2;
+            v3 = exl3_swiglu_value(bf16_value(gate_row + off + 3u), bf16_value(up_row + off + 3u), bf16_intermediate != 0u) * s3;
+        } else {
+            v0 = bf16_value(src + off + 0u) * s0;
+            v1 = bf16_value(src + off + 1u) * s1;
+            v2 = bf16_value(src + off + 2u) * s2;
+            v3 = bf16_value(src + off + 3u) * s3;
+        }
         exl3_detail::fwht128(v0, v1, v2, v3, lane);
         v0 *= kInvSqrt128;
         v1 *= kInvSqrt128;
@@ -451,10 +475,44 @@ hipError_t launch_exl3_grouped_activate(
         return hipErrorInvalidValue;
     if (row_capacity == 0u || k == 0u || (k % 128u) != 0u) return hipErrorInvalidValue;
     const dim3 grid((row_capacity + kActivateWarps - 1u) / kActivateWarps);
-    exl3_grouped_activate_kernel<<<grid, kActivateThreads, 0, stream>>>(
-        static_cast<const shelf::bf16_t*>(input), static_cast<const uint16_t*>(suh),
-        static_cast<uint8_t*>(codes), scales, group_expert, group_rows, group_count,
-        group_row_base, row_token, row_capacity, k, input_row_stride, suh_batch_stride);
+    exl3_grouped_activate_kernel<false><<<grid, kActivateThreads, 0, stream>>>(
+        static_cast<const shelf::bf16_t*>(input), nullptr, nullptr, 0u, 0u, 0u,
+        static_cast<const uint16_t*>(suh), static_cast<uint8_t*>(codes), scales,
+        group_expert, group_rows, group_count, group_row_base, row_token, row_capacity, k,
+        input_row_stride, suh_batch_stride);
+    return hipGetLastError();
+}
+
+hipError_t launch_exl3_grouped_swiglu_activate(
+    const void* gate,
+    const void* up,
+    const void* suh,
+    void* codes,
+    float* scales,
+    const uint32_t* group_expert,
+    const uint32_t* group_rows,
+    const uint32_t* group_count,
+    const uint32_t* group_row_base,
+    const int32_t* row_token,
+    uint32_t row_capacity,
+    uint32_t k,
+    uint32_t gate_row_stride,
+    uint32_t up_row_stride,
+    uint32_t bf16_intermediate,
+    uint64_t suh_batch_stride,
+    hipStream_t stream) {
+    if (gate == nullptr || up == nullptr || suh == nullptr || codes == nullptr ||
+        scales == nullptr || group_expert == nullptr || group_rows == nullptr ||
+        group_count == nullptr)
+        return hipErrorInvalidValue;
+    if (row_capacity == 0u || k == 0u || (k % 128u) != 0u) return hipErrorInvalidValue;
+    const dim3 grid((row_capacity + kActivateWarps - 1u) / kActivateWarps);
+    exl3_grouped_activate_kernel<true><<<grid, kActivateThreads, 0, stream>>>(
+        nullptr, static_cast<const shelf::bf16_t*>(gate), static_cast<const shelf::bf16_t*>(up),
+        gate_row_stride, up_row_stride, bf16_intermediate,
+        static_cast<const uint16_t*>(suh), static_cast<uint8_t*>(codes), scales,
+        group_expert, group_rows, group_count, group_row_base, row_token, row_capacity, k,
+        0u, suh_batch_stride);
     return hipGetLastError();
 }
 
