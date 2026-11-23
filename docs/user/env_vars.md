@@ -11,9 +11,20 @@ CLI オプションと環境変数の両方が用意されている項目（`--m
 | `ROCM_PATH` | 未設定 | build | `rocm-sdk` CLI が無い環境で ROCm root を指定する（`-DSHELF_ROCM_ROOT` の代替） |
 | `ROCR_VISIBLE_DEVICES` | 未設定 | runtime / quantize | 使用する GPU を UUID または index で絞り込む |
 | `HIP_VISIBLE_DEVICES` | 未設定 | runtime / quantize | HIP 側に見える GPU index を指定する |
+| `HSA_USERPTR_FOR_PAGED_MEM` | 標準構成では `0` | compute (`--serve-stdio`) / server | ROCr が paged host allocation に USERPTR を使うかを指定する。`1` で有効 |
+| `HSA_USE_SVM` | 標準構成では `0` | compute (`--serve-stdio`) / server | ROCr が KFD の SVM API を使うかを指定する。`0` ではホストメモリの一時登録に従来の登録・解除経路を使う |
 | `HIPBLASLT_USE_ROCROLLER` | 未設定 | runtime | `1` を指定すると EXL3-INT8 prefill の A 経路（hipBLASLt）を避け、自動で B 経路（自前 WMMA）へ切り替える |
 
 CMake オプション（`SHELF_ROCM_ROOT` / `SHELF_LIBCXX_LLVM_ROOT` / `SHELF_LOAD_LIBSTDCXX_FIRST` / `SHELF_HIP_GRAPH` 等）は [build.md](build.md) を参照する。
+
+`HSA_USERPTR_FOR_PAGED_MEM`、`HSA_USE_SVM`、`HSA_SVM_FOR_PAGED_MEM` のいずれかを
+起動環境で設定すると、compute はこの 3 変数を起動時のまま ROCr に渡す。標準構成では、ホストに常駐する
+embedding、prefix checkpoint、offload 用バッファもドライバの GTT 容量を消費する。
+各 GPU の `/sys/class/drm/card*/device/mem_info_gtt_total` と `mem_info_gtt_used`
+で容量と使用量を確認できる。複数 GPU では、ホストメモリを計上するカードが計算用 GPU と
+異なる場合がある。ホストへの大規模な offload で GTT が不足する場合は、
+`HSA_USERPTR_FOR_PAGED_MEM=1` で従来の割り当て方式を選べる。この場合、
+ホストページの移動中に生成が一時停止することがある。
 
 ## 2. 実行・メモリ・通信（compute / server / bench / runtime）
 

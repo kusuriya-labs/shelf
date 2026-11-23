@@ -286,6 +286,13 @@ weight load 直後の arena 使用量なので、offload と一緒に作られ�
 expert plane は arena を消費しないため `target weights` には入らず、上の
 `offload experts` にのみ表示される。
 
+`shelf-compute --serve-stdio` は ROCr の初期化前に、GPU が参照するホストメモリの
+割り当て方式を設定する。ROCm 10.2 の離散 GPU では、標準構成でドライバが
+常駐ホストバッファを GTT に確保する。転送元の一時登録には、転送後に登録を解除できる
+KFD の経路を使う。これにより、ホストページの移動に伴う生成中のキュー退避を防ぐ。
+`shelf-server` が起動する compute にも同じ設定が適用される。
+起動時の上書きと容量の確認方法は [環境変数リファレンス](../user/env_vars.md) にまとめている。
+
 ## Scheduler
 
 名前は2つに分離した。`max_num_batched_tokens` は 1 scheduled step の token 予算

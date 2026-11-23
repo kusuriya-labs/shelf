@@ -1,4 +1,5 @@
 #include "compute_cli.h"
+#include "serve_host_memory.h"
 #include "single_request.h"
 #include "stdio_server.h"
 
@@ -25,6 +26,11 @@ int main(int argc, char** argv) {
     if (parse_rc != shelf::app::kComputeParseOk) return parse_rc;
     const int validate_rc = shelf::app::validate_compute_options(opt);
     if (validate_rc != shelf::app::kComputeParseOk) return validate_rc;
+
+    if (opt.serve_stdio && !shelf::app::configure_serve_host_memory()) {
+        std::perror("ROCr host memory configuration");
+        return 1;
+    }
 
     auto plamo_result = shelf::plamo3::is_plamo3_config(opt.model_dir);
     if (!plamo_result.ok()) { fprintf(stderr, "%s\n", plamo_result.status().message().c_str()); return 1; }
