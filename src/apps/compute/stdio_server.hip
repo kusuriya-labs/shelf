@@ -240,6 +240,10 @@ struct MtpRequest {
     uint32_t restored_tokens = 0u;
     std::size_t prompt_tokens = 0u;
     std::vector<int32_t> generated_ids;
+    std::vector<int32_t> input_tokens;
+    shelf::runtime::CaptureId prefix_capture = 0u;
+    uint32_t tail_position = 0u;
+    shelf::qwen35::runtime::MtpDraftSnapshot tail_snapshot;
     MtpRequestTiming timing;
     double prefill_ms = 0.0;
 };
@@ -840,7 +844,57 @@ bool serve_parse_generate(shelf::app::Qwen35ComputeRuntime& runtime, ServeState&
     return true;
 }
 
-void serve_mtp_emit_done(ServeState& state, MtpRequest& request, const char* reason) {
+void mtp_store_snapshot(MtpServeContext& mtp,
+                        shelf::qwen35::runtime::MtpDraftSnapshot&& snapshot);
+
+void serve_mtp_finish_prefix(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state,
+                             MtpRequest& request, bool tail_eligible) {
+    auto* cache = runtime.prefix_cache();
+    if (cache == nullptr || request.prefix_capture == 0u) return;
+    const shelf::runtime::CaptureId capture = request.prefix_capture;
+    request.prefix_capture = 0u;
+    const uint32_t position = request.tail_position;
+    const bool usable = tail_eligible && position > 0u &&
+                        !request.tail_snapshot.ring_k.empty() &&
+                        position <= request.sequence->position;
+    if (usable) {
+        std::vector<uint32_t> tokens;
+        tokens.reserve(position);
+        for (std::size_t i = 0u; i < request.input_tokens.size() && tokens.size() < position;
+             ++i) {
+            tokens.push_back(static_cast<uint32_t>(request.input_tokens[i]));
+        }
+        for (std::size_t i = 0u; tokens.size() < position &&
+                                i < request.generated_ids.size();
+             ++i) {
+            tokens.push_back(static_cast<uint32_t>(request.generated_ids[i]));
+        }
+        if (tokens.size() == position) {
+            const shelf::Status saved = cache->save_output_tail(
+                capture, *request.sequence, tokens, position, runtime.stream(), nullptr);
+            if (saved.ok()) {
+                request.tail_snapshot.key =
+                    shelf::qwen35::runtime::mtp_prefix_key(tokens, position);
+                mtp_store_snapshot(state.mtp, std::move(request.tail_snapshot));
+                if (std::getenv("SHELF_PFXDBG") != nullptr) {
+                    std::fprintf(stderr, "PFXDBG mtp save_output_tail pos=%u ok\n",
+                                 position);
+                }
+                return;
+            }
+            if (std::getenv("SHELF_PFXDBG") != nullptr) {
+                std::fprintf(stderr, "PFXDBG mtp save_output_tail pos=%u: %s\n", position,
+                             saved.message().c_str());
+            }
+        }
+    }
+    (void)cache->cancel_capture(capture);
+}
+
+void serve_mtp_emit_done(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state,
+                         MtpRequest& request, const char* reason) {
+    const bool tail_eligible = std::strcmp(reason, "cancelled") != 0;
+    serve_mtp_finish_prefix(runtime, state, request, tail_eligible);
     mtp_log_request_summary(request.external_id, request.timing, request.prompt_tokens,
                             request.restored_tokens, request.generated,
                             request.prefill_ms);
@@ -861,6 +915,11 @@ void serve_mtp_emit_done(ServeState& state, MtpRequest& request, const char* rea
 void serve_mtp_release(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state,
                        MtpServeContext& mtp, std::size_t index) {
     MtpRequest& request = *mtp.active[index];
+    if (request.prefix_capture != 0u) {
+        if (auto* cache = runtime.prefix_cache(); cache != nullptr)
+            (void)cache->cancel_capture(request.prefix_capture);
+        request.prefix_capture = 0u;
+    }
     auto* tp = runtime.tp_coordinator();
     if (tp != nullptr) {
         (void)tp->on_sequence_released(*request.sequence);
@@ -898,7 +957,8 @@ struct MtpSnapshotSaveContext {
     const std::vector<int32_t>* input_ids = nullptr;
     shelf::state::PagedSequenceState* target_sequence = nullptr;
     uint32_t save_interval = 0u;
-    bool saved_first = false;
+    uint32_t last_save_position = 0u;
+    uint32_t tail_position = 0u;
 };
 
 shelf::Status serve_mtp_save_boundary(void* opaque, uint32_t position,
@@ -917,16 +977,20 @@ shelf::Status serve_mtp_save_boundary(void* opaque, uint32_t position,
     const uint32_t page_tokens = context->runtime->config().page_tokens;
     if (page_tokens == 0u || position % page_tokens != 0u)
         return shelf::Status::make_ok();
-    if (!context->saved_first && context->save_interval != 0u &&
-        position % context->save_interval != 0u) {
+    const uint32_t input_len = static_cast<uint32_t>(context->input_ids->size());
+    if (position > input_len) return shelf::Status::make_ok();
+    const bool first_boundary = context->last_save_position == 0u;
+    const bool input_end = position == input_len;
+    const bool tail = context->tail_position != 0u &&
+                      position == context->tail_position;
+    const bool periodic = context->save_interval != 0u &&
+                          position >= context->last_save_position + context->save_interval;
+    if (!first_boundary && !input_end && !tail && !periodic)
         return shelf::Status::make_ok();
-    }
-    if (position > context->input_ids->size())
-        return shelf::Status::make_ok();
-    context->saved_first = true;
     std::vector<uint32_t> tokens(position);
     for (uint32_t i = 0u; i < position; ++i)
         tokens[i] = static_cast<uint32_t>((*context->input_ids)[i]);
+    const uint64_t saves_before = cache->stats().saves;
     const shelf::Status saved = cache->save_input_boundary(
         *context->target_sequence, tokens, position, stream, nullptr);
     if (!saved.ok()) {
@@ -936,6 +1000,8 @@ shelf::Status serve_mtp_save_boundary(void* opaque, uint32_t position,
         }
         return shelf::Status::make_ok();
     }
+    if (cache->stats().saves == saves_before) return shelf::Status::make_ok();
+    context->last_save_position = position;
     auto snapshot = shelf::qwen35::runtime::mtp_save_draft_snapshot(
         *context->drafter, position, stream);
     if (snapshot.ok()) {
@@ -1105,10 +1171,10 @@ bool serve_mtp_admit(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& stat
                 const shelf::Status restored = cache->restore(
                     hit.entry_id, *sequence, runtime.stream());
                 if (restored.ok()) {
+                    const std::span<const int32_t> restored_prefix(
+                        input_ids.data(), hit.state_position);
                     if (tp != nullptr) {
                         auto mirror = tp->on_sequence_restored(*sequence);
-                        const std::span<const int32_t> restored_prefix(
-                            input_ids.data(), hit.state_position);
                         if (mirror.ok())
                             mirror = tp->on_prefix_restored(*sequence, restored_prefix);
                         if (!mirror.ok()) {
@@ -1116,6 +1182,17 @@ bool serve_mtp_admit(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& stat
                                                  "tp prefix restore failed: " +
                                                      mirror.message());
                             (void)tp->on_sequence_released(*sequence);
+                            (void)shelf::state::release_paged_sequence_state(
+                                *sequence, runtime.stream());
+                            return false;
+                        }
+                    } else if (runtime.executor().external_prefix_restore) {
+                        const shelf::Status seed = runtime.executor().external_prefix_restore(
+                            sequence->slot, restored_prefix);
+                        if (!seed.ok()) {
+                            emit_error_with_code(request_id, "internal",
+                                                 "prefix history restore failed: " +
+                                                     seed.message());
                             (void)shelf::state::release_paged_sequence_state(
                                 *sequence, runtime.stream());
                             return false;
@@ -1178,6 +1255,12 @@ bool serve_mtp_admit(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& stat
     prefill_progress.report = serve_mtp_prefill_progress;
     prefill_progress.should_stop = serve_mtp_prefill_should_stop;
     prefill_progress.stop_context = &prefill_cancel;
+    const uint32_t prompt_len = static_cast<uint32_t>(input_ids.size());
+    const uint32_t page_tokens = runtime.config().page_tokens;
+    const uint32_t tail_position =
+        runtime.prefix_cache() != nullptr && page_tokens != 0u && prompt_len > page_tokens
+            ? (prompt_len - 1u) / page_tokens * page_tokens
+            : 0u;
     MtpSnapshotSaveContext snapshot_save;
     snapshot_save.runtime = &runtime;
     snapshot_save.mtp = &mtp;
@@ -1185,14 +1268,14 @@ bool serve_mtp_admit(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& stat
     snapshot_save.input_ids = &input_ids;
     snapshot_save.target_sequence = sequence.get();
     snapshot_save.save_interval = runtime.config().prefix_cache_save_interval;
+    snapshot_save.tail_position = tail_position;
     shelf::qwen35::runtime::MtpPrefillBoundary boundary;
     boundary.context = &snapshot_save;
     boundary.save = serve_mtp_save_boundary;
     const auto prefill_started = std::chrono::steady_clock::now();
     auto prefill = shelf::qwen35::runtime::mtp_spec_prefill(
-        drafter, runtime.executor(), *sequence, input_ids.data(),
-        static_cast<uint32_t>(input_ids.size()), sampling, &prefill_progress, &boundary,
-        restored_tokens);
+        drafter, runtime.executor(), *sequence, input_ids.data(), prompt_len, sampling,
+        &prefill_progress, &boundary, restored_tokens, tail_position);
     const double prefill_ms = std::chrono::duration<double, std::milli>(
                                   std::chrono::steady_clock::now() - prefill_started)
                                   .count();
@@ -1203,7 +1286,7 @@ bool serve_mtp_admit(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& stat
             cancelled.prompt_tokens = input_ids.size();
             cancelled.timing = timing;
             cancelled.prefill_ms = prefill_ms;
-            serve_mtp_emit_done(state, cancelled, "cancelled");
+            serve_mtp_emit_done(runtime, state, cancelled, "cancelled");
         } else {
             emit_error_with_code(request_id, "internal",
                                  "mtp prefill failed: " + prefill.status().message());
@@ -1222,6 +1305,7 @@ bool serve_mtp_admit(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& stat
     admitted->max_new_tokens = max_new_tokens;
     admitted->restored_tokens = restored_tokens;
     admitted->prompt_tokens = input_ids.size();
+    admitted->input_tokens = std::move(input_ids);
     admitted->generated = 1u;
     admitted->generated_ids.push_back(prefill.value().pending_token);
     admitted->timing = timing;
@@ -1231,15 +1315,39 @@ bool serve_mtp_admit(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& stat
     const bool stop = shelf::qwen_hybrid::is_stop_token(
         runtime.model().hybrid_config().stop_tokens, prefill.value().pending_token);
     if (stop || admitted->generated >= admitted->max_new_tokens) {
-        serve_mtp_emit_done(state, *admitted, stop ? "stop" : "length");
+        serve_mtp_emit_done(runtime, state, *admitted, stop ? "stop" : "length");
         if (tp != nullptr) (void)tp->on_sequence_released(*admitted->sequence);
         (void)shelf::state::release_paged_sequence_state(*admitted->sequence,
                                                          runtime.stream());
         mtp.free_slots.push_back(slot);
         return true;
     }
+    if (auto* cache = runtime.prefix_cache(); cache != nullptr) {
+        auto capture = cache->begin_capture(*admitted->sequence);
+        if (capture.ok()) admitted->prefix_capture = capture.value();
+    }
     mtp.active.push_back(std::move(admitted));
     return true;
+}
+
+struct MtpBoundaryContext {
+    shelf::app::Qwen35ComputeRuntime* runtime = nullptr;
+    MtpRequest* request = nullptr;
+};
+
+void serve_mtp_capture_boundary(void* context, uint32_t position,
+                                shelf::qwen35::runtime::MtpDraftSnapshot& snapshot) {
+    auto* boundary = static_cast<MtpBoundaryContext*>(context);
+    if (boundary == nullptr || boundary->runtime == nullptr || boundary->request == nullptr)
+        return;
+    MtpRequest& request = *boundary->request;
+    auto* cache = boundary->runtime->prefix_cache();
+    if (cache == nullptr || request.prefix_capture == 0u) return;
+    const shelf::Status st = cache->capture_boundary(
+        request.prefix_capture, *request.sequence, boundary->runtime->stream());
+    if (!st.ok()) return;
+    request.tail_position = position;
+    request.tail_snapshot = std::move(snapshot);
 }
 
 void serve_mtp_step(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state,
@@ -1249,6 +1357,7 @@ void serve_mtp_step(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state
     std::vector<std::size_t> indices;
     slots.reserve(mtp.active.size());
     indices.reserve(mtp.active.size());
+    const bool capture_boundaries = runtime.prefix_cache() != nullptr;
     for (std::size_t i = 0u; i < mtp.active.size(); ++i) {
         MtpRequest& request = *mtp.active[i];
         if (request.generated >= request.max_new_tokens) continue;
@@ -1258,17 +1367,28 @@ void serve_mtp_step(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state
         slot.pending_token = request.pending_token;
         slot.num_drafts = mtp.drafts;
         slot.remaining_tokens = request.max_new_tokens - request.generated;
-        slot.page_tokens = runtime.config().page_tokens;
+        slot.page_tokens = capture_boundaries ? runtime.config().page_tokens : 0u;
         slots.push_back(slot);
         indices.push_back(i);
     }
     if (slots.empty()) {
         for (std::size_t i = mtp.active.size(); i-- > 0u;) {
             MtpRequest& request = *mtp.active[i];
-            serve_mtp_emit_done(state, request, "length");
+            serve_mtp_emit_done(runtime, state, request, "length");
             serve_mtp_release(runtime, state, mtp, i);
         }
         return;
+    }
+    std::vector<shelf::qwen35::runtime::MtpBoundaryCapture> boundaries(slots.size());
+    std::vector<MtpBoundaryContext> boundary_contexts(slots.size());
+    for (std::size_t j = 0u; j < slots.size(); ++j) {
+        MtpRequest& request = *mtp.active[indices[j]];
+        if (request.prefix_capture == 0u) continue;
+        boundary_contexts[j].runtime = &runtime;
+        boundary_contexts[j].request = &request;
+        boundaries[j].context = &boundary_contexts[j];
+        boundaries[j].capture = serve_mtp_capture_boundary;
+        slots[j].boundary_capture = &boundaries[j];
     }
     auto stepped = shelf::qwen35::runtime::mtp_spec_step_batch(mtp.batch, slots);
     if (!stepped.ok()) {
@@ -1315,7 +1435,7 @@ void serve_mtp_step(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state
     for (std::size_t j = slots.size(); j-- > 0u;) {
         if (!finished[j]) continue;
         MtpRequest& request = *mtp.active[indices[j]];
-        serve_mtp_emit_done(state, request, reasons[j]);
+        serve_mtp_emit_done(runtime, state, request, reasons[j]);
         request.max_new_tokens = request.generated;
         serve_mtp_release(runtime, state, mtp, indices[j]);
     }
@@ -1426,7 +1546,7 @@ void serve_handle_command(shelf::app::Qwen35ComputeRuntime& runtime, ServeState&
         if (state.mtp.enabled) {
             for (std::size_t i = 0u; i < state.mtp.active.size(); ++i) {
                 if (state.mtp.active[i]->external_id != id) continue;
-                serve_mtp_emit_done(state, *state.mtp.active[i], "cancelled");
+                serve_mtp_emit_done(runtime, state, *state.mtp.active[i], "cancelled");
                 serve_mtp_release(runtime, state, state.mtp, i);
                 return;
             }

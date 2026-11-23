@@ -1362,7 +1362,8 @@ Result<MtpPrefillOutput> mtp_spec_prefill(
     const SamplingConfig& sampling,
     const MtpPrefillProgress* progress,
     const MtpPrefillBoundary* boundary,
-    uint32_t start_position) {
+    uint32_t start_position,
+    uint32_t checkpoint_position) {
 
     if (!drafter.initialized) {
         return Status::invalid_state("mtp_spec_prefill: drafter is not initialized",
@@ -1426,12 +1427,14 @@ Result<MtpPrefillOutput> mtp_spec_prefill(
         return boundary->save(boundary->context, position, stream);
     };
 
-    for (uint32_t begin = start_position; begin < prompt_count; begin += chunk_limit) {
+    for (uint32_t begin = start_position; begin < prompt_count;) {
         if (progress != nullptr && progress->should_stop != nullptr &&
             progress->should_stop(progress->stop_context)) {
             return Status::invalid_state("mtp prefill cancelled", __FILE__, __LINE__);
         }
-        const uint32_t end = std::min(prompt_count, begin + chunk_limit);
+        uint32_t end = std::min(prompt_count, begin + chunk_limit);
+        if (checkpoint_position > begin && checkpoint_position < end)
+            end = checkpoint_position;
         const uint32_t rows = end - begin;
         const bool final_chunk = end == prompt_count;
         chunk_tokens.assign(prompt_tokens + begin, prompt_tokens + end);
@@ -1471,6 +1474,7 @@ Result<MtpPrefillOutput> mtp_spec_prefill(
             Status saved = save_boundary(end);
             if (!saved.ok()) return saved;
             report_progress(end);
+            begin = end;
             continue;
         }
 
@@ -1492,6 +1496,7 @@ Result<MtpPrefillOutput> mtp_spec_prefill(
         Status saved = save_boundary(end);
         if (!saved.ok()) return saved;
         report_progress(end);
+        begin = end;
     }
 
     MtpPrefillOutput output;
@@ -2270,6 +2275,11 @@ Status mtp_draft_batch(
         uint32_t drafts = std::min(drafter.num_drafts, slot.remaining_tokens - 1u);
         if (room < 2u) drafts = 0u;
         else drafts = std::min(drafts, room - 1u);
+        if (slot.page_tokens != 0u) {
+            const uint32_t to_boundary =
+                slot.page_tokens - position % slot.page_tokens - 1u;
+            drafts = std::min(drafts, to_boundary);
+        }
         plans[i].position = position;
         plans[i].drafts = drafts;
         if (drafts == 0u) {
@@ -2407,6 +2417,19 @@ Status mtp_draft_batch(
             *slots[i].drafter, executor.normed_token_hidden, source_row, 1u, stream,
             static_cast<uint32_t>(i));
         if (!copy.ok()) return copy;
+    }
+    for (std::size_t i = 0u; i < count; ++i) {
+        MtpBoundaryCapture* boundary = slots[i].boundary_capture;
+        if (boundary == nullptr || boundary->capture == nullptr) continue;
+        if (stopped[i] != 0 || plans[i].decode_only) continue;
+        if (slots[i].page_tokens == 0u ||
+            plans[i].position % slots[i].page_tokens != 0u) {
+            continue;
+        }
+        auto snapshot =
+            mtp_save_draft_snapshot(*slots[i].drafter, plans[i].position, stream);
+        if (!snapshot.ok()) continue;
+        boundary->capture(boundary->context, plans[i].position, snapshot.value());
     }
     for (uint32_t depth = 1u; depth < max_drafts; ++depth) {
         active.clear();

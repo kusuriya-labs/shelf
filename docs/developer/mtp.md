@@ -88,6 +88,9 @@ fused verify は target-only と一致するが、4 request / 20 行では near-
   融合 verify では数値が round の row 数に依存しないことが要件になる
   （下記「verify の行数不変性」）。
 - `token` event を request ごとに emit し、`done` で `generated_ids` を返す。
+- MTP block は backbone の TP 軸で分割する。TP を使う構成では全 rank が block の
+  shard を持ち、EP の axes overlap では EP グループが backbone の TP 軸になるため
+  同じく全 rank が shard を持つ。分割しない構成では rank0 だけが block 全体を持つ。
 - 融合 verify の TP では `TpCoordinator` の per-rank options 経路を使い、rank ごとの
   GDN / QSA / PLE history と snapshot で rollback する。qwen4exp の Wavefront 検証は
   通常の TP decode 経路を使う。
@@ -100,11 +103,23 @@ TP mirror を restore する。同じ checkpoint には `MtpDraftSnapshot` も�
 - snapshot は leader と全 peer の MTP KV ring、leader の hidden cache、last token /
   position、sample index を持つ。
 - key は prefix token 列と target position の hash である。
-- prefill の page-aligned chunk 境界で保存する。最初の境界は必ず保存し、以後は
-  `prefix_cache_save_interval` の倍数で保存する。
-- restore では target を復元した後、drafter の ring / position / hidden を戻す。
-  snapshot の MTP position が prefix - 1 のときは、suffix の先頭 token を 1 回だけ
-  MTP forward してから suffix の prefill を始める。
+- prefill の page-aligned chunk 境界で保存する。最初の境界、tail
+  （`align_down(input_len - 1, page_tokens)`）、page-aligned な入力末尾は必ず保存し、
+  以後は直前の保存から `prefix_cache_save_interval` 以上進んだ境界でも保存する
+  （通常 decode の periodic checkpoint と同じく、間隔は下限である）。
+- tail を保存点にするため、prefill の最終 chunk は tail で分割する。通常 decode 経路の
+  `dflash2_prefill_tail_position` と同じ位置である。
+- request の終了（stop / length）では、decode 中に最後に通過した page 境界を出力末尾
+  として保存する。capture は prefill 完了時に開始し、round の先頭で position が page
+  揃えのとき drafter snapshot と target state を同じ位置で取る。そのため prefix cache
+  有効時は、1 round の draft 数を次の page 境界までに制限する。出力末尾の entry は、
+  client が返した assistant メッセージを同じ token 列で再レンダリングしたときだけ
+  一致する（[prefix_cache.md](prefix_cache.md)）。
+- restore では target を復元した後、TP mirror と PLE などの token 履歴を復元 prefix で
+  re-seed し、drafter の ring / position / hidden を戻す。single GPU の restore でも
+  `Executor::external_prefix_restore` に復元 prefix を渡す。snapshot の MTP position が
+  prefix - 1 のときは、suffix の先頭 token を 1 回だけ MTP forward してから suffix の
+  prefill を始める。
 - suffix が空になる prefix は restore しない。target の最後の logits を保存していない
   ため、pending token を作れないからである。
 - suffix prefill は `mtp_spec_prefill` の `start_position` から実行し、prefix 部分の
@@ -274,9 +289,10 @@ verify が target-only と一致しなくなる。
 
 ## MTP prefill
 
-target の prefill chunk は target-only と同じ `max_batch_rows` を使う。target の
-chunk を MTP 用に変えてはならない。chunk を変えると prefill kernel の丸めが変わり、
-target-only と `GENERATED_IDS` が一致しなくなる。
+target の prefill chunk は target-only と同じ `max_batch_rows` を上限にする。MTP 専用の
+小さい chunk に変えてはならない。chunk を変えると prefill kernel の丸めが変わり、
+target-only と `GENERATED_IDS` が一致しなくなる。prefix cache の tail では、通常 decode
+経路と同じく chunk を分割する。
 
 MTP 側の first pass は独立に `kMtpMaxPrefillRows`（512）行以下へ分割する。これに
 より target executor と MTP executor の workspace を同時に確保しても 32 GiB に

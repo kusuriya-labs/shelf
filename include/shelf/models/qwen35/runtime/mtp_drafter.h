@@ -287,7 +287,8 @@ Result<MtpPrefillOutput> mtp_spec_prefill(
     const SamplingConfig& sampling,
     const MtpPrefillProgress* progress = nullptr,
     const MtpPrefillBoundary* boundary = nullptr,
-    uint32_t start_position = 0u);
+    uint32_t start_position = 0u,
+    uint32_t checkpoint_position = 0u);
 
 Result<MtpIterationOutput> mtp_spec_step(
     MtpDrafter& drafter,
@@ -313,6 +314,18 @@ Result<MtpDraftResult> mtp_draft(
     int32_t pending_token,
     uint32_t remaining_tokens);
 
+struct MtpDraftSnapshot;
+
+// A page-aligned capture point of a batched round. When the slot's position is page
+// aligned, the round snapshots the drafter after its draft phase and hands it to
+// `capture`, which owns both the drafter snapshot and the target state of that position.
+// `page_tokens` of the slot bounds the round so it never passes a boundary without
+// landing on it.
+struct MtpBoundaryCapture {
+    void* context = nullptr;
+    void (*capture)(void* context, uint32_t position, MtpDraftSnapshot& snapshot) = nullptr;
+};
+
 // One request's place in a batched MTP round. The drafter and the target sequence are the
 // request's own; the batch context supplies the shared verify buffer and the target.
 struct MtpSpecBatchSlot {
@@ -322,6 +335,7 @@ struct MtpSpecBatchSlot {
     uint32_t num_drafts = 0u;
     uint32_t remaining_tokens = 0u;
     uint32_t page_tokens = 0u;
+    MtpBoundaryCapture* boundary_capture = nullptr;
 };
 
 struct MtpSpecBatchOutput {
