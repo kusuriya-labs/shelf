@@ -137,6 +137,7 @@ set(SHELF_FUSED_KERNEL_SOURCES
     src/shelf/kernels/fused/fp8_activation_producer.hip
     src/shelf/kernels/fused/mxfp4_activation_producer.hip
     src/shelf/kernels/fused/exl3/rotate_quantize.hip
+    src/shelf/kernels/fused/exl3/row_prepare.hip
     src/shelf/kernels/fused/hyper_connection.hip
     src/shelf/kernels/fused/kv_append_octave.hip
     src/shelf/kernels/fused/moe/combine.hip

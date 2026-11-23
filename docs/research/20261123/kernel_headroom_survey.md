@@ -322,46 +322,37 @@ near-tie flip、interleaved A/B、required suite で行う。
 ## 13. opt-in 採用: dense EXL3 の row 前処理を 1 launch に融合
 
 dense A 経路の `rowstat` + `rowslot` + `rowfinish` を、atomic で slot を詰める
-`exl3_mul24_rowprepare_kernel` 1 launch に融合した。wall は neutral だが、
-launch 数・ISA・GPU 時間が減るため **opt-in**（`SHELF_EXL3_ROW_FUSE=1`）として残す。
-既定は従来の 3 kernel 経路である。
+`exl3_mul24_rowprepare_kernel` 1 launch に融合した。実装は
+`src/shelf/kernels/fused/exl3/row_prepare.hip`、宣言は
+`include/shelf/kernels/fused/exl3/row_prepare.h` に置く。既定は従来の 3 kernel 経路で、
+`SHELF_EXL3_ROW_FUSE=1` のときだけ使う。env 判定はホスト側で 1 回だけ行い、
+GPU kernel には分岐を入れない。
 
 ### specialized 測定
 
 2048 token / 4 chunk / EP=2 の trace。既定側は旧 3 kernel だけ、opt-in 側は
 `rowprepare` 1 kernel だけが走る。compact slot の counter は直前の
 `rotate_quantize` が 1 store で 0 にするので、fill も別 launch にならない。
-env 判定はホスト側で 1 回だけ行い、GPU kernel 内に分岐は入れていない。
 
 - row 前処理の GPU 時間: `rowstat` 46.817 + `rowslot` 12.214 + `rowfinish`
-  52.452 = **111.483 ms** → `rowprepare` **55.933 ms**（**−49.8 %**）。
-- prefill window の GPU 合計: **1159.15 → 1112.89 ms**（**−4.0 %**）。
+  52.452 = **111.483 ms** → `rowprepare` **47.147 ms**（**−57.7 %**）。
+- prefill window の GPU 合計: **1159.15 → 1104.31 ms**（**−4.7 %**）。
 - dispatch 数: 2484 + 2485 + 2484 = 7455 → **2486（−66.7 %）**。
-- static instruction: 170 + 200 + 267 = **637** → **482（−24.3 %）**。
-  `v_alu` 228 → 180、`s_wait*` **106 → 84**、`s_barrier` **6 → 4**、
-  code size 3204 → 2504 bytes（−21.8 %）。待ち命令も増えていない。
+- static instruction: 170 + 200 + 267 = **637** → **510（−20.0 %）**。
+  `s_wait*` は 106 → 75（−29.2 %）。copy / requantize を 16 byte 単位にしたため
+  unpack の `v_alu` は 228 → 243 に増えるが、動的命令数と GPU 時間は減る。
+- 資源値: `rowprepare` は VGPR 32、SGPR 128、LDS 512 B、256 thread。
+  32 VGPR × 1024 thread = 32768 < 65536、LDS 512 B なので **32 wave/CU の
+  上限 Occupancy**（4 block/CU）。スレッド数やレジスタを増やしても Occupancy は
+  上がらない。旧 `rowslot` だけが VGPR 40 / LDS 4096 B / 1024 thread だった。
 
 ### wall
 
 | 条件 | 既定 ms | opt-in ms |
 | --- | ---: | ---: |
-| 7002 token、host experts 0 | 2025.4 / 2034.6 | 2032.1 / 2029.3 |
-| 7002 token、host experts 96（前回測定） | 2427.8 | 2445.4 |
+| 7002 token、host experts 0（3 回） | 2042.7 / 2045.1 / 2051.0 | 1990.8 / 2007.6 / 2018.5 |
+| 7002 token、host experts 96（2 回） | 2459.1 / 2464.0 | 2459.3 / 2432.6 |
 
-生成 16 token は既定 / opt-in で一致した。wall が動かないのは、この cluster が
-prefill のクリティカルパスではなく、削減分が遊休に吸収されるためである。
-したがって既定にはせず、launch / ISA / GPU 時間を削る opt-in として採用する。
-
-## 14. 再試験して棄却: 4 group 融合
-
-pre-rotation で回転 temporaries が消えたため、`SHELF_EXL3_GROUPED_FUSE=4` を
-再試験した（`bench_exl3_mul24_grouped`、pre-rotated 経路）。weight の再読は
-半減するが、VGPR 増加で 2 group より遅い。
-
-| tokens | FUSE=1 gate+down | FUSE=2 gate+down | FUSE=4 gate+down |
-| ---: | ---: | ---: | ---: |
-| 256 | 2.354 ms | **1.696 ms** | 3.296 ms |
-| 1024 | 3.617 ms | **2.830 ms** | 4.445 ms |
-| 2048 | 6.948 ms | **5.902 ms** | 6.729 ms |
-
-既定の 2 group が最速なので、`launch_groups` の 4 group 分岐は入れない。
+host experts 0 では **約 2.0 %** 速い。host 96 では一回は同等、一回は −1.3 % で、
+悪化はしていない。生成 16 token は既定 / opt-in で一致した。既定 off の opt-in と
+するが、wall でも勝つ条件があるため、次に既定化を再検討してよい。

@@ -1,6 +1,7 @@
 #include <shelf/kernels/fused/exl3/decode.h>
 #include <shelf/kernels/fused/exl3/rotate_out.h>
 #include <shelf/kernels/fused/exl3/rotate_quantize.h>
+#include <shelf/kernels/fused/exl3/row_prepare.h>
 #include <shelf/kernels/fused/exl3/grouped.h>
 #include <shelf/inference/execution/optimized_dispatch.h>
 #include <shelf/kernels/optimized/linear/lm_head_int8.h>
