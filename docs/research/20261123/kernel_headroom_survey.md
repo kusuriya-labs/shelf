@@ -801,8 +801,8 @@ anchor / draft / sampled を出すと、target の argmax が 11 のところ ba
 7 を出しており、単発（cached）経路は 11 を提案して受理される。つまり
 `dflash2_propose_batch` の **request_count > 1 の batch 経路**が壊れている。
 
-2 件以上を cached 単発のループに変更した。旧 batch 経路は
-`SHELF_DFLASH2_PROPOSE_BATCH=1` で opt-in。
+2 件以上を cached 単発のループに変更した（後に下記の batch 修正で既定を
+batched backbone + batched select に戻した）。
 
 | conc | MEAN_ACCEPTED（修正前 → 後） | decode-only tok/s |
 | ---: | ---: | ---: |
@@ -848,3 +848,24 @@ DFLASH2_STAGE round=132.8ms draft_gpu=58.1ms verify_gpu=70.8ms
 8 セッションの律速は **直列 drafter proposal（8 × 7.3 ms = 58 ms）** と
 **62 行の fused verify（71 ms）**。batch proposal 経路を直せば draft が 1 回に
 まとまり、round が ~85 ms まで下がる見込み（+25〜30 %）。
+
+### DFlash2 の batch proposal / select を修正
+
+batch 経路を追うと 2 段階で壊れていた。
+
+1. proposal の backbone は正しい（batch と single の hidden が一致）が、
+   batch select が **distributor で top-k を書いた後に無条件で `draft_topk` を
+   呼び、zero の logits から identity top-k (0..15) で上書き**していた。
+   single 経路は distribute 後に selector へ直接戻るため問題が出ない。
+2. 修正: distributor を使った場合は `draft_topk` をスキップする。これで
+   sharded head（local 124160 / full 248320）のまま batched select が通る。
+
+| conc | draft_gpu | round | aggregate | MEAN_ACCEPTED |
+| ---: | ---: | ---: | ---: | ---: |
+| 2 | 8.0 ms | 56.4 ms | 64.1 tok/s | 13.5 |
+| 8（修正前 per-request select） | 48.6 ms | 124.6 ms | 124.8 tok/s | 54 |
+| 8（修正後 batched select） | **10.4 ms** | **87.0 ms** | **135.9 tok/s** | 54 |
+
+生成 16 token は一致、required 231/231 PASS。既定は batched backbone +
+batched select。`SHELF_DFLASH2_PROPOSE_BATCH=0` で単発 proposal、
+`SHELF_DFLASH2_SELECT_BATCH=0` で request ごとの select に戻せる。

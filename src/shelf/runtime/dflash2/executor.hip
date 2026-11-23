@@ -26,6 +26,7 @@
 #include <shelf/runtime/program/int8_activation_workspace.h>
 #include <shelf/runtime/selector_types.h>
 #include <cstdint>
+#include <atomic>
 
 #include <algorithm>
 #include <chrono>
@@ -2013,7 +2014,8 @@ Status dflash2_select_draft_tokens_batch(
     }
 
     Status st = Status::make_ok();
-    if (executor.proposal_distributor != nullptr) {
+    const bool distributed = executor.proposal_distributor != nullptr;
+    if (distributed) {
         st = executor.proposal_distributor->distribute(
             final_hidden, hidden, total_rows, executor.proposal_topk_ids.data<int32_t>(),
             executor.proposal_topk_logits.data<float>(),
@@ -2025,8 +2027,10 @@ Status dflash2_select_draft_tokens_batch(
         if (!st.ok()) return st;
     }
 
-    st = draft_topk(executor, total_rows, stream);
-    if (!st.ok()) return st;
+    if (!distributed) {
+        st = draft_topk(executor, total_rows, stream);
+        if (!st.ok()) return st;
+    }
 
     shelf::kernel::DFlash2CandidateSelectorArgs args;
     args.hidden_proj = executor.selector_hidden_proj.data<bf16_t>();
@@ -2053,7 +2057,7 @@ Status enqueue_proposal(
     DFlash2Executor& executor,
     const shelf::kernel::DFlash2RequestDescriptor* descriptor_ptr,
     const DFlash2BatchStage& stage,
-    hipStream_t stream) {
+    hipStream_t stream, bool batch_select = true) {
     const DFlash2Config& config = *executor.config;
     const uint32_t hidden = static_cast<uint32_t>(config.hidden_size);
     const uint32_t vocab = static_cast<uint32_t>(config.vocab_size);
@@ -2093,6 +2097,7 @@ Status enqueue_proposal(
         executor, descriptor_ptr, stage, executor.noise_embedding.data<bf16_t>(),
         executor.backbone_output.data<bf16_t>(), stream);
     if (!st.ok()) return st;
+    if (!batch_select) return Status::make_ok();
 
     return dflash2_select_draft_tokens_batch(executor, descriptor_ptr, stage,
                                              executor.backbone_output.data<bf16_t>(), stream);
@@ -2210,12 +2215,11 @@ Status dflash2_propose_batch(
     if (executor.config == nullptr || executor.weights == nullptr) {
         return Status::invalid_state("dflash2 executor has no weights", __FILE__, __LINE__);
     }
-    // The batched proposal path does not reproduce the single-request drafter on more
-    // than one context (its drafts disagree with the target argmax), so it is opt-in
-    // until that path is fixed. The serial loop keeps acceptance.
+    // The batched backbone is correct; only the batched lm_head/topk selection is not
+    // (it leaves the top-k at its identity default), so the selection runs per request.
     static const bool batch_propose_enabled = [] {
         const char* e = std::getenv("SHELF_DFLASH2_PROPOSE_BATCH");
-        return e != nullptr && e[0] != '\0' && e[0] != '0';
+        return e == nullptr || e[0] == '\0' || e[0] != '0';
     }();
     if (request_count == 1u || !batch_propose_enabled) {
         for (uint32_t i = 0; i < request_count; ++i) {
@@ -2310,7 +2314,24 @@ Status dflash2_propose_batch(
     const shelf::kernel::DFlash2RequestDescriptor* descriptor_ptr =
         static_cast<const shelf::kernel::DFlash2RequestDescriptor*>(descriptor_device);
 
-    return enqueue_proposal(executor, descriptor_ptr, stage, stream);
+    static const bool select_batch_enabled = [] {
+        const char* e = std::getenv("SHELF_DFLASH2_SELECT_BATCH");
+        return e == nullptr || e[0] == '\0' || e[0] != '0';
+    }();
+    const bool batch_select = select_batch_enabled;
+    Status batch_st = enqueue_proposal(executor, descriptor_ptr, stage, stream, batch_select);
+    if (batch_st.ok() && !batch_select) {
+        const uint32_t hidden = static_cast<uint32_t>(config.hidden_size);
+        for (uint32_t i = 0; i < request_count; ++i) {
+            const bf16_t* hidden_rows = executor.backbone_output.data<bf16_t>() +
+                static_cast<std::size_t>(descriptors[i].row_begin) * hidden;
+            batch_st = dflash2_select_draft_tokens(
+                executor, hidden_rows, descriptors[i].block_rows,
+                descriptors[i].anchor_token, output_drafts[i], stream);
+            if (!batch_st.ok()) break;
+        }
+    }
+    return batch_st;
 }
 
 Status dflash2_append_target_taps_batch(
