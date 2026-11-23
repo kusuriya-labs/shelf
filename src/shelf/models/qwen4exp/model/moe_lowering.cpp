@@ -93,6 +93,9 @@ Result<RT::ValueId> emit_qwen4exp_moe(Emitter& em,
     const RT::ValueId logits = em.linear(weights.router, indices.w_router, post_norm,
                                          RT::ValueDType::F32);
     em.pg.nodes.back().debug_name = std::string(debug_prefix) + "moe_router_logits";
+    const RT::ValueId shared_logit =
+        em.linear(weights.shared_gate, indices.w_shared_gate, post_norm,
+                  RT::ValueDType::F32);
     {
         RT::MoeRouterNode route;
         route.experts = geometry.global_experts;
@@ -160,9 +163,6 @@ Result<RT::ValueId> emit_qwen4exp_moe(Emitter& em,
         shared_out = scaled;
     }
     em.pg.nodes.back().debug_name = std::string(debug_prefix) + "moe_shared_out";
-    const RT::ValueId shared_logit =
-        em.linear(weights.shared_gate, indices.w_shared_gate, post_norm,
-                  RT::ValueDType::F32);
     const RT::ValueId shared_weight = em.value(1u, RT::ValueDType::F32);
     {
         RT::SigmoidNode n{RT::RowwiseShapeKey{1u}};

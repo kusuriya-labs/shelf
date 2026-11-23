@@ -774,6 +774,52 @@ qualified baseline ではない。TP は expert matrix split のため、この 
 - 現在の build で TP=2 を指定すると、routed expert の N / K が 128 の倍数にならないため
   `EXL3 expert TP requires N/128 and K/128 to be divisible by tp_size` で失敗する。
 
+## 2026-11-23 Qwen3.8-Flash-Next EXL3 MTP serve と kernel 内訳
+
+同じ checkpoint の EP=2 / TP=1 で、MTP serve と kernel 時間の内訳を測った
+reference run である。qualified baseline ではない。内訳と律速分類は
+[../research/20261123/flashnext_exl3_ep2_bottleneck.md](../research/20261123/flashnext_exl3_ep2_bottleneck.md)
+に置く。測定後に graph capture の排他 mode、expert slot map の EP 範囲、
+MTP fused verify の既定を修正し、下の表は fused 既定の build で再確認した値である。
+
+- measurement revision: `22e4f7e9` とその修正後の working tree。
+- GPU: Radeon AI PRO R9700 × 2（`--device 0,1`）。1 GPU 1 process。
+- prompt は同一文の繰り返し 3,162 token、greedy、61 token 生成、`octave:c5v5` KV。
+- MTP は既定の fused verify（`SHELF_MTP_FUSED_VERIFY` 未設定）で、
+  `SHELF_MTP_FUSED_VERIFY=0` のときだけ safe serial になる。
+
+| 構成 | decode tok/s | ms/token |
+| --- | ---: | ---: |
+| target-only（MTP なし） | 34.0 | 29.4 |
+| MTP safe serial（drafts 3、`SHELF_MTP_FUSED_VERIFY=0`） | 31.3 | 31.9 |
+| MTP fused（drafts 3） | 49.7 | 20.1 |
+| MTP fused（drafts 2） | **55.1** | 18.1 |
+| MTP fused（drafts 1） | 54.7 | 18.3 |
+| MTP fused（drafts 7） | 32.1 | 31.1 |
+
+- 修正後は既定 build（`SHELF_HIP_GRAPH=ON`）で MTP serve が完走する。
+  `test_compute_mtp_prefix.py` 13/13、`test_compute_mtp_batch.py`（EP=2、2 request）
+  10/10、required 231/231 が PASS した。
+- 3,162 token の prefill は cold 1,710 ms（1,848 tok/s、初回 hipBLASLt JIT を含む）、
+  warm 1,024〜1,087 ms（2,910〜3,178 tok/s）である。
+- `SHELF_TP_TRANSPORT=host` では prefill 1,257 tok/s、MTP fused decode 40.8 tok/s へ落ちる。
+- `--moe-host-experts` は EP=2 でも動作する（修正後）。offload 128 では decode 19.0 tok/s
+  まで落ちるため、EP=2 で VRAM に収まる構成では使わない。
+- kernel trace（trace 下の相対値）では、target-only decode は 2,772 dispatch/token、
+  経路時間の 46 % が EXL3 GEMM/dequant、14 % が hyper connection の BF16 GEMV
+  （460 dispatch/token、1 launch 8.2 µs）、12 % が paged attention（12 層で 3.0 ms/token、
+  ctx 128〜512 で 1 call 約 260 µs の固定費）である。実効 weight traffic は約 106 GB/s で、
+  DRAM 帯域律速ではない。
+- `shelf-bench tg --mode greedy`（bf16 KV、ctx 128、64 token、warmup 2）は 33.65 tok/s
+  （29.7 ms/token）で、既存の 33.24〜33.68 と一致する。
+- 同一入力の BF16 GEMM 2 本（hyper down + block_inject、GDN in_proj_a + b、
+  MoE router + shared gate）を 1 launch に融合した。interleaved A/B 3 ペアで
+  off 32.91 / 33.23 / 33.53、on 33.51 / 33.83 / 34.06 tok/s（中央値 +1.8 %）。
+  dispatch は 460 → 280 / token。`SHELF_DISABLE_BF16_PAIR=1` で無効化できる。
+- 2 GPU / 4 同時要求で `--max-seq-len 262144` は KV が 135,760 token しか確保できず
+  起動できない。この checkpoint を EP=2 / offload なしで使う場合の上限は
+  131,072 である。
+
 ## 2026-11-23 Problem #41 P0 の reference run（Flash-Next EXL3）
 
 issue #41 の P0-1（MTP verify 方式）と P0-2（expert 交換）の比較測定である。

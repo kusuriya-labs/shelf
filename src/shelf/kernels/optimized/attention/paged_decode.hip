@@ -348,6 +348,7 @@ hipError_t launch_attention_paged_bf16(
         return hipErrorInvalidValue;
     const uint64_t grid_x = static_cast<uint64_t>(common.rows) * common.q_heads;
     if (grid_x == 0u) return hipErrorInvalidValue;
+
     const PagedAttentionCommonArgs a = common;
     const dim3 grid(static_cast<uint32_t>(grid_x));
     if (common.head_dim == kHeadLimit) {

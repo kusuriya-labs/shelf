@@ -99,6 +99,12 @@ void verify_expert_sample(const std::string& model_dir, const shelf::qwen4exp::Q
     const auto& range = layer0.mlp.experts;
     check(gate.experts + gate_host.experts == range.local_experts,
           "MOE expert split covers the local expert range");
+    if (w.expert_slot_map.ndim() != 0u) {
+        check(w.expert_slot_map.dim(1) == range.local_experts,
+              "MOE expert slot map matches the local expert range");
+        check(w.expert_slot_map.dim(0) == w.layers.size(),
+              "MOE expert slot map covers every layer");
+    }
     if (gate.encoding != shelf::weights::MatrixEncoding::Exl3) {
         if (gate_host.experts != 0u) {
             check(gate_host.host_resident && gate_host.host_codes != nullptr &&
@@ -267,6 +273,10 @@ int main(int argc, char** argv) {
         ranks[0] = single_rank;
         devices[0] = single_device >= 0 ? single_device : single_rank;
     }
+    std::uint32_t ep_size = 0u;
+    if (const char* ep_env = std::getenv("SHELF_QWEN4EXP_EP")) {
+        ep_size = static_cast<std::uint32_t>(std::strtoul(ep_env, nullptr, 10));
+    }
 
     std::optional<shelf::gpu::GpuArena> arenas[2];
     hipStream_t streams[2] = {nullptr, nullptr};
@@ -288,8 +298,18 @@ int main(int argc, char** argv) {
     for (int index = 0; index < rank_count; ++index) {
         const std::uint32_t rank = static_cast<std::uint32_t>(ranks[index]);
         shelf::qwen4exp::Qwen4ExpLoadOptions options;
-        options.tp_size = 2;
-        options.tp_rank = rank;
+        if (ep_size > 1u) {
+            options.tp_size = 1;
+            options.tp_rank = 0;
+            options.ep_size = ep_size;
+            options.ep_rank = rank;
+            options.ep_enabled = true;
+            options.backbone_tp_size = ep_size;
+            options.backbone_tp_rank = rank;
+        } else {
+            options.tp_size = 2;
+            options.tp_rank = rank;
+        }
         if (const char* host_experts = std::getenv("SHELF_MOE_HOST_EXPERTS")) {
             options.moe_host_experts =
                 static_cast<std::uint32_t>(std::strtoul(host_experts, nullptr, 10));
@@ -313,7 +333,10 @@ int main(int argc, char** argv) {
                      rank, static_cast<double>(weights.resident_bytes()) / 1073741824.0,
                      static_cast<double>(arenas[index]->used()) / 1073741824.0);
         verify_expert_sample(model_dir, weights, rank, streams[index]);
-        auto validation = shelf::qwen4exp::validate_qwen4exp_rank(weights, config, 2, rank);
+        auto validation = ep_size > 1u
+            ? shelf::qwen4exp::validate_qwen4exp_rank(weights, config, ep_size, rank,
+                                                      ep_size, rank, 1u)
+            : shelf::qwen4exp::validate_qwen4exp_rank(weights, config, 2, rank);
         check(validation.ok(), "rank weight invariants");
         const auto expert_slot = shelf::qwen_hybrid::make_weight_slot(
             weights.layers[0].mlp.gate_experts);

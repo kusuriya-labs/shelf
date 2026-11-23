@@ -58,6 +58,7 @@ embedding、prefix checkpoint、offload 用バッファもドライバの GTT �
 | 変数名 | 既定値 | 対象範囲 | 用途 |
 | --- | --- | --- | --- |
 | `SHELF_GRAPH_VERIFY` | `1` | runtime | `0` で DFlash2 / MTP の verify HIP graph 実行を無効にする |
+| `SHELF_MTP_FUSED_VERIFY` | `1` | compute / server / runtime | `0` で qwen4exp の MTP verify を K+1 行の融合 forward から 1 request 1 行の直列 verify に戻す |
 | `SHELF_PLAMO_HIP_GRAPH` | `1` | runtime | `0` で PLaMo 3 の c=1 decode HIP graph を無効にする |
 | `SHELF_GDN_RECURRENCE_EXACT` | `0` | runtime | `0`（既定）で lossy、`1` で exact な GDN recurrence 経路を使う |
 | `SHELF_GDN_VERIFY_CHUNKED` | `1` | compute / server / runtime | `0` で DFlash2 verify の chunked GDN を無効にし、serial verify に戻す |
@@ -144,6 +145,8 @@ embedding、prefix checkpoint、offload 用バッファもドライバの GTT �
 | `SHELF_PFXDBG` | 未設定 | runtime | 設定すると prefix cache の検索・保存・復元トレースを出力する |
 | `SHELF_OP_DUMP` / `SHELF_OP_SYNC` / `SHELF_OP_FALLBACK_DEBUG` | 未設定 | runtime | 演算単位のダンプ・同期・fallback 診断（設定時は各種融合が無効化され速度が低下する） |
 | `SHELF_LINEAR_INPUT_DUMP`（`_MAX_ROWS`, `_MAX_TENSORS`） | 未設定 | runtime | linear 入力テンソルをダンプする |
+| `SHELF_DISABLE_BF16_PAIR` | 未設定 | runtime | 設定すると同一入力の BF16 GEMM 2 本を 1 launch にまとめる pair 融合を無効化する（A/B 用） |
+| `SHELF_BF16_DISPATCH_DEBUG` | 未設定 | runtime | 設定すると BF16 linear の物理選択（out, k, rows, variant）を stderr へ出力する |
 | `SHELF_KV_CALIB_DUMP`（`_MAX_ROWS`） | 未設定 | runtime | KV キャリブレーション用データをダンプする |
 | `SHELF_DEBUG_HIDDEN` / `SHELF_DEBUG_HIDDEN_FILE` | 未設定 | compute | `--hidden-taps` で取得した中間 hidden の出力先制御 |
 | `SHELF_LAYER_DUMP_DIR` / `SHELF_LAYER_INPUT_DEBUG` / `SHELF_LAYER_INPUT_OVERRIDE` | 未設定 | runtime | 層単位の入出力ダンプ・上書き |

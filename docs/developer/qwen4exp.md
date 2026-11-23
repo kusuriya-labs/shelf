@@ -68,6 +68,9 @@ PP stage 内の EP / TP 展開は実装済みで、TP reduce の後に EP reduce
   残りを VRAM の slot に置く。host plane は `hipHostMallocMapped` で、GPU の grouped
   GEMM が PCIe 越しに読む。expert ごとの配置は device の slot map
   `int32 [layers][local_experts]` が持つ（`>= 0` は VRAM slot、`-1 - slot` は host slot）。
+  `local_experts` は EP で expert ID を分割した後の数（`num_experts / ep_size`）であり、
+  matrix 分割の `expert_tp_size` では変わらない。EP の axes overlap では
+  `tp_size` が 1 でも `ep_size` が 2 以上になりうるため、slot map は `ep_size` を基準にする。
   EXL3 expert も同じ offload を使う。trellis / suh / svh を host の
   `host_codes / host_scales / host_row_ref` に置き、marker は全 expert で共通のため
   VRAM の 1 枚を共有する。grouped GEMM は hit/miss を別 launch にし、miss 側の

@@ -1653,7 +1653,7 @@ Result<Qwen4ExpRankWeights> load_qwen4exp_rank(const std::string& model_dir,
 
     const std::uint32_t global_experts =
         static_cast<std::uint32_t>(config.ffn.num_experts);
-    const std::uint32_t local_experts = global_experts / options.tp_size;
+    const std::uint32_t local_experts = global_experts / ep_size;
     if (options.moe_host_experts >= local_experts && options.moe_host_experts != 0u) {
         return Status::invalid_argument(
             "Qwen4Exp moe_host_experts must leave at least one VRAM expert", __FILE__,

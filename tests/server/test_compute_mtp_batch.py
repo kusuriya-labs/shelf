@@ -252,8 +252,8 @@ def run_slot_reuse(harness: ComputeHarness) -> dict[int, dict]:
 def main() -> int:
     checker = Checker("compute-mtp-batch")
     devices = os.environ.get("SHELF_MTP_DEVICES", "0,1,2,3")
-    near_tie_mode = bool(os.environ.get("SHELF_MTP_FUSED_VERIFY") or
-                         os.environ.get("SHELF_MTP_WAVEFRONT"))
+    near_tie_mode = bool(os.environ.get("SHELF_MTP_WAVEFRONT")) or \
+        os.environ.get("SHELF_MTP_FUSED_VERIFY", "1") not in ("", "0")
     if near_tie_mode:
         os.environ["SHELF_MTP_TOP2"] = "1"
     baseline = target_baseline()

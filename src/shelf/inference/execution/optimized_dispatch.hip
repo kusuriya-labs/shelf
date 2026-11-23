@@ -16,6 +16,7 @@
 #include <shelf/kernels/optimized/activation_quantize.h>
 #include <shelf/kernels/optimized/linear/fp8.h>
 #include <shelf/kernels/optimized/linear/mxfp4.h>
+#include <shelf/kernels/fused/bf16_linear_pair.h>
 #include <shelf/kernels/optimized/linear/bf16.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
 #include <shelf/inference/execution/hyper_connection_dispatch.h>
@@ -474,6 +475,10 @@ Result<PhysicalResolveStatus> resolve_bf16_physical(
     if (!config) {
         return PhysicalResolveStatus::NotApplicable;
     }
+    if (std::getenv("SHELF_BF16_DISPATCH_DEBUG") != nullptr) {
+        std::fprintf(stderr, "BF16_DISPATCH out=%u k=%u rows=%u id=%u\n", e.rows, e.cols,
+                     rows, static_cast<unsigned>(config->id));
+    }
 
     out.weight = reinterpret_cast<uint64_t>(e.device_ptr);
     out.input = reinterpret_cast<uint64_t>(in.ptr);
@@ -870,6 +875,59 @@ Result<OptimizedLaunchResult> try_launch_linear_bf16(
     record_physical_launch(1);
     record_optimized_op();
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
+}
+
+
+Result<OptimizedLaunchResult> try_launch_linear_bf16_pair(
+    const ::shelf::runtime::Program& program,
+    size_t dispatch_index,
+    HostExecutionContext& ctx,
+    hipStream_t stream) {
+    const auto miss = OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
+    static const bool enabled = std::getenv("SHELF_DISABLE_BF16_PAIR") == nullptr;
+    if (!enabled) return miss;
+    if (dispatch_index + 1u >= program.dispatches.size()) return miss;
+    const auto& b0 = program.dispatches[dispatch_index];
+    const auto& b1 = program.dispatches[dispatch_index + 1u];
+    if (b0.kernel_id != ::shelf::runtime::KernelId::LINEAR_BF16 ||
+        b1.kernel_id != ::shelf::runtime::KernelId::LINEAR_BF16 ||
+        b0.input_count != 1u || b0.output_count != 1u || b1.input_count != 1u ||
+        b1.output_count != 1u)
+        return miss;
+    if (b0.input_slots[0] != b1.input_slots[0]) return miss;
+    PhysicalBf16Launch l0{};
+    PhysicalBf16Launch l1{};
+    const Result<PhysicalResolveStatus> r0 = resolve_bf16_physical(program, b0, ctx, l0);
+    if (!r0.ok()) return r0.status();
+    if (r0.value() != PhysicalResolveStatus::Applicable) return miss;
+    const Result<PhysicalResolveStatus> r1 = resolve_bf16_physical(program, b1, ctx, l1);
+    if (!r1.ok()) return r1.status();
+    if (r1.value() != PhysicalResolveStatus::Applicable) return miss;
+    if (l0.variant != PhysicalBf16Variant::ExactRows ||
+        l1.variant != PhysicalBf16Variant::ExactRows)
+        return miss;
+    if (l0.rows == 0u || l0.rows != l1.rows ||
+        l0.rows > ::shelf::kernel::kBf16GemmExactRowsKernelMax)
+        return miss;
+    if (l0.k != l1.k || l0.input != l1.input ||
+        l0.input_row_stride != l1.input_row_stride)
+        return miss;
+    const hipError_t herr = ::shelf::kernel::launch_gemm_bf16_exact_rows_pair(
+        reinterpret_cast<const ::shelf::bf16_t*>(l0.weight),
+        reinterpret_cast<void*>(l0.output), l0.output_dtype, l0.out_features,
+        l0.output_row_stride,
+        reinterpret_cast<const ::shelf::bf16_t*>(l1.weight),
+        reinterpret_cast<void*>(l1.output), l1.output_dtype, l1.out_features,
+        l1.output_row_stride,
+        reinterpret_cast<const ::shelf::bf16_t*>(l0.input), l0.input_row_stride, l0.rows,
+        l0.k, false, stream);
+    if (herr == hipErrorNotSupported) return miss;
+    if (herr != hipSuccess)
+        return Status::hip_error("bf16 pair gemm launch", hipGetErrorString(herr),
+                                 __FILE__, __LINE__);
+    record_physical_launch(1);
+    record_optimized_op();
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 2u};
 }
 
 
@@ -1984,8 +2042,12 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             if (!projected.ok() || projected.value().kind == OptimizedLaunchKind::Launched) return projected;
             return try_launch_linear_exl3_with_boundary(program, dispatch_index, dispatch_end, ctx, stream);
         }
-        case KernelId::LINEAR_BF16:
+        case KernelId::LINEAR_BF16: {
+            auto pair = try_launch_linear_bf16_pair(program, dispatch_index, ctx, stream);
+            if (!pair.ok() || pair.value().kind == OptimizedLaunchKind::Launched)
+                return pair;
             return try_launch_linear_bf16(program, b, ctx, stream);
+        }
         case KernelId::LINEAR_INT8_W32:
             return try_launch_linear_int8_w32(program, b, ctx, stream);
         case KernelId::RMS_NORM: {

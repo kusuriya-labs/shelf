@@ -915,7 +915,15 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
             }
             const char* fused_env = std::getenv("SHELF_MTP_FUSED_VERIFY");
             const bool fused_verify =
-                fused_env != nullptr && fused_env[0] != '\0' && fused_env[0] != '0';
+                fused_env == nullptr ||
+                (fused_env[0] != '\0' && fused_env[0] != '0');
+            const auto& spatial = model.context();
+            const std::uint32_t spatial_rank =
+                spatial.axes_overlap
+                    ? spatial.ep_rank
+                    : static_cast<std::uint32_t>(spatial.ep_rank * spatial.tp_size +
+                                                 spatial.tp_rank);
+            const std::uint32_t snapshot_copies = spatial_rank == 0u ? 1u : 2u;
             if (model.uses_qsa_state()) {
                 const uint32_t batch_rows = std::max(
                     options.max_batch_rows,
@@ -933,7 +941,7 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
                             layout,
                             qwen35::runtime::mtp_spec_rows(cfg.max_requests,
                                                            options.num_drafts),
-                            cfg.max_requests);
+                            cfg.max_requests * snapshot_copies);
                 }
             } else if (tp_rank == 0u) {
                 drafter_bytes = qwen35::runtime::mtp_drafter_reserve_bytes(
@@ -949,7 +957,7 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
                         layout,
                         qwen35::runtime::mtp_spec_rows(cfg.max_requests,
                                                        options.num_drafts),
-                        cfg.max_requests);
+                        cfg.max_requests * snapshot_copies);
             }
             return drafter_bytes + state_bytes;
         };

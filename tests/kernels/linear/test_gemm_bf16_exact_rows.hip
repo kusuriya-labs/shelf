@@ -1,3 +1,4 @@
+#include <shelf/kernels/fused/bf16_linear_pair.h>
 #include <shelf/kernels/optimized/linear/bf16.h>
 #include <hip/hip_runtime.h>
 #include <cmath>
@@ -285,6 +286,78 @@ int run_case(const CaseSpec& s) {
     return 0;
 }
 
+
+int run_pair_case(uint32_t n0, uint32_t n1, uint32_t k, uint32_t rows,
+                  shelf::kernel::Bf16GemmOutputDType dtype0,
+                  shelf::kernel::Bf16GemmOutputDType dtype1, const char* name) {
+    printf("\n--- exact rows pair %s (n0=%u n1=%u k=%u rows=%u) ---\n", name, n0, n1, k,
+           rows);
+    const size_t w0_bytes = static_cast<size_t>(n0) * k * sizeof(shelf::bf16_t);
+    const size_t w1_bytes = static_cast<size_t>(n1) * k * sizeof(shelf::bf16_t);
+    const size_t x_bytes = static_cast<size_t>(rows) * k * sizeof(shelf::bf16_t);
+    const uint32_t e0 = dtype0 == shelf::kernel::Bf16GemmOutputDType::BF16 ? 2u : 4u;
+    const uint32_t e1 = dtype1 == shelf::kernel::Bf16GemmOutputDType::BF16 ? 2u : 4u;
+    const size_t y0_bytes = static_cast<size_t>(rows) * n0 * e0;
+    const size_t y1_bytes = static_cast<size_t>(rows) * n1 * e1;
+
+    shelf::bf16_t* w0 = nullptr;
+    shelf::bf16_t* w1 = nullptr;
+    shelf::bf16_t* x = nullptr;
+    void* single0 = nullptr;
+    void* single1 = nullptr;
+    void* pair0 = nullptr;
+    void* pair1 = nullptr;
+    HIP_ASSERT(hipMalloc(&w0, w0_bytes));
+    HIP_ASSERT(hipMalloc(&w1, w1_bytes));
+    HIP_ASSERT(hipMalloc(&x, x_bytes));
+    HIP_ASSERT(hipMalloc(&single0, y0_bytes));
+    HIP_ASSERT(hipMalloc(&single1, y1_bytes));
+    HIP_ASSERT(hipMalloc(&pair0, y0_bytes));
+    HIP_ASSERT(hipMalloc(&pair1, y1_bytes));
+
+    std::mt19937 rng(20261123u + n0 * 3u + n1);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    std::vector<shelf::bf16_t> h0(static_cast<size_t>(n0) * k);
+    std::vector<shelf::bf16_t> h1(static_cast<size_t>(n1) * k);
+    std::vector<shelf::bf16_t> hx(static_cast<size_t>(rows) * k);
+    for (auto& v : h0) v = f32_to_bf16(dist(rng));
+    for (auto& v : h1) v = f32_to_bf16(dist(rng));
+    for (auto& v : hx) v = f32_to_bf16(dist(rng));
+    if (!hx.empty()) hx[0] = f32_to_bf16(3.0e38f);
+    if (hx.size() > 1u) hx[1] = f32_to_bf16(-3.0e38f);
+    if (hx.size() > 2u) hx[2] = shelf::bf16_t{0x0001u};
+    HIP_ASSERT(hipMemcpy(w0, h0.data(), w0_bytes, hipMemcpyHostToDevice));
+    HIP_ASSERT(hipMemcpy(w1, h1.data(), w1_bytes, hipMemcpyHostToDevice));
+    HIP_ASSERT(hipMemcpy(x, hx.data(), x_bytes, hipMemcpyHostToDevice));
+
+    const shelf::kernel::Bf16GemmConfig exact0{
+        shelf::kernel::Bf16GemmConfigId::ExactRows, static_cast<uint8_t>(rows)};
+    HIP_ASSERT(shelf::kernel::launch_gemm_bf16(exact0, w0, x, single0, dtype0, rows, n0, k,
+                                               k, n0, 0));
+    HIP_ASSERT(shelf::kernel::launch_gemm_bf16(exact0, w1, x, single1, dtype1, rows, n1, k,
+                                               k, n1, 0));
+    HIP_ASSERT(shelf::kernel::launch_gemm_bf16_exact_rows_pair(
+        w0, pair0, dtype0, n0, n0, w1, pair1, dtype1, n1, n1, x, k, rows, k, false, 0));
+    HIP_ASSERT(hipDeviceSynchronize());
+
+    std::vector<uint8_t> s0(y0_bytes), s1(y1_bytes), p0(y0_bytes), p1(y1_bytes);
+    HIP_ASSERT(hipMemcpy(s0.data(), single0, y0_bytes, hipMemcpyDeviceToHost));
+    HIP_ASSERT(hipMemcpy(s1.data(), single1, y1_bytes, hipMemcpyDeviceToHost));
+    HIP_ASSERT(hipMemcpy(p0.data(), pair0, y0_bytes, hipMemcpyDeviceToHost));
+    HIP_ASSERT(hipMemcpy(p1.data(), pair1, y1_bytes, hipMemcpyDeviceToHost));
+    check(std::memcmp(s0.data(), p0.data(), y0_bytes) == 0, "pair matrix 0 is byte exact");
+    check(std::memcmp(s1.data(), p1.data(), y1_bytes) == 0, "pair matrix 1 is byte exact");
+
+    HIP_ASSERT(hipFree(pair1));
+    HIP_ASSERT(hipFree(pair0));
+    HIP_ASSERT(hipFree(single1));
+    HIP_ASSERT(hipFree(single0));
+    HIP_ASSERT(hipFree(x));
+    HIP_ASSERT(hipFree(w1));
+    HIP_ASSERT(hipFree(w0));
+    return 0;
+}
+
 }
 
 int main() {
@@ -319,6 +392,20 @@ int main() {
             return 1;
         }
     }
+
+    if (run_pair_case(320u, 4u, 10240u, 1u,
+                      shelf::kernel::Bf16GemmOutputDType::BF16,
+                      shelf::kernel::Bf16GemmOutputDType::BF16, "hyper down+inject") != 0)
+        return 1;
+    if (run_pair_case(24u, 24u, 2560u, 1u, shelf::kernel::Bf16GemmOutputDType::BF16,
+                      shelf::kernel::Bf16GemmOutputDType::BF16, "gdn a+b") != 0)
+        return 1;
+    if (run_pair_case(512u, 1u, 2560u, 4u, shelf::kernel::Bf16GemmOutputDType::F32,
+                      shelf::kernel::Bf16GemmOutputDType::F32, "router+shared") != 0)
+        return 1;
+    if (run_pair_case(17u, 3u, 65u, 2u, shelf::kernel::Bf16GemmOutputDType::BF16,
+                      shelf::kernel::Bf16GemmOutputDType::F32, "tail k and odd n") != 0)
+        return 1;
 
     printf("\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;

@@ -127,6 +127,7 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
 # single-operation optimized family.
 set(SHELF_FUSED_KERNEL_SOURCES
     src/shelf/kernels/fused/attention/octave.hip
+    src/shelf/kernels/fused/bf16_linear_pair.hip
     src/shelf/kernels/fused/exl3/decode.hip
     src/shelf/kernels/fused/exl3/group_gemm.hip
     src/shelf/kernels/fused/exl3/grouped.hip

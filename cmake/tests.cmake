@@ -280,7 +280,7 @@ shelf_add_test(NAME test_gpu_arena_vmm SOURCE unit/test_gpu_arena_vmm.hip LABELS
 shelf_add_test(NAME test_gpu_memory_manager SOURCE unit/test_gpu_memory_manager.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_gpu)
 
 shelf_add_test(NAME test_gemm_bf16_correctness SOURCE kernels/linear/test_gemm_bf16_correctness.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_correctness)
-shelf_add_test(NAME test_gemm_bf16_exact_rows SOURCE kernels/linear/test_gemm_bf16_exact_rows.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_gemm_bf16_exact_rows SOURCE kernels/linear/test_gemm_bf16_exact_rows.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_kernels_fused shelf_gpu)
 shelf_add_test(NAME test_gemm_lt SOURCE unit/test_gemm_lt.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_inference_execution shelf_gpu)
 shelf_add_test(NAME test_hipblaslt_abi SOURCE unit/test_hipblaslt_abi.cpp LABELS "cpu;required" LIBRARIES shelf_gpu ${CMAKE_DL_LIBS} DEFS SHELF_TEST_HIPBLASLT="${SHELF_HIPBLASLT_LIBRARY}")
 set(_shelf_abi_fixture "${CMAKE_CURRENT_BINARY_DIR}/libtest_hipblaslt_abi_fixture.so")

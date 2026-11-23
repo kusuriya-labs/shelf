@@ -31,7 +31,7 @@ bool mtp_wavefront_enabled() {
 bool mtp_fused_verify_enabled() {
     static const bool enabled = [] {
         const char* value = std::getenv("SHELF_MTP_FUSED_VERIFY");
-        return value != nullptr && value[0] != '\0' && value[0] != '0';
+        return value == nullptr || (value[0] != '\0' && value[0] != '0');
     }();
     return enabled;
 }

@@ -1282,10 +1282,13 @@ Result<PendingBatch> submit_co_batch(
                 }
                 stage_graph_inputs();
                 const auto capture_start = std::chrono::steady_clock::now();
-                if (hipStreamBeginCapture(stream, hipStreamCaptureModeGlobal) == hipSuccess) {
+                if (hipStreamBeginCapture(stream, hipStreamCaptureModeThreadLocal) == hipSuccess) {
                     Status cap_st = enqueue_batch(true);
                     hipGraph_t graph = nullptr;
                     hipError_t ec = hipStreamEndCapture(stream, &graph);
+                    if (!cap_st.ok() && graph_debug_enabled())
+                        std::fprintf(stderr, "[graph] capture enqueue failed: %s\n",
+                                     cap_st.message().c_str());
                     if (cap_st.ok() && ec == hipSuccess && graph != nullptr) {
                         hipGraphExec_t ge = nullptr;
                         size_t node_count = 0u;

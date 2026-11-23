@@ -59,18 +59,18 @@ qwen4exp のように QSA / PLE の per-row state を持つ target は、MTP blo
 draft は depth 単位で request をまとめて 1 forward にする。draft 数 K に対して
 MTP forward は最大 K 回であり、request 数 N に比例しない。
 
-既定の verify は draft 列 `[pending, draft0, ...]` を request ごとに 1 row ずつ
-target の `DECODE` で流し、最初の不一致で止める。target の state は受理した prefix
-だけを進めるため、GDN snapshot / compact log replay を必要としない。
+既定の verify は draft 列 `[pending, draft0, ...]` を 1 回の target forward（`K+1` 行）で
+まとめて確認し、最初の不一致までを採用する。target の state は受理した prefix
+だけを進める。`SHELF_MTP_FUSED_VERIFY=0` を指定すると、request ごとに 1 row ずつ
+target の `DECODE` で流す安全側の直列 verify に戻る。直列 verify は GDN snapshot /
+compact log replay を必要としない。
 `SHELF_MTP_WAVEFRONT=1` では同じ深さの active な request を最大 4 request の
 Wavefront batch にまとめる。Wavefront は forward 数を減らすが、near-tie で
-target-only と分岐する prompt が残るため既定 off である。dense など QSA / PLE を
-持たない target は従来どおり K+1 行の融合 verify を使う。
+target-only と分岐する prompt が残るため既定 off である。
 
-`SHELF_MTP_FUSED_VERIFY=1` は qwen4exp でも K+1 行の融合 verify を選ぶ比較用の
-フラグである。GDN verify の上限は 8 request / 64 行へ拡張した。1〜2 request の
-fused verify は target-only と一致するが、4 request / 20 行では near-tie 分岐が
-残るため既定 off である。TP serve の fused verify は rank ごとに
+qwen4exp の融合 verify は GDN verify の上限 8 request / 64 行の範囲で K+1 行を
+1 forward にまとめる。1〜2 request の融合 verify は target-only と一致するが、
+4 request / 20 行では near-tie 分岐が残る。TP serve の融合 verify は rank ごとに
 `mtp_batch_rank_state_reserve_bytes` を MTP reserve へ加算する。
 
 ## serve-stdio
@@ -139,16 +139,16 @@ admission のタイミングで生成列が分岐した。
 決まるため、同じ request は同居する request 数にも設定した同時実行数にも関係なく同じ
 分割数を使う。mul1 と mul24（EXL3-INT8）の両方がこの値に従う。QSA の sparse attention
 も同じ容量で split 数を決める。decode（`rows == 1`）と prefill は従来どおりである。
-QSA / PLE を持つ qwen4exp はこの融合 verify を使わず、深さごとの Wavefront `DECODE`
-batch を使うため、融合 verify の行数不変性の問題を避ける。Wavefront の batch は
-最大 4 request に区切り、それ以上同時に並べた場合の数値差を避ける。
+QSA / PLE を持つ qwen4exp も既定で融合 verify を使う。Wavefront は独立した flag で、
+既定 off のままである。Wavefront の batch は最大 4 request に区切り、
+それ以上同時に並べた場合の数値差を避ける。
 
 ## verify の 1 forward 上限
 
 GDN の verify kernel の定数は **8 request / 64 行**
 （`kGdnRecurrenceVerifyMaxRequests` / `kGdnRecurrenceVerifyBatchRows`）である。
-qwen4exp の既定経路は 1 request / 1 行ずつの安全 verify を使う。融合 verify の
-chunk はこの上限で分割する。
+qwen4exp の既定経路は融合 verify を使う。`SHELF_MTP_FUSED_VERIFY=0` で 1 request /
+1 行ずつの直列 verify に戻せる。融合 verify の chunk はこの上限で分割する。
 DFlash2 の 4 session × block 8 と同じ上限で、これが融合 verify の実効上限になる。
 
 MTP の batch context 自体は `min(max_num_batched_tokens, 512)` 行まで request を保持でき、

@@ -68,6 +68,8 @@ Result<HyperConnectionMixOutput> emit_hyper_connection_mix(
         emit_unary(em, RT::PrimitiveNode{norm_node}, hyper, width, RT::ValueDType::BF16);
 
     const RT::ValueId down = em.linear(*weights.down, indices.w_down, normed);
+    RT::ValueId inject{0};
+    if (with_inject) inject = em.linear(*weights.inject, indices.w_inject, normed);
     const float inverse_hc = 1.0f / static_cast<float>(geometry.hc);
     const RT::ValueId down_act = emit_unary(
         em, RT::PrimitiveNode{RT::SiLUNode{RT::RowwiseShapeKey{geometry.lowrank},
@@ -85,7 +87,6 @@ Result<HyperConnectionMixOutput> emit_hyper_connection_mix(
 
     RT::ValueId injection{0};
     if (with_inject) {
-        const RT::ValueId inject = em.linear(*weights.inject, indices.w_inject, normed);
         injection = emit_unary(
             em, RT::PrimitiveNode{RT::HyperInjectNode{
                     RT::RowwiseShapeKey{geometry.hc}, 2.0f}},
