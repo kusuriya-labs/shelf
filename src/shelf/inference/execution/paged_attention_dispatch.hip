@@ -329,6 +329,7 @@ PagedAttentionPlan plan_paged_attention(
         (ctx.spec.max_visible_tokens + ::shelf::kernel::kQsaSparseBlockTokens - 1u) /
                 ::shelf::kernel::kQsaSparseBlockTokens <=
             args.qsa_top_k;
+    plan.mask_all_visible = within_qsa_budget && args.common.block_mask != nullptr;
     // The tiled prefill kernel consumes the block mask directly (page bitmap + per-row
     // token visibility) and runs WMMA. It wins while the selected blocks are dense in the
     // visible range; with the model's fixed 512-block budget the density drops as the
@@ -726,6 +727,18 @@ enum class PagedAttentionResolveMode : uint8_t {
     StaticPrefill = 2,
 };
 
+
+namespace {
+
+::shelf::kernel::PagedAttentionCommonArgs paged_region_mask(
+    const ::shelf::kernel::PagedAttentionCommonArgs& region, bool drop) {
+    auto out = region;
+    if (drop) out.block_mask = nullptr;
+    return out;
+}
+
+}  // namespace
+
 Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
     const ::shelf::runtime::Program& program, size_t dispatch_index,
     const HostExecutionContext& ctx, PagedAttentionResolveMode mode,
@@ -754,6 +767,9 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
         out.use_prefill = plan.use_prefill;
         out.kv_dtype = a.kv_dtype;
         out.splits = plan.splits;
+        static const bool keep_dense_mask =
+            std::getenv("SHELF_DISABLE_QSA_DENSE_NO_MASK") != nullptr;
+        const bool drop_mask = plan.mask_all_visible && !keep_dense_mask;
         if (plan.verify_tile) {
             auto& split = out.kernels[out.physical_count++];
             split.common = a.common;
@@ -779,13 +795,13 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
             return PhysicalResolveStatus::Applicable;
         }
         if (plan.use_prefill) {
-            if (append_prefill_region(a, a.common, ctx, out) !=
-                PhysicalResolveStatus::Applicable)
+            if (append_prefill_region(a, paged_region_mask(a.common, drop_mask), ctx,
+                                      out) != PhysicalResolveStatus::Applicable)
                 return PhysicalResolveStatus::NotApplicable;
             return PhysicalResolveStatus::Applicable;
         }
-        if (append_decode_region(a, a.common, ctx, out, plan.splits) !=
-            PhysicalResolveStatus::Applicable)
+        if (append_decode_region(a, paged_region_mask(a.common, drop_mask), ctx, out,
+                                 plan.splits) != PhysicalResolveStatus::Applicable)
             return PhysicalResolveStatus::NotApplicable;
         return PhysicalResolveStatus::Applicable;
     }
@@ -794,6 +810,8 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
     if (!plan.optimized) return PhysicalResolveStatus::NotApplicable;
     out.optimized = true;
     out.kv_dtype = a.kv_dtype;
+    static const bool keep_dense_mask = std::getenv("SHELF_DISABLE_QSA_DENSE_NO_MASK") != nullptr;
+    const bool drop_mask = plan.mask_all_visible && !keep_dense_mask;
 
     auto is_region_request = [](const ::shelf::runtime::DeviceRequestDescriptor& d) {
         return d.execution_class == ::shelf::runtime::ExecutionClass::PREFILL ||
@@ -818,7 +836,8 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
             if (append_qsa_region(a, region, ctx, out, plan.splits) !=
                 PhysicalResolveStatus::Applicable)
                 return PhysicalResolveStatus::NotApplicable;
-        } else if (append_decode_region(a, region, ctx, out, plan.splits) !=
+        } else if (append_decode_region(a, paged_region_mask(region, drop_mask), ctx, out,
+                                        plan.splits) !=
                    PhysicalResolveStatus::Applicable) {
             return PhysicalResolveStatus::NotApplicable;
         }
@@ -845,11 +864,12 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
                 return PhysicalResolveStatus::NotApplicable;
             out.use_prefill = true;
         } else if (a.common.head_dim == 256u && d.row_count >= prefill_min_rows) {
-            if (append_prefill_region(a, region, ctx, out) !=
-                PhysicalResolveStatus::Applicable)
+            if (append_prefill_region(a, paged_region_mask(region, drop_mask), ctx,
+                                      out) != PhysicalResolveStatus::Applicable)
                 return PhysicalResolveStatus::NotApplicable;
             out.use_prefill = true;
-        } else if (append_decode_region(a, region, ctx, out, plan.splits) !=
+        } else if (append_decode_region(a, paged_region_mask(region, drop_mask), ctx, out,
+                                        plan.splits) !=
                    PhysicalResolveStatus::Applicable) {
             return PhysicalResolveStatus::NotApplicable;
         }
@@ -1031,6 +1051,7 @@ uint32_t make_paged_attention_plan_key(const PagedAttentionPlan& plan) {
     key |= plan.use_prefill ? 2u : 0u;
     key |= plan.qsa_sparse ? 4u : 0u;
     key |= plan.verify_tile ? (1u << 17) : 0u;
+    key |= plan.mask_all_visible ? (1u << 30) : 0u;
     key |= (plan.splits & 0x3FFFu) << 3;
     key |= (plan.prefill_kv_blocks & 0x3FFFu) << 18;
     return key;

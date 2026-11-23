@@ -45,6 +45,7 @@ struct PagedAttentionPlan {
     bool use_prefill = false;
     bool qsa_sparse = false;
     bool verify_tile = false;
+    bool mask_all_visible = false;
     uint32_t splits = 1u;
     uint32_t prefill_kv_blocks = 0u;
 };

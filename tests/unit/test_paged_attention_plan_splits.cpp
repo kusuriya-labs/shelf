@@ -131,6 +131,29 @@ int main() {
           "q_per_kv 8 takes splits in bf16");
     check(plan_for(16, 2, 262144, kPlentyBytes, false).splits == 16u,
           "q_per_kv 8 takes splits at the measured max visible");
+    {
+        PagedAttentionResolvedArgs a;
+        a.kv_dtype = KVCacheDType::BF16;
+        a.output_dtype = ValueDType::BF16;
+        a.common.rows = 1u;
+        a.common.q_heads = 16u;
+        a.common.kv_heads = 1u;
+        a.common.head_dim = 128u;
+        a.common.page_tokens = 16u;
+        a.common.block_mask = kBlockMask;
+        a.qsa_top_k = 512u;
+        HostExecutionContext ctx;
+        ctx.spec.max_visible_tokens = 1024u;
+        check(shelf::execution::plan_paged_attention(a, ctx, false).mask_all_visible,
+              "visible blocks within the QSA budget drop the dense mask");
+        ctx.spec.max_visible_tokens = 4096u;
+        check(!shelf::execution::plan_paged_attention(a, ctx, false).mask_all_visible,
+              "over-budget visible blocks keep the dense mask");
+        a.common.block_mask = nullptr;
+        ctx.spec.max_visible_tokens = 1024u;
+        check(!shelf::execution::plan_paged_attention(a, ctx, false).mask_all_visible,
+              "a batch without a mask has nothing to drop");
+    }
     check(plan_for(16, 2, 4096, kPlentyBytes, false).optimized,
           "q_per_kv 8 is still the optimized path");
     check(plan_for(16, 2, 4096, kPlentyBytes, false, KVCacheDType::FP8_E4M3).splits == 16u,

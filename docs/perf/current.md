@@ -816,6 +816,10 @@ MTP fused verify の既定を修正し、下の表は fused 既定の build で�
   MoE router + shared gate）を 1 launch に融合した。interleaved A/B 3 ペアで
   off 32.91 / 33.23 / 33.53、on 33.51 / 33.83 / 34.06 tok/s（中央値 +1.8 %）。
   dispatch は 460 → 280 / token。`SHELF_DISABLE_BF16_PAIR=1` で無効化できる。
+- QSA の可視 block が select budget 以下なら dense attention の block mask を外す。
+  ctx 512 / 64 token の interleaved A/B 3 ペアで戻し 32.32 / 32.52 / 32.53、
+  適用 34.82 / 34.56 / 34.55 tok/s（中央値 **+6.3 %**）。attention 1 launch は
+  258.8 → 33.4 µs。`SHELF_DISABLE_QSA_DENSE_NO_MASK=1` で戻せる。
 - 2 GPU / 4 同時要求で `--max-seq-len 262144` は KV が 135,760 token しか確保できず
   起動できない。この checkpoint を EP=2 / offload なしで使う場合の上限は
   131,072 である。

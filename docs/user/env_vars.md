@@ -145,6 +145,7 @@ embedding、prefix checkpoint、offload 用バッファもドライバの GTT �
 | `SHELF_PFXDBG` | 未設定 | runtime | 設定すると prefix cache の検索・保存・復元トレースを出力する |
 | `SHELF_OP_DUMP` / `SHELF_OP_SYNC` / `SHELF_OP_FALLBACK_DEBUG` | 未設定 | runtime | 演算単位のダンプ・同期・fallback 診断（設定時は各種融合が無効化され速度が低下する） |
 | `SHELF_LINEAR_INPUT_DUMP`（`_MAX_ROWS`, `_MAX_TENSORS`） | 未設定 | runtime | linear 入力テンソルをダンプする |
+| `SHELF_DISABLE_QSA_DENSE_NO_MASK` | 未設定 | runtime | 設定すると QSA の全 block が選択予算内でも dense attention の block mask を外さない（A/B 用） |
 | `SHELF_DISABLE_BF16_PAIR` | 未設定 | runtime | 設定すると同一入力の BF16 GEMM 2 本を 1 launch にまとめる pair 融合を無効化する（A/B 用） |
 | `SHELF_BF16_DISPATCH_DEBUG` | 未設定 | runtime | 設定すると BF16 linear の物理選択（out, k, rows, variant）を stderr へ出力する |
 | `SHELF_KV_CALIB_DUMP`（`_MAX_ROWS`） | 未設定 | runtime | KV キャリブレーション用データをダンプする |

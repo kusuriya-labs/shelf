@@ -296,6 +296,12 @@ Octave は同じ一時領域の末尾に回転済みの Q を置き、split 間�
   それで、`tests/kernels/optimized/test_paged_attention.hip` の split16 比較（bf16 / fp8 双方）と
   `tests/unit/test_paged_attention_split_reduce_exact.hip` の q_per_kv 6 / 8 が対にする。
 
+- QSA の block mask が付いた decode / prefill では、可視 block 数が indexer の
+  select budget（`qsa_top_k`）以下なら全 block が選ばれる。このとき planner は
+  `PagedAttentionPlan::mask_all_visible` を立て、dense kernel へ渡す mask を外す。
+  mask を外すと kernel は page bitmap と token ごとの可視判定を省いた経路になる。
+  可視 block が budget を超える場合は mask を保持する。A/B 用に
+  `SHELF_DISABLE_QSA_DENSE_NO_MASK` で外す前の挙動へ戻せる。
 - 正規化の分母（softmax の指数和）が 0 のときは出力を書かない。
   full decode / split / reduce の全経路で同じ扱いとし、`0/0` を出力へ書かない。
   分母が 0 になるのは可視 token が 1 つも寄与しない場合（範囲外 page のみの
