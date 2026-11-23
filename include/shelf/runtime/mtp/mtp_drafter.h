@@ -8,9 +8,9 @@
 #include <shelf/inference/state/sequence_slot_pool.h>
 #include <shelf/models/common/qwen_hybrid/config.h>
 #include <shelf/models/common/qwen_hybrid/lowered_primitives.h>
-#include <shelf/models/qwen35/model/rope_profile.h>
-#include <shelf/models/qwen35/runtime/executor.h>
-#include <shelf/models/qwen35/runtime/gdn_spec_history.h>
+#include <shelf/runtime/rope_profile.h>
+#include <shelf/runtime/executor.h>
+#include <shelf/runtime/gdn_spec_history.h>
 #include <shelf/runtime/scheduling_types.h>
 #include <shelf/runtime/tp/tp_batch_hook.h>
 #include <shelf/weights/matrix_weight.h>
@@ -23,8 +23,8 @@
 #include <vector>
 
 namespace shelf {
-namespace qwen35 {
 namespace runtime {
+namespace mtp {
 
 constexpr uint32_t kMtpMaxDrafts = 31u;
 constexpr uint32_t kMtpMaxPrefillRows = 512u;
@@ -228,8 +228,8 @@ struct MtpDrafterInput {
     // Largest rotated-domain linear the draft block runs. An empty shape keeps the
     // model-independent upper bound.
     shelf::weights::Exl3LinearShape exl3_linear_shape;
-    // The target hidden the drafter consumes. Qwen4Exp feeds the pre-mixer wide residual
-    // (hc * hidden); the Qwen35 families feed the final normed hidden.
+    // The target hidden the drafter consumes. A wide-residual family feeds the pre-mixer residual
+    // (hc * hidden); the target families feed the final normed hidden.
     std::uint32_t hidden_width = 0;
     bool wide_hidden = false;
 };
@@ -429,6 +429,6 @@ Result<MtpSpecBatchOutput> mtp_spec_step_batch(
     MtpSpecBatchContext& context,
     std::span<const MtpSpecBatchSlot> slots);
 
+}  // namespace mtp
 }  // namespace runtime
-}  // namespace qwen35
 }  // namespace shelf

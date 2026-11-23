@@ -14,16 +14,24 @@ apps から下方向への依存のみ。矢印は「参照する」向きで、
 apps
   shelf-compute / shelf-server / shelf-bench
       ↓
-shelf_models
-  model_weights_factory / loaded_model / tp_rank_model / pipeline_stage_model
-  (family 選択 + executor 生成; plamo3 sources を含む)
+shelf_engine
+  ComputeSession / SpeculationRunner / ServeController
+  (request lifecycle, execution mode, resource budget, diagnostics)
+      ↓                    ↓
+shelf_models          shelf_runtime / shelf_inference
+  model probe           Executor / Batcher / state / prefix / TP / PP
+  weight/load
+  family policy
       ↓
 family層
   qwen35 (Dense)   qwen35moe (Moe)   qwen35qsa (Qsa)   qwen4exp (Qwen4Exp, loadのみ)   plamo3
-      ↓
-shelf_qwen35_runtime
-  family固有の executor 生成 (dense) / tp_rank_model_dense / pipeline_stage_model_dense / MTP drafter
-      ↓
+      ↓                                            ↓
+shelf_qwen35_runtime                          shelf_mtp
+  family固有の executor 生成 (dense) /            family中立の MTP drafter runtime
+  tp_rank_model_dense /                          (graph / reserve / snapshot / batch step)
+  pipeline_stage_model_dense
+      \                                            /
+       v                                          v
 shelf_runtime (共通 runtime)
   Executor / ContinuousBatcher / DFlash2 spec decode / spec state / request / token budget /
   prefix cache / decode backend / TP / pipeline parallel / graph / program / workspace layout
@@ -71,7 +79,7 @@ root namespace は `shelf`。`include/shelf/**` と `src/shelf/**` のディレ�
 | `shelf/io/**` | `shelf` |
 | `shelf/quantization/**` | `shelf::quantization`（下位: `manifest` / `bundle` / `codec` / `fp8` / `mxfp4` / `exl3`） |
 | `shelf/weights/**` | `shelf::weights` |
-| `shelf/runtime/**` | `shelf::runtime`（dflash2 の一部は `shelf::runtime::dflash2`） |
+| `shelf/runtime/**` | `shelf::runtime`（`dflash2` は `shelf::runtime::dflash2`、`mtp` は `shelf::runtime::mtp`） |
 | `shelf/kernels/**`（dflash2 を含む） | `shelf::kernel` |
 | `shelf/inference/state/**` | `shelf::state` |
 | `shelf/inference/scheduling/**` | `shelf::scheduling` |
@@ -85,6 +93,7 @@ root namespace は `shelf`。`include/shelf/**` と `src/shelf/**` のディレ�
 | `shelf/models/qwen4exp/**` | `shelf::qwen4exp` |
 | `shelf/models/plamo3/**` | `shelf::plamo3` |
 | `shelf/models/model_weights_factory.h` / `loaded_model.h` / `tp_rank_model.h` / `pipeline_stage_model.h` | `shelf::models` |
+| `shelf/engine/**` | `shelf::engine` |
 | `src/apps/**` | `shelf::app` / `shelf::bench::quality` |
 
 共通 runtime は `models/common/qwen_hybrid` の family 中立な部品（config /
@@ -157,14 +166,24 @@ CMake target の詳細な一覧は `cmake/targets.cmake` を参照。
   経路は後続の family port に委ねる
 - `shelf_qwen35_runtime` は family 固有の runtime 層だが、実行編成は共通層へ移した後、
   残る責務は dense model から共通 Executor を生成する処理
-  （`executor_model.cpp`）、dense の `TpRankModel` / `PipelineStageModel` 実装、
-  および MTP drafter とその linear kernel だけである
+  （`executor_model.cpp`）、dense の `TpRankModel` / `PipelineStageModel` 実装である
+- `shelf_mtp` は family 中立な MTP drafter runtime。drafter graph・reserve・
+  snapshot・batch step を `runtime/mtp/mtp_drafter` に置き、linear helper は
+  `models/common/drafter/linear` を共有する。family は MTP block を
+  `MtpDrafterInput` へ lowering するだけで、ここでは dense / QSA / Qwen4Exp の
+  どれも名指ししない
 - `shelf_models` は family 選択と executor 生成の入口
   （`shelf::models::load_model_weights` / `LoadedModel` / `TpRankModel` /
   `PipelineStageModel`）。plamo3 の source もここに置く。
   全 family の loader を link する唯一の target で、`shelf_qwen35_runtime` も link する。
   family 選択は config の構造だけが決め、identity の判定は `shelf_qwen_hybrid` の
-  identity gate が担う（後述「Checkpoint識別」）
+  identity gate が担う（後述「Checkpoint識別」）。
+  checkpoint の制約・rope profile・private target weight 名もここが持つ
+  （`model_policy` / `private_target_weights`）
+- `shelf_engine` は `shelf-compute` の実行編成だけを持つ。`ComputeSession` は
+  request lifecycle、resource budget、diagnostics を公開し、`SpeculationRunner` と
+  `ServeController` は MTP / DFlash2 のセッション制御を担う。アプリは engine の
+  public header だけを見て、family や `shelf::runtime::Executor` を直接扱わない
 
 `shelf_kernels_correctness` は `shelf_runtime` に link する一方、
 `shelf_runtime` は `shelf_core` / `shelf_gpu` / `shelf_kernels_fused` だけを使う。
@@ -242,7 +261,20 @@ Qwen35 model -> Qwen35 runtime             : forbidden
 Qwen35 kernels -> Qwen35 runtime           : forbidden
 Qwen35 <-> Qwen35 MoE                      : forbidden（互いに名指ししない）
 common/qwen_hybrid -> 具体 family           : forbidden
+apps/compute -> 具体 family / LoadedModel  : forbidden
+apps/compute -> Executor / TP rank / HIP   : forbidden
+engine -> 具体 family                       : forbidden
+drafter -> 具体 family                     : forbidden
 ```
+
+`src/apps/compute` は `shelf/engine/**` と `shelf/models/model_info.h` /
+`model_policy.h` のような model-neutral な型だけを参照する。family 名を help 文字列に
+書くことはできるが、include と型参照は `test_architecture_boundaries` が落とす。
+
+`src/shelf/engine/**` は model-neutral な実行編成だけを持ち、`nlohmann/json` や
+serving schema を参照しない。MTP は `models/common/drafter`、DFlash2 は
+`shelf_runtime` の型を使うため、engine に family 固有の例外はない。
+新しい family 固有処理を engine に足さず、models または共通 runtime 側へ置く。
 
 `cmake/targets.cmake` の `target_link_libraries` も同じ test が token 単位で読み、
 dense / MoE の直接 link、`shelf_qwen_hybrid` の family link、`shelf_weights` /

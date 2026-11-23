@@ -5,7 +5,7 @@
 #include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35/model/tensor_parallel_context.h>
 #include <shelf/models/qwen35/runtime/executor.h>
-#include <shelf/models/qwen35/runtime/mtp_drafter.h>
+#include <shelf/runtime/mtp/mtp_drafter.h>
 #include <shelf/models/qwen35/runtime/tensor_parallel.h>
 #include <shelf/runtime/state_types.h>
 #include <shelf/models/qwen35moe/model/qwen35moe_model.h>
@@ -70,8 +70,8 @@ public:
     virtual shelf::weights::Exl3LinearShape mtp_exl3_linear_shape() const { return {}; }
     // Lowers this rank's MTP block into the drafter graph. A rank without the block
     // returns unsupported.
-    virtual shelf::Result<shelf::qwen35::runtime::MtpDrafterInput> mtp_drafter_input(
-        const shelf::qwen35::runtime::MtpDrafterConfig& options) const {
+    virtual shelf::Result<shelf::runtime::mtp::MtpDrafterInput> mtp_drafter_input(
+        const shelf::runtime::mtp::MtpDrafterConfig& options) const {
         (void)options;
         return Status::unsupported("this rank has no MTP block", __FILE__, __LINE__);
     }
@@ -106,6 +106,14 @@ public:
     // The rank's own embedding table. It is this rank's vocabulary shard when the load
     // split the vocabulary, and the full table otherwise.
     virtual const shelf::weights::MatrixWeight* embed_tokens() const { return nullptr; }
+    // A family that keeps a complete replicated head / embedding on every rank returns
+    // it here. Null means the caller uses the rank's private target load instead.
+    virtual const shelf::weights::MatrixWeight* replicated_lm_head() const { return nullptr; }
+    virtual const shelf::weights::MatrixWeight* replicated_embed_tokens() const {
+        return nullptr;
+    }
+    // True when MTP drafter inputs are lowered per rank instead of from rank 0's model.
+    virtual bool mtp_uses_per_rank_input() const { return false; }
     // The dense family's model, for callers that need its weights. Null for a model whose FFN
     // runs on grouped expert rows, which has no dense model to reach.
     virtual const shelf::qwen35::Qwen35Model* dense_model() const { return nullptr; }
@@ -146,7 +154,7 @@ std::shared_ptr<const shelf::qwen4exp::PleTable> get_qwen4exp_ple_table(
 
 // Sets config.build_rank_model to the family config.model_dir declares, read from
 // num_experts before any tensor is opened.
-shelf::Status select_tp_rank_model(shelf::qwen35::runtime::TpCoordinatorConfig& config);
+shelf::Status select_tp_rank_model(shelf::runtime::TpCoordinatorConfig& config);
 
 // Lowers a grouped-expert model with this rank's expert range and hands the shared lowered
 // form to the executor. LoadedModel and a tensor parallel rank both reach the executor this
@@ -181,10 +189,10 @@ public:
     ~TpGroup() = default;
 
     static shelf::Result<TpGroup> create(
-        const shelf::qwen35::runtime::TpCoordinatorConfig& config);
+        const shelf::runtime::TpCoordinatorConfig& config);
 
-    shelf::qwen35::runtime::TpCoordinator& coordinator() noexcept { return *coordinator_; }
-    const shelf::qwen35::runtime::TpCoordinator& coordinator() const noexcept {
+    shelf::runtime::TpCoordinator& coordinator() noexcept { return *coordinator_; }
+    const shelf::runtime::TpCoordinator& coordinator() const noexcept {
         return *coordinator_;
     }
     LoadedModel& model() noexcept { return model_.value(); }
@@ -193,7 +201,7 @@ public:
 private:
     TpGroup() = default;
 
-    std::unique_ptr<shelf::qwen35::runtime::TpCoordinator> coordinator_;
+    std::unique_ptr<shelf::runtime::TpCoordinator> coordinator_;
     std::optional<LoadedModel> model_;
 };
 

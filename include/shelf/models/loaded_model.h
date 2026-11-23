@@ -4,7 +4,7 @@
 #include <shelf/models/model_weights_factory.h>
 #include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35/runtime/executor.h>
-#include <shelf/models/qwen35/runtime/mtp_drafter.h>
+#include <shelf/runtime/mtp/mtp_drafter.h>
 #include <shelf/models/qwen35moe/model/qwen35moe_model.h>
 #include <shelf/models/qwen4exp/model/qwen4exp_model.h>
 #include <shelf/models/qwen4exp/runtime/moe_expert_cache.h>
@@ -23,6 +23,9 @@ class PleTable;
 }
 
 namespace shelf::models {
+
+class TpRankModel;
+class PipelineStageModel;
 
 struct HostMemoryBytes {
     std::uint64_t embedding = 0;
@@ -56,6 +59,11 @@ public:
     static LoadedModel borrow(const shelf::qwen35moe::Qwen35MoeModel& model);
     static LoadedModel borrow(const shelf::qwen4exp::Qwen4ExpModel& model);
     static LoadedModel borrow(const shelf::qwen35qsa::Qwen35QsaModel& model);
+
+    // Family selection for a rank / stage model stays here; callers outside this layer
+    // receive a borrowed handle and never branch on the family.
+    static LoadedModel borrow_rank_model(const TpRankModel& model);
+    static LoadedModel borrow_stage_model(const PipelineStageModel& model);
 
     [[nodiscard]]
     ModelFamily family() const noexcept {
@@ -154,21 +162,21 @@ public:
     // The drafter input: this model's geometry and embedding, and its MTP block lowered by
     // the family that loaded it. Fails when there is no block, so a caller cannot ask for
     // speculative decode on a checkpoint that does not carry one.
-    Result<shelf::qwen35::runtime::MtpDrafterInput> mtp_drafter_input(
-        const shelf::qwen35::runtime::MtpDrafterConfig& options,
+    Result<shelf::runtime::mtp::MtpDrafterInput> mtp_drafter_input(
+        const shelf::runtime::mtp::MtpDrafterConfig& options,
         const shelf::weights::MatrixWeight* lm_head_override = nullptr) const;
 
     // Arena bytes the drafter needs, with the executor terms this model's FFN adds at the
     // drafter's row count.
     [[nodiscard]]
     std::size_t mtp_drafter_reserve_bytes(
-        const shelf::qwen35::runtime::MtpDrafterConfig& options) const;
+        const shelf::runtime::mtp::MtpDrafterConfig& options) const;
 
     // The arena the batched MTP serve needs: one drafter per concurrent request plus the
     // shared per-rank history / compact log.
     [[nodiscard]]
     std::size_t mtp_spec_batch_reserve_bytes(
-        const shelf::qwen35::runtime::MtpDrafterConfig& options,
+        const shelf::runtime::mtp::MtpDrafterConfig& options,
         std::size_t max_requests) const;
 
 private:

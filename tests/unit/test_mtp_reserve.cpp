@@ -1,12 +1,12 @@
 #include <shelf/inference/state/gdn_state.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
-#include <shelf/models/qwen35/runtime/mtp_drafter.h>
+#include <shelf/runtime/mtp/mtp_drafter.h>
 
 #include <cstdio>
 #include <string>
 
-using shelf::qwen35::runtime::mtp_batch_rank_state_reserve_bytes;
-using shelf::qwen35::runtime::mtp_spec_rows;
+using shelf::runtime::mtp::mtp_batch_rank_state_reserve_bytes;
+using shelf::runtime::mtp::mtp_spec_rows;
 
 static int g_fail = 0;
 
@@ -77,16 +77,16 @@ int main() {
     check(mtp_batch_rank_state_reserve_bytes(gdn_full, 0u, 1u) == 0u,
           "no verify rows reserve nothing");
 
-    shelf::qwen35::runtime::MtpDrafterConfig options;
+    shelf::runtime::mtp::MtpDrafterConfig options;
     options.num_drafts = 4u;
     options.max_seq_len = 524288u;
     options.page_tokens = 16u;
     options.max_batch_rows = 512u;
     options.kv_dtype = shelf::kernel::KVCacheDType::FP8_E4M3;
 
-    const std::size_t drafter_full = shelf::qwen35::runtime::mtp_drafter_reserve_bytes(
+    const std::size_t drafter_full = shelf::runtime::mtp::mtp_drafter_reserve_bytes(
         full, options, 640u, 0u, true);
-    const std::size_t drafter_local = shelf::qwen35::runtime::mtp_drafter_reserve_bytes(
+    const std::size_t drafter_local = shelf::runtime::mtp::mtp_drafter_reserve_bytes(
         full, options, 640u, 0u, true, {}, &gdn_local);
     check(drafter_local < drafter_full,
           "a tp rank reserves its local target gdn snapshot");
@@ -95,7 +95,7 @@ int main() {
     mtp_shape.max_k = 2560u;
     mtp_shape.max_out_features = 6144u;
     mtp_shape.max_dense_bytes = 2560u * 6144u * 2u;
-    const std::size_t drafter_shaped = shelf::qwen35::runtime::mtp_drafter_reserve_bytes(
+    const std::size_t drafter_shaped = shelf::runtime::mtp::mtp_drafter_reserve_bytes(
         full, options, 640u, 0u, true, mtp_shape, &gdn_local);
     check(drafter_shaped < drafter_local,
           "the drafter reserves its own exl3 staging planes, not the generic bound");

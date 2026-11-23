@@ -330,8 +330,8 @@ public:
         return qwen4exp::mtp_exl3_linear_shape(model_.weights());
     }
 
-    shelf::Result<q35r::MtpDrafterInput> mtp_drafter_input(
-        const q35r::MtpDrafterConfig& options) const override {
+    shelf::Result<shelf::runtime::mtp::MtpDrafterInput> mtp_drafter_input(
+        const shelf::runtime::mtp::MtpDrafterConfig& options) const override {
         const auto& cfg = model_.text_config();
         qwen4exp::Qwen4ExpLowerOptions lower_options;
         lower_options.max_context_tokens = options.max_seq_len + 1u;
@@ -344,14 +344,14 @@ public:
         auto lowered = qwen4exp::lower_qwen4exp_mtp_to_primitives(
             cfg, model_.weights(), lower_options);
         if (!lowered.ok()) return lowered.status();
-        q35r::MtpDrafterInput input;
+        shelf::runtime::mtp::MtpDrafterInput input;
         input.config = &hybrid_config();
         input.embed_tokens = &model_.weights().embed_tokens;
         input.lowered = lowered.release();
         input.token_row_intermediate =
             static_cast<std::size_t>(cfg.ffn.shared_expert_intermediate_size);
         input.grouped_executor_bytes = qwen4exp::mtp_grouped_executor_bytes(
-            cfg, q35r::mtp_drafter_rows(options), 0u, context_.local_num_experts);
+            cfg, shelf::runtime::mtp::mtp_drafter_rows(options), 0u, context_.local_num_experts);
         input.exl3_linear_shape = mtp_exl3_linear_shape();
         input.hidden_width =
             static_cast<std::uint32_t>(cfg.hc_count * cfg.hidden_size);
@@ -380,6 +380,13 @@ public:
     }
 
     const qwen4exp::Qwen4ExpModel* qwen4exp_model() const override { return &model_; }
+    const shelf::weights::MatrixWeight* replicated_lm_head() const override {
+        return &model_.weights().lm_head;
+    }
+    const shelf::weights::MatrixWeight* replicated_embed_tokens() const override {
+        return &model_.weights().embed_tokens;
+    }
+    bool mtp_uses_per_rank_input() const override { return true; }
 
 private:
     static void add_matrix(std::uint64_t& total, const weights::MatrixWeight& w) {

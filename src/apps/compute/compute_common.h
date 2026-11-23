@@ -1,19 +1,11 @@
 #pragma once
 
 #include <shelf/runtime/runtime_request.h>
-#include <shelf/models/common/qwen_hybrid/config.h>
-
-#include <cstdint>
 
 namespace shelf::app {
 
-inline uint32_t count_attention_layers(const shelf::qwen_hybrid::QwenHybridConfig& tc) {
-    return static_cast<uint32_t>(
-        shelf::qwen_hybrid::count_layer_topology(tc).attention_layers);
-}
-
-inline const char* finish_reason_name(shelf::qwen35::runtime::FinishReason reason) {
-    using shelf::qwen35::runtime::FinishReason;
+inline const char* finish_reason_name(shelf::runtime::FinishReason reason) {
+    using shelf::runtime::FinishReason;
     switch (reason) {
         case FinishReason::Eos: return "stop";
         case FinishReason::MaxNewTokens: return "length";

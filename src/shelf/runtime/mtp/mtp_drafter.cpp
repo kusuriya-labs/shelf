@@ -1,11 +1,11 @@
-#include <shelf/models/qwen35/runtime/mtp_drafter.h>
+#include <shelf/runtime/mtp/mtp_drafter.h>
 
 #include <shelf/core/gpu/scoped_device.h>
-#include <shelf/models/qwen35/model/gdn_state_layout.h>
-#include <shelf/models/qwen35/runtime/executor_footprint.h>
+#include <shelf/runtime/gdn_state_layout.h>
+#include <shelf/runtime/executor_footprint.h>
 #include <shelf/kernels/optimized/gdn/recurrence.h>
-#include <shelf/models/qwen35/runtime/spec_decode.h>
-#include <shelf/models/qwen35/runtime/tp_batch_hook.h>
+#include <shelf/runtime/spec_decode.h>
+#include <shelf/runtime/tp/tp_batch_hook.h>
 #include <shelf/runtime/kv_pages.h>
 
 #include <algorithm>
@@ -13,7 +13,7 @@
 #include <cstdio>
 #include <vector>
 
-namespace shelf::qwen35::runtime {
+namespace shelf::runtime::mtp {
 
 namespace {
 
@@ -883,12 +883,12 @@ std::size_t mtp_drafter_reserve_bytes(const shelf::qwen_hybrid::QwenHybridConfig
     executor_config.external_hidden_input = true;
     executor_config.external_mask_bytes = draft_mask_bytes(options.max_seq_len);
     executor_config.exl3_linear_shape = exl3_linear_shape;
-    const std::size_t executor = qwen35_executor_reserve_bytes(
+    const std::size_t executor = executor_reserve_bytes(
         mtp, token_row_intermediate, executor_config, 1u, exl3_linear_workspace) +
         grouped_executor_bytes;
 
     const state::GdnStatePoolLayout gdn =
-        target_gdn != nullptr ? *target_gdn : make_qwen35_gdn_state_layout(config);
+        target_gdn != nullptr ? *target_gdn : make_gdn_state_layout(config);
     std::size_t history = 0u;
     std::size_t compact = 0u;
     if (options.allocate_spec_buffers) {
@@ -938,7 +938,7 @@ std::size_t mtp_shared_draft_reserve_bytes(
     executor_config.max_scheduled_output_rows = max_requests;
     executor_config.external_hidden_input = true;
     executor_config.exl3_linear_shape = exl3_linear_shape;
-    const std::size_t executor = qwen35_executor_reserve_bytes(
+    const std::size_t executor = executor_reserve_bytes(
         mtp, token_row_intermediate, executor_config, 1u, exl3_linear_workspace) +
         grouped_executor_bytes;
 
@@ -1023,7 +1023,7 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
             std::make_unique<state::SequenceSlotPool>(slot_pool.release());
 
         const state::GdnStatePoolLayout gdn_layout =
-            make_qwen35_gdn_state_layout(drafter->config);
+            make_gdn_state_layout(drafter->config);
         auto gdn_pool = state::GdnStatePool::create(arena, 1u, gdn_layout);
         if (!gdn_pool.ok()) return gdn_pool.status();
         drafter->gdn_pool = std::make_unique<state::GdnStatePool>(gdn_pool.release());
@@ -2000,7 +2000,7 @@ Result<MtpSpecBatchContext> create_mtp_spec_batch_context(
         shared->slot_pool =
             std::make_unique<state::SequenceSlotPool>(slot_pool.release());
         const state::GdnStatePoolLayout gdn_layout =
-            make_qwen35_gdn_state_layout(shared->config);
+            make_gdn_state_layout(shared->config);
         auto gdn_pool = state::GdnStatePool::create(rank_arena, max_requests, gdn_layout);
         if (!gdn_pool.ok()) return gdn_pool.status();
         shared->gdn_pool = std::make_unique<state::GdnStatePool>(gdn_pool.release());
@@ -2907,4 +2907,4 @@ Result<MtpSpecBatchOutput> mtp_spec_step_batch(
     return out;
 }
 
-}  // namespace shelf::qwen35::runtime
+}  // namespace shelf::runtime::mtp

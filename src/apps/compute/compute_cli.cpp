@@ -2,6 +2,7 @@
 #include "arena_budget.h"
 #include <shelf/kernels/kv_types.h>
 #include <shelf/runtime/dflash2_config.h>
+#include <shelf/models/model_policy.h>
 
 #include <cerrno>
 #include <cmath>
@@ -147,7 +148,7 @@ void compute_usage(const char* prog) {
     printf("  --mtp-window N         draft attention window in tokens (0 = full context)\n");
     printf("  --mtp-sink N           attention-sink tokens kept before the window\n");
     printf("  --mtp-drafts N         speculative draft tokens per round (default 7,\n");
-    printf("                         max %u)\n", shelf::qwen35::runtime::kMtpMaxDrafts);
+    printf("                         max %u)\n", shelf::models::max_mtp_drafts());
     printf("  --mtp-stats 0|1        print MTP speculative decode statistics (default 1)\n");
     printf("  --prefix-cache 0|1     enable prefix cache (default 1)\n");
     printf("  --working-set-reserve-gib N    arena headroom kept free for the working set\n");
@@ -242,7 +243,7 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
     auto& hidden_taps = opt.hidden_taps;
     auto& tp_combine_f32 = opt.tp_combine_f32;
     auto& serve_stdio = opt.serve_stdio;
-    shelf::qwen35::runtime::SamplingConfig& sampling = opt.sampling;
+    shelf::runtime::SamplingConfig& sampling = opt.sampling;
     auto& dflash2_model_dir = opt.dflash2_model_dir;
     auto& dflash2_drafts = opt.dflash2_drafts;
     auto& dflash2_max_sessions = opt.dflash2_max_sessions;
@@ -421,9 +422,9 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
             mtp = true;
         } else if (std::strcmp(argv[i], "--mtp-drafts") == 0 && i + 1 < argc) {
             if (!parse_uint(argv[++i], mtp_drafts) || mtp_drafts == 0 ||
-                mtp_drafts > shelf::qwen35::runtime::kMtpMaxDrafts) {
+                mtp_drafts > shelf::models::max_mtp_drafts()) {
                 fprintf(stderr, "bad --mtp-drafts (expected 1..%u)\n",
-                        shelf::qwen35::runtime::kMtpMaxDrafts);
+                        shelf::models::max_mtp_drafts());
                 return kComputeParseError;
             }
         } else if (std::strcmp(argv[i], "--mtp-stats") == 0 && i + 1 < argc) {
@@ -614,7 +615,7 @@ int validate_compute_options(const ComputeOptions& opt) {
     const auto& verify_weights = opt.verify_weights;
     const auto& dump_logits_path = opt.dump_logits_path;
     const auto& serve_stdio = opt.serve_stdio;
-    const shelf::qwen35::runtime::SamplingConfig& sampling = opt.sampling;
+    const shelf::runtime::SamplingConfig& sampling = opt.sampling;
     const auto& dflash2_model_dir = opt.dflash2_model_dir;
     const auto& dflash2_drafts = opt.dflash2_drafts;
     const auto& dflash2_stats = opt.dflash2_stats;
@@ -717,9 +718,9 @@ int validate_compute_options(const ComputeOptions& opt) {
             fprintf(stderr, "MTP speculative decoding does not support --dump-logits\n");
             return kComputeParseError;
         }
-        if (mtp_drafts > shelf::qwen35::runtime::kMtpMaxDrafts) {
+        if (mtp_drafts > shelf::models::max_mtp_drafts()) {
             fprintf(stderr, "--mtp-drafts exceeds %u\n",
-                    shelf::qwen35::runtime::kMtpMaxDrafts);
+                    shelf::models::max_mtp_drafts());
             return kComputeParseError;
         }
     }
@@ -727,7 +728,7 @@ int validate_compute_options(const ComputeOptions& opt) {
 
     {
         const shelf::Status sampling_status =
-            shelf::qwen35::runtime::validate_sampling_config(sampling);
+            shelf::runtime::validate_sampling_config(sampling);
         if (!sampling_status.ok()) {
             fprintf(stderr, "invalid sampling option: %s\n",
                     sampling_status.message().c_str());

@@ -2,7 +2,6 @@
 
 #include <shelf/core/status.h>
 #include <shelf/runtime/decode_backend.h>
-#include <shelf/models/qwen35/runtime/mtp_drafter.h>
 #include <shelf/runtime/scheduling_types.h>
 
 #include <cstddef>
@@ -36,7 +35,7 @@ struct ComputeOptions {
     std::string hidden_taps;
     int tp_combine_f32 = 0;
     bool serve_stdio = false;
-    shelf::qwen35::runtime::SamplingConfig sampling;
+    shelf::runtime::SamplingConfig sampling;
     std::string dflash2_model_dir;
     unsigned long dflash2_drafts = 7;
     bool dflash2_adaptive = false;

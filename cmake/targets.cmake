@@ -451,6 +451,9 @@ add_library(shelf_models STATIC
     src/shelf/models/plamo3/weights/model_weights.cpp
     src/shelf/models/model_weights_factory.cpp
     src/shelf/models/loaded_model.cpp
+    src/shelf/models/model_info.cpp
+    src/shelf/models/model_policy.cpp
+    src/shelf/models/private_target_weights.cpp
     src/shelf/models/pipeline_stage_model.cpp
     src/shelf/models/tp_rank_model.cpp)
 target_compile_features(shelf_models PRIVATE cxx_std_20)
@@ -460,17 +463,37 @@ target_include_directories(shelf_models SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vend
 target_link_libraries(shelf_models PUBLIC shelf_qwen35 shelf_qwen35_runtime shelf_qwen35moe shelf_qwen35qsa shelf_qwen4exp shelf_gpu)
 target_compile_options(shelf_models PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type -Werror=switch)
 
+# Family-neutral speculative drafter runtime (MTP). The lowering of a family's MTP
+# block stays in that family; the drafter graph, reserve, snapshot and batch step are
+# shared by dense, QSA and Qwen4Exp.
+add_library(shelf_mtp STATIC
+    src/shelf/runtime/mtp/mtp_drafter.cpp
+    src/shelf/models/common/drafter/linear.hip
+)
+target_compile_features(shelf_mtp PRIVATE cxx_std_20)
+target_include_directories(shelf_mtp PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(shelf_mtp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(shelf_mtp PUBLIC
+    shelf_runtime
+    shelf_dflash2
+    shelf_inference_state
+    shelf_inference_execution
+    shelf_kernels_optimized
+    shelf_qwen_hybrid
+    shelf_gpu
+)
+target_compile_options(shelf_mtp PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
+shelf_set_hip_archs(shelf_mtp)
+
 add_library(shelf_qwen35_runtime STATIC
     src/shelf/models/qwen35/runtime/executor_model.cpp
     src/shelf/models/qwen35/runtime/tp_rank_model_dense.cpp
     src/shelf/models/qwen35/runtime/pipeline_stage_model_dense.cpp
-    src/shelf/models/qwen35/runtime/mtp_drafter.cpp
-    src/shelf/models/common/drafter/linear.hip
 )
 target_compile_features(shelf_qwen35_runtime PRIVATE cxx_std_20)
 target_include_directories(shelf_qwen35_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(shelf_qwen35_runtime PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(shelf_qwen35_runtime PUBLIC shelf_dflash2 shelf_qwen35 shelf_inference_state shelf_inference_scheduling shelf_inference_execution shelf_inference_prefix shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_runtime shelf_gpu)
+target_link_libraries(shelf_qwen35_runtime PUBLIC shelf_dflash2 shelf_mtp shelf_qwen35 shelf_inference_state shelf_inference_scheduling shelf_inference_execution shelf_inference_prefix shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_runtime shelf_gpu)
 target_compile_options(shelf_qwen35_runtime PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 shelf_set_hip_archs(shelf_qwen35_runtime)
 if(SHELF_HIP_GRAPH)
@@ -480,6 +503,27 @@ if(SHELF_HIP_GRAPH)
         src/shelf/runtime/executor.hip
         PROPERTIES COMPILE_DEFINITIONS "SHELF_HIP_GRAPH")
 endif()
+
+# Execution orchestration above the model layer. It resolves a request through
+# shelf::models and drives shelf::runtime; the application only sees its public API.
+add_library(shelf_engine STATIC
+    src/shelf/engine/compute_session.hip
+    src/shelf/engine/speculation.hip
+    src/shelf/engine/serve.hip
+)
+target_compile_features(shelf_engine PRIVATE cxx_std_20)
+target_include_directories(shelf_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(shelf_engine PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(shelf_engine PUBLIC
+    shelf_models
+    shelf_runtime
+    shelf_dflash2
+    shelf_mtp
+    shelf_inference_execution
+    shelf_gpu
+)
+target_compile_options(shelf_engine PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
+shelf_set_hip_archs(shelf_engine)
 
 # Aggregate INTERFACE target. Tests and benchmarks link against this.
 add_library(shelf INTERFACE)
@@ -497,9 +541,11 @@ target_link_libraries(
         shelf_inference_scheduling
         shelf_inference_execution
         shelf_qwen35
+        shelf_mtp
         shelf_qwen35_runtime
         shelf_qwen35moe
         shelf_models
+        shelf_engine
         shelf_quant_format
         shelf_quant_bundle
 )

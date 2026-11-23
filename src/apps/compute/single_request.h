@@ -1,7 +1,6 @@
 #pragma once
 
-#include "compute_runtime.h"
-
+#include <shelf/engine/compute_session.h>
 #include <shelf/runtime/dflash2_config.h>
 #include <shelf/runtime/scheduling_types.h>
 
@@ -11,22 +10,22 @@
 
 namespace shelf::app {
 
-int run_single_shot(Qwen35ComputeRuntime& runtime,
+int run_single_shot(shelf::engine::ComputeSession& runtime,
                     const std::vector<int32_t>& prompt_ids,
                     unsigned long max_new_tokens,
-                    const shelf::qwen35::runtime::SamplingConfig& sampling,
+                    const shelf::runtime::SamplingConfig& sampling,
                     const std::string& kv_cache_dtype,
                     const std::string& dump_logits_path);
 
-int run_mtp_shot(Qwen35ComputeRuntime& runtime,
+int run_mtp_shot(shelf::engine::ComputeSession& runtime,
                  const std::vector<int32_t>& prompt_ids,
                  unsigned long max_new_tokens,
                  uint32_t mtp_drafts,
                  int mtp_stats,
                  const std::string& kv_cache_dtype,
-                 const shelf::qwen35::runtime::SamplingConfig& sampling);
+                 const shelf::runtime::SamplingConfig& sampling);
 
-int run_dflash2_shot(Qwen35ComputeRuntime& runtime,
+int run_dflash2_shot(shelf::engine::ComputeSession& runtime,
                      const std::vector<int32_t>& prompt_ids,
                      unsigned long max_new_tokens,
                      const ::shelf::runtime::DFlash2Config& dflash_config,
@@ -38,6 +37,6 @@ int run_dflash2_shot(Qwen35ComputeRuntime& runtime,
                      unsigned long dflash2_tree_extra,
                      unsigned long dflash2_tree_budget,
                      const std::string& kv_cache_dtype,
-                     const shelf::qwen35::runtime::SamplingConfig& sampling);
+                     const shelf::runtime::SamplingConfig& sampling);
 
 }  // namespace shelf::app

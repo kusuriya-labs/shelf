@@ -11,13 +11,12 @@ add_executable(shelf-compute
     src/apps/compute/compute_cli.cpp
     src/apps/compute/single_request.hip
     src/apps/compute/stdio_server.hip
-    src/apps/compute/compute_runtime.hip
 )
 shelf_set_rocm_rpath(shelf-compute)
 target_compile_features(shelf-compute PRIVATE cxx_std_20)
 target_include_directories(shelf-compute SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
 target_include_directories(shelf-compute PRIVATE "${CMAKE_SOURCE_DIR}/src")
-target_link_libraries(shelf-compute PRIVATE shelf)
+target_link_libraries(shelf-compute PRIVATE shelf_engine)
 shelf_set_hip_archs(shelf-compute)
 
 # Server product: Python entrypoint plus the OpenAI protocol adapter, the async

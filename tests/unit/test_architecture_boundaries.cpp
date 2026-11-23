@@ -34,6 +34,93 @@ std::string read_file(const fs::path& p) {
     return out;
 }
 
+// Keeps the code part of a translation unit and drops comments and string / character
+// literals. A model name in a help string is not a dependency; a model name in code is.
+std::string code_only(const std::string& text) {
+    std::string out;
+    out.reserve(text.size());
+    enum class State { Normal, LineComment, BlockComment, String, Character };
+    State state = State::Normal;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        const char next = i + 1 < text.size() ? text[i + 1] : '\0';
+        switch (state) {
+            case State::Normal:
+                if (c == '/' && next == '/') {
+                    state = State::LineComment;
+                    ++i;
+                } else if (c == '/' && next == '*') {
+                    state = State::BlockComment;
+                    ++i;
+                } else if (c == '"') {
+                    state = State::String;
+                } else if (c == '\'') {
+                    state = State::Character;
+                } else {
+                    out.push_back(c);
+                }
+                break;
+            case State::LineComment:
+                if (c == '\n') {
+                    out.push_back('\n');
+                    state = State::Normal;
+                }
+                break;
+            case State::BlockComment:
+                if (c == '*' && next == '/') {
+                    state = State::Normal;
+                    ++i;
+                } else if (c == '\n') {
+                    out.push_back('\n');
+                }
+                break;
+            case State::String:
+                if (c == '\\') {
+                    ++i;
+                } else if (c == '"') {
+                    state = State::Normal;
+                }
+                break;
+            case State::Character:
+                if (c == '\\') {
+                    ++i;
+                } else if (c == '\'') {
+                    state = State::Normal;
+                }
+                break;
+        }
+    }
+    return out;
+}
+
+std::vector<std::string> included_paths(const std::string& text) {
+    std::vector<std::string> out;
+    std::size_t pos = 0;
+    while ((pos = text.find("#include", pos)) != std::string::npos) {
+        const std::size_t line_end = text.find('\n', pos);
+        const std::string line =
+            text.substr(pos, line_end == std::string::npos ? std::string::npos
+                                                           : line_end - pos);
+        const std::size_t open_angle = line.find('<');
+        const std::size_t open_quote = line.find('"');
+        std::size_t begin = std::string::npos;
+        char close = '\0';
+        if (open_angle != std::string::npos) {
+            begin = open_angle + 1;
+            close = '>';
+        } else if (open_quote != std::string::npos) {
+            begin = open_quote + 1;
+            close = '"';
+        }
+        if (begin != std::string::npos) {
+            const std::size_t end = line.find(close, begin);
+            if (end != std::string::npos) out.push_back(line.substr(begin, end - begin));
+        }
+        pos = line_end == std::string::npos ? text.size() : line_end;
+    }
+    return out;
+}
+
 std::vector<fs::path> scan(const fs::path& root) {
     std::vector<fs::path> files;
     if (!fs::exists(root)) return files;
@@ -170,6 +257,18 @@ void check_cmake_target_edges(const fs::path& root) {
         {"shelf_weights", "shelf_qwen35moe"},
         {"shelf_runtime", "shelf_qwen35"},
         {"shelf_runtime", "shelf_qwen35moe"},
+        {"shelf_engine", "shelf_qwen35"},
+        {"shelf_engine", "shelf_qwen35_runtime"},
+        {"shelf_engine", "shelf_qwen35moe"},
+        {"shelf_engine", "shelf_qwen35qsa"},
+        {"shelf_engine", "shelf_qwen4exp"},
+        {"shelf_engine", "shelf_plamo3"},
+        {"shelf_mtp", "shelf_qwen35"},
+        {"shelf_mtp", "shelf_qwen35_runtime"},
+        {"shelf_mtp", "shelf_qwen35moe"},
+        {"shelf_mtp", "shelf_qwen35qsa"},
+        {"shelf_mtp", "shelf_qwen4exp"},
+        {"shelf_mtp", "shelf_plamo3"},
     };
     for (const auto& rule : forbidden_edges) {
         const std::vector<std::string> links = linked_targets(text, rule.target);
@@ -193,6 +292,112 @@ void check_cmake_target_edges(const fs::path& root) {
         }
         if (!hybrid) fail(std::string(family) + " does not link shelf_qwen_hybrid");
         else ++passed;
+    }
+
+    // The compute application depends on the engine, not on a family or on shelf::models
+    // directly. The aggregate target is not enough: it would silently propagate every
+    // family library.
+    const std::string apps = read_file(root / "cmake/apps.cmake");
+    if (apps.empty()) {
+        fail("cmake/apps.cmake could not be read");
+        return;
+    }
+    bool engine_link = false;
+    const std::vector<std::string> app_links = linked_targets(apps, "shelf-compute");
+    for (const auto& lib : app_links) {
+        if (lib == "shelf_engine") engine_link = true;
+        if (lib == "shelf" || lib == "shelf_models" || lib == "shelf_qwen35" ||
+            lib == "shelf_qwen35_runtime" || lib == "shelf_qwen35moe" ||
+            lib == "shelf_qwen35qsa" || lib == "shelf_qwen4exp" || lib == "shelf_plamo3") {
+            fail("shelf-compute links " + lib + " directly");
+        }
+    }
+    if (!engine_link) fail("shelf-compute does not link shelf_engine");
+    else ++passed;
+}
+
+// src/apps/compute is a token-in / token-out driver. It may print a model name in a help
+// string, but it may not include a family header or reach a concrete model / rank runtime.
+void check_compute_app_boundaries(const fs::path& root) {
+    const std::vector<std::string> forbidden_headers = {
+        "shelf/models/qwen35", "shelf/models/qwen35moe", "shelf/models/qwen35qsa",
+        "shelf/models/qwen4exp", "shelf/models/plamo3", "shelf/models/loaded_model.h",
+        "shelf/models/tp_rank_model.h", "shelf/models/pipeline_stage_model.h",
+        "shelf/runtime/executor.h", "shelf/runtime/tp/tensor_parallel.h",
+    };
+    const std::vector<const char*> forbidden_code = {
+        "qwen35::", "Qwen35", "qwen4exp::", "Qwen4Exp", "plamo3::", "Plamo3",
+        "qwen35moe", "qwen35qsa", "runtime::Executor", "runtime::TpCoordinator",
+        "TpRankRuntime", "PipelineStageRuntime", "LoadedModel", "hipStream_t",
+        "hipMalloc", "hipMemcpy",
+    };
+    for (const auto& file : scan(root / "src/apps/compute")) {
+        const std::string text = read_file(file);
+        for (const auto& header : included_paths(text)) {
+            for (const auto& forbidden : forbidden_headers) {
+                if (header.rfind(forbidden, 0) == 0) {
+                    fail(file.string() + " includes " + header);
+                }
+            }
+        }
+        const std::string code = code_only(text);
+        for (const char* needle : forbidden_code) {
+            if (contains(code, needle)) {
+                fail(file.string() + std::string(" uses ") + needle);
+            }
+        }
+        ++passed;
+    }
+}
+
+// The engine may orchestrate models, but it may not include a family header or a serving
+// schema. MTP lives in models/common/drafter and DFlash2 lives in shelf_runtime, so the
+// engine has no family exception.
+void check_engine_boundaries(const fs::path& root) {
+    const std::vector<const char*> forbidden_generic = {
+        "nlohmann", "OpenAI", "openai", "protobuf", "Protobuf", "gRPC", "grpc",
+        "xgrammar", "XGrammar",
+    };
+    const std::vector<const char*> forbidden_family = {
+        "shelf/models/qwen35", "shelf/models/qwen35moe", "shelf/models/qwen35qsa",
+        "shelf/models/qwen4exp", "shelf/models/plamo3", "qwen35::", "Qwen35",
+        "qwen4exp::", "Qwen4Exp", "plamo3::", "Plamo3",
+    };
+
+    // Public engine headers stay family neutral.
+    for (const auto& file : scan(root / "include/shelf/engine")) {
+        const std::string text = read_file(file);
+        const std::string code = code_only(text);
+        for (const char* needle : forbidden_generic) {
+            if (contains(code, needle)) fail(file.string() + std::string(" uses ") + needle);
+        }
+        for (const auto& header : included_paths(text)) {
+            for (const char* needle : forbidden_family) {
+                if (header.rfind(needle, 0) == 0) {
+                    fail(file.string() + " includes " + header);
+                }
+            }
+        }
+        ++passed;
+    }
+
+    for (const auto& file : scan(root / "src/shelf/engine")) {
+        const std::string text = read_file(file);
+        const std::string code = code_only(text);
+        for (const char* needle : forbidden_generic) {
+            if (contains(code, needle)) fail(file.string() + std::string(" uses ") + needle);
+        }
+        for (const auto& header : included_paths(text)) {
+            for (const char* needle : forbidden_family) {
+                if (header.rfind(needle, 0) == 0) {
+                    fail(file.string() + " includes " + header);
+                }
+            }
+        }
+        for (const char* needle : forbidden_family) {
+            if (contains(code, needle)) fail(file.string() + std::string(" uses ") + needle);
+        }
+        ++passed;
     }
 }
 
@@ -293,6 +498,8 @@ int main() {
                 "MoeExpert", "MoeFfn", "DenseFfn", "load_qwen35"});
 
     check_cmake_target_edges(root);
+    check_compute_app_boundaries(root);
+    check_engine_boundaries(root);
 
     const std::vector<fs::path> kernel_dirs = {
         root / "include/shelf/models/qwen35/kernels",

@@ -4,6 +4,7 @@
 #include <shelf/models/qwen35/model/lower_to_primitives.h>
 #include <shelf/models/qwen35/runtime/executor_footprint.h>
 #include <shelf/models/tp_rank_model.h>
+#include <shelf/models/pipeline_stage_model.h>
 #include <shelf/models/qwen35moe/model/lower_to_primitives.h>
 #include <shelf/models/qwen35moe/runtime/executor_footprint.h>
 #include <shelf/models/qwen4exp/model/lower_to_primitives.h>
@@ -161,6 +162,20 @@ LoadedModel LoadedModel::borrow(const shelf::qwen35qsa::Qwen35QsaModel& model) {
     LoadedModel out;
     out.qsa_ = &model;
     return out;
+}
+
+LoadedModel LoadedModel::borrow_rank_model(const TpRankModel& model) {
+    if (const auto* q4 = model.qwen4exp_model()) return borrow(*q4);
+    if (const auto* qsa = model.qsa_model()) return borrow(*qsa);
+    if (const auto* grouped = model.grouped_model()) return borrow(*grouped);
+    return borrow(*model.dense_model());
+}
+
+LoadedModel LoadedModel::borrow_stage_model(const PipelineStageModel& model) {
+    if (const auto* q4 = model.qwen4exp_model()) return borrow(*q4);
+    if (const auto* qsa = model.qsa_model()) return borrow(*qsa);
+    if (const auto* grouped = model.grouped_model()) return borrow(*grouped);
+    return borrow(*model.dense_model());
 }
 
 shelf::weights::Exl3LinearShape LoadedModel::exl3_linear_shape() const {
@@ -400,58 +415,58 @@ std::uint32_t LoadedModel::mtp_token_hidden_width() const noexcept {
 }
 
 std::size_t LoadedModel::mtp_drafter_reserve_bytes(
-    const shelf::qwen35::runtime::MtpDrafterConfig& options) const {
+    const shelf::runtime::mtp::MtpDrafterConfig& options) const {
     if (!has_mtp_block()) return 0u;
-    const std::size_t rows = shelf::qwen35::runtime::mtp_drafter_rows(options);
+    const std::size_t rows = shelf::runtime::mtp::mtp_drafter_rows(options);
     const MtpExecutorTerms terms = mtp_executor_terms(*this, rows);
     shelf::weights::Exl3LinearShape shape;
     if (qwen4exp_ != nullptr) {
         shape = shelf::qwen4exp::mtp_exl3_linear_shape(qwen4exp_->weights());
     }
-    return shelf::qwen35::runtime::mtp_drafter_reserve_bytes(
+    return shelf::runtime::mtp::mtp_drafter_reserve_bytes(
         hybrid_config(), options, terms.token_row_intermediate,
         terms.grouped_executor_bytes, terms.exl3_linear_workspace, shape);
 }
 
 std::size_t LoadedModel::mtp_spec_batch_reserve_bytes(
-    const shelf::qwen35::runtime::MtpDrafterConfig& options,
+    const shelf::runtime::mtp::MtpDrafterConfig& options,
     std::size_t max_requests) const {
     if (!has_mtp_block()) return 0u;
-    const std::size_t rows = shelf::qwen35::runtime::mtp_drafter_rows(options);
+    const std::size_t rows = shelf::runtime::mtp::mtp_drafter_rows(options);
     const MtpExecutorTerms terms = mtp_executor_terms(*this, rows);
-    shelf::qwen35::runtime::MtpDrafterConfig per_request = options;
+    shelf::runtime::mtp::MtpDrafterConfig per_request = options;
     per_request.allocate_spec_buffers = false;
     shelf::weights::Exl3LinearShape shape;
     if (qwen4exp_ != nullptr) {
         shape = shelf::qwen4exp::mtp_exl3_linear_shape(qwen4exp_->weights());
-        return shelf::qwen35::runtime::mtp_shared_draft_reserve_bytes(
+        return shelf::runtime::mtp::mtp_shared_draft_reserve_bytes(
             hybrid_config(), per_request, terms.token_row_intermediate,
             terms.grouped_executor_bytes, terms.exl3_linear_workspace, shape,
             static_cast<std::uint32_t>(max_requests));
     }
-    const std::size_t drafter = shelf::qwen35::runtime::mtp_drafter_reserve_bytes(
+    const std::size_t drafter = shelf::runtime::mtp::mtp_drafter_reserve_bytes(
         hybrid_config(), per_request, terms.token_row_intermediate,
         terms.grouped_executor_bytes, terms.exl3_linear_workspace, shape);
-    const std::size_t state = shelf::qwen35::runtime::mtp_batch_rank_state_reserve_bytes(
+    const std::size_t state = shelf::runtime::mtp::mtp_batch_rank_state_reserve_bytes(
         shelf::qwen35::make_qwen35_gdn_state_layout(hybrid_config()),
-        shelf::qwen35::runtime::mtp_spec_rows(
+        shelf::runtime::mtp::mtp_spec_rows(
             static_cast<std::uint32_t>(max_requests), options.num_drafts),
         static_cast<std::uint32_t>(max_requests));
     return drafter * max_requests + state;
 }
 
-Result<shelf::qwen35::runtime::MtpDrafterInput> LoadedModel::mtp_drafter_input(
-    const shelf::qwen35::runtime::MtpDrafterConfig& options,
+Result<shelf::runtime::mtp::MtpDrafterInput> LoadedModel::mtp_drafter_input(
+    const shelf::runtime::mtp::MtpDrafterConfig& options,
     const shelf::weights::MatrixWeight* lm_head_override) const {
     if (!has_mtp_block()) {
         return Status::unsupported(
             "the loaded model has no MTP block: load it with the MTP option", __FILE__,
             __LINE__);
     }
-    shelf::qwen35::runtime::MtpDrafterInput input;
+    shelf::runtime::mtp::MtpDrafterInput input;
     input.config = &hybrid_config();
     input.embed_tokens = &embed_tokens();
-    const std::size_t rows = shelf::qwen35::runtime::mtp_drafter_rows(options);
+    const std::size_t rows = shelf::runtime::mtp::mtp_drafter_rows(options);
     const MtpExecutorTerms terms = mtp_executor_terms(*this, rows);
     input.token_row_intermediate = terms.token_row_intermediate;
     input.grouped_executor_bytes = terms.grouped_executor_bytes;
