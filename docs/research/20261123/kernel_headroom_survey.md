@@ -351,3 +351,17 @@ GPU kernel 内に分岐は入れていない。
 生成 16 token は既定 / opt-in で一致した。wall が動かないのは、この cluster が
 prefill のクリティカルパスではなく、削減分が遊休に吸収されるためである。
 したがって既定にはせず、launch / ISA / GPU 時間を削る opt-in として採用する。
+
+## 14. 再試験して棄却: 4 group 融合
+
+pre-rotation で回転 temporaries が消えたため、`SHELF_EXL3_GROUPED_FUSE=4` を
+再試験した（`bench_exl3_mul24_grouped`、pre-rotated 経路）。weight の再読は
+半減するが、VGPR 増加で 2 group より遅い。
+
+| tokens | FUSE=1 gate+down | FUSE=2 gate+down | FUSE=4 gate+down |
+| ---: | ---: | ---: | ---: |
+| 256 | 2.354 ms | **1.696 ms** | 3.296 ms |
+| 1024 | 3.617 ms | **2.830 ms** | 4.445 ms |
+| 2048 | 6.948 ms | **5.902 ms** | 6.729 ms |
+
+既定の 2 group が最速なので、`launch_groups` の 4 group 分岐は入れない。
