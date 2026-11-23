@@ -130,9 +130,9 @@ constexpr uint32_t kWv = 32u;
 constexpr uint32_t kWk = 128u;
 constexpr uint32_t kWthreads = 128u;
 constexpr uint32_t kSp = 36u;
+constexpr uint32_t kSstageRows = 64u;
 constexpr uint32_t kWp = 36u;
 constexpr uint32_t kAp = 34u;
-constexpr uint32_t kDp = 34u;
 
 __device__ __forceinline__ float wbf2f(const bf16_t* p) {
     return __bfloat162float(*reinterpret_cast<const __hip_bfloat16*>(p));
@@ -185,13 +185,12 @@ struct ChunkSmem {
     float A[kWt][kAp];
     float L[kWt][kAp];
     float W[kWt][kWp];
-    float dT[kWv][kDp];
 };
 
 struct LdsSmem {
     union {
         ChunkSmem mid;
-        float S[kWk][kSp];
+        float S[kSstageRows][kSp];
     };
     float G[kWt];
     float raw_g[kWt];
@@ -202,6 +201,8 @@ struct LdsSmem {
     float oe[kWt];
     float eg;
 };
+
+static_assert(sizeof(LdsSmem) < 16u * 1024u, "GDN WMMA requires LDS below 16 KiB per workgroup");
 
 }  // namespace gdngfx12
 
@@ -276,17 +277,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
             #pragma unroll
             for (uint32_t e = 0; e < 8u; ++e) Sacc[ki * 2u + vj][e] = ld_state(sp + static_cast<size_t>(e) * hv);
         }
-    #pragma unroll
-    for (uint32_t ki = 0; ki < 2u; ++ki)
-        #pragma unroll
-        for (uint32_t vj = 0; vj < 2u; ++vj) {
-            const uint32_t kt = kt0 + ki, vt = vt0 + vj;
-            #pragma unroll
-            for (uint32_t e = 0; e < 8u; ++e)
-                Sst[static_cast<size_t>(kt * 16u + 8u * hi + e) * spitch + vt * 16u + lo] =
-                    Sacc[ki * 2u + vj][e];
-        }
-    detail::lds_barrier();
+    // Sacc holds the complete state; shared S is a 64-row staging buffer.
 
     const uint32_t nchunks = kSerialRows
         ? row_count
@@ -378,6 +369,22 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
         if (tid == 0u) s.eg = __expf(s.G[g::kWt - 1u]);
         detail::lds_barrier();
 
+        // Stage K rows [0, 64) from the state in registers.
+        // Only waves 0 and 1 own these state rows.
+        if (warp < 2u) {
+            #pragma unroll
+            for (uint32_t ki = 0; ki < 2u; ++ki)
+                #pragma unroll
+                for (uint32_t vj = 0; vj < 2u; ++vj) {
+                    const uint32_t kt = kt0 + ki, vt = vt0 + vj;
+                    #pragma unroll
+                    for (uint32_t e = 0; e < 8u; ++e)
+                        Sst[static_cast<size_t>(kt * 16u + 8u * hi + e) * spitch +
+                            vt * 16u + lo] = Sacc[ki * 2u + vj][e];
+                }
+        }
+        detail::lds_barrier();
+
         f32x8_t p_acc = {};
         f32x8_t pk_acc = {};
         f32x8_t uacc = {};
@@ -393,11 +400,29 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
             const float* __restrict__ kpj = kp_g + static_cast<size_t>(c0 + tj) * a.k_row_stride;
             #pragma unroll
             for (uint32_t kk = 0; kk < g::kWk / 16u; ++kk) {
+                if (kk == 4u) {
+                    // All waves must finish consuming stage 0 before stage 1 overwrites it.
+                    detail::lds_barrier();
+                    // Stage K rows [64, 128) from waves 2 and 3.
+                    if (warp >= 2u) {
+                        #pragma unroll
+                        for (uint32_t ki = 0; ki < 2u; ++ki)
+                            #pragma unroll
+                            for (uint32_t vj = 0; vj < 2u; ++vj) {
+                                const uint32_t kt = kt0 + ki - 4u, vt = vt0 + vj;
+                                #pragma unroll
+                                for (uint32_t e = 0; e < 8u; ++e)
+                                    Sst[static_cast<size_t>(kt * 16u + 8u * hi + e) * spitch +
+                                        vt * 16u + lo] = Sacc[ki * 2u + vj][e];
+                            }
+                    }
+                    detail::lds_barrier();
+                }
                 float stmp[8];
                 #pragma unroll
                 for (uint32_t q = 0; q < 4u; ++q) {
-                    stmp[q] = Sst[static_cast<size_t>(kk * 16u + kh * 4u + q) * spitch + nt * 16u + lo];
-                    stmp[4u + q] = Sst[static_cast<size_t>(kk * 16u + 8u + kh * 4u + q) * spitch + nt * 16u + lo];
+                    stmp[q] = Sst[static_cast<size_t>((kk & 3u) * 16u + kh * 4u + q) * spitch + nt * 16u + lo];
+                    stmp[4u + q] = Sst[static_cast<size_t>((kk & 3u) * 16u + 8u + kh * 4u + q) * spitch + nt * 16u + lo];
                 }
                 const Frag2 bs = g::gdn_decomp8<kLossy>(stmp);
                 float ktmp[8], qtmp[8];
@@ -461,7 +486,8 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
                 for (uint32_t l = 0; l < g::kWt; ++l)
                     if (l < i) acc -= s.mid.L[i][l] * dlt[l];
                 dlt[i] = acc;
-                s.mid.dT[tid][i] = acc;
+                // In-place substitution: this column is only read by its owning lane.
+                s.mid.W[i][tid] = acc;
             }
         }
         detail::lds_barrier();
@@ -477,8 +503,8 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
             float dtmp[8];
             #pragma unroll
             for (uint32_t q = 0; q < 4u; ++q) {
-                dtmp[q] = s.mid.dT[nt * 16u + lo][jt * 16u + kh * 4u + q];
-                dtmp[4u + q] = s.mid.dT[nt * 16u + lo][jt * 16u + 8u + kh * 4u + q];
+                dtmp[q] = s.mid.W[jt * 16u + kh * 4u + q][nt * 16u + lo];
+                dtmp[4u + q] = s.mid.W[jt * 16u + 8u + kh * 4u + q][nt * 16u + lo];
             }
             const Frag2 aab = g::gdn_decomp8<kLossy>(atmp);
             const Frag2 bvb = g::gdn_decomp8<kLossy>(dtmp);
@@ -505,8 +531,8 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
                 float dtmp[8];
                 #pragma unroll
                 for (uint32_t q = 0; q < 4u; ++q) {
-                    dtmp[q] = s.mid.dT[(vt0 + vj) * 16u + lo][tstep * 16u + kh * 4u + q];
-                    dtmp[4u + q] = s.mid.dT[(vt0 + vj) * 16u + lo][tstep * 16u + 8u + kh * 4u + q];
+                    dtmp[q] = s.mid.W[tstep * 16u + kh * 4u + q][(vt0 + vj) * 16u + lo];
+                    dtmp[4u + q] = s.mid.W[tstep * 16u + 8u + kh * 4u + q][(vt0 + vj) * 16u + lo];
                 }
                 bv[vj] = g::gdn_decomp8<kLossy>(dtmp);
             }
@@ -541,7 +567,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
             for (uint32_t i = 0; i < nval; ++i) {
                 if (tid < g::kWv)
                     a.compact_delta[dbase + static_cast<uint64_t>(c0 + i) * vdim +
-                                    static_cast<uint64_t>(v_head) * hv + v0 + tid] = s.mid.dT[tid][i];
+                                    static_cast<uint64_t>(v_head) * hv + v0 + tid] = s.mid.W[i][tid];
                 if (tid == 0u && vg == 0u)
                     a.compact_a[abase + static_cast<uint64_t>(c0 + i) * a.num_v_heads + v_head] =
                         kTree && s.chain == 0u ? __expf(s.raw_g[i]) :
@@ -581,7 +607,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
                 if (tid < g::kWv) {
                     a.compact_delta[dbase + static_cast<size_t>(c0) * vdim +
                                     static_cast<size_t>(v_head) * hv + v0 + tid] =
-                        s.mid.dT[tid][0];
+                        s.mid.W[0][tid];
                 }
                 if (tid == 0u && a.compact_a != nullptr) {
                     a.compact_a[static_cast<uint64_t>(a.state_index) * a.compact_a_layer_stride +
@@ -602,17 +628,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
                 }
             }
         }
-        detail::lds_barrier();
-        #pragma unroll
-        for (uint32_t ki = 0; ki < 2u; ++ki)
-            #pragma unroll
-            for (uint32_t vj = 0; vj < 2u; ++vj) {
-                const uint32_t kt = kt0 + ki, vt = vt0 + vj;
-                #pragma unroll
-                for (uint32_t e = 0; e < 8u; ++e)
-                    Sst[static_cast<size_t>(kt * 16u + 8u * hi + e) * spitch + vt * 16u + lo] =
-                        Sacc[ki * 2u + vj][e];
-            }
+        // Drain all readers of mid before the next chunk reuses the LDS union.
         detail::lds_barrier();
     }
 

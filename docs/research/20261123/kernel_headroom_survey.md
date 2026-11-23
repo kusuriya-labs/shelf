@@ -528,3 +528,27 @@ E2E は neutral:
 生成 16 token は一致、required 231/231 PASS。`SHELF_GDN_V32=0` で
 従来の 64-wide 経路に戻せる。head_v が 32 の倍数なら適用し、
 `hv64`（`head_v=64`、vgroups=2）のテストを追加した。
+
+## 19. GDN v32 の LDS を 14 KB に削って 4 block/CU にする
+
+v32（`kSp=36`、`S[128][36]`）は LDS 19,456 B で 3 block/CU だった。state を
+64 k 行ずつステージし、`dT` を `W` の三角求解で置き換える patch を A/B した。
+
+- `S[kSstageRows=64][36]` にして、chunk 内の `kk==4` で barrier を置き、
+  K 行 [64,128) を warp 2,3 が上書きする。state の正本は `Sacc`（レジスタ）に置く。
+- `dT` を廃止し、前進代入の結果を `W[i][tid]` に書いて転置読みする。
+
+| 項目 | 変更前 | 変更後 |
+| --- | ---: | ---: |
+| LDS | 19,456 B | **14,336 B** |
+| VGPR | 224 | 248 |
+| blocks/CU（LDS 拘束） | 3 | **4** |
+| GDN ms（2048 token trace、2 rank 合計） | 87.06 | **83.31 / 83.50** |
+| prefill window GPU ms | 1,142.9 | **1,139.7 / 1,144.1** |
+
+- E2E は neutral: prefill 7002 token が 1,897.3 → 1,893.5 / 1,891.1 ms、
+  decode MTP2 が 60.6 / 60.7 → 60.6 / 60.8 tok/s。
+- VGPR 248 は granule 264 → 5 wave/SIMD で、4 block/CU（4 warp/SIMD）を
+  拘束しない。
+- `test_gdn_recurrence` PASS（hv64 含む）、required 231/231 PASS。
+
