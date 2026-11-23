@@ -463,3 +463,30 @@ prefill window の GPU 合計は **1113.3 ms**。GDN は依然 7.8 % で、
 （per-stream 9.90）。
 
 required **231/231 PASS**。この状態を次の変更の基準にする。
+
+## 17. VGPR granule を使った grouped gate の occupancy 改善
+
+compiler の gfx1201 VGPR capacity（1536 VGPR/SIMD、granule 24、16 wave/SIMD）を
+grouped gate に適用した。gate `<2,1,3,true>` は VGPR 128 で granule 144 に丸められ、
+`floor(1536 / 144) = 10 wave/SIMD` だった。LDS は 17,408 B で 3 block/CU が可能なので、
+VPR を 120 以下にすれば `floor(1536 / 120) = 12 wave/SIMD` になる。
+
+- `__launch_bounds__(256, 3)` だけでは VGPR は 128 のままだった。compiler の
+  min-blocks は VGPR を 8 単位で見ており、実機 granule 24 の境界を跨げない。
+- body を `__device__` 関数にし、gate wrapper を `amdgpu_num_vgpr(120)`、
+  down wrapper を `amdgpu_num_vgpr(184)` に分けた。down は元の 184 を維持。
+- 2048 token prefill trace:
+
+| kernel | 変更前 | 変更後 |
+| --- | ---: | ---: |
+| grouped gate `<2,1,3>` | 293.1 ms, VGPR 128, scratch 0 | **265.6 ms, VGPR 120, scratch 0** |
+| grouped down `<2,2,3>` | 112.3 ms, VGPR 184, scratch 0 | 110.8 ms, VGPR 184, scratch 0 |
+| GPU 合計 | 1113.3 ms | **1077.6 ms（−3.2 %）** |
+
+- 7002 token prefill は 1851.2 / 1859.9 → **1835.6 / 1846.5 ms**（−0.8 %）。
+- decode MTP2 は 61.6 tok/s を維持。生成 16 token は一致。required 231/231。
+- down は VGPR 120 にすると scratch 192 B が出て 112.3 → 122.4 ms に悪化したため、
+  184 のまま 2 block/CU を維持する。
+
+同じモデルで、rowprepare（VGPR 32）や moe_combine（VGPR 8）は 96 VGPR まで
+wave を落とさずに使える。次はこれらの無料予算を unroll / 再利用に使う。
