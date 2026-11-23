@@ -238,6 +238,7 @@ class ComputeHarness:
                  prefix_cache_strategy: str | None = None,
                  prefix_cache_save_interval: int | None = None,
                  max_num_batched_tokens: int | None = None,
+                 prefill_chunk: int | None = None,
                  rope_factor: str | None = None,
                  mtp: bool = False,
                  mtp_drafts: int = 4,
@@ -251,6 +252,7 @@ class ComputeHarness:
         self.prefix_cache_strategy = prefix_cache_strategy
         self.prefix_cache_save_interval = prefix_cache_save_interval
         self.max_num_batched_tokens = max_num_batched_tokens
+        self.prefill_chunk = prefill_chunk
         self.rope_factor = rope_factor
         self.mtp = mtp
         self.mtp_drafts = mtp_drafts
@@ -319,6 +321,8 @@ class ComputeHarness:
             batch_tokens = _env_int("SHELF_TEST_MAX_NUM_BATCHED_TOKENS")
         if batch_tokens is not None:
             argv += ["--max-num-batched-tokens", str(batch_tokens)]
+        if self.prefill_chunk is not None:
+            argv += ["--prefill-chunk", str(self.prefill_chunk)]
         if self.rope_factor is not None:
             argv += ["--rope-factor", self.rope_factor]
         if self.tp > 1:

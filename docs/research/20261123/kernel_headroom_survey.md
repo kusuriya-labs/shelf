@@ -205,3 +205,19 @@ hit / miss の `expert_group_begin` は slot ごとの最小 index を `atomicMi
   実行し、回転を除いた grouped GEMM と組み合わせる microbench を作る。
   group fuse 3 / 4 は既存研究で VGPR 増加のため棄却済みなので、tile 拡大では追わない。
 - **MoE slot scan**: §8 で並列化した（compact plan 専用経路は不要だった）。
+
+## 10. 参考: prefill chunk と warm 帯域
+
+`--max-num-batched-tokens` = prefill chunk を 2048 / 4096 / 8192 にして、8106 token の
+2 本目（warm）prefill を測った（EP=2、bf16 KV、serve）。
+
+| chunk | prefill ms | tok/s |
+| ---: | ---: | ---: |
+| 2048 | 2563.6 | 3162 |
+| 4096 | 2472.2 | 3279 |
+| 8192 | 2412.8 | 3360 |
+
+chunk を 2048 → 8192 にすると **−5.9 %**。expert の重み traffic は chunk 数に比例する
+ため、chunk を大きくすると同じ token 数でも expert を読む回数が減る。ただし
+grouped GEMM は dequant ALU 律速で、traffic 半減ほどの短縮にはならない。
+`tests/server/support.py` の `ComputeHarness` に `prefill_chunk` を追加した。
