@@ -318,3 +318,36 @@ GPU 時間で、share は prefill 区間の合計に対する割合である。�
 次の実装候補は、share と launch 単価から **dense EXL3 の rowfinish / rowstat /
 rotate_out の GEMM 融合**とする。採用判定は §11 と同じく、bit 一致または許容される
 near-tie flip、interleaved A/B、required suite で行う。
+
+## 13. opt-in 採用: dense EXL3 の row 前処理を 1 launch に融合
+
+dense A 経路の `rowstat` + `rowslot` + `rowfinish` を、atomic で slot を詰める
+`exl3_mul24_rowprepare_kernel` 1 launch に融合した。wall は neutral だが、
+launch 数・ISA・GPU 時間が減るため **opt-in**（`SHELF_EXL3_ROW_FUSE=1`）として残す。
+既定は従来の 3 kernel 経路である。
+
+### specialized 測定
+
+2048 token / 4 chunk / EP=2 の trace。既定側は旧 3 kernel だけ、opt-in 側は
+`rowprepare` と 4 byte fill だけが走る。env 判定はホスト側で 1 回だけ行い、
+GPU kernel 内に分岐は入れていない。
+
+- row 前処理の GPU 時間: `rowstat` 46.817 + `rowslot` 12.214 + `rowfinish`
+  52.452 = **111.483 ms** → `rowprepare` 55.460 + fill 6.817 = **62.277 ms**
+  （**−44.1 %**）。
+- prefill window の GPU 合計: **1159.15 → 1117.88 ms**（**−3.6 %**）。
+- dispatch 数: 2484 + 2485 + 2484 = 7455 → `rowprepare` 2486 + fill 2486 =
+  4972。kernel launch だけでは **7455 → 2486（−66.7 %）**。
+- static instruction: 170 + 200 + 267 = **637** → **482（−24.3 %）**。
+  `v_alu` は 228 → 180（−21.1 %）、code size は 3204 → 2504 bytes（−21.8 %）。
+
+### wall
+
+| 条件 | 既定 ms | opt-in ms |
+| --- | ---: | ---: |
+| 7002 token、host experts 0 | 2034.2 / 2037.7 | 2033.0 / 2038.1 |
+| 7002 token、host experts 96（前回測定） | 2427.8 | 2445.4 |
+
+生成 16 token は既定 / opt-in で一致した。wall が動かないのは、この cluster が
+prefill のクリティカルパスではなく、削減分が遊休に吸収されるためである。
+したがって既定にはせず、launch / ISA / GPU 時間を削る opt-in として採用する。
