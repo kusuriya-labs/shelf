@@ -586,3 +586,28 @@ MoE の routed expert は `gate/up grouped GEMM → SwiGLU → down producer →
   codes / scales ビット一致検査を追加（group rows / token rows / split）。
 - 生成 16 token 一致、required 231/231 PASS。`SHELF_DISABLE_SWIGLU_MOE_DOWN=1` で
   融合を無効にできる。
+
+## 21. MOE_COMBINE への SIGMOID 取り込み
+
+shared expert の gate は `SIGMOID（F32 1 列）→ MOE_COMBINE` と進む。SIGMOID の
+出力が combine の gate 以外に消費されない層では、combine が生の logits から
+sigmoid を計算して launch を 1 本消せる。
+
+- combine の gate 入力が前段 SIGMOID の出力で、他に消費者がないことを確認し、
+  SIGMOID dispatch を 1 つ skip する。combine 側は生の logits と row stride を
+  受け取り、`1 / (1 + __expf(-g))` をカーネル内で適用する（要素演算カーネルと
+  同じ式）。
+- SIGMOID は F32 1 列のときだけ対象にする（shared gate の既定形）。
+
+2048 token prefill trace（2 rank 合計、EP=2）:
+
+| 項目 | 融合 off | 融合 on |
+| --- | ---: | ---: |
+| `shelf_sigmoid_f32` | 1.207 ms / 478 | **0 ms / 0** |
+| `moe_combine_kernel` | 28.629 ms / 478 | 28.991 ms / 478 |
+| GPU 合計 | 1,141.4 ms | 1,142.0 ms |
+
+- 478 launch を削減。E2E は prefill 1,879.6 / 1,882.9 → **1,878.2 / 1,881.4 ms**、
+  decode MTP2 は 60.5 → **60.9 tok/s**（いずれも neutral）。
+- 生成 16 token 一致、required 231/231 PASS。
+  `SHELF_DISABLE_MOE_COMBINE_SIGMOID=1` で無効化できる。

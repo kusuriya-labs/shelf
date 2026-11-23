@@ -144,4 +144,13 @@ Result<OptimizedLaunchResult> try_launch_moe_combine(
     HostExecutionContext& ctx,
     hipStream_t stream);
 
+// The shared gate arrives as raw logits (an exclusive preceding SIGMOID was folded in).
+Result<OptimizedLaunchResult> try_launch_moe_combine_gate(
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
+    HostExecutionContext& ctx,
+    hipStream_t stream,
+    const void* gate_logits,
+    uint32_t gate_logits_row_stride);
+
 }

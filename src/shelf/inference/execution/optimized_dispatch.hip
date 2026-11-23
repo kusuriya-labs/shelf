@@ -2103,6 +2103,46 @@ Result<OptimizedLaunchResult> try_launch_swiglu_moe_down(
     return OptimizedLaunchResult{OptimizedLaunchKind::Skipped, 1u};
 }
 
+Result<OptimizedLaunchResult> try_launch_moe_combine_sigmoid(
+    const ::shelf::runtime::Program& program, size_t i, size_t end,
+    HostExecutionContext& ctx, hipStream_t stream) {
+    const OptimizedLaunchResult miss{OptimizedLaunchKind::NotApplicable};
+    static const bool enabled = std::getenv("SHELF_DISABLE_MOE_COMBINE_SIGMOID") == nullptr &&
+        std::getenv("SHELF_OP_DUMP") == nullptr && std::getenv("SHELF_OP_SYNC") == nullptr &&
+        std::getenv("SHELF_LINEAR_INPUT_DUMP") == nullptr;
+    if (!enabled || ctx.value_trace || ctx.layer_override_count || i + 1u >= end) return miss;
+    const auto& sig = program.dispatches[i];
+    const auto& comb = program.dispatches[i + 1u];
+    if (sig.kernel_id != ::shelf::runtime::KernelId::SIGMOID ||
+        comb.kernel_id != ::shelf::runtime::KernelId::MOE_COMBINE)
+        return miss;
+    if (sig.input_count != 1u || sig.output_count != 1u || comb.input_count != 3u ||
+        comb.output_count != 1u || comb.input_slots[2] != sig.output_slots[0])
+        return miss;
+    const ::shelf::runtime::ValueBinding* out_binding =
+        program.find_value(::shelf::runtime::ValueId{sig.output_slots[0]});
+    if (out_binding == nullptr ||
+        out_binding->dtype != ::shelf::runtime::ValueDType::F32 ||
+        (out_binding->storage != ::shelf::runtime::ValueStorage::WORKSPACE &&
+         out_binding->storage != ::shelf::runtime::ValueStorage::WORKSPACE_VIEW))
+        return miss;
+    for (size_t j = i + 2u; j < program.dispatches.size(); ++j)
+        for (uint32_t k = 0; k < program.dispatches[j].input_count; ++k)
+            if (program.dispatches[j].input_slots[k] == sig.output_slots[0]) return miss;
+    const auto logits =
+        resolve_host_value(program, ::shelf::runtime::ValueId{sig.input_slots[0]}, ctx);
+    if (!logits.ok() || logits.value().dtype != ::shelf::runtime::ValueDType::F32 ||
+        logits.value().feature_count != 1u || logits.value().row_stride == 0u ||
+        logits.value().ptr == nullptr)
+        return miss;
+    auto result = try_launch_moe_combine_gate(program, comb, ctx, stream, logits.value().ptr,
+                                              logits.value().row_stride);
+    if (!result.ok()) return result;
+    if (result.value().kind == OptimizedLaunchKind::Launched)
+        return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 2u};
+    return miss;
+}
+
 Result<OptimizedLaunchResult> try_launch_optimized(
     const ::shelf::runtime::Program& program,
     size_t dispatch_index,
@@ -2300,6 +2340,10 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             return try_launch_elementwise(program, dispatch_index, ctx, stream);
         }
         case KernelId::SIGMOID: {
+            auto combine = try_launch_moe_combine_sigmoid(program, dispatch_index,
+                                                          dispatch_end, ctx, stream);
+            if (!combine.ok() || combine.value().kind == OptimizedLaunchKind::Launched)
+                return combine;
             static const bool rq_enabled = std::getenv("SHELF_DISABLE_ATTN_RQ") == nullptr &&
                 std::getenv("SHELF_OP_DUMP") == nullptr && std::getenv("SHELF_OP_SYNC") == nullptr &&
                 std::getenv("SHELF_LINEAR_INPUT_DUMP") == nullptr && std::getenv("SHELF_EXL3_INT8_DENSE") == nullptr;

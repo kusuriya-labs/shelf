@@ -581,10 +581,9 @@ Result<OptimizedLaunchResult> try_launch_moe_grouped_exl3(const Program& program
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
-Result<OptimizedLaunchResult> try_launch_moe_combine(const Program& program,
-                                                     const DispatchBinding& b,
-                                                     HostExecutionContext& ctx,
-                                                     hipStream_t stream) {
+static Result<OptimizedLaunchResult> moe_combine_launch(
+    const Program& program, const DispatchBinding& b, HostExecutionContext& ctx,
+    hipStream_t stream, const void* gate_logits, uint32_t gate_logits_row_stride) {
     const Result<MoePlanView> plan = resolve_moe_plan(program, b, ctx);
     if (!plan.ok()) return plan.status();
     if (b.input_count != 3u || b.output_count != 1u)
@@ -600,10 +599,19 @@ Result<OptimizedLaunchResult> try_launch_moe_combine(const Program& program,
         resolve_host_value(program, ValueId{b.input_slots[1]}, ctx);
     if (!shared_res.ok()) return shared_res.status();
     const HostResolvedValue shared = shared_res.value();
-    const Result<HostResolvedValue> gate_res =
-        resolve_host_value(program, ValueId{b.input_slots[2]}, ctx);
-    if (!gate_res.ok()) return gate_res.status();
-    const HostResolvedValue gate = gate_res.value();
+    HostResolvedValue gate;
+    if (gate_logits != nullptr) {
+        gate.ptr = const_cast<void*>(gate_logits);
+        gate.row_stride = gate_logits_row_stride;
+        gate.feature_count = 1u;
+        gate.dtype = ValueDType::F32;
+        gate.row_domain = ValueRowDomain::TOKEN_ROWS;
+    } else {
+        const Result<HostResolvedValue> gate_res =
+            resolve_host_value(program, ValueId{b.input_slots[2]}, ctx);
+        if (!gate_res.ok()) return gate_res.status();
+        gate = gate_res.value();
+    }
     const Result<HostResolvedValue> out_res =
         resolve_host_value(program, ValueId{b.output_slots[0]}, ctx);
     if (!out_res.ok()) return out_res.status();
@@ -657,13 +665,28 @@ Result<OptimizedLaunchResult> try_launch_moe_combine(const Program& program,
         plan.value().tokens, plan.value().top_k, out.feature_count,
         include_experts ? expert.row_stride : out.feature_count,
         include_shared ? shared.row_stride : out.feature_count,
-        include_shared ? gate.row_stride : 0u, include_experts, stream);
+        include_shared ? gate.row_stride : 0u, include_experts, stream,
+        gate_logits != nullptr);
     if (herr != hipSuccess)
         return Status::hip_error("moe combine launch", hipGetErrorString(herr), __FILE__,
                                  __LINE__);
     record_physical_launch(1u);
     record_optimized_op();
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
+}
+
+Result<OptimizedLaunchResult> try_launch_moe_combine(const Program& program,
+                                                     const DispatchBinding& b,
+                                                     HostExecutionContext& ctx,
+                                                     hipStream_t stream) {
+    return moe_combine_launch(program, b, ctx, stream, nullptr, 0u);
+}
+
+Result<OptimizedLaunchResult> try_launch_moe_combine_gate(
+    const Program& program, const DispatchBinding& b, HostExecutionContext& ctx,
+    hipStream_t stream, const void* gate_logits, uint32_t gate_logits_row_stride) {
+    return moe_combine_launch(program, b, ctx, stream, gate_logits,
+                              gate_logits_row_stride);
 }
 
 }
