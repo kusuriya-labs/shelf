@@ -490,3 +490,8 @@ VPR を 120 以下にすれば `floor(1536 / 120) = 12 wave/SIMD` になる。
 
 同じモデルで、rowprepare（VGPR 32）や moe_combine（VGPR 8）は 96 VGPR まで
 wave を落とさずに使える。次はこれらの無料予算を unroll / 再利用に使う。
+
+down の N tile も 1 にして 120 VGPR / 3 block/CU を狙えるか試したが、
+1024 / 2048 token の pre-rotated down は **1.837 / 3.003 ms**（producer 込み
+1.873 / 3.066 ms）で、既定の n_tiles=2 / VGPR 184 の **1.245 / 2.573 ms**
+（1.261 / 2.636 ms）より **47.6 % / 16.7 % 遅い**。down は n_tiles=2 のままにする。
