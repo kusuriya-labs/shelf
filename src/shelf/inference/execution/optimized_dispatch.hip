@@ -689,7 +689,8 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
             {
                 const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
                 herr = ::shelf::kernel::launch_exl3_mul24_rotate_quantize(
-                    x, in.row_stride, suh, codes, scales, n_rows, k, code_stride, scale_stride_bytes, stream);
+                    x, in.row_stride, suh, codes, scales, n_rows, k, code_stride,
+                    scale_stride_bytes, stream, count);
                 if (semantic_timing_enabled())
                     semantic_timing_finish(stream, timing, 0xffff0000u,
                                            static_cast<uint32_t>(SemPath::Optimized), 0);

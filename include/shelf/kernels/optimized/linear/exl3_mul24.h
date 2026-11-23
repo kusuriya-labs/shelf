@@ -68,6 +68,7 @@ hipError_t launch_exl3_mul24_rowscale(
 // The same row preparation in one launch: row peak / squared sum, atomic compact slots and
 // in-place re-rounding. Opt-in because it is a launch / ISA reduction, not a wall win on every
 // shape; the caller selects it explicitly. Slot order is arbitrary (rotate_out scatters by slot).
+// `count` must be zero before the launch; the dense path lets rotate_quantize's reset_count do it.
 hipError_t launch_exl3_mul24_rowscale_fused(
     int8_t* codes, const float* scales, float* rowscale, int32_t* slots, uint32_t* count, int8_t* codes_f,
     float* scales_f, uint32_t rows, uint32_t cap, uint32_t k, uint32_t code_row_stride_bytes,

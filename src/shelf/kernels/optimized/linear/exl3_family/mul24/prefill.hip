@@ -246,8 +246,6 @@ hipError_t launch_exl3_mul24_rowscale_fused(
         return hipErrorInvalidValue;
     if (k == 0u || (k % kBlock) != 0u || (scale_row_stride_bytes % 4u) != 0u)
         return hipErrorInvalidValue;
-    const hipError_t reset = hipMemsetAsync(count, 0, sizeof(uint32_t), stream);
-    if (reset != hipSuccess) return reset;
     exl3_mul24_rowprepare_kernel<<<rows, 256, 0, stream>>>(
         codes, scales, rowscale, slots, count, codes_f, scales_f, code_row_stride_bytes,
         scale_row_stride_bytes / 4u, k / kBlock, k, cap, share);

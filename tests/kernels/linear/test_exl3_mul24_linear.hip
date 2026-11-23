@@ -252,6 +252,7 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits, uint32_t see
         Dev<float> d_y2(static_cast<size_t>(cap) * n);
         Dev<float> d_out2(static_cast<size_t>(rows) * n);
         HIP_OK(shelf::kernel::launch_exl3_mul24_recon(d_trellis.p, bits, d_dense.p, n, k, nullptr));
+        HIP_OK(hipMemset(d_count.p, 0, sizeof(uint32_t)));
         HIP_OK(shelf::kernel::launch_exl3_mul24_rowscale_fused(
             d_codes.p, d_scales.p, d_rs.p, d_slots.p, d_count.p, d_codes_f.p, d_scales_f.p,
             rows, cap, k, code_stride, scale_stride_bytes, 0.5f, nullptr));
