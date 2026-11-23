@@ -78,7 +78,9 @@ __global__ __launch_bounds__(kThreads) void gemm_mul24_grouped_kernel(Exl3GemmAr
     const uint32_t group_index = blockIdx.z;
     uint32_t r0 = 0u;
     uint32_t active_rows = 0u;
-    if (!exl3_detail::resolve_group_plan<kGroups>(args, group_index, r0, active_rows)) return;
+    uint32_t group_base = 0u;
+    if (!exl3_detail::resolve_group_plan<kGroups>(args, group_index, r0, active_rows, group_base))
+        return;
 
     constexpr uint32_t kXqPitch = kPairK ? kXqPitch2 : kXqPitch1;
     constexpr uint32_t kStageChunks = kPairK ? 2u : 1u;
@@ -124,6 +126,19 @@ __global__ __launch_bounds__(kThreads) void gemm_mul24_grouped_kernel(Exl3GemmAr
 
                             if (lane == 0u) xs[c * kRows + r] = 0.f;
 
+                        continue;
+                    }
+                    if (args.pre_rotated_codes != nullptr) {
+                        const uint32_t chunks = args.k / 128u;
+                        const size_t group_row = static_cast<size_t>(group_base) * kRowTile + r;
+                        const uint8_t* src = static_cast<const uint8_t*>(args.pre_rotated_codes) +
+                                             group_row * args.k + k_base + lane * 4u;
+                        *reinterpret_cast<uint32_t*>(xbuf + r * kXqPitch + c * 128u +
+                                                     lane * 4u) =
+                            *reinterpret_cast<const uint32_t*>(src);
+                        if (lane == 0u)
+                            xs[c * kRows + r] = args.pre_rotated_scales[group_row * chunks +
+                                                                        first_kc + c];
                         continue;
                     }
                     const uint32_t input_row =
@@ -319,6 +334,107 @@ hipError_t launch_groups(const Exl3GemmArgs& args, dim3 grid, hipStream_t stream
 }
 
 }  // namespace
+
+namespace {
+
+constexpr uint32_t kActivateWarps = 8u;
+constexpr uint32_t kActivateThreads = kActivateWarps * 32u;
+
+// One warp per grouped row: rotate + INT8 quantize the token row with the expert's suh.
+__global__ void __launch_bounds__(kActivateThreads) exl3_grouped_activate_kernel(
+    const shelf::bf16_t* __restrict__ input,
+    const uint16_t* __restrict__ suh,
+    uint8_t* __restrict__ codes,
+    float* __restrict__ scales,
+    const uint32_t* __restrict__ group_expert,
+    const uint32_t* __restrict__ group_rows,
+    const uint32_t* __restrict__ group_count,
+    const uint32_t* __restrict__ group_row_base,
+    const int32_t* __restrict__ row_token,
+    uint32_t row_capacity,
+    uint32_t k,
+    uint32_t input_row_stride,
+    uint64_t suh_batch_stride) {
+    const uint32_t warp = threadIdx.x >> 5u;
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t row = blockIdx.x * kActivateWarps + warp;
+    if (row >= row_capacity) return;
+    const uint32_t group = row / kRowTile;
+    if (group >= group_count[0]) return;
+    const uint32_t local = row % kRowTile;
+    if (local >= group_rows[group]) return;
+    const uint32_t base = group_row_base != nullptr ? group_row_base[group] : group;
+    const uint32_t out_row = base * kRowTile + local;
+    int32_t token = static_cast<int32_t>(out_row);
+    if (row_token != nullptr) token = row_token[out_row];
+    if (token < 0) return;
+    const uint32_t expert = group_expert[group];
+    const uint16_t* suh_e = suh + static_cast<size_t>(expert) * suh_batch_stride / sizeof(uint16_t);
+    const shelf::bf16_t* src = input + static_cast<uint64_t>(token) * input_row_stride;
+    const uint32_t chunks = k / 128u;
+    for (uint32_t c = 0u; c < chunks; ++c) {
+        const uint32_t k_base = c * 128u;
+        const uint32_t off = k_base + lane * 4u;
+        const float s0 = __half2float(__ushort_as_half(suh_e[k_base + lane * 4u + 0u]));
+        const float s1 = __half2float(__ushort_as_half(suh_e[k_base + lane * 4u + 1u]));
+        const float s2 = __half2float(__ushort_as_half(suh_e[k_base + lane * 4u + 2u]));
+        const float s3 = __half2float(__ushort_as_half(suh_e[k_base + lane * 4u + 3u]));
+        float v0 = bf16_value(src + off + 0u) * s0;
+        float v1 = bf16_value(src + off + 1u) * s1;
+        float v2 = bf16_value(src + off + 2u) * s2;
+        float v3 = bf16_value(src + off + 3u) * s3;
+        exl3_detail::fwht128(v0, v1, v2, v3, lane);
+        v0 *= kInvSqrt128;
+        v1 *= kInvSqrt128;
+        v2 *= kInvSqrt128;
+        v3 *= kInvSqrt128;
+        float peak = fmaxf(fmaxf(fabsf(v0), fabsf(v1)), fmaxf(fabsf(v2), fabsf(v3)));
+        peak = fmaxf(peak, __shfl_xor(peak, 16, 32));
+        peak = fmaxf(peak, __shfl_xor(peak, 8, 32));
+        peak = fmaxf(peak, __shfl_xor(peak, 4, 32));
+        peak = fmaxf(peak, __shfl_xor(peak, 2, 32));
+        peak = fmaxf(peak, __shfl_xor(peak, 1, 32));
+        const float scale = peak / 127.0f;
+        const float inv = scale > 0.0f ? 1.0f / scale : 0.0f;
+        auto quant = [&](float v) -> uint32_t {
+            const float q = fminf(fmaxf(rintf(v * inv), -128.0f), 127.0f);
+            return static_cast<uint32_t>(static_cast<int32_t>(q)) & 0xFFu;
+        };
+        const uint32_t packed = quant(v0) | (quant(v1) << 8) | (quant(v2) << 16) |
+                                (quant(v3) << 24);
+        *reinterpret_cast<uint32_t*>(codes + static_cast<size_t>(out_row) * k + off) = packed;
+        if (lane == 0u) scales[static_cast<size_t>(out_row) * chunks + c] = scale;
+    }
+}
+
+}  // namespace
+
+hipError_t launch_exl3_grouped_activate(
+    const void* input,
+    const void* suh,
+    void* codes,
+    float* scales,
+    const uint32_t* group_expert,
+    const uint32_t* group_rows,
+    const uint32_t* group_count,
+    const uint32_t* group_row_base,
+    const int32_t* row_token,
+    uint32_t row_capacity,
+    uint32_t k,
+    uint32_t input_row_stride,
+    uint64_t suh_batch_stride,
+    hipStream_t stream) {
+    if (input == nullptr || suh == nullptr || codes == nullptr || scales == nullptr ||
+        group_expert == nullptr || group_rows == nullptr || group_count == nullptr)
+        return hipErrorInvalidValue;
+    if (row_capacity == 0u || k == 0u || (k % 128u) != 0u) return hipErrorInvalidValue;
+    const dim3 grid((row_capacity + kActivateWarps - 1u) / kActivateWarps);
+    exl3_grouped_activate_kernel<<<grid, kActivateThreads, 0, stream>>>(
+        static_cast<const shelf::bf16_t*>(input), static_cast<const uint16_t*>(suh),
+        static_cast<uint8_t*>(codes), scales, group_expert, group_rows, group_count,
+        group_row_base, row_token, row_capacity, k, input_row_stride, suh_batch_stride);
+    return hipGetLastError();
+}
 
 hipError_t launch_exl3_mul24_grouped(const Exl3GemmArgs& args, uint32_t n_tiles, uint32_t grid_x,
                                      uint32_t grid_z, hipStream_t stream) {

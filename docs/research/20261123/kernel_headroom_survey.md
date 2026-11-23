@@ -199,11 +199,9 @@ hit / miss の `expert_group_begin` は slot ごとの最小 index を `atomicMi
   の融合（§7）で hidden index ごとに 1 warp、320 CTA の kernel になった。
   `hyper_mix` / `hyper_apply` 単体の hidden tile 分割（256 / 512 / 1024 / 1 CTA）は
   E2E で差がなく（35.23〜35.40 tok/s）、1 launch 45〜60 KB の latency 律速だった。
-- **EXL3 grouped の activation 回転**: 回転と量子化は N tile の block ごとに実行され、
-  N=640 では同一 expert・同一入力に対して出力 tile 数だけ繰り返される。2-stage
-  producer との比較は未実施である。次に `exl3_mul24_rotate_quantize_f4` を 1 回だけ
-  実行し、回転を除いた grouped GEMM と組み合わせる microbench を作る。
-  group fuse 3 / 4 は既存研究で VGPR 増加のため棄却済みなので、tile 拡大では追わない。
+- **EXL3 grouped の activation 回転**: §11 で producer + pre-rotated GEMM を実装し、
+  prefill で採用した（microbench −17.4 %、E2E −9.1 %）。group fuse 3 / 4 は既存研究で
+  VGPR 増加のため棄却済みなので、tile 拡大では追わない。
 - **MoE slot scan**: §8 で並列化した（compact plan 専用経路は不要だった）。
 
 ## 10. 参考: prefill chunk と warm 帯域
@@ -221,3 +219,58 @@ chunk を 2048 → 8192 にすると **−5.9 %**。expert の重み traffic は
 ため、chunk を大きくすると同じ token 数でも expert を読む回数が減る。ただし
 grouped GEMM は dequant ALU 律速で、traffic 半減ほどの短縮にはならない。
 `tests/server/support.py` の `ComputeHarness` に `prefill_chunk` を追加した。
+
+## 11. 適用: EXL3 grouped の activation 回転を 1 回にする
+
+grouped kernel は N tile の block ごとに activation の FWHT 回転と INT8 量子化をやり直していた。
+gate は N=640 なので 5 block、down は N=2560 なので 10 block が同じ group row を回転する。
+回転を producer で 1 回だけ行い、grouped GEMM は INT8 code と chunk scale を読む形にした。
+
+- `launch_exl3_grouped_activate` が group row ごとに 1 warp で回転・量子化し、
+  `codes[group_row][k]` と `scales[group_row][k / 128]` を書く。group row は
+  `group_row_base` を通した full layout の row なので、hit / miss の split launch でも
+  同じ plane を共有できる。
+- grouped kernel は `pre_rotated_codes` が非 null のとき、tile block の回転を飛ばして
+  code を shared に積むだけになる。`group_base` は `resolve_group_plan` から受け取る。
+- code plane は grouped input value ごとの workspace range に置く。gate と up は同じ
+  input を共有するので range も共有し、down は別 range になる。
+  サイズは `rows_cap * k` bytes + `rows_cap * (k / 128) * 4` bytes。
+  4096 token chunk・local expert 256 では gate/up が約 118 MB、down が約 30 MB。
+- decode は producer の launch が増える分だけ損なので、routed rows が 128 未満では
+  従来の fused 回転を使う。`SHELF_DISABLE_EXL3_GROUPED_PREROTATE=1` で全体を戻せる。
+
+### microbench
+
+`bench_exl3_mul24_grouped`（gate k=2560/n=640、down k=640/n=2560、iters 20、fuse=2）。
+fused の gate+down と、producer + pre-rotated gate/down の合計を比べた。
+
+| tokens | grouped rows | fused ms | producer + pre ms | 差 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 10 | 0.096 | 0.110 | +14.9 % |
+| 8 | 80 | 0.354 | 0.327 | −7.7 % |
+| 64 | 640 | 2.035 | 1.830 | −10.1 % |
+| 1024 | 10240 | 4.276 | 3.655 | −14.5 % |
+| 2048 | 20480 | 7.125 | 5.884 | −17.4 % |
+
+全サイズで fused と pre-rotated の出力は bit 一致した。
+
+### E2E
+
+7002 token の warm prefill（EP=2、bf16 KV、serve、drafts 0、同一 binary を env で切替）。
+
+| host experts | 無効 ms | 有効 ms | 差 |
+| ---: | ---: | ---: | ---: |
+| 0 | 2231.7 / 2238.5 | 2024.2 / 2037.1 | −9.1 % |
+| 96 | 2611.8 | 2422.0 | −7.3 % |
+
+- decode は 3162 token prefill + 58 token 生成で 37.3 → 37.2 tok/s（差なし）。
+  MTP drafts 3 では 53.8 → 54.1 tok/s（差なし）。
+- 生成 16 token は host experts 0 / 96 の両方で有効・無効が完全一致した。
+
+### テスト
+
+- `test_exl3_mul24_grouped` の全 case に pre-rotated plane との bit 一致比較を追加した。
+- hit / miss を混ぜた split plan（`group_row_base` が非 identity）の比較も追加した。
+  この test で producer の capacity を group 数として渡していた bug を見つけ、
+  行数 (`activation_max_rows`) を渡すよう修正した。
+- required 231/231 PASS。

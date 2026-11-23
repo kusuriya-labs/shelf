@@ -921,6 +921,40 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
                     (w.rows & 127u) != 0u)
                     return fail("exl3 grouped linear shape is not 128-aligned");
                 if (!c.open_moe_scratch()) return fail("moe plan scratch has no capacity");
+                const uint32_t rows_cap = c.rows_for(ValueRowDomain::GROUPED_ROWS);
+                if (rows_cap == 0) return fail("grouped row capacity is empty");
+                // One INT8 code plane per grouped input row, plus one scale per 128-wide
+                // chunk, written once per projection and consumed without per-N-tile
+                // rotation. The high bit keeps it apart from token-row activation planes.
+                const uint64_t pre_key = static_cast<uint64_t>(node.inputs[0].id) |
+                                         (std::uint64_t{1} << 62);
+                const uint32_t kdim = w.cols;
+                const uint32_t chunks = kdim / 128u;
+                const uint64_t code_bytes = static_cast<uint64_t>(rows_cap) * kdim;
+                const uint64_t plane_bytes =
+                    ((code_bytes + 255ull) & ~std::uint64_t{255ull}) +
+                    static_cast<uint64_t>(rows_cap) * chunks * sizeof(float);
+                const uint32_t cmd_idx = static_cast<uint32_t>(c.plan->dispatches.size());
+                auto pre_it = c.activation_ws_by_input.find(pre_key);
+                if (pre_it == c.activation_ws_by_input.end()) {
+                    const uint32_t ws_idx =
+                        static_cast<uint32_t>(c.activation_workspaces.size());
+                    ActivationWorkspace aw{};
+                    aw.input_value = node.inputs[0].id;
+                    aw.k = kdim;
+                    aw.k_padded = kdim;
+                    aw.max_rows = rows_cap;
+                    aw.total_bytes = plane_bytes;
+                    aw.first_command = cmd_idx;
+                    aw.last_command = cmd_idx;
+                    c.activation_workspaces.push_back(aw);
+                    c.activation_ws_by_input[pre_key] = ws_idx;
+                } else {
+                    auto& aw = c.activation_workspaces[pre_it->second];
+                    if (aw.k != kdim || aw.max_rows != rows_cap)
+                        return fail("grouped pre-rotation workspace shape mismatch");
+                    aw.last_command = cmd_idx;
+                }
                 DispatchBinding b = base_binding(KernelId::LINEAR_EXL3_INT8_GROUPED);
                 b.weight_index = n.weight_index;
                 b.host_weight_index = n.host_weight_index;
@@ -928,12 +962,20 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
                 b.flags = c.graph->value_dtype(node.outputs[0]) == ValueDType::F32 ? 1u : 0u;
                 b.input_slots[0] = node.inputs[0].id;
                 b.input_count = 1;
+                b.activation_kp = kdim;
+                b.activation_max_rows = rows_cap;
+                b.activation_code_stride = kdim;
+                b.activation_scale_stride = chunks * static_cast<uint32_t>(sizeof(float));
                 c.use_moe_scratch(b);
                 auto po = c.produce(node.outputs[0]);
                 if (!po.ok()) return po;
                 b.output_slots[0] = node.outputs[0].id;
                 b.output_count = 1;
+                const uint32_t binding_idx = static_cast<uint32_t>(c.plan->dispatches.size());
                 c.push(b);
+                auto& aw = c.activation_workspaces[c.activation_ws_by_input[pre_key]];
+                aw.binding_refs.push_back(binding_idx);
+                aw.last_command = binding_idx;
                 return Status::make_ok();
             }
             if (contract.activation_kernel != KernelId::ACTIVATION_QUANTIZE_MXFP4_ROWREF)

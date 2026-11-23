@@ -1,4 +1,5 @@
 #include <shelf/kernels/fused/exl3/decode.h>
+#include <shelf/kernels/fused/exl3/grouped.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
 #include <shelf/quantization/exl3/exl3_int8.h>
@@ -238,11 +239,203 @@ bool run_case(const Case& c, uint32_t seed) {
             err = std::max(err, static_cast<double>(std::fabs(element(raw, i) - refs[i])));
         }
     }
-    const bool ok = err <= tol && untouched_bad == 0;
+    // The pre-rotated plane must reproduce the inline rotation bit for bit: the producer and
+    // the grouped kernel run the same rotation, and the GEMM then only skips redoing it.
+    std::vector<uint8_t> pre_raw(out_bytes, 0);
+    const size_t elem_bytes = c.bf16_out ? 2u : 4u;
+    bool pre_exact = true;
+    {
+        Dev<uint8_t> d_codes(static_cast<size_t>(plane_rows) * k);
+        Dev<float> d_scales(static_cast<size_t>(plane_rows) * (k / 128u));
+        HIP_OK(kernel::launch_exl3_grouped_activate(
+            d_in.p, d_suh.p, d_codes.p, d_scales.p, d_ge.p, d_gr.p, d_gc.p, nullptr,
+            c.token_rows ? d_rt.p : nullptr, plane_rows, k, k,
+            static_cast<uint64_t>(k) * 2u, nullptr));
+        kernel::Exl3GroupedArgs pre_args = args;
+        pre_args.pre_rotated_codes = d_codes.p;
+        pre_args.pre_rotated_scales = d_scales.p;
+        HIP_OK(hipMemset(d_out.p, 0xFF, out_bytes));
+        HIP_OK(kernel::launch_gemm_exl3_int8_grouped(pre_args, nullptr));
+        HIP_OK(hipDeviceSynchronize());
+        HIP_OK(hipMemcpy(pre_raw.data(), d_out.p, out_bytes, hipMemcpyDeviceToHost));
+        size_t bad = 0;
+        for (uint32_t row = 0; row < plane_rows; ++row) {
+            const size_t off = static_cast<size_t>(row) * n * elem_bytes;
+            if (row_written[row]) {
+                if (std::memcmp(raw.data() + off, pre_raw.data() + off,
+                                static_cast<size_t>(n) * elem_bytes) != 0)
+                    ++bad;
+            } else {
+                for (size_t b = 0; b < static_cast<size_t>(n) * elem_bytes; ++b)
+                    if (pre_raw[off + b] != 0xFFu) { ++bad; break; }
+            }
+        }
+        pre_exact = bad == 0;
+        if (!pre_exact) std::printf("%s: pre-rotated rows differ (%zu rows)\n", c.name, bad);
+    }
+    const bool ok = err <= tol && untouched_bad == 0 && pre_exact;
     std::printf("%s: bits=%u k=%u n=%u groups=%u max_ref=%g err_int8=%g tol=%g untouched_bad=%zu %s\n",
                 c.name, bits, k, n, group_count, max_ref, err, tol, untouched_bad,
                 ok ? "ok" : "FAIL");
     return ok;
+}
+
+
+// Split plan: hits and misses are compacted subsequences of the full group list, and each
+// launch addresses its output rows through group_row_base. The pre-rotated codes must land
+// on those same full rows.
+bool run_split_case(uint32_t seed) {
+    std::mt19937 rng(seed);
+    std::normal_distribution<float> nd(0.0f, 1.0f);
+    const uint32_t experts = 6, k = 1280, n = 512, bits = 3;
+    const uint32_t kt = k / 16u, nt = n / 16u;
+    const uint64_t trellis_words = kt * nt * 16u * bits;
+    const std::vector<Group> groups = {{0, 16}, {1, 3}, {2, 16}, {2, 16}, {2, 5}, {4, 1}, {5, 16}};
+    const uint32_t group_count = static_cast<uint32_t>(groups.size());
+    const uint32_t plane_rows = group_count * kRowTile;
+
+    std::vector<uint16_t> trellis(trellis_words * experts), suh(static_cast<size_t>(experts) * k),
+        svh(static_cast<size_t>(experts) * n);
+    for (auto& w : trellis) w = static_cast<uint16_t>(rng());
+    for (auto& s : suh) s = f16_bits((rng() & 1u) ? 1.0f : -1.0f);
+    for (auto& s : svh) s = f16_bits(0.5f + std::fabs(nd(rng)));
+    std::vector<uint16_t> input(static_cast<size_t>(plane_rows) * k);
+    for (auto& v : input) v = shelf::f32_to_bf16_rne(nd(rng));
+    std::vector<uint32_t> perm(plane_rows);
+    for (uint32_t i = 0; i < plane_rows; ++i) perm[i] = i;
+    std::shuffle(perm.begin(), perm.end(), rng);
+    std::vector<int32_t> row_token(plane_rows, -1);
+    std::vector<uint32_t> group_expert(group_count), group_rows(group_count);
+    for (uint32_t g = 0; g < group_count; ++g) {
+        group_expert[g] = groups[g].expert;
+        group_rows[g] = groups[g].rows;
+        for (uint32_t r = 0; r < groups[g].rows; ++r)
+            row_token[g * kRowTile + r] = static_cast<int32_t>(perm[g * kRowTile + r]);
+    }
+    // Even experts are resident (hits), odd experts are offloaded (misses).
+    std::vector<uint32_t> hit_slot, hit_rows_v, hit_base, miss_slot, miss_rows_v, miss_base;
+    for (uint32_t g = 0; g < group_count; ++g) {
+        if ((group_expert[g] & 1u) == 0u) {
+            hit_slot.push_back(group_expert[g]);
+            hit_rows_v.push_back(group_rows[g]);
+            hit_base.push_back(g);
+        } else {
+            miss_slot.push_back(group_expert[g]);
+            miss_rows_v.push_back(group_rows[g]);
+            miss_base.push_back(g);
+        }
+    }
+    auto begin_for = [&](const std::vector<uint32_t>& slot, uint32_t e) {
+        uint32_t at = 0u;
+        for (uint32_t i = 0; i < slot.size(); ++i)
+            if (slot[i] < e) ++at;
+        return at;
+    };
+    std::vector<uint32_t> hit_eb(experts + 1u), miss_eb(experts + 1u);
+    for (uint32_t e = 0; e < experts; ++e) {
+        hit_eb[e] = begin_for(hit_slot, e);
+        miss_eb[e] = begin_for(miss_slot, e);
+    }
+    hit_eb[experts] = static_cast<uint32_t>(hit_slot.size());
+    miss_eb[experts] = static_cast<uint32_t>(miss_slot.size());
+
+    Dev<uint16_t> d_trellis(trellis.size()), d_suh(suh.size()), d_svh(svh.size()), d_in(input.size());
+    Dev<uint32_t> d_hslot(hit_slot.size()), d_hrows(hit_rows_v.size()), d_hbase(hit_base.size());
+    Dev<uint32_t> d_mslot(miss_slot.size()), d_mrows(miss_rows_v.size()), d_mbase(miss_base.size());
+    Dev<uint32_t> d_hcount(1), d_mcount(1), d_heb(hit_eb.size()), d_meb(miss_eb.size());
+    Dev<int32_t> d_rt(row_token.size());
+    const uint32_t hc = static_cast<uint32_t>(hit_slot.size());
+    const uint32_t mc = static_cast<uint32_t>(miss_slot.size());
+    HIP_OK(hipMemcpy(d_trellis.p, trellis.data(), trellis.size() * 2, hipMemcpyHostToDevice));
+    HIP_OK(hipMemcpy(d_suh.p, suh.data(), suh.size() * 2, hipMemcpyHostToDevice));
+    HIP_OK(hipMemcpy(d_svh.p, svh.data(), svh.size() * 2, hipMemcpyHostToDevice));
+    HIP_OK(hipMemcpy(d_in.p, input.data(), input.size() * 2, hipMemcpyHostToDevice));
+    HIP_OK(hipMemcpy(d_hslot.p, hit_slot.data(), hc * 4, hipMemcpyHostToDevice));
+    HIP_OK(hipMemcpy(d_hrows.p, hit_rows_v.data(), hc * 4, hipMemcpyHostToDevice));
+    HIP_OK(hipMemcpy(d_hbase.p, hit_base.data(), hc * 4, hipMemcpyHostToDevice));
+    HIP_OK(hipMemcpy(d_mslot.p, miss_slot.data(), mc * 4, hipMemcpyHostToDevice));
+    HIP_OK(hipMemcpy(d_mrows.p, miss_rows_v.data(), mc * 4, hipMemcpyHostToDevice));
+    HIP_OK(hipMemcpy(d_mbase.p, miss_base.data(), mc * 4, hipMemcpyHostToDevice));
+    HIP_OK(hipMemcpy(d_hcount.p, &hc, 4, hipMemcpyHostToDevice));
+    HIP_OK(hipMemcpy(d_mcount.p, &mc, 4, hipMemcpyHostToDevice));
+    HIP_OK(hipMemcpy(d_heb.p, hit_eb.data(), hit_eb.size() * 4, hipMemcpyHostToDevice));
+    HIP_OK(hipMemcpy(d_meb.p, miss_eb.data(), miss_eb.size() * 4, hipMemcpyHostToDevice));
+    HIP_OK(hipMemcpy(d_rt.p, row_token.data(), row_token.size() * 4, hipMemcpyHostToDevice));
+
+    const size_t out_elems = static_cast<size_t>(plane_rows) * n;
+    const size_t out_bytes = out_elems * 2u;
+    Dev<uint8_t> d_out(out_bytes);
+    Dev<uint8_t> d_codes(static_cast<size_t>(plane_rows) * k);
+    Dev<float> d_scales(static_cast<size_t>(plane_rows) * (k / 128u));
+
+    kernel::Exl3GroupedArgs base;
+    base.trellis = d_trellis.p; base.suh = d_suh.p; base.svh = d_svh.p;
+    base.input = d_in.p; base.output = d_out.p; base.out_features = n; base.k = k;
+    base.input_row_stride = k;
+    base.output_row_stride = n; base.output_dtype = 0u; base.ka = bits;
+    base.trellis_batch_stride = trellis_words * 2u;
+    base.suh_batch_stride = static_cast<uint64_t>(k) * 2u;
+    base.svh_batch_stride = static_cast<uint64_t>(n) * 2u;
+    base.row_token = d_rt.p; base.group_capacity = group_count;
+
+    auto launch = [&](const uint32_t* ge, const uint32_t* gr, const uint32_t* gc,
+                      const uint32_t* gb, const uint32_t* eb, bool pre) {
+        kernel::Exl3GroupedArgs a = base;
+        a.group_expert = ge; a.group_rows = gr; a.group_count = gc;
+        a.group_row_base = gb; a.expert_group_begin = eb;
+        if (pre) { a.pre_rotated_codes = d_codes.p; a.pre_rotated_scales = d_scales.p; }
+        return kernel::launch_gemm_exl3_int8_grouped(a, nullptr);
+    };
+    Dev<uint32_t> d_ge(group_count), d_gr(group_count), d_gc7(1);
+    HIP_OK(hipMemcpy(d_ge.p, group_expert.data(), group_count * 4, hipMemcpyHostToDevice));
+    HIP_OK(hipMemcpy(d_gr.p, group_rows.data(), group_count * 4, hipMemcpyHostToDevice));
+    const uint32_t g7 = group_count;
+    HIP_OK(hipMemcpy(d_gc7.p, &g7, 4, hipMemcpyHostToDevice));
+    HIP_OK(hipMemset(d_out.p, 0xFF, out_bytes));
+    HIP_OK(launch(d_ge.p, d_gr.p, d_gc7.p, nullptr, nullptr, false));
+    HIP_OK(hipDeviceSynchronize());
+    std::vector<uint8_t> full(out_bytes);
+    HIP_OK(hipMemcpy(full.data(), d_out.p, out_bytes, hipMemcpyDeviceToHost));
+    HIP_OK(hipMemset(d_out.p, 0xFF, out_bytes));
+    hipError_t le = launch(d_hslot.p, d_hrows.p, d_hcount.p, d_hbase.p, d_heb.p, false);
+    if (le != hipSuccess) { std::printf("hit launch err %d\n", (int)le); return false; }
+    le = launch(d_mslot.p, d_mrows.p, d_mcount.p, d_mbase.p, d_meb.p, false);
+    if (le != hipSuccess) { std::printf("miss launch err %d hc=%u mc=%u\n", (int)le, hc, mc); return false; }
+    HIP_OK(hipDeviceSynchronize());
+    std::vector<uint8_t> fused(out_bytes);
+    HIP_OK(hipMemcpy(fused.data(), d_out.p, out_bytes, hipMemcpyDeviceToHost));
+
+    HIP_OK(hipMemset(d_out.p, 0xFF, out_bytes));
+    HIP_OK(kernel::launch_exl3_grouped_activate(
+        d_in.p, d_suh.p, d_codes.p, d_scales.p, d_hslot.p, d_hrows.p, d_hcount.p,
+        d_hbase.p, d_rt.p, plane_rows, k, k, static_cast<uint64_t>(k) * 2u, nullptr));
+    HIP_OK(launch(d_hslot.p, d_hrows.p, d_hcount.p, d_hbase.p, d_heb.p, true));
+    HIP_OK(kernel::launch_exl3_grouped_activate(
+        d_in.p, d_suh.p, d_codes.p, d_scales.p, d_mslot.p, d_mrows.p, d_mcount.p,
+        d_mbase.p, d_rt.p, plane_rows, k, k, static_cast<uint64_t>(k) * 2u, nullptr));
+    HIP_OK(launch(d_mslot.p, d_mrows.p, d_mcount.p, d_mbase.p, d_meb.p, true));
+    HIP_OK(hipDeviceSynchronize());
+    std::vector<uint8_t> pre(out_bytes);
+    HIP_OK(hipMemcpy(pre.data(), d_out.p, out_bytes, hipMemcpyDeviceToHost));
+    bool exact = true;
+    for (uint32_t row = 0; row < plane_rows && exact; ++row) {
+        const size_t off = static_cast<size_t>(row) * n * 2u;
+        if (std::memcmp(fused.data() + off, pre.data() + off, static_cast<size_t>(n) * 2u) != 0) {
+            exact = false;
+            uint32_t col = 0;
+            for (uint32_t c = 0; c < n; ++c)
+                if (std::memcmp(fused.data() + off + c * 2u, pre.data() + off + c * 2u, 2) != 0) {
+                    col = c;
+                    break;
+                }
+            std::printf("split-base first diff row=%u col=%u\n", row, col);
+        }
+    }
+    std::printf("split-base: hits=%u misses=%u %s full_vs_split=%s pre_vs_full=%s\n", hc, mc,
+                exact ? "ok" : "FAIL",
+                std::memcmp(full.data(), fused.data(), out_bytes) == 0 ? "same" : "DIFF",
+                std::memcmp(full.data(), pre.data(), out_bytes) == 0 ? "same" : "DIFF");
+    return exact;
 }
 
 }  // namespace
@@ -280,6 +473,7 @@ int main() {
          true, true, false});
     run({"pair-k11-nt2", 2, 1408, 1024, 3, {{0, 16}, {0, 16}, {0, 16}, {0, 9}, {1, 2}},
          true, true, false});
+    if (!run_split_case(seed++)) ++failed;
     if (failed != 0) {
         std::printf("FAILED: %d case(s)\n", failed);
         return 1;

@@ -100,6 +100,11 @@ struct Exl3GemmArgs {
     // group-row order.
     const int32_t* row_token = nullptr;
     const uint32_t* group_row_base = nullptr;
+    // Optional pre-rotated grouped activation plane. When pre_rotated_codes is non-null the
+    // kernel reads INT8 codes [group_row][k] and one F32 scale per 128-wide chunk
+    // ([group_row][k / 128]) instead of rotating the BF16 input in every N-tile block.
+    const void* pre_rotated_codes = nullptr;
+    const float* pre_rotated_scales = nullptr;
     uint64_t trellis_batch_stride = 0;
     uint64_t suh_batch_stride = 0;
     uint64_t svh_batch_stride = 0;
@@ -140,6 +145,12 @@ struct Exl3GroupedArgs {
     const int32_t* row_token = nullptr;
     const uint32_t* group_row_base = nullptr;
     uint32_t group_capacity = 0;
+    // Optional pre-rotated grouped activation plane. When pre_rotated_codes is non-null the
+    // kernel reads INT8 codes [group_row][k] and F32 scales [group_row][k / 128] instead of
+    // rotating the BF16 input in every N-tile block. The plane is produced once by
+    // launch_exl3_grouped_activate.
+    const void* pre_rotated_codes = nullptr;
+    const float* pre_rotated_scales = nullptr;
 };
 
 }  // namespace shelf::kernel

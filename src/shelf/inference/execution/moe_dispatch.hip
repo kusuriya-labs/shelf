@@ -1,4 +1,5 @@
 #include <shelf/kernels/fused/exl3/decode.h>
+#include <shelf/kernels/fused/exl3/grouped.h>
 #include <shelf/inference/execution/moe_dispatch.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/program_executor.h>
@@ -372,6 +373,32 @@ Result<OptimizedLaunchResult> try_launch_moe_grouped_exl3(const Program& program
     args.row_token = token_rows ? plan.value().arrays.row_token : nullptr;
     args.group_capacity = plan.value().group_capacity;
 
+    // One INT8 activation plane per projection: rotating once here replaces the rotation
+    // every N-tile block would otherwise repeat. Decode-sized routing keeps the fused
+    // rotation because a second launch costs more than it saves.
+    static const bool pre_rotate_disabled = [] {
+        const char* v = std::getenv("SHELF_DISABLE_EXL3_GROUPED_PREROTATE");
+        return v != nullptr && v[0] != '\0';
+    }();
+    const uint32_t routed_rows = plan.value().tokens * plan.value().top_k;
+    uint8_t* pre_codes = nullptr;
+    float* pre_scales = nullptr;
+    if (!pre_rotate_disabled && routed_rows >= 128u &&
+        b.workspace_slot != ::shelf::runtime::kNoWorkspace &&
+        b.workspace_slot < program.workspace.ranges.size() && b.activation_max_rows != 0u &&
+        b.activation_kp == e.cols) {
+        const uint64_t code_bytes =
+            static_cast<uint64_t>(b.activation_max_rows) * b.activation_kp;
+        const uint64_t scale_bytes = static_cast<uint64_t>(b.activation_max_rows) *
+                                     (b.activation_kp / 128u) * sizeof(float);
+        const uint64_t aligned = (code_bytes + 255ull) & ~std::uint64_t{255ull};
+        const auto& range = program.workspace.ranges[b.workspace_slot];
+        if (range.bytes >= aligned + scale_bytes) {
+            pre_codes = ctx.workspace + range.offset;
+            pre_scales = reinterpret_cast<float*>(pre_codes + aligned);
+        }
+    }
+
     auto launch_plane = [&](const WeightSlot& plane, const uint32_t* group_expert,
                             const uint32_t* group_rows, const uint32_t* group_count,
                             const uint32_t* group_row_base,
@@ -385,6 +412,15 @@ Result<OptimizedLaunchResult> try_launch_moe_grouped_exl3(const Program& program
         a.group_count = group_count;
         a.group_row_base = group_row_base;
         a.expert_group_begin = expert_group_begin;
+        if (pre_codes != nullptr) {
+            const hipError_t perr = ::shelf::kernel::launch_exl3_grouped_activate(
+                in.ptr, plane.exl3_suh, pre_codes, pre_scales, group_expert, group_rows,
+                group_count, group_row_base, args.row_token, b.activation_max_rows, e.cols,
+                in.row_stride, plane.exl3_suh_batch_stride_bytes, stream);
+            if (perr != hipSuccess) return perr;
+            a.pre_rotated_codes = pre_codes;
+            a.pre_rotated_scales = pre_scales;
+        }
         return ::shelf::kernel::launch_gemm_exl3_int8_grouped(a, stream);
     };
 

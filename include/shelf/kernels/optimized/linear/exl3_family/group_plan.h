@@ -15,7 +15,8 @@ namespace shelf::kernel::exl3_detail {
 // of an expert does the work for the whole stride (its rows are the sum of the stride's groups).
 template <uint32_t kGroups>
 __device__ __forceinline__ bool resolve_group_plan(Exl3GemmArgs& args, uint32_t group_index,
-                                                   uint32_t& r0, uint32_t& active_rows) {
+                                                   uint32_t& r0, uint32_t& active_rows,
+                                                   uint32_t& group_base) {
     constexpr uint32_t kRows = kExl3W16A16RowTile * kGroups;
     if (group_index >= args.group_count[0]) return false;
     const uint32_t expert = args.group_expert[group_index];
@@ -43,6 +44,7 @@ __device__ __forceinline__ bool resolve_group_plan(Exl3GemmArgs& args, uint32_t 
                static_cast<std::uint64_t>(expert) * args.svh_batch_stride;
     const uint32_t base =
         args.group_row_base != nullptr ? args.group_row_base[group_index] : group_index;
+    group_base = base;
     const std::uint64_t output_offset =
         static_cast<std::uint64_t>(base) * kExl3W16A16RowTile * args.output_row_stride;
     if (args.row_token == nullptr) {
