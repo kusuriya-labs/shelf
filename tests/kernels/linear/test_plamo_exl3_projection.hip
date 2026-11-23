@@ -284,7 +284,7 @@ int main() {
             for (uint32_t count : {1u, 2u, 3u})
                 if (!run(rows, bits, count))
                     return 1;
-    for (uint32_t rows : {1u, 8u, 16u, 17u, 32u, 40u, 64u})
+    for (uint32_t rows : {1u, 8u, 16u, 17u, 32u, 33u, 40u, 48u, 49u, 64u})
         for (uint32_t count : {2u, 3u})
             if (!run(rows, 4u, count, 1024u, 384u, 0u, false))
                 return 1;
