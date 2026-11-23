@@ -255,6 +255,9 @@ hipError_t launch_plamo_exl3_projection(const PlamoExl3ProjectionGroup &args, ui
         err = launch_group_bits<3, 1, true>(args, stream);
     else if (bits == 4u)
         err = args.rows <= 16u    ? launch_group_bits<4, 1, true>(args, stream)
+              : args.rows <= 32u ? launch_group_bits<4, 2, true>(args, stream)
+              : args.rows <= 48u ? launch_group_bits<4, 3, true>(args, stream)
+              : args.rows <= 64u ? launch_group_bits<4, 4, true>(args, stream)
               : args.rows <= 128u ? launch_group_bits<4, 2, true>(args, stream)
                                   : launch_group_bits<4, 4, true>(args, stream);
     else if (bits == 5u)
