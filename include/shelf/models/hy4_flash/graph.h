@@ -42,6 +42,8 @@ struct GraphKey {
 struct GraphLayer {
     hipGraphExec_t scatter{}, local{};
     std::array<hipGraphExec_t, 4> expert{};
+    std::array<hipEvent_t, 2> scatter_done{}, local_done{};
+    std::array<std::array<hipEvent_t, 4>, 2> expert_done{};
 };
 
 struct GraphPlan {
@@ -51,7 +53,11 @@ struct GraphPlan {
     float *logits{};
     uint16_t *hidden{};
     size_t cursor{};
-    void launch(Residency &gpu) const;
+    std::array<hipEvent_t, 2> replay_done{};
+    std::array<bool, 2> replay_recorded{};
+    unsigned replay_slot{};
+    bool events_ready{};
+    void launch(Residency &gpu);
     void release(Residency &gpu, std::string &errors);
 };
 

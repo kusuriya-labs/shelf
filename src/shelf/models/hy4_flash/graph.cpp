@@ -36,33 +36,64 @@ void GraphCapture::cancel(std::string &errors) {
         collect(errors, status);
 }
 
-void GraphPlan::launch(Residency &gpu) const {
+void GraphPlan::launch(Residency &gpu) {
     auto root = gpu.compute[0];
     if (!layers.front().scatter) {
         checked(hipGraphLaunch(tail, root));
         return;
     }
+    if (!events_ready) {
+        for (int slot = 0; slot < 2; ++slot) {
+            checked(hipSetDevice(gpu.physical[0]));
+            if (!replay_done[slot])
+                checked(hipEventCreateWithFlags(&replay_done[slot], hipEventDisableTiming));
+            for (auto &layer : layers) {
+                if (!layer.scatter_done[slot])
+                    checked(hipEventCreateWithFlags(&layer.scatter_done[slot], hipEventDisableTiming | hipEventReleaseToSystem));
+                if (layer.local && !layer.local_done[slot])
+                    checked(hipEventCreateWithFlags(&layer.local_done[slot], hipEventDisableTiming));
+                for (int r = 1; r < gpu.ep_size; ++r) {
+                    checked(hipSetDevice(gpu.physical[r]));
+                    if (!layer.expert_done[slot][r])
+                        checked(hipEventCreateWithFlags(&layer.expert_done[slot][r], hipEventDisableTiming | hipEventReleaseToSystem));
+                }
+                checked(hipSetDevice(gpu.physical[0]));
+            }
+        }
+        events_ready = true;
+    }
+    unsigned slot = replay_slot;
+    if (replay_recorded[slot]) {
+        auto status = hipEventQuery(replay_done[slot]);
+        if (status == hipErrorNotReady)
+            checked(hipEventSynchronize(replay_done[slot]));
+        else
+            checked(status);
+    }
     for (const auto &layer : layers) {
         checked(hipGraphLaunch(layer.scatter, root));
-        if (gpu.ep_size > 1) checked(hipEventRecord(gpu.ready[0][1][0], root));
+        if (gpu.ep_size > 1) checked(hipEventRecord(layer.scatter_done[slot], root));
         if (layer.local) {
-            checked(hipStreamWaitEvent(gpu.local_expert[0], gpu.ready[0][1][0], 0));
+            checked(hipStreamWaitEvent(gpu.local_expert[0], layer.scatter_done[slot], 0));
             checked(hipGraphLaunch(layer.local, gpu.local_expert[0]));
-            checked(hipEventRecord(gpu.local_done[0], gpu.local_expert[0]));
+            checked(hipEventRecord(layer.local_done[slot], gpu.local_expert[0]));
         }
         for (int r = 1; r < gpu.ep_size; ++r) {
             checked(hipSetDevice(gpu.physical[r]));
-            checked(hipStreamWaitEvent(gpu.compute[r], gpu.ready[0][1][0], 0));
+            checked(hipStreamWaitEvent(gpu.compute[r], layer.scatter_done[slot], 0));
             checked(hipGraphLaunch(layer.expert[r], gpu.compute[r]));
-            checked(hipEventRecord(gpu.ready[r][0][0], gpu.compute[r]));
+            checked(hipEventRecord(layer.expert_done[slot][r], gpu.compute[r]));
         }
         checked(hipSetDevice(gpu.physical[0]));
         checked(hipGraphLaunch(layer.expert[0], root));
-        if (layer.local) checked(hipStreamWaitEvent(root, gpu.local_done[0], 0));
+        if (layer.local) checked(hipStreamWaitEvent(root, layer.local_done[slot], 0));
         for (int r = 1; r < gpu.ep_size; ++r)
-            checked(hipStreamWaitEvent(root, gpu.ready[r][0][0], 0));
+            checked(hipStreamWaitEvent(root, layer.expert_done[slot][r], 0));
     }
     checked(hipGraphLaunch(tail, root));
+    checked(hipEventRecord(replay_done[slot], root));
+    replay_recorded[slot] = true;
+    replay_slot ^= 1;
 }
 
 void GraphPlan::release(Residency &gpu, std::string &errors) {
@@ -72,10 +103,23 @@ void GraphPlan::release(Residency &gpu, std::string &errors) {
             exec = nullptr;
         }
     };
+    auto destroy_event = [&](hipEvent_t &event) {
+        if (event) {
+            collect(errors, hipEventDestroy(event));
+            event = nullptr;
+        }
+    };
     for (int r = gpu.ranks - 1; r >= 0; --r) {
         collect(errors, hipSetDevice(gpu.physical[r]));
         for (auto &layer : layers) {
             destroy(layer.expert[r]);
+            for (int slot = 0; slot < 2; ++slot) {
+                destroy_event(layer.expert_done[slot][r]);
+                if (!r) {
+                    destroy_event(layer.scatter_done[slot]);
+                    destroy_event(layer.local_done[slot]);
+                }
+            }
             if (!r) {
                 destroy(layer.scatter);
                 destroy(layer.local);
@@ -84,8 +128,12 @@ void GraphPlan::release(Residency &gpu, std::string &errors) {
         if (!r) {
             destroy(tail);
             destroy(entry);
+            for (auto &event : replay_done) destroy_event(event);
         }
     }
     key = {};
+    replay_recorded = {};
+    replay_slot = 0;
+    events_ready = false;
 }
 }
