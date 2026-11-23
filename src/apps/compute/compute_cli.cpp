@@ -131,8 +131,8 @@ void compute_usage(const char* prog) {
     printf("  --pcie-gbps F           assumed PCIe bandwidth in GB/s (default 25)\n");
     printf("  --dflash2-model-dir PATH  DFlash2 draft model directory; enables\n");
     printf("                            speculative decoding (greedy / stochastic)\n");
-    printf("  --dflash2-tree-budget N|auto  tree verify rows (default auto; 0 disables)\n");
-    printf("                         auto: 10 for one decoding request if speculative, else 8\n");
+    printf("  --dflash2-tree-budget N|auto  木検証の行数（既定は 0 で chain を使用）\n");
+    printf("                         auto は生成中の要求が投機中の 1 件だけなら 10 行、それ以外は 8 行\n");
     printf("  --dflash2-tree-extra B  enable experimental tree verification (B=0,1,2,4)\n");
     printf("  --dflash2-drafts N     speculative draft tokens per round (default 7)\n");
     printf("  --dflash2-adaptive     control speculation with a batch policy\n");

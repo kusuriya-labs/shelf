@@ -17,7 +17,8 @@ def prompt_tokens(n, salt=0):
 
 
 def run(harness_kwargs, requests):
-    harness = ComputeHarness(max_seq_len=4608, auto_arena=True, **harness_kwargs)
+    harness = ComputeHarness(max_seq_len=4608, auto_arena=True, max_num_batched_tokens=2048,
+                             prefix_cache_save_interval=2048, **harness_kwargs)
     results = []
     try:
         harness.start()

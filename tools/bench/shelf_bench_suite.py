@@ -244,6 +244,10 @@ def track_c(args, preview):
     for task in selected:
         for i in range(-args.warmup, args.repeats):
             body = request_body(args.model, task, args.seed + i)
+            if args.reasoning_effort and task['thinking']:
+                body['reasoning_effort'] = args.reasoning_effort
+            if args.no_answer_reserve:
+                body['reserve_answer_tokens'] = False
             r = stream(args.endpoint, body)
             if i < 0:
                 if not r['ok']:
@@ -998,6 +1002,8 @@ def parser():
     b.add_argument('--server-log', action='append', default=[], metavar='[CATEGORY=]PATH')
     b.add_argument('--conditions', help='同条件比較用の構成 JSON。必要なキーは --list で表示')
     c.add_argument('--task', action='append', metavar='ID')
+    c.add_argument('--reasoning-effort', choices=('low', 'medium', 'xhigh'), help='思考を使う課題に渡す指示')
+    c.add_argument('--no-answer-reserve', action='store_true', help='Shelf の回答用トークン予約を無効にする')
     d.add_argument('--concurrency', type=numbers, default=[1, 4, 8, 16])
     d.add_argument('--requests', type=positive, help='同時数ごとの測定件数（既定は同時数の4倍）')
     d.add_argument('--mode', choices=['steady', 'mix', 'both'], default='both')

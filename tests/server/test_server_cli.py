@@ -73,8 +73,8 @@ def main() -> int:
     checker.check("default-save-interval",
                   value_of(default_argv, "--prefix-cache-save-interval") == "16384",
                   repr(value_of(default_argv, "--prefix-cache-save-interval")))
-    checker.check("default-prefill-chunk-absent",
-                  "--prefill-chunk" not in default_argv,
+    checker.check("既定の prefill chunk を転送する",
+                  value_of(default_argv, "--prefill-chunk") == "4096",
                   repr(value_of(default_argv, "--prefill-chunk")))
     return checker.done()
 

@@ -160,6 +160,41 @@ __device__ __forceinline__ uint32_t block_sum_u32(uint32_t value, uint32_t* su) 
     return su[0];
 }
 
+__device__ __forceinline__ float kth_logit(
+    const float* row, uint32_t vocab_size, uint32_t k, uint32_t* histogram) {
+    __shared__ uint32_t selected;
+    __shared__ uint32_t remaining;
+    if (threadIdx.x == 0u) {
+        selected = 0u;
+        remaining = k;
+    }
+    uint32_t mask = 0u;
+    for (int shift = 24; shift >= 0; shift -= 8) {
+        for (uint32_t bin = threadIdx.x; bin < 256u; bin += blockDim.x)
+            histogram[bin] = 0u;
+        __syncthreads();
+        for (uint32_t v = threadIdx.x; v < vocab_size; v += blockDim.x) {
+            const uint32_t bits = row[v] == 0.0f ? 0u : __float_as_uint(row[v]);
+            const uint32_t key = (bits & 0x80000000u) ? ~bits : bits ^ 0x80000000u;
+            if ((key & mask) == selected)
+                atomicAdd(histogram + ((key >> shift) & 255u), 1u);
+        }
+        __syncthreads();
+        if (threadIdx.x == 0u) {
+            for (int bin = 255; bin >= 0; --bin) {
+                if (remaining <= histogram[bin]) {
+                    selected |= static_cast<uint32_t>(bin) << shift;
+                    break;
+                }
+                remaining -= histogram[bin];
+            }
+        }
+        mask |= 255u << shift;
+        __syncthreads();
+    }
+    return __uint_as_float((selected & 0x80000000u) ? selected ^ 0x80000000u : ~selected);
+}
+
 }  // namespace sampling_detail
 
 __device__ __forceinline__ void sampling_sample_row(
@@ -221,15 +256,26 @@ __device__ __forceinline__ void sampling_sample_row(
     }
     lmax = block_max(lmax, s_val);
 
-    bool usable = isfinite(lmax) != 0;
     double z = 0.0;
-    if (usable) {
-        for (uint32_t v = threadIdx.x; v < vocab_size; v += blockDim.x) {
-            z += static_cast<double>(::expf((logits[v] - lmax) / temperature));
+    const bool truncated = params.top_p < 1.0f && params.top_k > 0u &&
+                           params.top_k < vocab_size;
+    const float cutoff = truncated ? kth_logit(logits, vocab_size, params.top_k, s_tok)
+                                   : -INFINITY;
+    uint32_t above = 0u;
+    for (uint32_t v = threadIdx.x; v < vocab_size; v += blockDim.x) {
+        const float val = logits[v];
+        if (!truncated || val > cutoff || isnan(val)) {
+            z += static_cast<double>(::expf((val - lmax) / temperature));
+            ++above;
         }
-        z = block_sum_f64(z, s_acc);
-        usable = (isfinite(z) != 0) && z > 0.0;
     }
+    z = block_sum_f64(z, s_acc);
+    if (truncated) {
+        above = block_sum_u32(above, s_tok);
+        __syncthreads();
+        z += static_cast<double>(params.top_k - above) * ::expf((cutoff - lmax) / temperature);
+    }
+    const bool usable = isfinite(lmax) && isfinite(z) && z > 0.0;
 
     if (!usable) {
         sampling_report_error(error_word);
@@ -370,8 +416,8 @@ __device__ __forceinline__ void sampling_topk_active_row(
     bool usable = (isfinite(lmax) != 0) && lmax > kNegInf && nan_count == 0u;
     double z = 0.0;
     if (usable && params.top_p < 1.0f) {
-        for (uint32_t v = threadIdx.x; v < vocab_size; v += blockDim.x) {
-            z += static_cast<double>(::expf((row[v] - lmax) / temperature));
+        for (uint32_t i = threadIdx.x; i < count; i += blockDim.x) {
+            z += static_cast<double>(::expf((topk.logits[i] - lmax) / temperature));
         }
         z = block_sum_f64(z, s_acc);
         usable = (isfinite(z) != 0) && z > 0.0;

@@ -69,7 +69,7 @@ prefill の chunk 境界や prefix cache の有無によって、同じ入力の
 | `--pcie-frac F` | share of PCIe the runtime may use (default 0.25) |
 | `--pcie-gbps F` | assumed PCIe bandwidth in GB/s (default 25) |
 | `--dflash2-model-dir PATH` | DFlash2 draft model directory; enables speculative decoding (greedy / stochastic) |
-| `--dflash2-tree-budget N\|auto` | tree verify rows (default auto; 0 disables) auto: 10 for one decoding request if speculative, else 8 |
+| `--dflash2-tree-budget N\|auto` | 木検証の行数（既定は 0 で chain を使用） auto は生成中の要求が投機中の 1 件だけなら 10 行、それ以外は 8 行 |
 | `--dflash2-tree-extra B` | enable experimental tree verification (B=0,1,2,4) |
 | `--dflash2-drafts N` | speculative draft tokens per round (default 7) |
 | `--dflash2-adaptive` | control speculation with a batch policy |
@@ -413,7 +413,7 @@ vocab の host sort も行わない。
 | `--temperature 0.7 --top-p 1` | temperature softmax からの categorical sample |
 | `--temperature 0.7 --top-p 0.9` | nucleus sampling |
 | `--temperature 0.7 --min-p 0.05` | 最大確率の 5% 未満を除外 |
-| `--temperature 0.7 --top-p 0.9 --min-p 0.05 --top-k 50` | 3 条件の積集合 |
+| `--temperature 0.7 --top-p 0.9 --min-p 0.05 --top-k 50` | 上位 50 語の質量の 90% に達するまで残し、最大確率の 5% 未満を除外 |
 | `--temperature 0.7 --top-p 1 --top-k 1` | 最上位 token のみ |
 
 `--top-k` は `0` で無効、`--min-p` は `0` で無効。`--top-k` / `--top-p` /

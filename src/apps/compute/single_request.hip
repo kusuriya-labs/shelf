@@ -746,9 +746,8 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
 
     const auto t_prefill_start = std::chrono::steady_clock::now();
     const uint32_t prompt_count = static_cast<uint32_t>(prompt_ids.size());
-    const uint32_t tail_position = dflash_config.block_size == 16u
-        ? shelf::runtime::dflash2_prefill_tail_position(prompt_count, runtime.config().page_tokens)
-        : 0u;
+    const uint32_t tail_position =
+        shelf::runtime::dflash2_prefill_tail_position(prompt_count, runtime.config().page_tokens);
     auto prefill_result = shelf::qwen35::runtime::dflash2_spec_prefill(
         decoder, prompt_ids.data(), prompt_count, 0u, 0u, {}, tail_position);
     if (!prefill_result.ok()) {

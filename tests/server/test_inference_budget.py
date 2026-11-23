@@ -81,6 +81,8 @@ def main() -> int:
     parse(checked, "non-positive-rejected",
           body(max_completion_tokens=0), None)
 
+    parse(checked, "回答予約は真偽値のみ", body(reserve_answer_tokens=0), None)
+
     if not model_dir().is_dir():
         return checked.done()
 
@@ -121,6 +123,13 @@ def main() -> int:
                   str(prepared.reasoning_budget_tokens))
     checked.check("prepare-close-token-forwarded",
                   prepared.reasoning_close_token == capability["close_token"], "")
+
+    unreserved = service.prepare(parse_chat_request(
+        body(reserve_answer_tokens=False), inference_budget_tokens=service.inference_budget_ceiling))
+    checked.check("回答予約を外しても入力と生成上限を維持する",
+                  unreserved.prompt_ids == prepared.prompt_ids and
+                  unreserved.max_new_tokens == prepared.max_new_tokens and
+                  unreserved.reasoning_budget_tokens == 0, "")
 
     long_messages = [{"role": "user", "content": "語 " * 4000}]
     small_threshold = ChatService(

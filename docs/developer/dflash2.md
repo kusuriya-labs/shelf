@@ -155,6 +155,9 @@ DFlash2 drafter は target の途中層の出力を入力に使う。tap は
   明示的に bind する（alias させない）。
 - executor の host 側 external I/O 静的 capacity は `kHostExternalCapacity = 16`。
 - tap は layer の row 数分（token rows）を保持する。
+- 出力射影が EXL3 mul24、SiLU gate、value 幅 6144・head 幅 128 の GDN では、
+  recurrence の出力と gate の入力を乗算まで保持する。融合カーネルが両方を読むため、
+  tap の有無によらず、乗算の出力には別の作業領域を割り当てる。
 - `kMaxTargetHiddenTaps = 8`。`target_hidden_tap_count` がこれを超える場合は executor
   create が error。
 
@@ -173,11 +176,10 @@ external tap と internal layer output の bit 一致を確認する。tap の�
 3. `launch_dflash2_rmsnorm_direct_bf16`: `hidden_norm.weight` で
    `target_feature [rows, 5120]`。
 
-TP=1 で sliding window が 256 以上の場合、block size 16 の単発 CLI と stdio serving は
-prefill の feature projection と context append を最大 256 行ずつ実行する。block size 8
-でも stdio serving は同じ容量を使う。それ以外の構成と `SHELF_DFLASH2_PREFILL_ROWS=8` では従来の容量を使う。block size が 16 の場合は `16` でも同じ容量を選べる。
+TP=1、sliding window が 256 以上、block size が 8 または 16 の場合、単発 CLI と stdio serving は
+prefill の feature projection と context append を最大 256 行ずつ実行する。それ以外の構成と `SHELF_DFLASH2_PREFILL_ROWS=8` では従来の容量を使う。block size が 16 の場合は `16` でも同じ容量を選べる。
 バッチ用 executor が複数 request 分を持つ場合、従来の容量は block size より大きい。
-block size 16 の単発 CLI は server と同様に、入力の最後の token を含むページの手前で target prefill を区切る。
+単発 CLI は server と同様に、入力の最後の token を含むページの手前で target prefill を区切る。
 FC の 8 行経路は `ExactRowsDot2`、256 行経路は `WmmaWide` を選ぶため、K/V は
 bit 一致せず 2 ULP を超える差も生じる。原因と測定条件は
 [行数による K/V 差の調査](../research/20261109/dflash2_prefill_rows_kv_diff.md)を参照。

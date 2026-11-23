@@ -72,6 +72,7 @@ class ChatRequest:
     forced_tool_name: str | None = None
     response_schema: dict | None = None
     template_kwargs: dict[str, Any] | None = None
+    reserve_answer_tokens: bool = True
 
 
 def error_body(message: str, *, param: str | None = None,
@@ -105,7 +106,7 @@ def reject_unsupported(body: dict) -> None:
     allowed = {
         "model", "messages", "tools", "tool_choice", "stream", "stream_options",
         "max_tokens", "max_completion_tokens", "temperature", "top_p", "min_p",
-        "top_k", "seed", "chat_template_kwargs", "reasoning_effort", "n",
+        "top_k", "seed", "chat_template_kwargs", "reasoning_effort", "reserve_answer_tokens", "n",
         "user", "store", "metadata", "service_tier", "parallel_tool_calls",
         "frequency_penalty", "presence_penalty", "stop", "response_format",
     }
@@ -458,6 +459,9 @@ def parse_chat_request(body: Any,
     template_kwargs = {key: value for key, value in
                        (body.get("chat_template_kwargs") or {}).items()
                        if key in TRANSLATION_TEMPLATE_KWARGS}
+    reserve_answer_tokens = body.get("reserve_answer_tokens", True)
+    if not isinstance(reserve_answer_tokens, bool):
+        raise OpenAIProtocolError("reserve_answer_tokens must be a boolean", param="reserve_answer_tokens")
     reasoning_effort, effort_given = parse_reasoning_effort(body)
     if effort_given and not enable_thinking:
         raise OpenAIProtocolError(
@@ -483,6 +487,7 @@ def parse_chat_request(body: Any,
         include_usage=include_usage,
         enable_thinking=enable_thinking,
         reasoning_effort=reasoning_effort,
+        reserve_answer_tokens=reserve_answer_tokens,
         preserve_thinking=preserve_thinking,
         response_schema=response_schema,
         template_kwargs=template_kwargs,

@@ -338,6 +338,24 @@ int main() {
     }
 
     {
+        const std::vector<float> logits = prob_logits({0.10f, 0.25f, 0.60f, 0.05f});
+        std::vector<int32_t> tokens;
+        const bool ok = sample_many(4u, logits, 1.0f, 0.7f, 2u, 7u, 256u, tokens);
+        check(ok && std::all_of(tokens.begin(), tokens.end(), [](int32_t t) { return t == 2; }),
+              "rejection 経路も上位 2 語の質量で候補を絞る");
+    }
+
+    {
+        const std::vector<float> flat(259u, -1.0f);
+        std::vector<int32_t> tokens;
+        const bool ok = sample_many(259u, flat, 1.0f, 0.5f, 130u, 7u, 512u, tokens);
+        check(ok && std::all_of(tokens.begin(), tokens.end(),
+                                [](int32_t t) { return t >= 0 && t < 65; }) &&
+                    std::find(tokens.begin(), tokens.end(), 64) != tokens.end(),
+              "同点を含む上位 130 語に top-p を適用して先頭 65 語を残す");
+    }
+
+    {
         std::printf("H. top-p distribution\n");
         const std::vector<float> l = prob_logits({0.60f, 0.25f, 0.10f, 0.05f});
         const uint32_t count = 10000u;

@@ -564,7 +564,7 @@ def parse_args(argv=None):
     parser.add_argument("--prefix-cache", type=int, default=1, choices=(0, 1),
                         help="enable prefix cache (default 1)")
     parser.add_argument("--prefix-cache-checkpoints", type=int, default=16,
-                        help="stored prefix checkpoints in host memory (default 4)")
+                        help="ホストに保存する prefix checkpoint 数（既定 %(default)s）")
     parser.add_argument("--prefix-cache-strategy", default="radix",
                         choices=("radix", "slot"),
                         help="prefix cache entry strategy (default radix)")

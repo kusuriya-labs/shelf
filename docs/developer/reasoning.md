@@ -20,10 +20,12 @@ HTTP request
 
 | 入力 | 既定 | 意味 |
 | --- | --- | --- |
+| `reserve_answer_tokens` | `true` | Shelf の Chat Completions 拡張。回答用の生成予算を予約するか |
 | `reasoning_effort` | `"xhigh"` | `low` / `medium` / `xhigh` のみ受理 |
 | `chat_template_kwargs.enable_thinking` | `true` | `false` で thinking 無効 |
 | `chat_template_kwargs.preserve_thinking` | `true` | 履歴の reasoning を chat template へ渡すか |
 
+- `reserve_answer_tokens` は真偽値を受け付ける。他の型を指定すると HTTP 400 を返す。
 - `reasoning_effort` は受けた値をそのまま chat template へ渡す。`high` などを `xhigh` へ
   読み替えない。
 - `reasoning_effort` の型不正、未対応値は HTTP 400（`param=reasoning_effort`、
@@ -85,7 +87,8 @@ Token 列を正本にする。
 ## thinking 予算
 
 thinking は生成 Token 数で区切られ、request の推論予算のうち answer reserve を残した地点で
-強制的に閉じる。client から変更できる field は無い（OpenAI API に対応 field が無い）。
+強制的に閉じる。`reserve_answer_tokens=false` を指定すると、生成上限を維持したままモデル自身に思考の終了を任せる。
+Track C では `--no-answer-reserve` でこの値を送り、`--reasoning-effort medium` で Qwen3.8 の追加 system 指示を外せる。
 予算の値と決定規則は [../user/server.md](../user/server.md) 「推論予算」に正本として置き、
 ここには compute 側の contract だけを書く。
 

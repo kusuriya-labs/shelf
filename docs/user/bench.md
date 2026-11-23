@@ -421,4 +421,8 @@ python3 tools/bench/shelf_bench_suite.py render \
   --output /tmp/report.md
 ```
 
+Track C で Qwen3.8 の追加の思考指示を外して比較する場合は `--reasoning-effort medium` を指定する。
+Shelf Server の回答用予約も外す場合は `--no-answer-reserve` を追加する。
+どちらも省略するとサーバーの既定値を使う。[思考方針と予算の設定](../developer/reasoning.md)
+
 各サブコマンドの全オプションは `python3 tools/bench/shelf_bench_suite.py <サブコマンド> --help` を参照。

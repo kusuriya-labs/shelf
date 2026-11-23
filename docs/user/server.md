@@ -91,7 +91,7 @@ Ready.
 | `--working-set-reserve-gib WORKING_SET_RESERVE_GIB` | arena headroom kept free for the working set (0 = size it from the row bucket, default 0) |
 | `--rope-factor {auto,1,2,4}` | static YaRN rope factor forwarded to compute (default auto) |
 | `--prefix-cache {0,1}` | enable prefix cache (default 1) |
-| `--prefix-cache-checkpoints PREFIX_CACHE_CHECKPOINTS` | stored prefix checkpoints in host memory (default 4) |
+| `--prefix-cache-checkpoints PREFIX_CACHE_CHECKPOINTS` | ホストに保存する prefix checkpoint 数（既定 16） |
 | `--prefix-cache-strategy {radix,slot}` | prefix cache entry strategy (default radix) |
 | `--prefix-cache-save-interval PREFIX_CACHE_SAVE_INTERVAL` | periodic prefix checkpoint spacing in tokens; 0 disables periodic checkpoints (default 16384) |
 | `--dflash2-model-dir DFLASH2_MODEL_DIR` | DFlash2 draft model directory (enables speculative decoding) |
@@ -150,10 +150,11 @@ request 1 個あたりの生成予算（推論予算）は `--inference-budget-t
   判定基準は当該 request の prompt token 数であり、会話の履歴や server 全体の占有ではない。
   この段階が発火するには `--max-seq-len` が `--large-context-tokens` より大きいことが
   必要である（`--max-seq-len 262144` では prompt が閾値を超えられない）。
-- thinking が有効な request では、予算のうち answer reserve を残した地点で thinking を
+- 既定では thinking が有効な request の場合、予算のうち answer reserve を残した地点で thinking を
   閉じる。reserve は `予算/4`（512 以上、予算/2 以下）なので、
   32768 なら thinking 24576 / answer reserve 8192、65536 なら thinking 49152 /
-  answer reserve 16384 である。
+  answer reserve 16384 である。Chat Completions で `reserve_answer_tokens: false` を指定すると、
+  生成上限までモデル自身に思考の終了を任せる。
 - 生成上限は `--max-seq-len` から prompt を引いた残りでも上限を受ける。
 
 細部は [../developer/reasoning.md](../developer/reasoning.md) と

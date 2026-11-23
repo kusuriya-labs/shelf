@@ -149,19 +149,17 @@ int main(int argc, char** argv) {
             return 1;
         }
         dflash_config = dflash_config_result.release();
-        if (opt.serve_stdio || dflash_config.block_size == 16u) {
-            const char* value = std::getenv("SHELF_DFLASH2_PREFILL_ROWS");
-            if (!shelf::qwen35::runtime::dflash2_prefill_rows(
-                    dflash_config, config.tp, value, config.dflash2_prefill_rows)) {
-                fprintf(stderr, "invalid SHELF_DFLASH2_PREFILL_ROWS: expected 8, 256, or 16 for block_size=16\n");
-                return 2;
-            }
-            if (config.dflash2_prefill_rows == 0u) {
-                fprintf(stderr, "DFLASH2 prefill feature rows: legacy\n");
-            } else {
-                fprintf(stderr, "DFLASH2 prefill feature rows: %u\n",
-                        config.dflash2_prefill_rows);
-            }
+        const char* value = std::getenv("SHELF_DFLASH2_PREFILL_ROWS");
+        if (!shelf::qwen35::runtime::dflash2_prefill_rows(
+                dflash_config, config.tp, value, config.dflash2_prefill_rows)) {
+            fprintf(stderr, "invalid SHELF_DFLASH2_PREFILL_ROWS: expected 8, 256, or 16 for block_size=16\n");
+            return 2;
+        }
+        if (config.dflash2_prefill_rows == 0u) {
+            fprintf(stderr, "DFLASH2 prefill feature rows: legacy\n");
+        } else {
+            fprintf(stderr, "DFLASH2 prefill feature rows: %u\n",
+                    config.dflash2_prefill_rows);
         }
         fprintf(stderr, "DFLASH2 rope: type=default theta=%g source=checkpoint\n",
                 dflash_config.rope_theta);

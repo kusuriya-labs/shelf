@@ -9,7 +9,7 @@ MTP の sampling とは別物で、target LM の logits から次 token を決�
 - 対象外: typical-p、penalty 系、beam search、DFlash2 CandidateSelector
 - DFlash2 verify は `SamplingConfig` と `sample_index` を `ScheduledRequest` に渡す。
   stochastic の verify は target の sample 結果と draft を比較する sample-and-compare
-  で、round ごとに行消費 row 数だけ `sample_index` を進める
+  で、round ごとに検証した物理行数だけ `sample_index` を進める
   （[dflash2.md](dflash2.md) を参照）。
 
 ## SamplingConfig
@@ -89,42 +89,22 @@ candidate = argmax_i(s_i)
 
 ## top-k / top-p membership
 
-candidate `c` について、full softmax 上の mass を
+logit の降順、同点では token ID の昇順に並べる。上位 `top_k` 個の集合を `K` とし、
+`top_k = 0` または語彙数以上では全語彙を `K` とする。温度適用後の重みを使う。
 
 ```
 w_i = exp((l_i - max_logit) / temperature)
-Z   = Σ_i w_i
+Z_K = Σ_{i ∈ K} w_i
 ```
 
-とし、次の両方を満たすときだけ accept する。
-
-```
-better_count(c) < top_k        (top_k > 0 のとき)
-better_mass(c)  < top_p * Z    (top_p < 1 のとき)
-```
-
-ここで `better` は
-
-```
-l_i > l_c  または  (l_i == l_c かつ i < c)
-```
-
-を満たす `i`。つまり `better_count` は「c より上位の token 数」、
-`better_mass` はその mass 和。
-
-- `top_k = 0` は top-k 条件を無効化
-- `top_p = 1` は top-p 条件を無効化
-
-`top_k` と `top_p` はそれぞれ full softmax 上で定義し、両方を満たす token だけを
-accept する（積集合）。`top_k` だけなら通常の top-k sampling、`top_p` だけなら
-通常の nucleus sampling と一致する。
-
-**top-k の再正規化はしない。** `top_p` は常に full softmax の `Z` を基準に判定し、
-Top-K 集合内で確率を振り直してから nucleus を適用する HF 式の順序ではない。
+`top_p < 1` のとき、`K` の先頭から重みを加算し、累積が初めて
+`top_p * Z_K` に達する token までを残す。`top_p = 1` のときは `K` 全体を残す。
+たとえば確率が `[0.60, 0.25, 0.10, 0.05]` なら、
+`top_k=2` と `top_p=0.7` の閾値は `0.7 × 0.85 = 0.595` で、先頭の 1 語が残る。
 
 ## min-p membership
 
-`w_i = exp((l_i - max_logit) / temperature)`、`p_i = w_i / Z`、`p_max = 1 / Z` とすると、
+全語彙の重みの和を `Z` と置き、`p_i = w_i / Z`、`p_max = 1 / Z` とすると、
 min-p の条件 `p_i >= min_p * p_max` は `w_i >= min_p` に等しい。`Z` は不要である。
 
 ```
@@ -133,7 +113,7 @@ min_p_membership(c) = (min_p == 0) || (w_c >= min_p)
 
 - `min_p = 0` は条件を無効化
 - `min_p = 1` は最大確率の token（同値の tie を含む）だけを残す
-- `top_p` / `top_k` / `min_p` はすべて full softmax 上で定義し、3 条件の積集合を accept する
+- top-k、top-p の順で残った候補に min-p の条件を適用する
 - min-p は `top_p` の prefix mass 順序に影響しない。rank 上位から積み上げる `prefix` は
   min-p で除外された token の mass も含めて計算する
 
@@ -163,8 +143,8 @@ active set 上で 1 回だけ Gumbel-Max   (attempt = 0)
 - `top_p` を指定しないときは `Z` を計算しない。`lmax` は row max の finite 検査と
   NaN 検査に使い、full vocab の `exp` scan は行わない。min_p は `w_i` の比較だけで
   判定できるため `Z` を必要としない。
-- `top_p` を指定したときは full vocab の `Z` を 1 回だけ計算し、
-  Top-K 内の prefix が `top_p * Z` 未満の位置までを active set にする。
+- `top_p` を指定したときは Top-K 内の重みを加算して `Z_K` を求め、
+  Top-K 内の prefix が `top_p * Z_K` 未満の位置までを active set にする。
   prefix が 0 の token は常に active に入る。
 - `min_p` を指定したときは `w_i >= min_p` の token だけを active set に残す。
   `top_p` との併用時は両方を満たす token だけが active になる。
@@ -174,8 +154,8 @@ active set 上で 1 回だけ Gumbel-Max   (attempt = 0)
 - Top-K selection は常に exact F32。
 
 top-k path が使われない batch（`top_k = 0`、`top_k > 128`、
-`top_k` が row ごとに異なる、stochastic が混在）は従来の rejection path をそのまま
-使う。
+`top_k` が row ごとに異なる、stochastic が混在）は rejection path を使う。top-k と top-p を併用する行では radix で k 位の
+logit を特定し、それより大きい重みと、残りの枠を占める同点の重みを足して `Z_K` を求める。
 
 `kSamplingMaxTopK = 128` は
 `include/shelf/kernels/optimized/sampling_limits.h` にある。
@@ -204,7 +184,7 @@ accept されなければ `attempt` を 1 増やして Gumbel-Max をやり直�
 sample して accept 集合に含まれる token だけを残すので、accept 後の分布は
 「softmax を accept 集合に制限して再正規化したもの」になる。sort は不要。
 
-accept 確率は accept 集合の mass なので、top-p では `>= top_p`。期待試行回数は
+accept 確率は accept 集合の mass なので、top-p 単独では `>= top_p`。期待試行回数は
 `<= 1 / top_p` 程度（`top_p = 0.9` で約 1.11）。`top_k` を小さくすると accept 確率は
 top-k 集合の mass まで下がるため、試行回数が増える。`top_k = 50` の random logits は
 これが顕著で、active-set path はこの rejection loop を無くすために使う。
@@ -227,7 +207,7 @@ row max が finite でない、`Z` が finite でない、`Z <= 0` のいずれ�
 `DISPATCH_FAILED` を書き、token は `-1`。NaN / Inf を黙って sample しない。
 
 active-set path も同じ結果になる。row max の finite 検査と NaN 検査は full vocab を
-1 回走査して行い、`top_p < 1` のときだけ `Z` を計算する。`top_k` だけで
+1 回走査して行い、`top_p < 1` のときだけ候補の質量 `Z_K` を計算する。`top_k` だけで
 `Z` を計算しない場合も、NaN を含む row・全 `-Inf` の row・`+Inf` を含む row は
 `DISPATCH_FAILED` になる。
 

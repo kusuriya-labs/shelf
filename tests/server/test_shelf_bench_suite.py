@@ -334,6 +334,13 @@ class SuiteTest(unittest.TestCase):
         self.assertEqual(sum(c['decode_tok_s'] is not None for c in data['all']['cells']), 1)
         self.assertTrue(all(c['decode_tok_s'] is None for c in data['non_loop']['cells']))
 
+    def test_track_c_thinking_options(self):
+        with server(long_reply) as (srv, url):
+            run('track-c', '--endpoint', url, '--task', 'code_edit-en-short_2k',
+                '--reasoning-effort', 'medium', '--no-answer-reserve')
+        self.assertEqual(srv.bodies[0]['reasoning_effort'], 'medium')
+        self.assertIs(srv.bodies[0]['reserve_answer_tokens'], False)
+
     def test_complete_macro(self):
         manifest, tasks = suite.corpus()
         data = [{'task_id': t['id'], 'ok': True, 'decode_tok_s': i} for i, t in enumerate(tasks)]

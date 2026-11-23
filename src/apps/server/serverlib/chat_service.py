@@ -248,7 +248,8 @@ class ChatService:
         max_new_tokens = min(request.max_new_tokens, budget, remaining)
 
         reasoning_budget_tokens = 0
-        if request.enable_thinking and not translation and not tool_prefix and self._reasoning_close_token >= 0:
+        if (request.reserve_answer_tokens and request.enable_thinking and not translation
+                and not tool_prefix and self._reasoning_close_token >= 0):
             reasoning_budget_tokens = thinking_budget_tokens(max_new_tokens)
 
         if (request.response_schema is not None or strict_tools) and request.enable_thinking and self._reasoning_close_token < 0:

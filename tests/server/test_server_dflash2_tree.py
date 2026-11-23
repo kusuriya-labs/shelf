@@ -68,17 +68,19 @@ def main():
         chain = serve(0, draft, path)
         chain_tree = serve(8, draft, path)
         tree = serve(10, draft, path)
-        automatic = serve(None, draft, path)
+        default_output = serve(None, draft, path)
+        automatic = serve("auto", draft, path)
         reference = single_tree(draft)
         default_reference = single_tree(draft, budget=None)
+        chain_reference = single_tree(draft, budget=0)
     if len(chain) != 64 or chain_tree != chain:
         raise AssertionError("budget 8 differs from chain")
-    if default_reference != reference:
-        raise AssertionError("compute default differs from budget 10")
+    if default_reference != chain_reference or default_output != chain:
+        raise AssertionError("tree budget 省略時の生成列が chain と異なります")
     if len(tree) != 64 or tree != reference:
         raise AssertionError("budget 10 differs from the single-request tree")
     if automatic != tree or len(automatic) != 64:
-        raise AssertionError("default budget differs from budget 10 at concurrency 1")
+        raise AssertionError("同時数 1 の auto が budget 10 と異なります")
     print("PASS: serve tree budget 8, 10 and auto")
 
 

@@ -54,7 +54,7 @@ async def run_requests(server, log):
             return text
 
         first = asyncio.create_task(request(
-            "Write a detailed tutorial on Python programming with many working examples and explanations.", 384))
+            "Write a detailed tutorial on Python programming with many working examples and explanations.", 768))
         await wait_trace(lambda rounds: (1, 10, 1) in rounds)
         second = asyncio.create_task(request(
             "Explain in detail how a compiler parses and evaluates arithmetic expressions.", 96))
@@ -66,7 +66,7 @@ async def run_requests(server, log):
             max(i for i, x in enumerate(rounds) if x == (2, 8, 2)) + 1:]))
         await first
         first = asyncio.create_task(request(
-            "Write a detailed tutorial on algorithms with many examples and explanations.", 384))
+            "Write a detailed tutorial on algorithms with many examples and explanations.", 768))
         before = len(await wait_trace(lambda rounds: bool(rounds)))
         await wait_trace(lambda rounds: (1, 10, 1) in rounds[before:])
         second = asyncio.create_task(request(
@@ -86,7 +86,7 @@ def main():
         log = Path(tmp) / "server.log"
         server = ServerHarness(log_path=log, max_seq_len=1024, arena_gib=31,
                                max_concurrent_requests=2, dflash2_model_dir=draft,
-                               dflash2_tree_budget=None, startup_timeout=420,
+                               dflash2_tree_budget="auto", startup_timeout=420,
                                env={"SHELF_DFLASH2_TREE_TRACE_ROUND": "1"})
         try:
             server.start()

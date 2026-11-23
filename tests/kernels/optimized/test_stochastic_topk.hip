@@ -233,7 +233,7 @@ std::vector<int32_t> cpu_active_set(const std::vector<float>& row, float tempera
     for (float v : row)
         if (std::isfinite(v) && v > lmax) lmax = v;
     double z = 0.0;
-    for (float v : row) z += static_cast<double>(std::exp((v - lmax) / temperature));
+    for (int32_t id : order) z += std::exp((row[id] - lmax) / temperature);
     std::vector<int32_t> active;
     double prefix = 0.0;
     const double threshold = static_cast<double>(top_p) * z;
@@ -347,22 +347,13 @@ int main() {
     }
 
     {
-        std::printf("H. top_k + top_p intersection\n");
+        std::printf("H. top-k 後の nucleus\n");
         const std::vector<float> l = prob_logits({0.60f, 0.25f, 0.10f, 0.05f});
         TopKResult r;
         const bool ok = sample_topk(4u, l, 1.0f, 0.7f, 2u, 21u, 4000u, r);
-        uint32_t c0 = 0, c1 = 0, other = 0;
-        for (int32_t t : r.tokens) {
-            if (t == 0) ++c0;
-            else if (t == 1) ++c1;
-            else ++other;
-        }
-        const double f0 = static_cast<double>(c0) / 4000.0;
-        const double f1 = static_cast<double>(c1) / 4000.0;
-        std::printf("    top_k=2 top_p=0.7: p0=%.4f p1=%.4f other=%u\n", f0, f1, other);
-        check(ok && other == 0u, "top_k=2 + top_p=0.7 -> nucleus {0,1}");
-        check(std::fabs(f0 - 0.70588) <= 0.03, "conditional p0 within 3%");
-        check(std::fabs(f1 - 0.29412) <= 0.03, "conditional p1 within 3%");
+        check(ok && std::all_of(r.tokens.begin(), r.tokens.end(),
+                                [](int32_t token) { return token == 0; }),
+              "上位 2 語の質量を基準にすると先頭の 1 語だけが残る");
 
         TopKResult r3;
         const bool ok3 = sample_topk(4u, l, 1.0f, 1.0f, 3u, 21u, 4000u, r3);
@@ -479,7 +470,7 @@ int main() {
     }
 
     {
-        std::printf("5.19. active set matches the full-softmax definition\n");
+        std::printf("5.19. 候補集合と CPU 参照値の一致\n");
         const std::vector<float> l = prob_logits({0.60f, 0.25f, 0.10f, 0.05f});
         struct Case {
             float top_p;

@@ -153,6 +153,10 @@ inline RT::ValueId emit_gdn(
         RT::MulNode mn{RT::RowwiseShapeKey{value_features}};
         v_gated = em.value(value_features);
         em.emit(RT::PrimitiveNode{mn}, {v_rms, v_gated_z}, {v_gated});
+        if (!geo.sigmoid_gate && geo.value_head_dim == 128u && value_features == 6144u &&
+            w.out->quant_spec == quantization::QuantSpecId::EXL3_MUL24_INT8_V1) {
+            pg.nodes.back().keep_alive = {v_rec, v_z};
+        }
         name_last("gdn_gated");
     }
     const RT::ValueId block_out =
