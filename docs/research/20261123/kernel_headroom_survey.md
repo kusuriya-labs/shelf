@@ -735,3 +735,18 @@ verify は平均 81.46 → 81.00 ms（−0.6 %）、decode は 118.24 → 118.57
 
 GDN だけ verify / commit が別実装で、v32 と LDS ステージの恩恵を受けていなかった。
 verify は今回埋めた。commit と verify の v32 化が残る。
+
+### decode の grouped gate pair-K を外す案は棄却
+
+decode（tokens ≤ 16）だけ pair-K を外し、`xbuf` を 272 → 144 値/row にして
+LDS 17,408 → 13,312 B、VGPR 120 → 112、block/CU 3 → 4 を狙った。8 token の
+DFlash2 decode window では gate が **16.11 → 16.41 ms（+1.9 %）**。
+
+- pair-K の barrier 半減の損失が occupancy +1 block を上回る。decode window 全体は
+  65.7 ms で変わらない。
+- したがって gate は pair-K のままにする（`SHELF_EXL3_GROUPED_DECODE_PAIR` の
+  分岐も追加しない）。
+
+次の gate レバーは N tile 自体を 128 → 64 にすることだが、accum 8,192 B の削減に
+対して grid が 2 倍になり、今回と同じ barrier/launch 側の損失が出る可能性が高い。
+優先度は `hyper_up_mix`（13.2 %、4 launch/layer）の hc 融合に下げる。
