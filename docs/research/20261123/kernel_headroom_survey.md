@@ -650,18 +650,33 @@ prompt 150 token、生成 16 token、greedy。
   proposal wait 12.5 ms が round の約 19 % を占める。serve 経路では bridge が
   有効なので、CLI の値はその分だけ不利。
 
-### 改善レバー（`kernel_optimization_and_fusion.md` の分類で）
+### 改善レバーを 4 分類に割り当てる
 
-1. **GDN verify の LDS 削減**（8.1 %）: `wmma_verify_lossy` は LDS 35,840 B で
-   1 block/CU。lossy 本体で実測した 64 行ステージ（LDS 14,336 B、4 block/CU、
-   −4.3 %）を verify variant に適用する。効果は decode 全体で −0.3〜0.4 %。
-2. **`hyper_up_mix` の融合・分割**（13.2 %）: 44 µs/launch で 580 launch。up GEMM と
-   mix を 1 launch にするか、rows が小さい decode 用に tile を増やす。
-3. **verify の grouped gate**（23.7 %）: 7 行では wave が足りない。n_tiles を増やす
-   か、decode 専用の M 方向分割を試す。down の n_tiles=1 は prefill で負けたが、
-   decode の小 rows では未検証。
-4. **proposal の host 往復**（round の 19 %、CLI のみ）: serve 経路の device token
-   bridge を CLI でも使えるようにする。
+`kernel_optimization_and_fusion.md` §2 の分類に、decode window の実測を当てはめる。
+実効帯域は「1 verify forward あたりの静的 bytes × 3 round ÷ 実測時間」で出した。
+
+| kernel | share | 実効 | 分類 | レバー |
+| --- | ---: | ---: | --- | --- |
+| grouped gate `<2,1,3>` | 23.7 % | 39 GB/s | ③ レイテンシ / 並列不足 | GEMM 統合、命令昇格、decode 用 M 分割 |
+| `hyper_up_mix` | 13.2 % | — | ③（44 µs × 580 launch） | up GEMM との融合、tile 増 |
+| GDN `wmma_verify_lossy` | 8.1 % | 43 GB/s | ③（LDS 35,840 → 1 block/CU） | LDS ステージで occupancy 4 倍 |
+| grouped down `<2,2,3>` | 5.9 % | 下記 | ③ | gate と同じ |
+| dense EXL3 `<5,1>` | 4.9 % | — | ③ | rows を増やす（MTP / batch） |
+| `dflash2_topk_merge` | 5.5 % | — | ④/overlay | 壁時計には出ない（実測 neutral） |
+| proposal D2H / wait | round 19 % | — | ④（CLI のみ） | device token bridge |
+
+- grouped gate は 10 expert × n=1280 × k=2560 × 3.05 bpw × 48 layer × 3 = 1.80 GB を
+  45.8 ms で流しており **39 GB/s**。① DRAM（550–636 GB/s）ではない。
+- GDN verify は 36 layer × 96 block × 65,536 B × 3 = 680 MB を 15.7 ms で流して
+  **43 GB/s**。同じく ③ で、拘束は LDS（35,840 B → 1 block/CU）。
+- したがって §2 の優先順位「share 大 × ②③ × occupancy / 命令昇格 / 同期消去」では、
+  **GDN verify の LDS 削減**が最初に検証すべきレバーになる。lossy 本体では
+  64 行ステージで LDS 19,456 → 14,336 B、3 → 4 block/CU、−4.3 % を実測済み。
+- 次点は grouped gate の ③。7 行では wave が足りないため、prefill で負けた
+  n_tiles=1 の判断を decode に持ち込まない（decode は n_tiles を増やす方向）。
+- `dflash2_topk_merge` は参照実装（1 thread/row）を hierarchical に替えても
+  round が neutral（113.0 → 114.4 tok/s）。proposal stream で verify と重なるため、
+  ④/overlay として wall レバーから外す。
 
 ### 単発 MTP の不具合修正
 
