@@ -443,8 +443,10 @@ static Mat prefill_moe(Ops &op, int layer, const std::string &p, Mat x, Mat late
             if (gpu.expert_begin[r]) checked(hipEventRecord(gpu.expert_begin[r], rank.stream));
             remote[r] = direct ? op.mat(tile.rows, 1536) : rank.mat(tile.rows, 1536);
             prefill_experts(rank, layer, input, reinterpret_cast<PrefillRoutes *>(recv), remote[r], peer_result[r]);
-            if (peer_result[r])
+            if (peer_result[r]) {
+                checked(hipEventSynchronize(gpu.ready[r][0][0]));
                 checked(hipEventRecord(gpu.ready[r][0][0], rank.stream));
+            }
             if (gpu.expert_end[r]) checked(hipEventRecord(gpu.expert_end[r], rank.stream));
         }
         checked(hipSetDevice(gpu.physical[op.rank]));
@@ -460,6 +462,7 @@ static Mat prefill_moe(Ops &op, int layer, const std::string &p, Mat x, Mat late
                 checked(hipGetLastError());
                 gpu.transfer_bytes[r][0] += sum.bytes();
                 if (!gpu.push) {
+                    checked(hipEventSynchronize(gpu.ack[0][r][0]));
                     checked(hipEventRecord(gpu.ack[0][r][0], op.stream));
                     checked(hipSetDevice(gpu.physical[r]));
                     checked(hipStreamWaitEvent(gpu.compute[r], gpu.ack[0][r][0], 0));
