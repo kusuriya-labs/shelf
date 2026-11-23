@@ -696,7 +696,14 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
             }
             if (herr == hipSuccess) {
                 const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
-                herr = ::shelf::kernel::launch_exl3_mul24_rowscale(
+                static const bool row_fuse = [] {
+                    const char* v = std::getenv("SHELF_EXL3_ROW_FUSE");
+                    return v != nullptr && v[0] != '\0' && v[0] != '0';
+                }();
+                herr = row_fuse ? ::shelf::kernel::launch_exl3_mul24_rowscale_fused(
+                    codes, scales, rowscale, slots, count, codes_f, scales_f, n_rows, cap, k, code_stride,
+                    scale_stride_bytes, flag_share, stream)
+                                : ::shelf::kernel::launch_exl3_mul24_rowscale(
                     codes, scales, rowscale, slots, count, codes_f, scales_f, n_rows, cap, k, code_stride,
                     scale_stride_bytes, flag_share, stream);
                 if (semantic_timing_enabled())

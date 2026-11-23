@@ -252,9 +252,9 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits, uint32_t see
         Dev<float> d_y2(static_cast<size_t>(cap) * n);
         Dev<float> d_out2(static_cast<size_t>(rows) * n);
         HIP_OK(shelf::kernel::launch_exl3_mul24_recon(d_trellis.p, bits, d_dense.p, n, k, nullptr));
-        HIP_OK(shelf::kernel::launch_exl3_mul24_rowscale(d_codes.p, d_scales.p, d_rs.p, d_slots.p, d_count.p, d_codes_f.p,
-                                                        d_scales_f.p, rows, cap, k, code_stride, scale_stride_bytes, 0.5f,
-                                                        nullptr));
+        HIP_OK(shelf::kernel::launch_exl3_mul24_rowscale_fused(
+            d_codes.p, d_scales.p, d_rs.p, d_slots.p, d_count.p, d_codes_f.p, d_scales_f.p,
+            rows, cap, k, code_stride, scale_stride_bytes, 0.5f, nullptr));
         const hipError_t ge = shelf::execution::exl3_dense_gemm_int8(rows, n, k, d_dense.p, d_codes.p, d_acc.p, nullptr);
         if (ge == hipErrorNotSupported) {
             std::printf("  dense int8 GEMM: no hipBLASLt algorithm for this shape, skipped\n");
@@ -280,20 +280,49 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits, uint32_t see
             HIP_OK(hipMemcpy(out2.data(), d_out2.p, out2.size() * 4, hipMemcpyDeviceToHost));
             size_t recon_bad = (dense == q) ? 0 : 1, code_bad = 0, acc_bad = 0, slot_bad = 0, flagged_bad = 0;
             std::vector<float> y2(static_cast<size_t>(rows) * n);
-            uint32_t next_slot = 0;
-            for (uint32_t m = 0; m < rows; ++m) {
-                float peak = 0.0f, sq = 0.0f;
+            std::vector<int8_t> codes_f(static_cast<size_t>(cap) * code_stride);
+            std::vector<float> scales_f(static_cast<size_t>(cap) * scale_stride_bytes / 4u);
+            HIP_OK(hipMemcpy(codes_f.data(), d_codes_f.p, codes_f.size(), hipMemcpyDeviceToHost));
+            HIP_OK(hipMemcpy(scales_f.data(), d_scales_f.p, scales_f.size() * 4u, hipMemcpyDeviceToHost));
+            auto row_peak = [&](uint32_t m, float& peak, float& sq) {
+                peak = 0.0f;
+                sq = 0.0f;
                 for (uint32_t g = 0; g < groups; ++g) {
                     const float sg = scales[static_cast<size_t>(m) * scale_stride_bytes / 4u + g];
                     peak = std::max(peak, sg);
                     sq += sg * sg;
                 }
+            };
+            uint32_t flagged_total = 0;
+            for (uint32_t m = 0; m < rows; ++m) {
+                float peak = 0.0f, sq = 0.0f;
+                row_peak(m, peak, sq);
                 if (rs[m] != peak) ++code_bad;
+                if (peak > 0.0f && peak * peak > 0.5f * sq) ++flagged_total;
+            }
+            const uint32_t want_count = std::min(flagged_total, cap);
+            if (count != want_count) ++slot_bad;
+            std::vector<uint8_t> seen(want_count, 0u);
+            for (uint32_t m = 0; m < rows; ++m) {
+                float peak = 0.0f, sq = 0.0f;
+                row_peak(m, peak, sq);
                 const bool want_flag = peak > 0.0f && peak * peak > 0.5f * sq;
-                const int32_t want_slot = want_flag && next_slot < cap ? static_cast<int32_t>(next_slot++) : -1;
-                if (want_flag && want_slot < 0) ++next_slot;
-                if (slots[m] != want_slot) ++slot_bad;
-                if (want_slot >= 0) {
+                const int32_t slot = slots[m];
+                if (slot >= 0) {
+                    if (!want_flag || static_cast<uint32_t>(slot) >= want_count || seen[slot]) {
+                        ++slot_bad;
+                    } else {
+                        seen[slot] = 1u;
+                        if (std::memcmp(codes_f.data() + static_cast<size_t>(slot) * code_stride,
+                                        codes.data() + static_cast<size_t>(m) * code_stride, k) != 0)
+                            ++code_bad;
+                        if (std::memcmp(scales_f.data() +
+                                            static_cast<size_t>(slot) * scale_stride_bytes / 4u,
+                                        scales.data() +
+                                            static_cast<size_t>(m) * scale_stride_bytes / 4u,
+                                        static_cast<size_t>(groups) * 4u) != 0)
+                            ++code_bad;
+                    }
                     // Flagged: the same fused kernel as the per-group path (split-K changes only the float summation order).
                     float row_max = 0.0f;
                     for (uint32_t nn = 0; nn < n; ++nn) row_max = std::max(row_max, std::fabs(out[static_cast<size_t>(m) * n + nn]));
@@ -301,6 +330,8 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits, uint32_t see
                         if (std::fabs(out2[static_cast<size_t>(m) * n + nn] - out[static_cast<size_t>(m) * n + nn]) > 1e-4f * row_max) ++flagged_bad;
                     continue;
                 }
+                if (want_flag && count < cap) ++slot_bad;
+                if (!want_flag && slot != -1) ++slot_bad;
                 for (uint32_t i = 0; i < k; ++i) {
                     const int8_t c0 = codes[static_cast<size_t>(m) * code_stride + i];
                     int8_t want = c0;
@@ -319,8 +350,8 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits, uint32_t see
                     y2[static_cast<size_t>(m) * n + nn] = static_cast<float>(a) * rs[m] * shelf::quantization::exl3::kExl3Int8GridStep;
                 }
             }
-            const uint32_t want_count = std::min(next_slot, cap);
-            if (count != want_count) ++slot_bad;
+            for (uint32_t s = 0; s < want_count; ++s)
+                if (!seen[s]) ++slot_bad;
             double d2 = 0.0, r2 = 0.0, g2 = 0.0, gn = 0.0;
             for (uint32_t m = 0; m < rows; ++m) {
                 for (uint32_t b = 0; b < n / 128u; ++b) {
