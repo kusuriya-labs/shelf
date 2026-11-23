@@ -658,7 +658,7 @@ prompt 150 token、生成 16 token、greedy。
 | kernel | share | 実効 | 分類 | レバー |
 | --- | ---: | ---: | --- | --- |
 | grouped gate `<2,1,3>` | 23.7 % | 39 GB/s | ③ レイテンシ / 並列不足 | GEMM 統合、命令昇格、decode 用 M 分割 |
-| `hyper_up_mix` | 13.2 % | — | ③（44 µs × 580 launch） | up GEMM との融合、tile 増 |
+| `hyper_up_mix` | 13.2 % | 約 1.0 TB/s（L3） | ② L3 / pass | rows 方向の weight 再利用 |
 | GDN `wmma_verify_lossy` | 8.1 % | 43 GB/s | ③（LDS 35,840 → 1 block/CU） | LDS ステージで 1 → 3 block/CU（v32 は 4） |
 | grouped down `<2,2,3>` | 5.9 % | 下記 | ③ | gate と同じ |
 | dense EXL3 `<5,1>` | 4.9 % | — | ③ | rows を増やす（MTP / batch） |
@@ -677,6 +677,7 @@ prompt 150 token、生成 16 token、greedy。
   調整では届かない。v32 幅（kWv=32、128 thread）への移植が次の段になる。
 - 次点は grouped gate の ③。7 行では wave が足りないため、prefill で負けた
   n_tiles=1 の判断を decode に持ち込まない（decode は n_tiles を増やす方向）。
+  decode の pair-K 除去は gate 16.11 → 16.41 ms（+1.9%）で棄却済み。
 - `dflash2_topk_merge` は参照実装（1 thread/row）を hierarchical に替えても
   round が neutral（113.0 → 114.4 tok/s）。proposal stream で verify と重なるため、
   ④/overlay として wall レバーから外す。
@@ -750,3 +751,34 @@ DFlash2 decode window では gate が **16.11 → 16.41 ms（+1.9 %）**。
 次の gate レバーは N tile 自体を 128 → 64 にすることだが、accum 8,192 B の削減に
 対して grid が 2 倍になり、今回と同じ barrier/launch 側の損失が出る可能性が高い。
 優先度は `hyper_up_mix`（13.2 %、4 launch/layer）の hc 融合に下げる。
+
+### hyper up mix の rows 方向タイルを採用（−36 %）
+
+`hyper_up_mix` は 1 warp が 1 `(row, i)` を担当し、`[hc, hidden, k]` の up weight を
+**row ごとに読み直していた**。rows=7、hc=4、hidden=2560、k=320 で 26.4 GB を
+25.5 ms で流しており、約 1.03 TB/s = L3 の上限（1263–1378 GB/s）に張り付いていた。
+つまり ③ ではなく ② L3 / pass 律速で、削るべきは weight の再読。
+
+1 warp が `i` を固定して 8 行タイルを持ち、weight を 1 回読んで各行に適用する
+`hyper_up_mix_rows_kernel<8>` を追加した。行ごとの k 蓄積順と shfl 還元は従来と
+同一なので、出力はビット一致する。
+
+| 項目 | 従来 | rows タイル |
+| --- | ---: | ---: |
+| kernel 時間（8 token decode window） | 10.77 ms | **6.92 ms（−35.7 %）** |
+| decode window 合計 | 65.7 ms | **61.6 ms（−6.2 %）** |
+| VGPR | 40 | 112 |
+
+interleaved A/B（DFlash2 EXL3、16 token、device 2,3）:
+
+| run | verify GPU ms | round ms | tok/s |
+| --- | ---: | ---: | ---: |
+| off | 80.95 | 125.30 | 119.43 |
+| **on** | **77.39** | **123.80** | **120.88** |
+| off | 81.94 | 127.01 | 117.85 |
+| **on** | **77.36** | **122.00** | **122.66** |
+
+verify は平均 81.45 → 77.38 ms（−5.0 %）、round 126.16 → 122.90 ms（−2.6 %）、
+decode は 118.64 → **121.77 tok/s（+2.6 %）**。生成 16 token は 4 run すべて一致。
+rows ≤ 8 で既定 on、`SHELF_HYPER_UP_MIX_ROWS=0` で戻せる。rows ≥ 9（prefill、
+混合 batch）は従来カーネルのままで、拡張は次の候補。required 231/231 PASS。
