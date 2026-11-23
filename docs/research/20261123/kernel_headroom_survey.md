@@ -329,23 +329,23 @@ launch 数・ISA・GPU 時間が減るため **opt-in**（`SHELF_EXL3_ROW_FUSE=1
 ### specialized 測定
 
 2048 token / 4 chunk / EP=2 の trace。既定側は旧 3 kernel だけ、opt-in 側は
-`rowprepare` と 4 byte fill だけが走る。env 判定はホスト側で 1 回だけ行い、
-GPU kernel 内に分岐は入れていない。
+`rowprepare` 1 kernel だけが走る。compact slot の counter は直前の
+`rotate_quantize` が 1 store で 0 にするので、fill も別 launch にならない。
+env 判定はホスト側で 1 回だけ行い、GPU kernel 内に分岐は入れていない。
 
 - row 前処理の GPU 時間: `rowstat` 46.817 + `rowslot` 12.214 + `rowfinish`
-  52.452 = **111.483 ms** → `rowprepare` 55.460 + fill 6.817 = **62.277 ms**
-  （**−44.1 %**）。
-- prefill window の GPU 合計: **1159.15 → 1117.88 ms**（**−3.6 %**）。
-- dispatch 数: 2484 + 2485 + 2484 = 7455 → `rowprepare` 2486 + fill 2486 =
-  4972。kernel launch だけでは **7455 → 2486（−66.7 %）**。
+  52.452 = **111.483 ms** → `rowprepare` **55.933 ms**（**−49.8 %**）。
+- prefill window の GPU 合計: **1159.15 → 1112.89 ms**（**−4.0 %**）。
+- dispatch 数: 2484 + 2485 + 2484 = 7455 → **2486（−66.7 %）**。
 - static instruction: 170 + 200 + 267 = **637** → **482（−24.3 %）**。
-  `v_alu` は 228 → 180（−21.1 %）、code size は 3204 → 2504 bytes（−21.8 %）。
+  `v_alu` 228 → 180、`s_wait*` **106 → 84**、`s_barrier` **6 → 4**、
+  code size 3204 → 2504 bytes（−21.8 %）。待ち命令も増えていない。
 
 ### wall
 
 | 条件 | 既定 ms | opt-in ms |
 | --- | ---: | ---: |
-| 7002 token、host experts 0 | 2034.2 / 2037.7 | 2033.0 / 2038.1 |
+| 7002 token、host experts 0 | 2025.4 / 2034.6 | 2032.1 / 2029.3 |
 | 7002 token、host experts 96（前回測定） | 2427.8 | 2445.4 |
 
 生成 16 token は既定 / opt-in で一致した。wall が動かないのは、この cluster が
