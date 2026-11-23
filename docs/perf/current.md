@@ -1561,6 +1561,52 @@ Drafter は全 factor で `DFLASH2 rope: type=default ... source=checkpoint` を
 target の factor を継承しない。詳細は
 [../research/20261122/dflash2_yarn_target.md](../research/20261122/dflash2_yarn_target.md)。
 
+## 2026-11-24 Qwen3.8-Flash-Next EXL3 MTP draft 2 の BetterBench
+
+revision `487468ac`、device 0,1、EP=2、`octave:c5v5` KV、prefix cache off、
+`--max-concurrent-requests 4`、`--max-num-batched-tokens 8192`、
+`--prefill-chunk 8192`、`--max-seq-len 8192`、MTP drafts 2 / window 4096 / sink 64。
+BetterBench v1.0 corpus、greedy、`--quick`（5 passes/category）。
+
+```bash
+./build/shelf-server --model-dir models/kusuriya-labs/Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw \
+  --host 127.0.0.1 --port 8131 --model Qwen3.8 --max-seq-len 8192 \
+  --max-num-batched-tokens 8192 --prefill-chunk 8192 --max-concurrent-requests 4 \
+  --device 0,1 --expert-parallel 2 --kv-cache-dtype octave:c5v5 --prefix-cache 0 \
+  --mtp --mtp-drafts 2 --mtp-window 4096 --mtp-sink 64
+betterbench run --endpoint http://127.0.0.1:8131/v1 --model Qwen3.8 \
+  --quick --greedy --name mtp2 --out mtp2.json
+```
+
+### single stream（batch 1）
+
+| 指標 | 値 |
+| --- | ---: |
+| combined decode（weighted median） | **46.4 tok/s** |
+| TTFT p50 | 166 ms |
+| update p99 | 39.4 ms |
+| tok/update（中央値） | **1.00** |
+
+カテゴリ別 decode は 35.4〜54.2 tok/s（chat 35.4、code 42.5、file_edit 48.4、
+json 52.2、math 52.6、prose 43.0、reasoning 45.4、summarization 54.2）。
+40 run 中 26 run が `max_tokens` で打ち切られ、推論フェーズの計測になっている。
+
+### concurrency / prefill
+
+| level | aggregate t/s | TTFT p50 | per-req decode t/s |
+| --: | --: | --: | --: |
+| 1 | 45.9 | 135.7 ms | 48.7 |
+| 2 | 72.7 | 169.1 ms | 39.1 |
+| 4 | 94.7 | 187.1 ms | 26.0 |
+| 8 | 95.7 | 16088.4 ms | 26.0 |
+
+prefill は 1556 token で **3043.9 t/s**（TTFT 511.5 ms）。8000 以上は
+`--max-seq-len 8192` のため skipped。
+
+**観察**: 実タスク corpus では MTP の受理がほぼ 1 token/update で、単純な
+「1 から 20 まで数える」prompt（CLI 計測で mean accepted 2.0）より大幅に低い。
+draft 2 の verify コストがそのまま残るため、実タスクでは MTP の利得が小さい。
+
 ## 記録規則
 
 - 新しい計測をしていない数値は更新しない。
