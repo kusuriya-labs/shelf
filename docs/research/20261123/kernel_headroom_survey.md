@@ -611,3 +611,63 @@ sigmoid を計算して launch を 1 本消せる。
   decode MTP2 は 60.5 → **60.9 tok/s**（いずれも neutral）。
 - 生成 16 token 一致、required 231/231 PASS。
   `SHELF_DISABLE_MOE_COMBINE_SIGMOID=1` で無効化できる。
+
+## 22. MTP と DFlash2 の Spec / Verify 計測
+
+`SHELF_QWEN35_PERF_TIMING=1` で、単発 decode の draft / verify 内訳を取った。
+条件は EP=2、device 0,1、bf16 KV ではなく `octave:c5v5`、prefix cache off、
+prompt 150 token、生成 16 token、greedy。
+
+| drafter | rounds | full accept | mean accepted | draft ms | verify ms | round ms | decode tok/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| MTP drafts 2 | 5 | 1.000 | 2.00 | 21.6 | 184.0 | 205.6 | **72.9** |
+| DFlash2 BF16（incoai） | 3 | 0.667 | 4.00 | 5.9 | 86.3 | 132.9 | **112.2** |
+| DFlash2 EXL3-INT8 4bpw | 3 | 0.667 | 4.00 | 5.5 | 86.9 | 131.4 | **113.0** |
+
+- DFlash2 は MTP より **約 55 % 高速**。MTP は full accept 1.0 だが 2 draft/round で
+  round 数が多く、verify 184 ms が round の 89 % を占める。
+- DFlash2 は 4 draft/round 受け入れで round が 3 回に減り、verify は 1 round あたり
+  約 28.7 ms。drafter の GPU 時間も 5.5 ms と小さい。
+- EXL3-INT8 4bpw drafter は BF16 drafter と同 accept で **draft がわずかに速い**。
+
+### verify の内訳（DFlash2 EXL3、decode window 193 ms、3 round）
+
+| kernel | ms | share | 備考 |
+| --- | ---: | ---: | --- |
+| grouped gate `<2,1,3>` | 45.8 | 23.7 % | VGPR 120 / LDS 17,408 |
+| `hyper_up_mix` | 25.5 | 13.2 % | 580 launch、44 µs/launch |
+| GDN `wmma_verify_lossy` | 15.7 | 8.1 % | VGPR 224 / LDS 35,840、1 block/CU |
+| grouped down `<2,2,3>` | 11.5 | 5.9 % | VGPR 184 / LDS 21,504 |
+| `dflash2_topk_merge` | 10.7 | 5.5 % | 参照実装 1 thread/row |
+| dense EXL3 `<5,1>` | 9.5 | 4.9 % | decode 線形 |
+| BF16 exact rows pair `<7>` | 10.0 | 5.2 % | drafter の BF16 GEMM |
+
+- `dflash2_topk_merge` は `top_k != 16` のとき参照実装（1 thread/row）が選ばれていた。
+  最適化版（hierarchical、256 thread）に切り替えると GPU 時間は消えるが、proposal
+  側の別 stream で verify と重なっているため round 時間は **neutral**（113.0 →
+  114.4 tok/s、生成列一致）。壁時計のレバーではない。
+- `DFLASH2_DEVICE_TOKEN_BRIDGE=0`（CLI は host token ids）。D2H 12.7 ms と
+  proposal wait 12.5 ms が round の約 19 % を占める。serve 経路では bridge が
+  有効なので、CLI の値はその分だけ不利。
+
+### 改善レバー（`kernel_optimization_and_fusion.md` の分類で）
+
+1. **GDN verify の LDS 削減**（8.1 %）: `wmma_verify_lossy` は LDS 35,840 B で
+   1 block/CU。lossy 本体で実測した 64 行ステージ（LDS 14,336 B、4 block/CU、
+   −4.3 %）を verify variant に適用する。効果は decode 全体で −0.3〜0.4 %。
+2. **`hyper_up_mix` の融合・分割**（13.2 %）: 44 µs/launch で 580 launch。up GEMM と
+   mix を 1 launch にするか、rows が小さい decode 用に tile を増やす。
+3. **verify の grouped gate**（23.7 %）: 7 行では wave が足りない。n_tiles を増やす
+   か、decode 専用の M 方向分割を試す。down の n_tiles=1 は prefill で負けたが、
+   decode の小 rows では未検証。
+4. **proposal の host 往復**（round の 19 %、CLI のみ）: serve 経路の device token
+   bridge を CLI でも使えるようにする。
+
+### 単発 MTP の不具合修正
+
+`shelf-compute --mtp` は drafter 構築で
+`linear output features do not match the weight column width` に落ちていた。
+serve 経路と同じく、EP/TP では rank ごとの `local_kv_heads` で
+`MtpDrafterInput` を作り、`drafter_config.local_kv_heads` と
+`MtpGdnRankBinding` の `local_kv_heads` / `tp_rank` / `mtp_input` を設定する
+（`9dbb1d42`）。
