@@ -2210,13 +2210,25 @@ Status dflash2_propose_batch(
     if (executor.config == nullptr || executor.weights == nullptr) {
         return Status::invalid_state("dflash2 executor has no weights", __FILE__, __LINE__);
     }
-    if (request_count == 1u) {
-        if (requests[0].context == nullptr || output_drafts[0] == nullptr) {
-            return Status::invalid_argument("dflash2 batch proposal request is null", __FILE__,
-                                            __LINE__);
+    // The batched proposal path does not reproduce the single-request drafter on more
+    // than one context (its drafts disagree with the target argmax), so it is opt-in
+    // until that path is fixed. The serial loop keeps acceptance.
+    static const bool batch_propose_enabled = [] {
+        const char* e = std::getenv("SHELF_DFLASH2_PROPOSE_BATCH");
+        return e != nullptr && e[0] != '\0' && e[0] != '0';
+    }();
+    if (request_count == 1u || !batch_propose_enabled) {
+        for (uint32_t i = 0; i < request_count; ++i) {
+            if (requests[i].context == nullptr || output_drafts[i] == nullptr) {
+                return Status::invalid_argument("dflash2 batch proposal request is null",
+                                                __FILE__, __LINE__);
+            }
+            const Status st = dflash2_propose_cached(
+                executor, *requests[i].context, requests[i].anchor_token,
+                requests[i].num_drafts, output_drafts[i], stream);
+            if (!st.ok()) return st;
         }
-        return dflash2_propose_cached(executor, *requests[0].context, requests[0].anchor_token,
-                                      requests[0].num_drafts, output_drafts[0], stream);
+        return Status::make_ok();
     }
     if (executor.target_embed_tokens == nullptr ||
         executor.noise_embedding.ndim() == 0u || executor.noise_token_ids.ndim() == 0u) {

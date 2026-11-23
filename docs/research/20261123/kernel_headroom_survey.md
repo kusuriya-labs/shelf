@@ -793,3 +793,25 @@ GPU 合計は 1,129.7 → 1,131.4 ms で誤差。prefill では `hyper_up_mix` �
 A/B した。aggregate は 43.62 / 43.22（off）対 43.20 / 43.42（on）tok/s で **neutral**。
 serve の fused verify は rows が 28 程度になり、従来カーネルでも同じ weight を L3 から
 共有できるため差が出ない。prefill と同じく rows ≤ 8 のガードを維持する。
+
+### DFlash2 serve の複数セッション proposal を単発経路に固定
+
+serve の DFlash2 は conc ≥ 2 で `DFLASH2_MEAN_ACCEPTED=0` だった。1 round の
+anchor / draft / sampled を出すと、target の argmax が 11 のところ batch proposal が
+7 を出しており、単発（cached）経路は 11 を提案して受理される。つまり
+`dflash2_propose_batch` の **request_count > 1 の batch 経路**が壊れている。
+
+2 件以上を cached 単発のループに変更した。旧 batch 経路は
+`SHELF_DFLASH2_PROPOSE_BATCH=1` で opt-in。
+
+| conc | MEAN_ACCEPTED（修正前 → 後） | decode-only tok/s |
+| ---: | ---: | ---: |
+| 1 | 6.75 → 6.67 | 117.1 |
+| 2 | 0 → 13.33 | — |
+| 4 | 0 → 26.67 | **254.2（2.17×）** |
+
+- decode-only は trace の verify 以降の window（prefill を含まない）。32 token/req。
+- probe の wall（4 本分の prefill を含む）は aggregate 42.9 → 74.9 tok/s。
+  並行時の aggregate が低く見えるのは prefill が直列に入るためで、decode は
+  単発の 2.17 倍まで戻っている。
+- required 231/231 PASS。DRaft の batch proposal 自体の修正は次の課題。
