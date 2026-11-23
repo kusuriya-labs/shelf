@@ -815,3 +815,26 @@ anchor / draft / sampled を出すと、target の argmax が 11 のところ ba
   並行時の aggregate が低く見えるのは prefill が直列に入るためで、decode は
   単発の 2.17 倍まで戻っている。
 - required 231/231 PASS。DRaft の batch proposal 自体の修正は次の課題。
+
+### BetterBench level 8 の TTFT 異常は max-concurrent の待ち
+
+MTP2 と DFlash2 の BetterBench で、concurrency level 8 の TTFT だけが
+16〜29 秒に跳ねた。`stdio_server` は
+`state.inflight.size() + mtp.active.size() >= state.max_inflight` で新規受付を止め、
+`shelf-server` の HTTP 層がキューに積む。BetterBench の 1 run は最大 512 token
+生成するため、`--max-concurrent-requests 4` では後半 4 本が **1 世代（512 token）
+完了まで待つ**。TTFT の跳ねは spec 固有ではなく、cap と生成長の積である。
+
+DFlash2 を `--max-concurrent-requests 8` にして 8 本を直接送った結果:
+
+| request | TTFT | 完了 |
+| ---: | ---: | ---: |
+| 1–2 | 759 ms | 2,211 ms |
+| 3–6 | 1,279 ms | 2,211 ms |
+| 7–8 | 1,538 ms | 2,211 ms |
+
+8 本すべて受理（拒否・キュー待ちなし）。32 token の aggregate は
+256 token / 2.21 s ≈ **116 tok/s** で単発同等。8 セッションでは verify 行数が
+`kDFlash2SpecMaxVerifyRows` に当たり 4 セッションずつの 2 群に分かれるため、
+4 セッションの 254 tok/s よりスケーリングが落ちる。cap 8 の BetterBench
+concurrency sweep は別途取得する。
