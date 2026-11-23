@@ -834,7 +834,17 @@ DFlash2 を `--max-concurrent-requests 8` にして 8 本を直接送った結�
 | 7–8 | 1,538 ms | 2,211 ms |
 
 8 本すべて受理（拒否・キュー待ちなし）。32 token の aggregate は
-256 token / 2.21 s ≈ **116 tok/s** で単発同等。8 セッションでは verify 行数が
-`kDFlash2SpecMaxVerifyRows` に当たり 4 セッションずつの 2 群に分かれるため、
-4 セッションの 254 tok/s よりスケーリングが落ちる。cap 8 の BetterBench
-concurrency sweep は別途取得する。
+256 token / 2.04–2.21 s ≈ **116–125 tok/s**。
+
+`SHELF_DFLASH2_SERVE_STATS=1` の内訳（cap 8、32 token）:
+
+```
+DFLASH2_VERIFY_ROWS_PER_ROUND=62.000   (8 × 7.75 行が 1 回の verify に融合)
+DFLASH2_MEAN_ACCEPTED=54.000            (8 × 6.75)
+DFLASH2_STAGE round=132.8ms draft_gpu=58.1ms verify_gpu=70.8ms
+```
+
+`kDFlash2SpecMaxVerifyRows=512` は効いており、row cap で 2 群に分かれてはいない。
+8 セッションの律速は **直列 drafter proposal（8 × 7.3 ms = 58 ms）** と
+**62 行の fused verify（71 ms）**。batch proposal 経路を直せば draft が 1 回に
+まとまり、round が ~85 ms まで下がる見込み（+25〜30 %）。
