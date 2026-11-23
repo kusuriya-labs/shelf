@@ -438,6 +438,10 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     exec_config.max_context_tokens = config_.max_seq_len + 1u;
     exec_config.backend = config_.decode_backend;
     exec_config.emit_normed_token_hidden = config_.mtp;
+    if (exec_config.emit_normed_token_hidden) {
+        const std::uint32_t width = model_->mtp_token_hidden_width();
+        if (width != 0u) exec_config.normed_token_hidden_width = width;
+    }
     if (config_.rope_profile.has_value()) {
         exec_config.rope_profile = *config_.rope_profile;
     }

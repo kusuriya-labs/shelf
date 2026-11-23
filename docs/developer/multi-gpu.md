@@ -51,6 +51,7 @@ router は全 rank が同じ top-k を選ぶため replicated のままである
 EP>1 かつ TP=1 で、attention / GDN の head 数が EP で割り切れる場合、EP rank を
 backbone の TP 軸にも使う（axes overlap）。backbone、shared expert、lm_head は
 EP グループ内で TP 分割され、routed expert は EP 軸だけで分割される。
+MTP block も `--serve-stdio --mtp` では同じ backbone TP 軸で分割する。
 `num_key_value_heads` などが EP で割り切れない場合は backbone を複製する
 fallback 経路になる。Qwen3.8-Flash-Next EXL3（KV head 2）は EP=2 で overlap し、
 EP=4 では KV head が 4 で割れないため fallback する。

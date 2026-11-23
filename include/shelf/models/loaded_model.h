@@ -146,6 +146,11 @@ public:
     [[nodiscard]]
     bool has_mtp_block() const noexcept;
 
+    // Width of the hidden the model exposes to the MTP block. Zero means the model's
+    // hidden size. Qwen4Exp exposes the pre-mixer wide residual (hc * hidden).
+    [[nodiscard]]
+    std::uint32_t mtp_token_hidden_width() const noexcept;
+
     // The drafter input: this model's geometry and embedding, and its MTP block lowered by
     // the family that loaded it. Fails when there is no block, so a caller cannot ask for
     // speculative decode on a checkpoint that does not carry one.

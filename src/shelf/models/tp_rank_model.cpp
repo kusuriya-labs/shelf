@@ -594,7 +594,7 @@ Result<std::unique_ptr<TpRankModel>> build_qwen4exp_tp_rank_model(
         axes_overlap ? config.ep_rank : config.tp_rank;
     qwen4exp::Qwen4ExpLoadOptions load_options;
     load_options.load_mtp = config.load_mtp_layers;
-    load_options.mtp_split = config.mtp_split;
+    load_options.mtp_split = config.mtp_split || (axes_overlap && config.load_mtp_layers);
     load_options.ep_size = config.ep_size;
     load_options.ep_rank = config.ep_rank;
     load_options.ep_enabled = config.ep_enabled;

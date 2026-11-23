@@ -393,6 +393,12 @@ bool LoadedModel::has_mtp_block() const noexcept {
     return dense_ != nullptr && dense_->weights().mtp.present;
 }
 
+std::uint32_t LoadedModel::mtp_token_hidden_width() const noexcept {
+    if (qwen4exp_ == nullptr) return 0u;
+    const auto& text = qwen4exp_->text_config();
+    return static_cast<std::uint32_t>(text.hc_count * text.hidden_size);
+}
+
 std::size_t LoadedModel::mtp_drafter_reserve_bytes(
     const shelf::qwen35::runtime::MtpDrafterConfig& options) const {
     if (!has_mtp_block()) return 0u;

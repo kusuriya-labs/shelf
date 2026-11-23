@@ -57,7 +57,12 @@ PP stage 内の EP / TP 展開は実装済みで、TP reduce の後に EP reduce
 - `--serve-stdio --mtp` で TP を使うときは、MTP block を全 rank に load し、attention と
   routed experts を TP 軸で分割する。drafter は target の語彙分割 lm_head を共用し、
   draft の greedy は logits の TP combine で全語彙を得る。単発生成の TP は rank0 が
-  MTP block 全体を持つ。
+  MTP block 全体を持つ。EP の axes overlap（backbone を EP 軸で分割する構成）でも
+  backbone の TP 軸が EP グループになるため、同じく全 rank が MTP block の shard を
+  持つ。
+- MTP に wide residual を渡す executor は `normed_token_hidden_width` を
+  `hc_count * hidden_size` にする。Qwen4Exp の pre-mixer residual は hidden より広く、
+  既定値のままにすると出力 buffer が不足する。
 - routed expert は既定で全 local expert を VRAM に置く。`--moe-host-experts N`
   （layer あたり）を設定すると、各 layer の N expert を pinned host の plane に置き、
   残りを VRAM の slot に置く。host plane は `hipHostMallocMapped` で、GPU の grouped
