@@ -513,12 +513,12 @@ def parse_args(argv=None):
 
     parser.add_argument("--max-seq-len", type=int, default=None,
                         help="max sequence length (default 32768; PLaMo 3: 2048)")
-    parser.add_argument("--max-num-batched-tokens", type=int, default=4096,
+    parser.add_argument("--max-num-batched-tokens", type=int, default=8192,
                         help="token budget per scheduled step; also sets the executor "
-                             "row bucket (default 4096)")
-    parser.add_argument("--prefill-chunk", type=int, default=4096,
+                             "row bucket (default 8192)")
+    parser.add_argument("--prefill-chunk", type=int, default=8192,
                         help="cap prefill tokens per step and the executor row bucket "
-                             "(default 4096)")
+                             "(default 8192)")
     parser.add_argument("--max-concurrent-requests", type=int, default=4,
                         help="max in-flight requests (default 4)")
 

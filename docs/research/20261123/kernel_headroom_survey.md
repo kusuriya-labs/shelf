@@ -220,6 +220,21 @@ chunk を 2048 → 8192 にすると **−5.9 %**。expert の重み traffic は
 grouped GEMM は dequant ALU 律速で、traffic 半減ほどの短縮にはならない。
 `tests/server/support.py` の `ComputeHarness` に `prefill_chunk` を追加した。
 
+pre-rotation と row 前処理の融合後（7002 token、EP=2、bf16 KV、warm）に取り直すと、
+budget と chunk を **両方** 8192 にしたときだけ短縮した。
+
+| budget / chunk | prefill ms |
+| --- | ---: |
+| 4096 / 4096 | 1915.4 / 1924.6 |
+| 8192 / 8192 | **1850.4 / 1866.2（−3.2 %）** |
+| 8192 / 4096 | 1931.6 |
+| 4096 / 8192 | 1936.1 |
+
+片方だけ 8192 にしても効果がないため、`shelf-server` の
+`--max-num-batched-tokens` と `--prefill-chunk` の既定を両方 8192 にした。
+`run.sh` のように `--max-num-batched-tokens 4096` を明示している場合は、
+その指定を外さないと 8192 chunk にならない。
+
 ## 11. 適用: EXL3 grouped の activation 回転を 1 回にする
 
 grouped kernel は N tile の block ごとに activation の FWHT 回転と INT8 量子化をやり直していた。
