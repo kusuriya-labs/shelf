@@ -415,3 +415,51 @@ run.sh の drafts 2 が最速で、増やすと遅い。
 
 aggregate は conc 4 が最良で、server の既定 `--max-concurrent-requests 4` のままにする。
 required 231/231 PASS。
+
+## 16. 現行 build の再測定（GDN v32 試作 revert 後）
+
+GDN v32 の試作を取り消した状態（row 前処理の既定融合と chunk 8192 を含む）で、
+prefill / decode / trace / batch を取り直した。
+
+### prefill（7002 token warm、EP=2、bf16 KV）
+
+| 条件 | prefill ms | tok/s |
+| --- | ---: | ---: |
+| 8192 / 8192、host experts 0 | 1851.2 / 1859.9 | 3782.5 / 3764.8 |
+| 8192 / 8192、host experts 96 | 2020.6 | 3465.3 |
+| 4096 / 4096、host experts 0 | 1921.8 | 3643.4 |
+| 8192 / 8192、row 融合 off | 1886.3 | 3712.1 |
+
+chunk 8192 は 4096 より **−3.4 %**、row 融合は off より **−1.6 %**（1 回比較）。
+
+### decode（3162 token prefill + 64 token 生成）
+
+| MTP drafts | decode tok/s | prefill ms |
+| ---: | ---: | ---: |
+| 2 | **61.6 / 61.6** | 900.6 / 888.8 |
+| 0 | 37.5 | 836.8 |
+
+### trace（2048 token、4 × 512 chunk、2 rank 合計）
+
+| kernel | ms | share | 資源 |
+| --- | ---: | ---: | --- |
+| grouped gate+up | 293.1 | 26.3 % | VGPR 128 / LDS 17,408 |
+| grouped down | 112.3 | 10.1 % | VGPR 184 / LDS 21,504 |
+| GDN recurrence lossy | 87.3 | 7.8 % | VGPR 224 / LDS 35,840 / scratch 0 |
+| rowprepare（既定融合） | 47.0 | 4.2 % | VGPR 32 / LDS 512 |
+| rotate_out_i32_f4 | 38.8 | 3.5 % | VGPR 32 |
+| hipBLASLt BBS | 39.1 + 36.8 | 6.8 % | — |
+| grouped producer | 30.2 | 2.7 % | VGPR 32 |
+| hyper_mix | 29.4 | 2.6 % | VGPR 16 |
+| rotate_quantize_f4 | 28.2 | 2.5 % | VGPR 40 |
+| moe_combine | 27.4 | 2.5 % | VGPR 8 |
+
+prefill window の GPU 合計は **1113.3 ms**。GDN は依然 7.8 % で、
+`VGPR 224 / LDS 35,840 / scratch 0` のまま。rowprepare は `VGPR 32 / LDS 512`。
+
+### concurrent batch
+
+3162 token prompt、drafts 2、budget 8192、conc 4: **39.59 aggregate tok/s**
+（per-stream 9.90）。
+
+required **231/231 PASS**。この状態を次の変更の基準にする。
