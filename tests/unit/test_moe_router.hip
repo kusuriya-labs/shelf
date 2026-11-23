@@ -19,7 +19,10 @@ using shelf::kernel::kMoeRouterMaxExperts;
 using shelf::kernel::kMoeSlotNotOwned;
 using shelf::kernel::kMxfp4GemmRowTile;
 using shelf::kernel::launch_moe_router;
+using shelf::kernel::kMoeSlotTileTokens;
 using shelf::kernel::launch_moe_slot_scan;
+using shelf::kernel::launch_moe_slot_scan_scatter_split;
+using shelf::kernel::launch_moe_slot_scan_split;
 using shelf::kernel::launch_moe_slot_scatter;
 using shelf::kernel::moe_group_count_upper_bound;
 using shelf::kernel::moe_group_row_capacity;
@@ -555,6 +558,137 @@ void run_unsafe_logits_case(const Buffers& b, hipStream_t stream) {
 
 }  // namespace
 
+namespace {
+
+struct PlanSnapshot {
+    std::vector<uint32_t> row_begin;
+    std::vector<uint32_t> tile_base;
+    std::vector<uint32_t> group_begin;
+    std::vector<uint32_t> group_expert;
+    std::vector<uint32_t> group_rows;
+    std::vector<uint32_t> group_count;
+    std::vector<int32_t> row_token;
+    std::vector<int32_t> slot_row_of;
+    std::vector<uint32_t> hit_slot, hit_rows, hit_base, hit_count;
+    std::vector<uint32_t> miss_slot, miss_rows, miss_base, miss_count;
+};
+
+bool run_plan(Buffers& b, hipStream_t stream, uint32_t rows, uint32_t experts, uint32_t top_k,
+              int32_t* slot_map, bool fused, PlanSnapshot& out) {
+    const uint32_t tiles = moe_slot_tile_count(rows);
+    const uint32_t groups = moe_group_count_upper_bound(rows, experts, top_k);
+    const uint32_t capacity = moe_group_row_capacity(rows, experts, top_k);
+    auto* hit_slot = dalloc<uint32_t>(groups);
+    auto* hit_rows = dalloc<uint32_t>(groups);
+    auto* hit_base = dalloc<uint32_t>(groups);
+    auto* hit_count = dalloc<uint32_t>(1);
+    auto* miss_slot = dalloc<uint32_t>(groups);
+    auto* miss_rows = dalloc<uint32_t>(groups);
+    auto* miss_base = dalloc<uint32_t>(groups);
+    auto* miss_count = dalloc<uint32_t>(1);
+    auto* hit_begin = dalloc<uint32_t>(experts + 1u);
+    auto* miss_begin = dalloc<uint32_t>(experts + 1u);
+    bool ok = hipMemset(b.tile_counts, 0,
+                        static_cast<std::size_t>(experts) * tiles * sizeof(uint32_t)) == hipSuccess &&
+        launch_moe_router(b.logits, experts, b.sel_expert, b.sel_weight, b.tile_counts, rows,
+                          experts, top_k, 0u, experts, b.error_word, stream) == hipSuccess;
+    if (ok && fused) {
+        ok = launch_moe_slot_scan_scatter_split(
+                 b.tile_counts, b.expert_row_begin, b.tile_base, b.expert_group_begin,
+                 b.group_expert, b.group_rows, b.group_count, b.row_token, slot_map, hit_slot,
+                 hit_rows, hit_base, hit_count, miss_slot, miss_rows, miss_base, miss_count,
+                 hit_begin, miss_begin, b.sel_expert, b.slot_row_of, rows, experts, top_k,
+                 stream) == hipSuccess;
+    } else if (ok) {
+        ok = launch_moe_slot_scan_split(
+                 b.tile_counts, b.expert_row_begin, b.tile_base, b.expert_group_begin,
+                 b.group_expert, b.group_rows, b.group_count, b.row_token, slot_map, hit_slot,
+                 hit_rows, hit_base, hit_count, miss_slot, miss_rows, miss_base, miss_count,
+                 hit_begin, miss_begin, rows, experts, top_k, stream) == hipSuccess &&
+            launch_moe_slot_scatter(b.sel_expert, b.tile_base, b.expert_row_begin,
+                                    b.expert_group_begin, b.row_token, b.slot_row_of, rows,
+                                    experts, top_k, stream) == hipSuccess;
+    }
+    if (ok) ok = hipStreamSynchronize(stream) == hipSuccess;
+    if (ok) {
+        out.row_begin = d2h(b.expert_row_begin, experts + 1u);
+        out.tile_base = d2h(b.tile_base, static_cast<std::size_t>(experts) * tiles);
+        out.group_begin = d2h(b.expert_group_begin, experts + 1u);
+        out.group_expert = d2h(b.group_expert, groups);
+        out.group_rows = d2h(b.group_rows, groups);
+        out.group_count = d2h(b.group_count, 1u);
+        out.row_token = d2h(b.row_token, capacity);
+        out.slot_row_of = d2h(b.slot_row_of, static_cast<std::size_t>(rows) * top_k);
+        out.hit_slot = d2h(hit_slot, groups);
+        out.hit_rows = d2h(hit_rows, groups);
+        out.hit_base = d2h(hit_base, groups);
+        out.hit_count = d2h(hit_count, 1u);
+        out.miss_slot = d2h(miss_slot, groups);
+        out.miss_rows = d2h(miss_rows, groups);
+        out.miss_base = d2h(miss_base, groups);
+        out.miss_count = d2h(miss_count, 1u);
+    }
+    shelf::gpu::discard_cleanup_result(hipFree(hit_slot));
+    shelf::gpu::discard_cleanup_result(hipFree(hit_rows));
+    shelf::gpu::discard_cleanup_result(hipFree(hit_base));
+    shelf::gpu::discard_cleanup_result(hipFree(hit_count));
+    shelf::gpu::discard_cleanup_result(hipFree(miss_slot));
+    shelf::gpu::discard_cleanup_result(hipFree(miss_rows));
+    shelf::gpu::discard_cleanup_result(hipFree(miss_base));
+    shelf::gpu::discard_cleanup_result(hipFree(miss_count));
+    shelf::gpu::discard_cleanup_result(hipFree(hit_begin));
+    shelf::gpu::discard_cleanup_result(hipFree(miss_begin));
+    return ok;
+}
+
+}  // namespace
+
+void check_fused_scan_scatter(Buffers& b, hipStream_t stream) {
+    const std::string tag = "fused scan scatter";
+    constexpr uint32_t kExperts = 64u;
+    constexpr uint32_t kTopK = 4u;
+    constexpr uint32_t kVram = 32u;
+    auto* slot_map = dalloc<int32_t>(kExperts);
+    std::vector<int32_t> host_slot(kExperts);
+    for (uint32_t e = 0; e < kExperts; ++e)
+        host_slot[e] = e < kVram ? static_cast<int32_t>(e)
+                                 : -1 - static_cast<int32_t>(e - kVram);
+    h2d(slot_map, host_slot);
+    for (const uint32_t rows : {1u, 7u, 16u, kMoeSlotTileTokens}) {
+        const std::vector<float> logits = make_logits(rows, kExperts, kTopK, 91u + rows, false);
+        h2d(b.logits, logits);
+        PlanSnapshot split{}, fused{};
+        const bool split_ok = run_plan(b, stream, rows, kExperts, kTopK, slot_map, false, split);
+        const bool fused_ok = run_plan(b, stream, rows, kExperts, kTopK, slot_map, true, fused);
+        check(split_ok, tag + ": split path runs");
+        check(fused_ok, tag + ": fused path runs");
+        if (!split_ok || !fused_ok) continue;
+        check(split.row_begin == fused.row_begin, tag + ": expert row begin matches");
+        check(split.tile_base == fused.tile_base, tag + ": tile base matches");
+        check(split.group_begin == fused.group_begin, tag + ": expert group begin matches");
+        check(split.group_expert == fused.group_expert, tag + ": group expert matches");
+        check(split.group_rows == fused.group_rows, tag + ": group rows matches");
+        check(split.group_count == fused.group_count, tag + ": group count matches");
+        check(split.row_token == fused.row_token, tag + ": row token matches");
+        check(split.slot_row_of == fused.slot_row_of, tag + ": slot row map matches");
+        check(split.hit_slot == fused.hit_slot && split.hit_rows == fused.hit_rows &&
+                  split.hit_base == fused.hit_base && split.hit_count == fused.hit_count,
+              tag + ": hit planes match");
+        check(split.miss_slot == fused.miss_slot && split.miss_rows == fused.miss_rows &&
+                  split.miss_base == fused.miss_base && split.miss_count == fused.miss_count,
+              tag + ": miss planes match");
+    }
+    const uint32_t wide_rows = kMoeSlotTileTokens + 1u;
+    check(launch_moe_slot_scan_scatter_split(
+              b.tile_counts, b.expert_row_begin, b.tile_base, b.expert_group_begin,
+              b.group_expert, b.group_rows, b.group_count, b.row_token, slot_map, nullptr,
+              nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+              b.sel_expert, b.slot_row_of, wide_rows, kExperts, kTopK, stream) ==
+              hipErrorNotSupported,
+          tag + ": a row count that needs several tiles is rejected");
+    shelf::gpu::discard_cleanup_result(hipFree(slot_map));
+}
+
 void check_split_scan(Buffers& b, hipStream_t stream) {
     constexpr uint32_t kRows = 16u;
     constexpr uint32_t kExperts = 64u;
@@ -764,6 +898,7 @@ int main() {
     run_unsafe_logits_case(b, stream);
     run_expert_axis_split_case(b, stream);
     check_split_scan(b, stream);
+    check_fused_scan_scatter(b, stream);
 
     shelf::gpu::discard_cleanup_result(hipFree(b.logits));
     shelf::gpu::discard_cleanup_result(hipFree(b.error_word));

@@ -183,7 +183,7 @@ __global__ void __launch_bounds__(kRouterThreads) moe_router_kernel(
     }
 }
 
-__global__ void __launch_bounds__(kScanThreads) moe_slot_scan_kernel(
+__device__ __forceinline__ void moe_slot_scan_body(
     uint32_t* __restrict__ tile_counts,
     uint32_t* __restrict__ expert_row_begin,
     uint32_t* __restrict__ tile_base,
@@ -348,7 +348,37 @@ __global__ void __launch_bounds__(kScanThreads) moe_slot_scan_kernel(
         row_token[r] = -1;
 }
 
-__global__ void __launch_bounds__(kRouterThreads) moe_slot_scatter_kernel(
+__global__ void __launch_bounds__(kScanThreads) moe_slot_scan_kernel(
+    uint32_t* __restrict__ tile_counts,
+    uint32_t* __restrict__ expert_row_begin,
+    uint32_t* __restrict__ tile_base,
+    uint32_t* __restrict__ expert_group_begin,
+    uint32_t* __restrict__ group_expert,
+    uint32_t* __restrict__ group_rows,
+    uint32_t* __restrict__ group_count,
+    int32_t* __restrict__ row_token,
+    const int32_t* __restrict__ expert_slot,
+    uint32_t* __restrict__ hit_slot,
+    uint32_t* __restrict__ hit_rows,
+    uint32_t* __restrict__ hit_base,
+    uint32_t* __restrict__ hit_count,
+    uint32_t* __restrict__ miss_slot,
+    uint32_t* __restrict__ miss_rows,
+    uint32_t* __restrict__ miss_base,
+    uint32_t* __restrict__ miss_count,
+    uint32_t* __restrict__ hit_expert_group_begin,
+    uint32_t* __restrict__ miss_expert_group_begin,
+    uint32_t experts,
+    uint32_t tiles,
+    uint32_t group_capacity) {
+    moe_slot_scan_body(
+        tile_counts, expert_row_begin, tile_base, expert_group_begin, group_expert,
+        group_rows, group_count, row_token, expert_slot, hit_slot, hit_rows, hit_base,
+        hit_count, miss_slot, miss_rows, miss_base, miss_count, hit_expert_group_begin,
+        miss_expert_group_begin, experts, tiles, group_capacity);
+}
+
+__device__ __forceinline__ void moe_slot_scatter_body(
     const int32_t* __restrict__ sel_expert,
     const uint32_t* __restrict__ tile_base,
     const uint32_t* __restrict__ expert_row_begin,
@@ -364,7 +394,7 @@ __global__ void __launch_bounds__(kRouterThreads) moe_slot_scatter_kernel(
     __shared__ uint32_t s_base[kMoeRouterMaxExperts];
     __shared__ uint32_t s_first[kMoeRouterMaxExperts];
     __shared__ uint32_t s_group[kMoeRouterMaxExperts];
-    for (uint32_t e = tid; e < experts; e += kRouterThreads) {
+    for (uint32_t e = tid; e < experts; e += blockDim.x) {
         s_base[e] = tile_base[static_cast<size_t>(e) * tiles + tile];
         s_first[e] = expert_row_begin[e];
         s_group[e] = expert_group_begin[e];
@@ -389,6 +419,60 @@ __global__ void __launch_bounds__(kRouterThreads) moe_slot_scatter_kernel(
             slot_row_of[j] = static_cast<int32_t>(row);
         }
     }
+}
+
+__global__ void __launch_bounds__(kRouterThreads) moe_slot_scatter_kernel(
+    const int32_t* __restrict__ sel_expert,
+    const uint32_t* __restrict__ tile_base,
+    const uint32_t* __restrict__ expert_row_begin,
+    const uint32_t* __restrict__ expert_group_begin,
+    int32_t* __restrict__ row_token,
+    int32_t* __restrict__ slot_row_of,
+    uint32_t rows,
+    uint32_t experts,
+    uint32_t top_k,
+    uint32_t tiles) {
+    moe_slot_scatter_body(
+        sel_expert, tile_base, expert_row_begin, expert_group_begin, row_token, slot_row_of,
+        rows, experts, top_k, tiles);
+}
+
+__global__ void __launch_bounds__(kScanThreads) moe_slot_scan_scatter_kernel(
+    uint32_t* __restrict__ tile_counts,
+    uint32_t* __restrict__ expert_row_begin,
+    uint32_t* __restrict__ tile_base,
+    uint32_t* __restrict__ expert_group_begin,
+    uint32_t* __restrict__ group_expert,
+    uint32_t* __restrict__ group_rows,
+    uint32_t* __restrict__ group_count,
+    int32_t* __restrict__ row_token,
+    const int32_t* __restrict__ expert_slot,
+    uint32_t* __restrict__ hit_slot,
+    uint32_t* __restrict__ hit_rows,
+    uint32_t* __restrict__ hit_base,
+    uint32_t* __restrict__ hit_count,
+    uint32_t* __restrict__ miss_slot,
+    uint32_t* __restrict__ miss_rows,
+    uint32_t* __restrict__ miss_base,
+    uint32_t* __restrict__ miss_count,
+    uint32_t* __restrict__ hit_expert_group_begin,
+    uint32_t* __restrict__ miss_expert_group_begin,
+    uint32_t experts,
+    uint32_t tiles,
+    uint32_t group_capacity,
+    const int32_t* __restrict__ sel_expert,
+    int32_t* __restrict__ slot_row_of,
+    uint32_t rows,
+    uint32_t top_k) {
+    moe_slot_scan_body(
+        tile_counts, expert_row_begin, tile_base, expert_group_begin, group_expert,
+        group_rows, group_count, row_token, expert_slot, hit_slot, hit_rows, hit_base,
+        hit_count, miss_slot, miss_rows, miss_base, miss_count, hit_expert_group_begin,
+        miss_expert_group_begin, experts, tiles, group_capacity);
+    __syncthreads();
+    moe_slot_scatter_body(
+        sel_expert, tile_base, expert_row_begin, expert_group_begin, row_token, slot_row_of,
+        rows, experts, top_k, 1u);
 }
 
 }  // namespace
@@ -526,6 +610,52 @@ hipError_t launch_moe_slot_scatter(
     moe_slot_scatter_kernel<<<tiles, kRouterThreads, 0, stream>>>(
         sel_expert, tile_base, expert_row_begin, expert_group_begin, row_token, slot_row_of, rows,
         experts, top_k, tiles);
+    return hipGetLastError();
+}
+
+hipError_t launch_moe_slot_scan_scatter_split(
+    uint32_t* tile_counts,
+    uint32_t* expert_row_begin,
+    uint32_t* tile_base,
+    uint32_t* expert_group_begin,
+    uint32_t* group_expert,
+    uint32_t* group_rows,
+    uint32_t* group_count,
+    int32_t* row_token,
+    const int32_t* expert_slot,
+    uint32_t* hit_slot,
+    uint32_t* hit_rows,
+    uint32_t* hit_base,
+    uint32_t* hit_count,
+    uint32_t* miss_slot,
+    uint32_t* miss_rows,
+    uint32_t* miss_base,
+    uint32_t* miss_count,
+    uint32_t* hit_expert_group_begin,
+    uint32_t* miss_expert_group_begin,
+    const int32_t* sel_expert,
+    int32_t* slot_row_of,
+    uint32_t rows,
+    uint32_t experts,
+    uint32_t top_k,
+    hipStream_t stream) {
+    if (tile_counts == nullptr || expert_row_begin == nullptr || tile_base == nullptr ||
+        expert_group_begin == nullptr || group_expert == nullptr || group_rows == nullptr ||
+        group_count == nullptr || row_token == nullptr || sel_expert == nullptr ||
+        slot_row_of == nullptr)
+        return hipErrorInvalidValue;
+    if (rows == 0u || experts == 0u || experts > kMoeRouterMaxExperts)
+        return hipErrorInvalidValue;
+    if (top_k == 0u || top_k > kMoeRouterMaxTopK || top_k > experts)
+        return hipErrorInvalidValue;
+    if (moe_slot_tile_count(rows) != 1u) return hipErrorNotSupported;
+    const uint32_t group_capacity = moe_group_count_upper_bound(rows, experts, top_k);
+    moe_slot_scan_scatter_kernel<<<1, kScanThreads, 0, stream>>>(
+        tile_counts, expert_row_begin, tile_base, expert_group_begin, group_expert, group_rows,
+        group_count, row_token, expert_slot, hit_slot, hit_rows, hit_base, hit_count,
+        miss_slot, miss_rows, miss_base, miss_count, hit_expert_group_begin,
+        miss_expert_group_begin, experts, 1u, group_capacity, sel_expert, slot_row_of, rows,
+        top_k);
     return hipGetLastError();
 }
 

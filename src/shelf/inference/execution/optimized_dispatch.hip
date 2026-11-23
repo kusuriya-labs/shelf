@@ -2170,8 +2170,13 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             return try_launch_linear_mxfp4(program, b, ctx, stream);
         case KernelId::MOE_ROUTER:
             return try_launch_moe_router(program, b, ctx, stream);
-        case KernelId::MOE_PLAN_SCAN:
+        case KernelId::MOE_PLAN_SCAN: {
+            auto fused = try_launch_moe_plan_scan_scatter(program, dispatch_index, dispatch_end,
+                                                          ctx, stream);
+            if (!fused.ok() || fused.value().kind == OptimizedLaunchKind::Launched)
+                return fused;
             return try_launch_moe_plan_scan(program, b, ctx, stream);
+        }
         case KernelId::MOE_PLAN_SCATTER:
             return try_launch_moe_plan_scatter(program, b, ctx, stream);
         case KernelId::LINEAR_MXFP4_W4A8_GROUPED:

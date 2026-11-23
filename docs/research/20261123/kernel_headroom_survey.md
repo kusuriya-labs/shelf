@@ -995,3 +995,73 @@ stage は round 89.2 ms、verify_gpu 74.6 ms、draft_gpu 10.6 ms、verify 62 行
 trace で確認すると v96 は **scratch 48〜84 B を spill しており**（120 では 0）、
 gate は occupancy より wave あたりの仕事量（ILP）で律速している。
 レジスタを削ると spill が乗って負けるため、120 VGPR を維持する。
+
+### MoE の slot_scan + slot_scatter を 1 launch に融合（採用）
+
+decode の trace では `moe_slot_scan_kernel`（1 thread 群の全体 scan、4.5 µs）と
+`moe_slot_scatter_kernel`（tile 並列、9.6 µs）が **常に隣接**し、1.6 s window で
+1,152 対あった。行数が `kMoeSlotTileTokens` 以下（decode と verify 62 行）なら
+`moe_slot_tile_count(rows) == 1` なので、scan の結果を消費する scatter を同じ
+ブロックで続けられる。
+
+- `moe_slot_scan_kernel` / `moe_slot_scatter_kernel` の本体を device 関数へ分離し、
+  tiles == 1 用の `moe_slot_scan_scatter_kernel` を追加した。scan と scatter の間に
+  `__syncthreads()` を 1 つ置くだけで、plan の作成順・slot 順・atomicAdd の対象は
+  従来と同一である。scatter 本体の expert ストライドは `kRouterThreads` 固定から
+  `blockDim.x` に変え、融合時は scan と同じ 256 thread で動かす。
+- `launch_moe_slot_scan_scatter_split` は tiles != 1 で `hipErrorNotSupported` を
+  返し、prefill は従来どおり 2 launch のまま。
+- 起動条件は `MOE_PLAN_SCAN` の次が `MOE_PLAN_SCATTER` であること。融合は
+  `SHELF_DISABLE_MOE_SCAN_SCATTER=1` で戻せる。
+
+rocprofv3 の decode window（conc=8、8 token、1.6 s）での比較:
+
+| 構成 | scan | scatter | 融合 | 合計 dispatch |
+| --- | ---: | ---: | ---: | ---: |
+| off | 1,632 | 1,632 | 0 | 323,783 |
+| on | 768 | 768 | **864** | **322,919（−864）** |
+
+interleaved A/B（8 セッション、異なる prompt、128 token 上限、3 pair + 前後）:
+
+| 構成 | aggregate tok/s | 中央値 |
+| --- | --- | ---: |
+| off | 150.33 / 150.68 / 150.85 / 150.37 / 150.95 / 150.32 | 150.51 |
+| on | 151.77 / 151.30 / 151.40 / 151.13 / 150.86 / 150.67 | **151.21（+0.5 %）** |
+
+生成 64 token は 8 セッションすべて一致。E2E の差は小さく、主な根拠は
+launch 864 本の削減と scan 側の plan 再読消去である。
+`test_moe_router` に split 経路との byte-exact 比較（rows 1/7/16/64）と、
+multi-tile 行数で `hipErrorNotSupported` を返す検査を追加した。required 231/231 PASS。
+
+### EXL3 epilogue 融合は Flash-Next では成立しない（2 方式を実測して棄却）
+
+dense EXL3 linear は 1 本あたり rotate_in + GEMM + rotate_out の 3 launch で、
+1.6 s window で rotate_out 7,185 / rotate_quantize 8,011 / GEMM 8,011 あった。
+epilogue を次の consumer に畳む 2 方式を実装して測ったが、どちらも発火しない。
+
+1. **linear → 次 linear の chain。** epilogue と次 linear の pre-rotation を 1 kernel
+   （split-K 加算 → H128 → svh → BF16 round → suh → H128 → INT8 量子化）にした。
+   focused test は rows 32〜511 / n 256〜2560 / splits 1〜3 で byte-exact PASS。
+   しかし program 上で発火せず、`SHELF_CHAIN_WHY=1` の実測は
+   `slot=0 single_consumer=0`。linear の出力を直接読むのは residual / norm 系で、
+   次の linear は別の値を読む。
+2. **boundary i8/i9 の k=2560 移植。** 既存の
+   `boundary_fast`（linear epilogue + residual_add + rms_norm + 次 projection の
+   rotate を 1 launch）を features 可変・rows ≤ 64 に一般化し、EP でも動くよう
+   `tp_active` の門を外した。token は一致したが trace で `boundary_fast = 0`。
+   この model は standalone の `RESIDUAL_ADD` を 1.6 s で 78 回しか持たず、
+   residual は hyper 経路に畳まれているため pattern が成立しない。
+
+したがって epilogue の launch を消すには、(a) EP publish（`tp_copy`、window で
+1,152）へ畳む transport 変更、(b) 入力 rotate を dense GEMM の A 経路へ取り込む
+（grouped kernel の `xbuf` と同じ構造）のどちらかが必要になる。どちらも本調査の
+範囲外なので、実装は revert し、launch 数の根拠だけを残す。
+
+### TP / EP では HIP graph が有効にならない（確認）
+
+`graph_eligible` は `executor.tp_schedules.empty()` を要求し、`tp_schedules` は
+`tp_size > 1 || ep_enabled` で必ず構築される（program を TP range + barrier に
+分割するため）。したがって TP>=2 でも EP>=2 でも graph は capture されない。
+実測でも TP=2 の 27B は `[graph]` 行が 1 つも出ず、single device は
+`capture ok nodes=1325` と `replay` が出る。`docs/developer/multi-gpu.md` §10 の
+「TP schedule と HIP graph の併用」は非目標のままである。

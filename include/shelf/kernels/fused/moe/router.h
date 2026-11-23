@@ -160,4 +160,31 @@ hipError_t launch_moe_slot_scatter(
     uint32_t top_k,
     hipStream_t stream);
 
+hipError_t launch_moe_slot_scan_scatter_split(
+    uint32_t* tile_counts,
+    uint32_t* expert_row_begin,
+    uint32_t* tile_base,
+    uint32_t* expert_group_begin,
+    uint32_t* group_expert,
+    uint32_t* group_rows,
+    uint32_t* group_count,
+    int32_t* row_token,
+    const int32_t* expert_slot,
+    uint32_t* hit_slot,
+    uint32_t* hit_rows,
+    uint32_t* hit_base,
+    uint32_t* hit_count,
+    uint32_t* miss_slot,
+    uint32_t* miss_rows,
+    uint32_t* miss_base,
+    uint32_t* miss_count,
+    uint32_t* hit_expert_group_begin,
+    uint32_t* miss_expert_group_begin,
+    const int32_t* sel_expert,
+    int32_t* slot_row_of,
+    uint32_t rows,
+    uint32_t experts,
+    uint32_t top_k,
+    hipStream_t stream);
+
 }  // namespace shelf::kernel

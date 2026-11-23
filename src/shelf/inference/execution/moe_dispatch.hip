@@ -190,6 +190,48 @@ Result<OptimizedLaunchResult> try_launch_moe_plan_scatter(const Program& program
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
+Result<OptimizedLaunchResult> try_launch_moe_plan_scan_scatter(
+    const Program& program, size_t index, size_t end, HostExecutionContext& ctx,
+    hipStream_t stream) {
+    static const bool enabled = std::getenv("SHELF_DISABLE_MOE_SCAN_SCATTER") == nullptr &&
+        std::getenv("SHELF_OP_DUMP") == nullptr && std::getenv("SHELF_OP_SYNC") == nullptr;
+    if (!enabled || ctx.value_trace || ctx.layer_override_count) return kNone;
+    if (index + 1u >= end) return kNone;
+    const auto& scan_b = program.dispatches[index];
+    const auto& scatter_b = program.dispatches[index + 1u];
+    if (scatter_b.kernel_id != ::shelf::runtime::KernelId::MOE_PLAN_SCATTER) return kNone;
+    if (scan_b.input_count != 0u || scatter_b.input_count != 0u) return kNone;
+    const Result<MoePlanView> scan_plan = resolve_moe_plan(program, scan_b, ctx);
+    if (!scan_plan.ok()) return scan_plan.status();
+    const Result<MoePlanView> scatter_plan = resolve_moe_plan(program, scatter_b, ctx);
+    if (!scatter_plan.ok()) return scatter_plan.status();
+    const int32_t* expert_slot = nullptr;
+    if (scan_b.parameter_index0 != ::shelf::runtime::kNoParameter) {
+        if (ctx.host_parameters == nullptr ||
+            scan_b.parameter_index0 >= ctx.host_parameter_count)
+            return bad("moe plan scan: slot map parameter out of range");
+        expert_slot = static_cast<const int32_t*>(
+            ctx.host_parameters[scan_b.parameter_index0].device_ptr);
+        if (expert_slot == nullptr) return bad("moe plan scan: slot map is unbound");
+    }
+    const auto& s = scan_plan.value().arrays;
+    const auto& o = scatter_plan.value().arrays;
+    const hipError_t herr = ::shelf::kernel::launch_moe_slot_scan_scatter_split(
+        s.tile_counts, s.expert_row_begin, s.tile_base, s.expert_group_begin, s.group_expert,
+        s.group_rows, s.group_count, s.row_token, expert_slot, s.hit_slot, s.hit_rows,
+        s.hit_base, s.hit_count, s.miss_slot, s.miss_rows, s.miss_base, s.miss_count,
+        s.hit_expert_group_begin, s.miss_expert_group_begin, o.sel_expert, o.slot_row_of,
+        scan_plan.value().tokens, scan_plan.value().experts, scan_plan.value().top_k, stream);
+    if (herr == hipErrorNotSupported) return kNone;
+    if (herr != hipSuccess)
+        return Status::hip_error("moe plan scan scatter launch", hipGetErrorString(herr),
+                                 __FILE__, __LINE__);
+    record_physical_launch(1u);
+    record_optimized_op();
+    record_optimized_op();
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 2u};
+}
+
 Result<OptimizedLaunchResult> try_launch_moe_grouped_linear(const Program& program,
                                                             const DispatchBinding& b,
                                                             HostExecutionContext& ctx,

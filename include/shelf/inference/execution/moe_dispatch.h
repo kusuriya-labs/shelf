@@ -120,6 +120,9 @@ Result<OptimizedLaunchResult> try_launch_moe_plan_scan(
     HostExecutionContext& ctx,
     hipStream_t stream);
 
+Result<OptimizedLaunchResult> try_launch_moe_plan_scan_scatter(
+    const ::shelf::runtime::Program&, size_t, size_t, HostExecutionContext&, hipStream_t);
+
 Result<OptimizedLaunchResult> try_launch_moe_plan_scatter(
     const ::shelf::runtime::Program& program,
     const ::shelf::runtime::DispatchBinding& b,
