@@ -4,6 +4,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <numeric>
 #include <stdexcept>
@@ -481,6 +482,19 @@ void compare_transports(const Path &body, const Path &draft, int ranks, const Ow
     }
 }
 
+}
+extern "C" hipError_t __real_hipEventRecord(hipEvent_t, hipStream_t);
+extern "C" hipError_t __wrap_hipEventRecord(hipEvent_t event, hipStream_t stream) {
+    if (std::getenv("SHELF_HY4_CHECK_EVENT_REUSE")) {
+        auto status = hipEventQuery(event);
+        if (status == hipErrorNotReady) {
+            std::fprintf(stderr, "完了前の event が再使用されました\n");
+            return hipErrorIllegalState;
+        }
+        if (status != hipSuccess)
+            return status;
+    }
+    return __real_hipEventRecord(event, stream);
 }
 extern "C" hipError_t __real_hipGraphInstantiate(hipGraphExec_t *, hipGraph_t, hipGraphNode_t *, char *, size_t);
 extern "C" hipError_t __wrap_hipGraphInstantiate(hipGraphExec_t *exec, hipGraph_t graph, hipGraphNode_t *node,

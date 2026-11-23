@@ -369,7 +369,6 @@ void Residency::transfer(void *dst, int destination, const void *src, int source
         check(hipEventRecord(ack_event, compute[destination]));
         check(hipSetDevice(physical[source]));
         check(hipStreamWaitEvent(compute[source], ack_event, 0));
-
         check(hipSetDevice(physical[destination]));
     }
     if (expert_begin[0])

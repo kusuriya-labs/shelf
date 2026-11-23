@@ -92,3 +92,9 @@ flock /tmp/r9700.lock build/tests/test_hy4_graph "$BODY" "$DRAFT"
 出力末尾の logits 比較では全位置の logits を確認していない。3,072 token の層別ハッシュは衝突可能性がある。入力は反復列のみで、物理 4 GPU の通信・負荷分散、128k の通常実行 AB/BA、旧 tiled MLA の性能差は未検証。試作は未コミットで、物理構成での再測定と追加入力の正しさ確認が必要である。
 
 `test_hy4_reduce` と差分の空白検査も通った。調査用の一時ファイルを削除し、GPU 排他ロック内で KFD プロセス 0 件を確認した。
+
+## PR #39 取り込み後の event と回帰
+
+PR #39 の転送 event 再利用の修正と rank 別 expert 射影表を取り込んだ。prefill の peer 返却でも ready と ack を再記録する前に対象 event の完了を待つ。`hipEventRecord` の直前で `hipEventQuery` を呼ぶ一時的な計測器を使い、20 token、chunk 20、論理 EP=4 で全 event を検査した。push の 369 回、peer の 492 回はいずれも未完了 0 回、照会エラー 0 回だった。両方式の最後の全 logits が一致した。再発確認用に `test_hy4_graph` は `SHELF_HY4_CHECK_EVENT_REUSE=1` のとき、未完了 event の再記録を失敗として扱う。
+
+射影表を rank ごとに分離した後、8,192 / 32,768 token と論理 EP=1 / 4 の全組み合わせで chunk 512 と 1024 の最後の全 logits が一致した。EP=1 の両入力長は変更前の記録とも一致した。Graph の論理 EP=1 / 3 / 4 回帰、peer 転送と reduce、および CPU 必須 CTest 133 件が通った。CPU CTest はビルドに指定された LLVM の共有ライブラリディレクトリを `LD_LIBRARY_PATH` に指定した。上記の性能値は event 同期の修正前の測定であり、修正後の物理 4 GPU 性能は未測定である。
