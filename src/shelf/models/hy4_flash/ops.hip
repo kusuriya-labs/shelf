@@ -39,9 +39,84 @@ __global__ void dense(Mat x, Param w, Mat out) {
     if (!lane)
         out.p[size_t(row) * out.cols + col] = f32_to_bf16_rne_device(acc);
 }
+template <int RT, int CT, int WR, int WC>
+__global__ void __launch_bounds__((WR * WC) * 32) dense_tiled(Mat x, const uint16_t *w, Mat out) {
+    constexpr int CTA_R = RT * WR;
+    constexpr int CTA_C = CT * WC;
+    constexpr int THREADS = WR * WC * 32;
+    __shared__ uint16_t s_x[CTA_R][72];
+    __shared__ uint16_t s_w[CTA_C][72];
+    int t = threadIdx.x, wave = t >> 5, lane = t & 31;
+    int wr = wave % WR, wc = wave / WR;
+    int r_base = blockIdx.y * CTA_R, c_base = blockIdx.x * CTA_C;
+    float acc[RT][CT]{};
+    int k_off = (t & 7) * 8;
+    int r_step = THREADS / 8;
+    for (int k = 0; k < x.cols; k += 64) {
+        for (int xr = t >> 3; xr < CTA_R; xr += r_step) {
+            int r = r_base + xr;
+            *reinterpret_cast<uint4 *>(&s_x[xr][k_off]) =
+                r < x.rows ? *reinterpret_cast<const uint4 *>(x.p + size_t(r) * x.cols + k + k_off) : uint4{};
+        }
+        for (int wc_r = t >> 3; wc_r < CTA_C; wc_r += r_step) {
+            int c = c_base + wc_r;
+            *reinterpret_cast<uint4 *>(&s_w[wc_r][k_off]) =
+                c < out.cols ? *reinterpret_cast<const uint4 *>(w + size_t(c) * x.cols + k + k_off) : uint4{};
+        }
+        __syncthreads();
+#pragma unroll
+        for (int ks = 0; ks < 64; ks += 32) {
+            float vx[RT], vw[CT];
+#pragma unroll
+            for (int r = 0; r < RT; ++r)
+                vx[r] = bf16_bits_to_f32(s_x[wr * RT + r][ks + lane]);
+#pragma unroll
+            for (int c = 0; c < CT; ++c)
+                vw[c] = bf16_bits_to_f32(s_w[wc * CT + c][ks + lane]);
+#pragma unroll
+            for (int r = 0; r < RT; ++r)
+#pragma unroll
+                for (int c = 0; c < CT; ++c)
+                    acc[r][c] += vx[r] * vw[c];
+        }
+        __syncthreads();
+    }
+#pragma unroll
+    for (int r = 0; r < RT; ++r) {
+        int row = r_base + wr * RT + r;
+        if (row >= x.rows)
+            continue;
+#pragma unroll
+        for (int c = 0; c < CT; ++c) {
+            int col = c_base + wc * CT + c;
+            if (col >= out.cols)
+                continue;
+            float sum = acc[r][c];
+            for (int d = 16; d; d /= 2)
+                sum += __shfl_down(sum, d, 32);
+            if (!lane)
+                out.p[size_t(row) * out.cols + col] = f32_to_bf16_rne_device(sum);
+        }
+    }
+}
 __global__ void normalize(Mat x, Param weight, Mat y, float eps) {
     __shared__ float scratch[32];
     size_t base = size_t(blockIdx.x) * x.cols;
+    if (x.cols <= 3072) {
+        uint16_t vals[12];
+        int n = 0;
+        float sum = 0;
+        for (int c = threadIdx.x; c < x.cols; c += blockDim.x, ++n) {
+            vals[n] = x.p[base + c];
+            float v = bf16_bits_to_f32(vals[n]);
+            sum += v * v;
+        }
+        float inv = rsqrtf(blocksum(sum, scratch) / x.cols + eps);
+        for (int i = 0, c = threadIdx.x; i < n; ++i, c += blockDim.x)
+            y.p[base + c] =
+                f32_to_bf16_rne_device(round_bf16(bf16_bits_to_f32(vals[i]) * inv) * (weight.p ? read(weight, c) : 1.f));
+        return;
+    }
     float sum = 0;
     for (int c = threadIdx.x; c < x.cols; c += blockDim.x) {
         float v = value(x, base + c);
@@ -149,6 +224,57 @@ __global__ void gather_rows(Mat x, const int *ids, Mat y, int repeat) {
         y.p[i] = id >= 0 && id < x.rows ? x.p[size_t(id) * x.cols + i % x.cols] : 0;
     }
 }
+template <int Rows>
+__global__ void hc_mix_multi(Mat x, Param fn, Param scale, Param base, float *gates, int count) {
+    __shared__ float s_dot[Rows][8][8], s_norm[Rows][8];
+    int r0 = blockIdx.y * Rows, t = threadIdx.x, lane = t & 31, wave = t >> 5;
+    float dot[Rows][8]{}, norm[Rows]{};
+    for (int i = t; i < x.cols; i += 256) {
+        float vx[Rows];
+#pragma unroll
+        for (int r = 0; r < Rows; ++r)
+            vx[r] = r0 + r < x.rows ? value(x, size_t(r0 + r) * x.cols + i) : 0.f;
+        for (int g = 0; g < count; ++g) {
+            float f = read(fn, size_t(g) * x.cols + i);
+#pragma unroll
+            for (int r = 0; r < Rows; ++r)
+                dot[r][g] += vx[r] * f;
+        }
+#pragma unroll
+        for (int r = 0; r < Rows; ++r)
+            norm[r] += vx[r] * vx[r];
+    }
+#pragma unroll
+    for (int r = 0; r < Rows; ++r) {
+        float nv = norm[r];
+        for (int m = 16; m; m /= 2)
+            nv += __shfl_down(nv, m, 32);
+        if (!lane)
+            s_norm[r][wave] = nv;
+        for (int g = 0; g < count; ++g) {
+            float dv = dot[r][g];
+            for (int m = 16; m; m /= 2)
+                dv += __shfl_down(dv, m, 32);
+            if (!lane)
+                s_dot[r][g][wave] = dv;
+        }
+    }
+    __syncthreads();
+    if (t < Rows * count) {
+        int r = t / count, g = t % count;
+        if (r0 + r < x.rows) {
+            float d0 = s_dot[r][g][0] + s_dot[r][g][4], d1 = s_dot[r][g][1] + s_dot[r][g][5];
+            float d2 = s_dot[r][g][2] + s_dot[r][g][6], d3 = s_dot[r][g][3] + s_dot[r][g][7];
+            float d = (d0 + d2) + (d1 + d3);
+            float n0 = s_norm[r][0] + s_norm[r][4], n1 = s_norm[r][1] + s_norm[r][5];
+            float n2 = s_norm[r][2] + s_norm[r][6], n3 = s_norm[r][3] + s_norm[r][7];
+            float n = (n0 + n2) + (n1 + n3);
+            float f = d * rsqrtf(n / x.cols + 1e-5f);
+            float v = __fadd_rn(__fmul_rn(f, read(scale, g / 4)), read(base, g));
+            gates[(r0 + r) * count + g] = (g < 4 ? 1.f : 2.f) / (1.f + expf(-v)) + 1e-6f;
+        }
+    }
+}
 __global__ void hc_mix(Mat x, Param fn, Param scale, Param base, float *gates, int count) {
     __shared__ float s1[32], s2[32];
     int gate = blockIdx.x, row = blockIdx.y;
@@ -195,6 +321,30 @@ __global__ void hc_reduce_norm(Mat x, const float *gates, Param weight, Mat y, f
         y.p[size_t(row) * y.cols + c] = f32_to_bf16_rne_device(
             round_bf16(bf16_bits_to_f32(vals[i]) * inv) * (weight.p ? read(weight, c) : 1.f));
 }
+__global__ void hc_expand_vec(Mat x, Mat y, const float *post) {
+    size_t idx = (size_t(blockIdx.x) * blockDim.x + threadIdx.x) * 8;
+    size_t total = size_t(x.rows) * x.cols;
+    if (idx >= total)
+        return;
+    int r = idx / x.cols, h = (idx / y.cols) % 4;
+    float g = post[r * 8 + 4 + h];
+    uint4 xv = *reinterpret_cast<const uint4 *>(x.p + idx);
+    uint4 yv = *reinterpret_cast<const uint4 *>(y.p + size_t(r) * y.cols + idx % y.cols);
+    uint32_t xw[4] = {xv.x, xv.y, xv.z, xv.w};
+    uint32_t yw[4] = {yv.x, yv.y, yv.z, yv.w};
+    uint32_t out[4];
+#pragma unroll
+    for (int p = 0; p < 4; ++p) {
+        uint16_t a0 = f32_to_bf16_rne_device(
+            __fadd_rn(bf16_bits_to_f32(uint16_t(xw[p] & 0xffffu)),
+                      __fmul_rn(g, bf16_bits_to_f32(uint16_t(yw[p] & 0xffffu)))));
+        uint16_t a1 = f32_to_bf16_rne_device(
+            __fadd_rn(bf16_bits_to_f32(uint16_t(xw[p] >> 16)),
+                      __fmul_rn(g, bf16_bits_to_f32(uint16_t(yw[p] >> 16)))));
+        out[p] = uint32_t(a0) | (uint32_t(a1) << 16);
+    }
+    *reinterpret_cast<uint4 *>(x.p + idx) = uint4{out[0], out[1], out[2], out[3]};
+}
 __global__ void hc_expand(Mat x, Mat y, const float *post) {
     size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= size_t(x.rows) * x.cols)
@@ -219,6 +369,45 @@ __global__ void rotary(Mat x, Mat y, int heads, int start, float theta, const Hy
     float co = bf16_bits_to_f32(f32_to_bf16_rne_device(cosf(phase)));
     float si = bf16_bits_to_f32(f32_to_bf16_rne_device(sinf(phase)));
     y.p[i] = f32_to_bf16_rne_device(value(x, i) * co + ((j & 1) ? 1.f : -1.f) * value(x, i ^ 1) * si);
+}
+template <int Width>
+__global__ void rotary_tiled(Mat x, Mat y, int heads, int start, float theta, const Hy4StepParams *params,
+                             const int *positions = nullptr) {
+    __shared__ float co_s[32], si_s[32];
+    if (params)
+        start = params->position;
+    constexpr int HPB = Width == 256 ? 4 : 8;
+    constexpr int LPW = Width / 8;
+    int row = blockIdx.y, h_base = blockIdx.x * HPB, t = threadIdx.x;
+    if (t < 32) {
+        float phase = (positions ? positions[row] : start + row) * powf(theta, -float(t) / 32);
+        co_s[t] = bf16_bits_to_f32(f32_to_bf16_rne_device(cosf(phase)));
+        si_s[t] = bf16_bits_to_f32(f32_to_bf16_rne_device(sinf(phase)));
+    }
+    __syncthreads();
+    int h = h_base + t / LPW, lane = t % LPW, c = lane * 8;
+    if (h >= heads)
+        return;
+    size_t off = (size_t(row) * heads + h) * Width + c;
+    uint4 raw = *reinterpret_cast<const uint4 *>(x.p + off);
+    if (c < Width - 64) {
+        *reinterpret_cast<uint4 *>(y.p + off) = raw;
+        return;
+    }
+    int p_base = (c - (Width - 64)) >> 1;
+    uint32_t w[4] = {raw.x, raw.y, raw.z, raw.w};
+    uint32_t out[4];
+#pragma unroll
+    for (int p = 0; p < 4; ++p) {
+        int pair = p_base + p;
+        float v0 = bf16_bits_to_f32(uint16_t(w[p] & 0xffffu));
+        float v1 = bf16_bits_to_f32(uint16_t(w[p] >> 16));
+        float co = co_s[pair], si = si_s[pair];
+        uint16_t o0 = f32_to_bf16_rne_device(v0 * co - v1 * si);
+        uint16_t o1 = f32_to_bf16_rne_device(v1 * co + v0 * si);
+        out[p] = uint32_t(o0) | (uint32_t(o1) << 16);
+    }
+    *reinterpret_cast<uint4 *>(y.p + off) = uint4{out[0], out[1], out[2], out[3]};
 }
 unsigned grid(Mat x) { return (size_t(x.rows) * x.cols + 255) / 256; }
 }
@@ -279,7 +468,16 @@ Mat Ops::linear(const std::string &name, Mat x) {
             (w.spec.dtype != io::SType::F32 && w.spec.dtype != io::SType::BF16))
             throw std::runtime_error("線形の形状・型が不正です: " + name);
         Mat y = mat(x.rows, w.spec.shape[0]);
-        dense<<<dim3((y.cols + 3) / 4, y.rows), 128, 0, stream>>>(x, param(name + ".weight"), y);
+        Param wp = param(name + ".weight");
+        if (wp.type == io::SType::BF16 && x.rows >= 8 && (x.cols % 64) == 0 && (y.cols % 32) == 0) {
+            dense_tiled<8, 8, 2, 4><<<dim3(y.cols / 32, (x.rows + 15) / 16), 256, 0, stream>>>(
+                x, static_cast<const uint16_t *>(wp.p), y);
+        } else if (wp.type == io::SType::BF16 && x.rows >= 8 && (x.cols % 64) == 0 && y.cols == 16) {
+            dense_tiled<2, 8, 4, 2><<<dim3(1, (x.rows + 7) / 8), 256, 0, stream>>>(
+                x, static_cast<const uint16_t *>(wp.p), y);
+        } else {
+            dense<<<dim3((y.cols + 3) / 4, y.rows), 128, 0, stream>>>(x, wp, y);
+        }
         checked(hipGetLastError());
         return y;
     }
@@ -391,12 +589,17 @@ Mat Ops::embed_device(const int *list, int rows, bool expand) {
     checked(hipGetLastError());
     return y;
 }
+static void launch_hc_mix(Mat x, Param fn, Param scale, Param base, float *post, int count, hipStream_t stream) {
+    if (x.rows >= 256)
+        hc_mix_multi<4><<<dim3(1, (x.rows + 3) / 4), 256, 0, stream>>>(x, fn, scale, base, post, count);
+    else
+        hc_mix<<<dim3(count, x.rows), 256, 0, stream>>>(x, fn, scale, base, post, count);
+}
 Mat Ops::collapse(Mat x, const std::string &prefix, float *&post) {
     int count = prefix == "model.hc_head.hc_head_" ? 4 : 8;
     post = static_cast<float *>(arena.next(size_t(x.rows) * count * 4));
     Mat y = mat(x.rows, 3072);
-    hc_mix<<<dim3(count, x.rows), 256, 0, stream>>>(x, param(prefix + "fn"), param(prefix + "scale"),
-                                                    param(prefix + "base"), post, count);
+    launch_hc_mix(x, param(prefix + "fn"), param(prefix + "scale"), param(prefix + "base"), post, count, stream);
     checked(hipGetLastError());
     hc_reduce<<<grid(y), 256, 0, stream>>>(x, y, post, count);
     checked(hipGetLastError());
@@ -407,15 +610,17 @@ Mat Ops::collapse_norm(Mat x, const std::string &prefix, float *&post, const std
     post = static_cast<float *>(arena.next(size_t(x.rows) * count * 4));
     Mat y = mat(x.rows, 3072);
     Param w = key.empty() ? Param{} : param(key);
-    hc_mix<<<dim3(count, x.rows), 256, 0, stream>>>(x, param(prefix + "fn"), param(prefix + "scale"),
-                                                    param(prefix + "base"), post, count);
+    launch_hc_mix(x, param(prefix + "fn"), param(prefix + "scale"), param(prefix + "base"), post, count, stream);
     checked(hipGetLastError());
     hc_reduce_norm<<<x.rows, 256, 0, stream>>>(x, post, w, y, eps, count);
     checked(hipGetLastError());
     return y;
 }
 Mat Ops::expand(Mat x, Mat y, const float *post) {
-    hc_expand<<<grid(x), 256, 0, stream>>>(x, y, post);
+    if ((y.cols & 7) == 0 && (x.cols & 7) == 0)
+        hc_expand_vec<<<((size_t(x.rows) * x.cols) / 8 + 255) / 256, 256, 0, stream>>>(x, y, post);
+    else
+        hc_expand<<<grid(x), 256, 0, stream>>>(x, y, post);
     checked(hipGetLastError());
     return x;
 }
@@ -425,7 +630,12 @@ void Ops::add_into(Mat a, Mat b, Mat out) {
 }
 Mat Ops::rope_batch(Mat x, int heads, float theta, const int *row_positions) {
     Mat y = mat(x.rows, x.cols);
-    rotary<<<grid(y), 256, 0, stream>>>(x, y, heads, 0, theta, nullptr, row_positions);
+    if (x.cols / heads == 256 && (heads & 3) == 0)
+        rotary_tiled<256><<<dim3(heads / 4, x.rows), 128, 0, stream>>>(x, y, heads, 0, theta, nullptr, row_positions);
+    else if (x.cols / heads == 128 && (heads & 7) == 0)
+        rotary_tiled<128><<<dim3(heads / 8, x.rows), 128, 0, stream>>>(x, y, heads, 0, theta, nullptr, row_positions);
+    else
+        rotary<<<grid(y), 256, 0, stream>>>(x, y, heads, 0, theta, nullptr, row_positions);
     checked(hipGetLastError());
     return y;
 }
@@ -443,7 +653,12 @@ Mat Ops::rope_from(Mat x, int first, int width, int heads, int start, float thet
 }
 Mat Ops::rope(Mat x, int heads, int start, float theta) {
     Mat y = mat(x.rows, x.cols);
-    rotary<<<grid(y), 256, 0, stream>>>(x, y, heads, start, theta, params);
+    if (x.cols / heads == 256 && (heads & 3) == 0)
+        rotary_tiled<256><<<dim3(heads / 4, x.rows), 128, 0, stream>>>(x, y, heads, start, theta, params);
+    else if (x.cols / heads == 128 && (heads & 7) == 0)
+        rotary_tiled<128><<<dim3(heads / 8, x.rows), 128, 0, stream>>>(x, y, heads, start, theta, params);
+    else
+        rotary<<<grid(y), 256, 0, stream>>>(x, y, heads, start, theta, params);
     checked(hipGetLastError());
     return y;
 }
