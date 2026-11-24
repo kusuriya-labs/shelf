@@ -19,11 +19,6 @@ enum class TpBarrierKind : uint8_t {
     SumHidden = 1,
 };
 
-struct TpCombinePolicy {
-    bool fence_copy = true;
-    bool fence_add = true;
-};
-
 enum class TpCombineBackend : uint8_t {
     Event = 0,
     StreamSignal = 1,
@@ -102,8 +97,6 @@ public:
     virtual std::size_t inbox_capacity() const noexcept { return 0; }
 
     virtual void advance_barrier(int rank) { (void)rank; }
-
-    virtual void set_combine_policy(const TpCombinePolicy& policy) { (void)policy; }
 
     virtual bool stream_signal_ready() const noexcept { return false; }
 

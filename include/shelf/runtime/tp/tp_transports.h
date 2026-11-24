@@ -25,7 +25,6 @@ public:
     bool supports_combine_fusion() const noexcept override;
     std::size_t inbox_capacity() const noexcept override;
     void advance_barrier(int rank) override;
-    void set_combine_policy(const TpCombinePolicy& policy) override;
     bool stream_signal_ready() const noexcept override;
     Status sum_hidden_stream_signal(int rank, const TpSumTarget& target,
                                     hipStream_t stream, bool peer_written) override;
@@ -44,7 +43,6 @@ private:
 
     std::vector<int> devices_;
     TpCombineBackend backend_ = TpCombineBackend::Event;
-    TpCombinePolicy combine_policy_{};
     std::vector<std::vector<std::array<hipEvent_t, 2>>> sent_;
     std::vector<std::vector<std::array<hipEvent_t, 2>>> consumed_;
     std::vector<std::vector<std::array<char, 2>>> consumed_recorded_;
@@ -55,6 +53,7 @@ private:
     std::vector<std::pair<int, void*>> retired_inbox_;
     void* stream_signal_host_ = nullptr;
     std::array<uint32_t*, 2> stream_signal_dev_{{nullptr, nullptr}};
+    std::array<uint32_t*, 2> stream_arrive_{{nullptr, nullptr}};
     bool stream_signal_allocated_ = false;
     std::vector<void*> probe_buffers_;
     std::vector<hipStream_t> probe_streams_;

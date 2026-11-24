@@ -1611,46 +1611,52 @@ draft 2 の verify コストがそのまま残るため、実タスクでは MTP
 
 `TpCombineBackend::StreamSignal` の reference run。qualified baseline ではない。
 絶対値は GPU の温度・クロックで動くため、同一 boot の交互測定を正本にする。
-StreamSignal の 78.5 tok/s / 40.1 tok/s は **fused ではなく StreamSignal** の値である。
 
 ### 27B EXL3 TP=2 decode
 
-`shelf-bench tg --mode greedy --context 64 --tokens 8 --warmup 2`。
+`shelf-bench tg --mode greedy --context 64 --tokens 8 --warmup 2`。同一 boot の交互測定。
 
-同一 boot（遅い状態）:
+| backend | gpu_tokens_per_sec_p50 | 生成列 |
+| --- | ---: | --- |
+| Event | 36.3〜36.5 | 一致（3/3） |
+| StreamSignal | **41.1〜41.2** | 一致（20/20） |
 
-| backend | gpu_tokens_per_sec_p50 |
-| --- | ---: |
-| Event | 35.2 |
-| StreamSignal | **38.4** |
-
-+9.1%。別 boot（速い状態）では Event 36.5 / StreamSignal 40.1 で +9.9%。
-生成一致アンカー: `GENERATED_IDS` sha1
++12.9%。生成一致アンカー: `GENERATED_IDS` sha1
 `c75f3eea6473dd56b6e927ca29b4dbe18e5c4597`（`shelf-compute`、64 token、greedy、TP=2）。
-StreamSignal は同じ入力で 20/20 一致した。
 
 ### 27B + DFlash2（16 token）
 
-同一 boot（遅い状態）:
+| backend | decode tok/s | verify_ms（5 round 合計） | 生成列 |
+| --- | ---: | ---: | --- |
+| Event | 74.2〜75.2 | 116.9〜118.7 | 一致 |
+| StreamSignal | **76.5〜77.8** | 114.6〜116.3 | 一致（3 run 同一） |
 
-| backend | decode tok/s | verify_ms（5 round 合計） |
-| --- | ---: | ---: |
-| Event | 67.5 | 138.7 |
-| StreamSignal | **70.3** | 134〜135 |
-
-+4.2%。採択率は両方 `DFLASH2_MEAN_ACCEPTED=2.000`、`DFLASH2_EMITTED_PER_ROUND=3.000`、
-生成列は一致した。別 boot（速い状態、fence なし）では StreamSignal が
-78.5 tok/s、verify 112.2 ms、round 190.6 ms だった。
++4.2%。採択率は `DFLASH2_MEAN_ACCEPTED=2.000`、`DFLASH2_EMITTED_PER_ROUND=3.000`。
 
 ### Flash-Next EXL3 EP=2
 
 | backend | decode tok/s | 一致 |
 | --- | ---: | --- |
-| Event | 31.7 | 基準 |
-| StreamSignal | **33.8** | 10/10 |
+| Event | 34.6〜34.7 | 基準 |
+| StreamSignal | **38.0〜38.1** | 10/10 |
 
-fence は `fence_copy=true` / `fence_add=false`。7,000 barrier 規模の 64 token 生成で
-生成列が一致した。
++9.7%。`--tokens 64`、7,000 barrier 規模の生成で生成列が一致した。
+
+### signal を kernel から書く効果
+
+同じ boot 内の A/B ではないが、方式ごとの値は次のとおり。
+
+| 方式 | launch / combine | 27B | DFlash2 | 生成列 |
+| --- | ---: | ---: | ---: | --- |
+| copy + WriteValue32 + 全スレッド fence | 4 | 38.1 | 70.5 | 一致 |
+| copy + WriteValue32 + 最後の block fence | 4 | 39.7 | 76.5 | 一致 |
+| copy が signal も書く | **3** | **41.2** | **77.4** | 一致 |
+| copy + WriteValue32 + fence なし | 4 | 40.0 | 78.5 | 不一致 |
+
+copy kernel の ISA は 173 命令から 222 命令へ増える。増分は末尾の 41 命令（barrier、
+arrival counter、release store）で、1 スレッドあたり 1 回だけ実行する。削除した
+system fence は全スレッドが毎回実行していた。fence なしの 78.5 は生成列が壊れるため
+性能値として採用しない。
 
 ## 記録規則
 

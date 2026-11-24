@@ -42,7 +42,7 @@ model_dispatch_correctness (shelf::kernel, single launcher)
 `Executor` は呼び出し側が渡す compute stream 上で launch する。executor 自身が所有する
 host thread と追加 stream は持たない。
 
-GPU の idle 復帰（command processor の起动）を測る口は `shelf-bench` の `--gap-keepalive` で、
+GPU の idle 復帰（command processor の起動）を測る口は `shelf-bench` の `--gap-keepalive` で、
 app が自分の stream へ event を record する。executor 側にこの種の background activity は無い。
 
 ## Decode backend

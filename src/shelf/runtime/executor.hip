@@ -1194,16 +1194,22 @@ Result<PendingBatch> submit_co_batch(
             const char* ple_timing_env = std::getenv("SHELF_PLE_TIMING");
             const bool ple_timing =
                 ple_timing_env != nullptr && ple_timing_env[0] != '0';
-            const bf16_t* src = nullptr;
-            std::vector<bf16_t> host;
+            if (executor.external_input_staging == nullptr ||
+                executor.external_input_staging_bytes < expected * sizeof(bf16_t)) {
+                return Status::invalid_state("external input staging is not allocated",
+                                             __FILE__, __LINE__);
+            }
+            bf16_t* staging = static_cast<bf16_t*>(executor.external_input_staging);
             if (options.prepared_external_input != nullptr &&
                 options.prepared_external_input_rows == N) {
-                src = options.prepared_external_input;
+                std::memcpy(staging, options.prepared_external_input,
+                            expected * sizeof(bf16_t));
                 if (ple_timing)
                     std::fprintf(stderr,
                                  "PLE_TIMING rows=%u ple_gather_ms=0.000 (prefetched)\n",
                                  N);
             } else {
+                std::vector<bf16_t> host;
                 const std::chrono::steady_clock::time_point ple_t0 =
                     std::chrono::steady_clock::now();
                 stq = executor.external_input_preparer(batch, host);
@@ -1219,16 +1225,9 @@ Result<PendingBatch> submit_co_batch(
                         "external input preparer returned a wrong row count", __FILE__,
                         __LINE__);
                 }
-                if (executor.external_input_staging == nullptr ||
-                    executor.external_input_staging_bytes <
-                        expected * sizeof(bf16_t)) {
-                    return Status::invalid_state(
-                        "external input staging is not allocated", __FILE__, __LINE__);
-                }
-                std::memcpy(executor.external_input_staging, host.data(),
-                            expected * sizeof(bf16_t));
-                src = static_cast<const bf16_t*>(executor.external_input_staging);
+                std::memcpy(staging, host.data(), expected * sizeof(bf16_t));
             }
+            const bf16_t* src = staging;
             const hipError_t copy_error =
                 hipMemcpyAsync(executor.input_hidden.data<void>(), src,
                                expected * sizeof(bf16_t), hipMemcpyHostToDevice,

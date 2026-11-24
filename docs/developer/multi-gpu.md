@@ -174,19 +174,26 @@ TP の inbox は `TpCoordinator::initialize` で確保する。推論中の `hip
 
 `TpCombineBackend::StreamSignal` では、combine を次の順で stream に積む。
 
-1. 自分の部分和を peer の inbox へ copy
-2. `hipStreamWriteValue32` で peer の signal を書く
-3. `hipStreamWaitValue32` で自分の signal を待つ
-4. inbox を読んで sum / residual add
+1. 自分の部分和を peer の inbox へ copy する。copy kernel の最後の block が peer の
+   signal に epoch を system-scope release で書く。
+2. `hipStreamWaitValue32` で自分の signal を待つ。
+3. inbox を読んで sum / residual add。
 
 - host thread は barrier で rendezvous しない。kernel は spin しない。
-- copy と add は full grid で走る。`TpCombinePolicy::fence_copy` が copy kernel の
-  末尾に system fence を入れる。`fence_add` は add kernel の先頭に入れる。
-- qwen35 dense / qwen4exp は `StreamSignal`、その他は `Event` を既定にする。
-  fence は既定 `{copy=true, add=false}`。
+- copy と add は full grid で走る。
+- system fence は使わない。最後の block の release store が signal を全 write より
+  後ろに置くため、peer は signal を見た時点で inbox を読める。全スレッドの
+  `__threadfence_system()` は combine あたり数万回になり decode が 10% 落ちる。
+- 複数 block の write を 1 つの release にまとめるため、block ごとに system-scope の
+  arrival counter を進め、最後に到着した block だけが signal を書く
+  （`tp_publish_block_writes`）。
+- `peer_written` が立った combine は copy を省くため、`hipStreamWriteValue32` で
+  signal を書く。
+- signal と arrival counter は初期化時に確保する。実行中に確保しない。
+- signal は host coherent mapped memory に置く。kernel からの release store、
+  `hipStreamWriteValue32` / `WaitValue32` はいずれも HIP graph の node として
+  capture できる。
 - 対象は 2 rank のみ。3 rank 以上では `stream_signal_ready()` が false になる。
-- signal は host coherent mapped memory に置く。`hipStreamWriteValue32` /
-  `WaitValue32` は HIP graph の node として capture できる。
 
 ## 5. Pipeline parallel
 

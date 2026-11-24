@@ -183,6 +183,12 @@ checkpoint は `ngram-q`、FP8 shard checkpoint は E4M3 code × per-tensor BF16
 `PleInputRuntime` が sequence ごとの token history から 16 行を gather する。
 1 token あたり 16 行 = 2,560 要素である。
 
+PLE の external input は、gather 結果も prefetch 済み buffer も、executor が持つ
+pinned staging（`Executor::external_input_staging`）へ `memcpy` してから
+`hipMemcpyAsync` で device へ送る。`hipMemcpyAsync` の送信元は enqueue より
+長生きしなければならないため、関数ローカルの `std::vector` や mmap を送信元にしない。
+staging は executor の初期化時に `hipHostMalloc` で 1 回だけ確保し、shutdown で解放する。
+
 ### QSA
 
 indexer の graph は `qwen_hybrid::emit_qsa_indexer`

@@ -879,13 +879,10 @@ Status select_tp_rank_model(q35r::TpCoordinatorConfig& config) {
          family.value() == ModelFamily::Qwen4Exp)
             ? ::shelf::runtime::TpCombineBackend::StreamSignal
             : ::shelf::runtime::TpCombineBackend::Event;
-    config.combine_policy = ::shelf::runtime::TpCombinePolicy{true, false};
-    std::fprintf(stderr, "TP_COMBINE_BACKEND=%s fence_copy=%d fence_add=%d\n",
+    std::fprintf(stderr, "TP_COMBINE_BACKEND=%s\n",
                  config.combine_backend == ::shelf::runtime::TpCombineBackend::StreamSignal
                      ? "stream-signal"
-                     : "event",
-                 config.combine_policy.fence_copy ? 1 : 0,
-                 config.combine_policy.fence_add ? 1 : 0);
+                     : "event");
     if (family.value() == ModelFamily::Plamo3)
         return Status::unsupported("plamo3: runtime path is not connected", __FILE__, __LINE__);
     if (family.value() == ModelFamily::Qwen4Exp) {
