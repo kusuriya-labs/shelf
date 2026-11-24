@@ -129,6 +129,12 @@ constexpr LinearShapeRule kLinearShapeRules[] = {
     { 2560, 7680, kFamilyBf16 },
     { 2560, 12800, kFamilyBf16 },
     { 512, 2560, kFamilyBf16 },
+    { 6144, 2048, kFamilyBf16 },
+    { 2048, 6144, kFamilyBf16 },
+    { 120818, 2048, kFamilyBf16 },
+    { 14336, 4096, kFamilyBf16 },
+    { 4096, 14336, kFamilyBf16 },
+    { 128167, 4096, kFamilyBf16 },
 };
 
 uint8_t family_bit(LinearComputeFamily family) {

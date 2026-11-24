@@ -41,7 +41,7 @@ Result<OptimizedLaunchResult> resolve_sampling(
     if (in.dtype != ValueDType::F32) return kNone;
     if (in.row_domain != ValueRowDomain::OUTPUT_ROWS) return kNone;
     if (in.ptr == nullptr || in.feature_count == 0u) return kNone;
-    if (in.row_stride != in.feature_count) return kNone;
+    if (in.row_stride < in.feature_count) return kNone;
 
     auto out_res =
         resolve_host_value(program, ::shelf::runtime::ValueId{b.output_slots[0]}, ctx);
@@ -51,8 +51,8 @@ Result<OptimizedLaunchResult> resolve_sampling(
     if (out.row_domain != ValueRowDomain::OUTPUT_ROWS) return kNone;
     if (out.ptr == nullptr || out.feature_count != 1u) return kNone;
 
-    const uint32_t vocab = in.feature_count;
-    if (b.rotary_dim != vocab) return kNone;
+    if (b.rotary_dim == 0u || b.rotary_dim > in.feature_count) return kNone;
+    const uint32_t vocab = b.rotary_dim;
 
     const uint32_t outputs = ctx.actual_outputs;
     if (outputs == 0u)

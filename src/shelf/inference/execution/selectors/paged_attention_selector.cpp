@@ -25,13 +25,17 @@ constexpr uint32_t kMeasuredMaxVisible24 = 524288;
 constexpr uint32_t kMeasuredMaxVisible16x2 = 262144;
 
 constexpr PagedAttentionRule kPagedAttentionRules[] = {
-    // PLaMo 3 BF16: the partial-head decode kernel also handles prefill rows.
+    // PLaMo 3 & Hy-MT3 BF16: the partial-head decode kernel also handles prefill rows.
     { ::shelf::kernel::KVCacheDType::BF16, ::shelf::runtime::ValueDType::BF16,
       16, 1, 128, 16, 1, kMeasuredMaxRows, 1, 2048 },
+    { ::shelf::kernel::KVCacheDType::BF16, ::shelf::runtime::ValueDType::BF16,
+      16, 4, 128, 16, 1, kMeasuredMaxRows, 1, kMeasuredMaxVisible16x2 },
     { ::shelf::kernel::KVCacheDType::BF16, ::shelf::runtime::ValueDType::BF16,
       24, 4, 128, 16, 1, kMeasuredMaxRows, 1, 2048 },
     { ::shelf::kernel::KVCacheDType::BF16, ::shelf::runtime::ValueDType::BF16,
       32, 4, 128, 16, 1, kMeasuredMaxRows, 1, 2048 },
+    { ::shelf::kernel::KVCacheDType::BF16, ::shelf::runtime::ValueDType::BF16,
+      32, 8, 128, 16, 1, kMeasuredMaxRows, 1, kMeasuredMaxVisible16x2 },
     { ::shelf::kernel::KVCacheDType::OCTAVE, ::shelf::runtime::ValueDType::F32,
       24, 4, 256, 16, 1, kMeasuredMaxRows, 1, kMeasuredMaxVisible24 },
     { ::shelf::kernel::KVCacheDType::OCTAVE, ::shelf::runtime::ValueDType::F32,

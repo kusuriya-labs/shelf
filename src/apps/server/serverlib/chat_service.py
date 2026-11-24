@@ -135,7 +135,8 @@ class ChatService:
                  inference_budget_tokens: int = 32768,
                  large_context_tokens: int = 0,
                  large_context_inference_budget_tokens: int = 0,
-                 reasoning_close_token: int = -1, vocab_size: int = 0):
+                 reasoning_close_token: int = -1, vocab_size: int = 0,
+                 supports_reasoning: bool = True):
         self._processor = processor
         self._compute = compute
         self._model_name = model_name
@@ -145,6 +146,7 @@ class ChatService:
         self._large_context_inference_budget_tokens = (
             large_context_inference_budget_tokens)
         self._reasoning_close_token = reasoning_close_token
+        self._supports_reasoning = bool(supports_reasoning)
         from .structured_output import GrammarFactory
         self._grammar_factory = GrammarFactory(processor, vocab_size)
 
@@ -247,12 +249,18 @@ class ChatService:
         budget = self.inference_budget_for(len(prompt_ids))
         max_new_tokens = min(request.max_new_tokens, budget, remaining)
 
+        effective_thinking = (
+            bool(request.enable_thinking)
+            and self._supports_reasoning
+            and not translation
+            and not tool_prefix
+        )
         reasoning_budget_tokens = 0
-        if (request.reserve_answer_tokens and request.enable_thinking and not translation
-                and not tool_prefix and self._reasoning_close_token >= 0):
+        if (request.reserve_answer_tokens and effective_thinking
+                and self._reasoning_close_token >= 0):
             reasoning_budget_tokens = thinking_budget_tokens(max_new_tokens)
 
-        if (request.response_schema is not None or strict_tools) and request.enable_thinking and self._reasoning_close_token < 0:
+        if (request.response_schema is not None or strict_tools) and effective_thinking and self._reasoning_close_token < 0:
             raise OpenAIProtocolError("structured output with thinking requires a single close token", param="response_format", code="unsupported_parameter")
         grammar = (self._grammar_factory.create(request.response_schema)
                    if request.response_schema is not None else None)
@@ -261,13 +269,13 @@ class ChatService:
             grammar = self._grammar_factory.create(
                 tool_structural_tag(tools, request.tool_choice, request.forced_tool_name), tools=True)
         if grammar is not None:
-            grammar.after_reasoning = request.enable_thinking
+            grammar.after_reasoning = effective_thinking
 
         return PreparedChat(
             prompt_ids=prompt_ids,
             tools=tools,
             max_new_tokens=max_new_tokens,
-            enable_thinking=request.enable_thinking and not translation and not tool_prefix,
+            enable_thinking=effective_thinking,
             tool_prefix=tool_prefix,
             reasoning_budget_tokens=reasoning_budget_tokens,
             reasoning_close_token=self._reasoning_close_token,

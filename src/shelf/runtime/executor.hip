@@ -2233,6 +2233,12 @@ Result<Executor> create_executor(
     const std::size_t H_pipeline =
         config.pipeline_hidden_width != 0u ? config.pipeline_hidden_width : H;
     const std::size_t V = tc.vocab_size;
+    std::size_t logits_width = V;
+    if (input.lowered.graph.external_outputs.size() >= 2u) {
+        const std::uint32_t eo_width =
+            input.lowered.graph.value_features(input.lowered.graph.external_outputs[1]);
+        if (eo_width > logits_width) logits_width = eo_width;
+    }
     const uint32_t N = config.max_batch_rows;
     const uint32_t R = config.max_scheduled_requests;
     uint32_t Npad = N;
@@ -2284,8 +2290,14 @@ Result<Executor> create_executor(
     if (last_stage) {
         st = allocate_contiguous_tensor<bf16_t>(arena, {MO, H}, ex.output_hidden);
         if (!st.ok()) return st;
-        st = allocate_contiguous_tensor<float>(arena, {MO, V}, ex.logits);
-        if (!st.ok()) return st;
+        const std::size_t logits_stride = (logits_width + 3u) & ~std::size_t(3);
+        auto logits_alloc = arena.allocate_aligned(
+            static_cast<std::size_t>(MO) * logits_stride * sizeof(float), 256u);
+        if (!logits_alloc.ok()) return logits_alloc.status();
+        auto logits_tensor = gpu::Tensor::create<float>(
+            logits_alloc.value(), {MO, logits_width}, {logits_stride, 1});
+        if (!logits_tensor.ok()) return logits_tensor.status();
+        ex.logits = logits_tensor.release();
     }
     if (V > 0u && MO > 0u && last_stage) {
         ex.stochastic_topk_partitions = shelf::kernel::dflash2_radix_default_partitions(V);
@@ -2655,6 +2667,16 @@ Result<Executor> create_executor(
                 float rope_theta = config.rope_profiles.empty()
                     ? tc.rope_theta : static_cast<float>(profile.theta);
                 if (rope_theta <= 0.0f) rope_theta = 10000000.0f;
+                if (profile.type == EffectiveRopeProfile::Type::NtkAlpha) {
+                    if (!(profile.alpha > 0.0) || rope_dim <= 2u) {
+                        shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
+                        return Status::invalid_argument("invalid NTK-alpha RoPE profile", __FILE__, __LINE__);
+                    }
+                    const double ntk_exp =
+                        static_cast<double>(rope_dim) / static_cast<double>(rope_dim - 2u);
+                    rope_theta = static_cast<float>(
+                        static_cast<double>(rope_theta) * std::pow(profile.alpha, ntk_exp));
+                }
                 double* table = ex.rope_inv_freq.data<double>() + i * rope_half;
                 hipError_t rerr = hipSuccess;
                 if (profile.float32_frequencies) {

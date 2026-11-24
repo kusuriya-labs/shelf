@@ -448,6 +448,9 @@ target_compile_options(shelf_qwen4exp PRIVATE -Wall -Wextra -Wpedantic -Werror=r
 # Model weight loading entry for the qwen35 family: the one place that links both the
 # dense and the MoE loaders and picks between them.
 add_library(shelf_models STATIC
+    src/shelf/models/hunyuan_dense/model/config.cpp
+    src/shelf/models/hunyuan_dense/model/lower_to_primitives.cpp
+    src/shelf/models/hunyuan_dense/weights/model_weights.cpp
     src/shelf/models/plamo3/model/config.cpp
     src/shelf/models/plamo3/model/lower_to_primitives.cpp
     src/shelf/models/plamo3/weights/model_weights.cpp

@@ -187,6 +187,8 @@ target_include_directories(test_quality_metrics PRIVATE "${CMAKE_SOURCE_DIR}/src
 shelf_add_test(NAME test_qwen35_config_tie SOURCE unit/test_qwen35_config_tie.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35)
 shelf_add_test(NAME test_moe_config SOURCE unit/test_moe_config.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_qwen35moe shelf_qwen35)
 shelf_add_test(NAME test_plamo3_lowering SOURCE unit/test_plamo3_lowering.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_models)
+shelf_add_test(NAME test_hunyuan_dense_config SOURCE unit/test_hunyuan_dense_config.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_models shelf_qwen35_runtime)
+shelf_add_test(NAME test_hunyuan_dense_lowering SOURCE unit/test_hunyuan_dense_lowering.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_models)
 shelf_add_test(NAME test_plamo_exl3_projection SOURCE kernels/linear/test_plamo_exl3_projection.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_fixedcost_hipfire_producer SOURCE kernels/linear/test_fixedcost_hipfire_producer.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_plamo_exl3_prefill SOURCE kernels/linear/test_plamo_exl3_prefill.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_inference_execution shelf_kernels_optimized shelf_gpu)

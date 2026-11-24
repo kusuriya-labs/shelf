@@ -24,7 +24,7 @@ shelf_models          shelf_runtime / shelf_inference
   family policy
       ↓
 family層
-  qwen35 (Dense)   qwen35moe (Moe)   qwen35qsa (Qsa)   qwen4exp (Qwen4Exp, loadのみ)   plamo3
+  qwen35 (Dense)   qwen35moe (Moe)   qwen35qsa (Qsa)   qwen4exp (Qwen4Exp, loadのみ)   plamo3   hunyuan_dense
       ↓                                            ↓
 shelf_qwen35_runtime                          shelf_mtp
   family固有の executor 生成 (dense) /            family中立の MTP drafter runtime
@@ -92,6 +92,7 @@ root namespace は `shelf`。`include/shelf/**` と `src/shelf/**` のディレ�
 | `shelf/models/qwen35qsa/**` | `shelf::qwen35qsa` |
 | `shelf/models/qwen4exp/**` | `shelf::qwen4exp` |
 | `shelf/models/plamo3/**` | `shelf::plamo3` |
+| `shelf/models/hunyuan_dense/**` | `shelf::hunyuan_dense` |
 | `shelf/models/model_weights_factory.h` / `loaded_model.h` / `tp_rank_model.h` / `pipeline_stage_model.h` | `shelf::models` |
 | `shelf/engine/**` | `shelf::engine` |
 | `src/apps/**` | `shelf::app` / `shelf::bench::quality` |
@@ -174,7 +175,7 @@ CMake target の詳細な一覧は `cmake/targets.cmake` を参照。
   どれも名指ししない
 - `shelf_models` は family 選択と executor 生成の入口
   （`shelf::models::load_model_weights` / `LoadedModel` / `TpRankModel` /
-  `PipelineStageModel`）。plamo3 の source もここに置く。
+  `PipelineStageModel`）。`plamo3` と `hunyuan_dense` の source もここに置く。
   全 family の loader を link する唯一の target で、`shelf_qwen35_runtime` も link する。
   family 選択は config の構造だけが決め、identity の判定は `shelf_qwen_hybrid` の
   identity gate が担う（後述「Checkpoint識別」）。
@@ -212,7 +213,7 @@ shelf_models         -> 全 family + shelf_qwen35_runtime
                         shelf_weights / shelf_quant_* / shelf_io
 ```
 
-plamo3 は `shelf_models` の source として配置し、identity で選択する。
+plamo3 および hunyuan_dense は `shelf_models` の source として配置し、identity で選択する。
 hybrid backbone は `shelf_models` が link する family target 経由で利用する。
 
 各 family は互いに参照しない（qwen35qsa と qwen4exp は qwen35 / qwen_hybrid を
@@ -227,13 +228,13 @@ weight の canonical → partition → preshuffle → upload の順序 contract 
 
 ### family をまたぐ境界
 
-`LoadedModelWeights` は 4 つの family weight 型の `std::variant` で、
-dense / MoE / QSA / Plamo3 のいずれか 1 つだけを保持する（`qwen4exp` は
+`LoadedModelWeights` は 5 つの family weight 型の `std::variant` で、
+dense / MoE / QSA / Plamo3 / HunyuanDense のいずれか 1 つだけを保持する（`qwen4exp` は
 load 契約のみで、variant の member を持たない）。
 MoE checkpoint を dense として読むことはできず、アクセスは明示的である
 （`std::get_if<...>` が他 family では null を返す）。
 
-`ModelFamily` enum は `Dense` / `Moe` / `Qsa` / `Qwen4Exp` / `Plamo3` の 5 値。
+`ModelFamily` enum は `Dense` / `Moe` / `Qsa` / `Qwen4Exp` / `Plamo3` / `HunyuanDense` の 6 値。
 `probe_model_dir` は config の構造から family を選び、`load_model_weights` は
 config を読み、その family の loader で読み込み、その family の validation を
 実行する。ここでは GPU 上の実行方法を決めない。

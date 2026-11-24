@@ -23,6 +23,7 @@ enum class ModelClass : std::uint8_t {
     Qsa,
     Qwen4Exp,
     Plamo3,
+    HunyuanDense,
 };
 
 struct ModelRuntimeRequest {

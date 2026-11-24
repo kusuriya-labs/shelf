@@ -856,6 +856,8 @@ Status select_tp_rank_model(q35r::TpCoordinatorConfig& config) {
                  config.combine_backend == ::shelf::runtime::TpCombineBackend::StreamSignal
                      ? "stream-signal"
                      : "event");
+    if (family.value() == ModelFamily::HunyuanDense)
+        return Status::unsupported("hunyuan_v1_dense: runtime path is not connected", __FILE__, __LINE__);
     if (family.value() == ModelFamily::Plamo3)
         return Status::unsupported("plamo3: runtime path is not connected", __FILE__, __LINE__);
     if (family.value() == ModelFamily::Qwen4Exp) {

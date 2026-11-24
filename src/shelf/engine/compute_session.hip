@@ -1317,7 +1317,8 @@ Status ComputeSession::synchronize() const {
 Status ComputeSession::copy_logits(std::vector<float>& out, std::size_t& rows) {
     const auto& logits = impl_->executor().logits;
     const std::size_t vocab = impl_->model().hybrid_config().vocab_size;
-    if (logits.ndim() != 2 || logits.dim(1) != vocab ||
+    const std::size_t logits_stride = logits.ndim() == 2 ? logits.strides_data()[0] : 0;
+    if (logits.ndim() != 2 || logits.dim(1) < vocab || logits_stride < vocab ||
         logits.element_size() != sizeof(float)) {
         char message[256];
         std::snprintf(
@@ -1329,10 +1330,15 @@ Status ComputeSession::copy_logits(std::vector<float>& out, std::size_t& rows) {
     }
     rows = logits.dim(0);
     out.resize(rows * vocab);
-    const hipError_t error = hipMemcpy(out.data(), logits.data<float>(),
-                                       out.size() * sizeof(float), hipMemcpyDeviceToHost);
+    const hipError_t error = logits_stride == vocab
+        ? hipMemcpy(out.data(), logits.data<float>(),
+                    out.size() * sizeof(float), hipMemcpyDeviceToHost)
+        : hipMemcpy2D(out.data(), vocab * sizeof(float),
+                      logits.data<float>(), logits_stride * sizeof(float),
+                      vocab * sizeof(float), rows, hipMemcpyDeviceToHost);
     if (error != hipSuccess) {
-        return Status::hip_error("hipMemcpy", hipGetErrorString(error), __FILE__, __LINE__);
+        return Status::hip_error(logits_stride == vocab ? "hipMemcpy" : "hipMemcpy2D",
+                                 hipGetErrorString(error), __FILE__, __LINE__);
     }
     return Status::make_ok();
 }

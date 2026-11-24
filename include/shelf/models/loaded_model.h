@@ -1,6 +1,8 @@
 #pragma once
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/status.h>
+#include <shelf/models/hunyuan_dense/model/config.h>
+#include <shelf/models/hunyuan_dense/weights/model_weights.h>
 #include <shelf/models/model_weights_factory.h>
 #include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35/runtime/executor.h>
@@ -63,6 +65,7 @@ public:
 
     [[nodiscard]]
     ModelFamily family() const noexcept {
+        if (hunyuan_ != nullptr) return ModelFamily::HunyuanDense;
         if (plamo_ != nullptr) return ModelFamily::Plamo3;
         if (qwen4exp_ != nullptr) return ModelFamily::Qwen4Exp;
         if (qsa_ != nullptr) return ModelFamily::Qsa;
@@ -178,6 +181,12 @@ public:
 private:
     LoadedModel() = default;
 
+    struct HunyuanDenseModel {
+        shelf::hunyuan_dense::Config config;
+        shelf::qwen_hybrid::QwenHybridConfig hybrid;
+        shelf::hunyuan_dense::ModelWeights weights;
+    };
+    std::unique_ptr<HunyuanDenseModel> hunyuan_;
     struct PlamoModel {
         shelf::plamo3::Config config;
         shelf::qwen_hybrid::QwenHybridConfig hybrid;

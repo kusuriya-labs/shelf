@@ -597,15 +597,25 @@ int run_quality(int argc, char** argv) {
         }
         auto prefill_out = exec_out.release();
         if (opts.dump_prefill) {
+            const size_t logits_stride =
+                prefill_out.logits.ndim() == 2u ? prefill_out.logits.strides_data()[0] : 0u;
             if (prefill_out.num_outputs != chunk_len || prefill_out.logits.ndim() != 2u ||
-                prefill_out.logits.dim(1) != vocab || prefill_out.logits.element_size() != sizeof(float)) {
+                prefill_out.logits.dim(1) < vocab || logits_stride < vocab ||
+                prefill_out.logits.element_size() != sizeof(float)) {
                 fprintf(stderr, "unexpected prefill logits shape\n");
                 return 1;
             }
             std::vector<float> rows(static_cast<size_t>(chunk_len) * vocab);
             hip_err = hipStreamSynchronize(stream);
-            if (hip_err != hipSuccess || hipMemcpy(rows.data(), prefill_out.logits.data<float>(),
-                rows.size() * sizeof(float), hipMemcpyDeviceToHost) != hipSuccess) {
+            const hipError_t copy_err = (hip_err == hipSuccess)
+                ? (logits_stride == vocab
+                    ? hipMemcpy(rows.data(), prefill_out.logits.data<float>(),
+                                rows.size() * sizeof(float), hipMemcpyDeviceToHost)
+                    : hipMemcpy2D(rows.data(), vocab * sizeof(float),
+                                  prefill_out.logits.data<float>(), logits_stride * sizeof(float),
+                                  vocab * sizeof(float), chunk_len, hipMemcpyDeviceToHost))
+                : hip_err;
+            if (copy_err != hipSuccess) {
                 fprintf(stderr, "prefill logits copy failed\n");
                 return 1;
             }
@@ -713,7 +723,7 @@ int run_quality(int argc, char** argv) {
             return 1;
         }
         const auto& logits = out.logits;
-        if (logits.ndim() != 2u || logits.dim(1) != vocab ||
+        if (logits.ndim() != 2u || logits.dim(1) < vocab ||
             logits.element_size() != sizeof(float)) {
             fprintf(stderr,
                     "unexpected logits shape ndim=%zu dim0=%zu dim1=%zu elem=%zu\n",

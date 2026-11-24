@@ -50,6 +50,8 @@ std::size_t executor_reserve_bytes(const shelf::qwen_hybrid::QwenHybridConfig& t
     }
     const std::size_t hidden = text_config.hidden_size != 0u ? text_config.hidden_size : 1u;
     const std::size_t vocab = text_config.vocab_size != 0u ? text_config.vocab_size : 1u;
+    const std::size_t padded_vocab = ((vocab + 127u) / 128u) * 128u;
+    const std::size_t logits_width = ((padded_vocab + 3u) / 4u) * 4u;
     const std::size_t rows = padded_row_count(config.max_batch_rows);
     const std::size_t requests =
         config.max_scheduled_requests != 0u ? config.max_scheduled_requests : 1u;
@@ -80,7 +82,7 @@ std::size_t executor_reserve_bytes(const shelf::qwen_hybrid::QwenHybridConfig& t
 
     total += align_up(rows * sizeof(int32_t));
     total += align_up(output_rows * hidden * sizeof(bf16_t));
-    total += align_up(output_rows * vocab * sizeof(float));
+    total += align_up(output_rows * logits_width * sizeof(float));
     total += align_up(output_rows * sizeof(int32_t));
 
     total += align_up(output_rows * ::shelf::kernel::kSamplingMaxTopK * sizeof(int32_t));

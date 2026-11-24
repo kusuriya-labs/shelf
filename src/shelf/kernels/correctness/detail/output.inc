@@ -46,7 +46,8 @@ __device__ __forceinline__ ProgramStatus exec_gather_or_sample(
     if (outputs > 0 && in.dtype != ValueDType::F32) return ProgramStatus::INVALID_BINDING;
 
     auto* sampled_tokens = static_cast<int32_t*>(out.ptr);
-    const uint32_t vocab = in.features;
+    const uint32_t vocab =
+        (b.rotary_dim != 0u && b.rotary_dim <= in.features) ? b.rotary_dim : in.features;
     const auto* logits = static_cast<const float*>(in.ptr);
 
     for (uint32_t row = blockIdx.x; row < outputs; row += gridDim.x) {

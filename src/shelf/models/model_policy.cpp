@@ -2,6 +2,7 @@
 
 #include <shelf/models/model_weights_factory.h>
 #include <shelf/models/loaded_model.h>
+#include <shelf/models/hunyuan_dense/model/config.h>
 #include <shelf/models/plamo3/model/config.h>
 #include <shelf/models/qwen35/model/rope_profile.h>
 #include <shelf/runtime/mtp/mtp_drafter.h>
@@ -22,6 +23,7 @@ ModelClass to_model_class(ModelFamily family) noexcept {
         case ModelFamily::Qsa: return ModelClass::Qsa;
         case ModelFamily::Qwen4Exp: return ModelClass::Qwen4Exp;
         case ModelFamily::Plamo3: return ModelClass::Plamo3;
+        case ModelFamily::HunyuanDense: return ModelClass::HunyuanDense;
     }
     return ModelClass::Dense;
 }
@@ -33,6 +35,7 @@ const char* display_family(ModelClass model_class) noexcept {
         case ModelClass::Qsa: return "qsa";
         case ModelClass::Qwen4Exp: return "moe";
         case ModelClass::Plamo3: return "plamo3";
+        case ModelClass::HunyuanDense: return "hunyuan_v1_dense";
     }
     return "dense";
 }
@@ -47,6 +50,22 @@ shelf::Status resolve_plamo(const ModelRuntimeRequest& request) {
             "plamo3: --max-seq-len must be at most 2048 (sliding attention limit)",
             __FILE__, __LINE__);
     }
+    return Status::make_ok();
+}
+
+shelf::Status resolve_hunyuan(const ModelRuntimeRequest& request, ResolvedModelOptions& out) {
+    auto cfg = shelf::hunyuan_dense::read_config(request.model_dir);
+    if (!cfg.ok()) return cfg.status();
+    if (cfg.value().max_position_embeddings > 0u &&
+        request.max_seq_len > cfg.value().max_position_embeddings) {
+        return Status::invalid_argument(
+            "hunyuan_v1_dense: --max-seq-len exceeds max_position_embeddings",
+            __FILE__, __LINE__);
+    }
+    auto profile = shelf::hunyuan_dense::resolve_rope_profile(cfg.value(), request.rope_factor);
+    if (!profile.ok()) return profile.status();
+    out.rope_profile = profile.value();
+    out.has_rope_profile = true;
     return Status::make_ok();
 }
 
@@ -72,6 +91,11 @@ Result<ResolvedModelOptions> resolve_model_options(const ModelRuntimeRequest& re
 
     if (out.model_class == ModelClass::Plamo3) {
         const Status checked = resolve_plamo(request);
+        if (!checked.ok()) return checked;
+        return out;
+    }
+    if (out.model_class == ModelClass::HunyuanDense) {
+        const Status checked = resolve_hunyuan(request, out);
         if (!checked.ok()) return checked;
         return out;
     }
@@ -129,6 +153,15 @@ Result<ResolvedModelOptions> resolve_model_options(const ModelRuntimeRequest& re
 
 Status validate_model_runtime_options(const ModelRuntimeRequest& request,
                                       const ResolvedModelOptions& resolved) {
+    if (resolved.model_class == ModelClass::HunyuanDense) {
+        if (request.tensor_parallel != 1u || request.pipeline_parallel != 1u ||
+            request.mtp || request.dflash2) {
+            return Status::unsupported(
+                "hunyuan_v1_dense: parallel and speculative execution are not supported",
+                __FILE__, __LINE__);
+        }
+        return Status::make_ok();
+    }
     if (resolved.model_class != ModelClass::Plamo3) return Status::make_ok();
     if (request.max_seq_len > 2048u) {
         return Status::invalid_argument(

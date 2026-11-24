@@ -1,4 +1,5 @@
 #include <shelf/models/loaded_model.h>
+#include <shelf/models/hunyuan_dense/model/lower_to_primitives.h>
 #include <shelf/models/plamo3/model/lower_to_primitives.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <shelf/models/qwen35/model/lower_to_primitives.h>
@@ -21,6 +22,7 @@
 namespace shelf::models {
 
 const shelf::qwen_hybrid::QwenHybridConfig& LoadedModel::hybrid_config() const noexcept {
+    if (hunyuan_ != nullptr) return hunyuan_->hybrid;
     if (plamo_ != nullptr) return plamo_->hybrid;
     if (qwen4exp_ != nullptr) {
         return static_cast<const shelf::qwen_hybrid::QwenHybridConfig&>(
@@ -37,6 +39,7 @@ const shelf::qwen_hybrid::QwenHybridConfig& LoadedModel::hybrid_config() const n
 }
 
 const shelf::weights::MatrixWeight& LoadedModel::embed_tokens() const noexcept {
+    if (hunyuan_ != nullptr) return hunyuan_->weights.embed_tokens;
     if (plamo_ != nullptr) return plamo_->weights.embed_tokens;
     if (qwen4exp_ != nullptr) return qwen4exp_->weights().embed_tokens;
     if (qsa_ != nullptr) return qsa_->weights().backbone.embed_tokens;
@@ -44,6 +47,7 @@ const shelf::weights::MatrixWeight& LoadedModel::embed_tokens() const noexcept {
 }
 
 const shelf::weights::MatrixWeight& LoadedModel::lm_head() const noexcept {
+    if (hunyuan_ != nullptr) return hunyuan_->weights.lm_head;
     if (plamo_ != nullptr) return plamo_->weights.lm_head;
     if (qwen4exp_ != nullptr) return qwen4exp_->weights().lm_head;
     if (qsa_ != nullptr) return qsa_->weights().backbone.lm_head;
@@ -60,6 +64,41 @@ Result<LoadedModel> LoadedModel::load(
     auto family_result = probe_model_dir(model_dir);
     if (!family_result.ok()) return family_result.status();
     LoadedModel out;
+    if (family_result.value() == ModelFamily::HunyuanDense) {
+        if (load_mtp) {
+            return Status::unsupported("hunyuan_v1_dense has no MTP block", __FILE__, __LINE__);
+        }
+        auto cfg = shelf::hunyuan_dense::read_config(model_dir);
+        if (!cfg.ok()) return cfg.status();
+        shelf::hunyuan_dense::LoadOptions load_options;
+        load_options.verify_quantized_payload_crc = verify_payload_crc;
+        if (const char* lm_head_int8 = std::getenv("SHELF_LM_HEAD_INT8")) {
+            load_options.quantize_lm_head_int8_w32 =
+                std::strtoul(lm_head_int8, nullptr, 10) != 0u;
+        }
+        auto weights = shelf::hunyuan_dense::load_weights(
+            model_dir, cfg.value(), arena, stream, load_options);
+        if (!weights.ok()) return weights.status();
+        out.hunyuan_ = std::make_unique<HunyuanDenseModel>();
+        out.hunyuan_->config = cfg.release();
+        out.hunyuan_->weights = weights.release();
+        const auto& c = out.hunyuan_->config;
+        auto& h = out.hunyuan_->hybrid;
+        h.vocab_size = c.vocab_size;
+        h.hidden_size = c.hidden_size;
+        h.num_hidden_layers = c.num_hidden_layers;
+        h.num_attention_heads = c.num_attention_heads;
+        h.num_key_value_heads = c.num_key_value_heads;
+        h.attention_head_dim = c.head_dim;
+        h.rms_norm_eps = static_cast<float>(c.rms_norm_eps);
+        h.rope_theta = static_cast<float>(c.rope_theta);
+        h.partial_rotary_factor = 1.0f;
+        h.tie_word_embeddings = c.tie_word_embeddings;
+        h.layer_types.assign(c.num_hidden_layers, 1);
+        h.stop_tokens = c.stop_tokens;
+        h.declared_model_type = "hunyuan_v1_dense";
+        return out;
+    }
     if (family_result.value() == ModelFamily::Plamo3) {
         if (load_mtp) return Status::unsupported("plamo3 has no MTP block", __FILE__, __LINE__);
         auto cfg = shelf::plamo3::read_config(model_dir);
@@ -178,6 +217,17 @@ LoadedModel LoadedModel::borrow_stage_model(const PipelineStageModel& model) {
 }
 
 shelf::weights::Exl3LinearShape LoadedModel::exl3_linear_shape() const {
+    if (hunyuan_ != nullptr) {
+        shelf::weights::Exl3LinearShape shape;
+        shelf::weights::note_exl3_int8_decode_accum(hunyuan_->weights.lm_head, shape);
+        for (const auto& layer : hunyuan_->weights.layers) {
+            for (const auto* w : {&layer.q_proj, &layer.k_proj, &layer.v_proj, &layer.o_proj,
+                                  &layer.gate_proj, &layer.up_proj, &layer.down_proj}) {
+                shelf::weights::note_exl3_linear(*w, shape);
+            }
+        }
+        return shape;
+    }
     if (plamo_ != nullptr) {
         shelf::weights::Exl3LinearShape shape;
         shelf::weights::note_exl3_linear(plamo_->weights.lm_head, shape);
@@ -237,7 +287,8 @@ std::size_t LoadedModel::executor_reserve_bytes(std::size_t max_batch_rows,
     // The dense FFN term of the shared estimate stands in for the FFN activations that
     // still sit at token rows: for a model with grouped experts those are its shared expert.
     const std::size_t token_row_ffn =
-        plamo_ != nullptr ? plamo_->config.intermediate_size
+        hunyuan_ != nullptr ? hunyuan_->config.intermediate_size
+        : plamo_ != nullptr ? plamo_->config.intermediate_size
         : qwen4exp_ != nullptr ? qwen4exp_->text_config().ffn.shared_expert_intermediate_size
         : qsa_ != nullptr ? qsa_->text_config().ffn.intermediate_size
         : moe_ != nullptr ? moe_->text_config().ffn.shared_expert_intermediate_size
@@ -249,7 +300,8 @@ std::size_t LoadedModel::executor_reserve_bytes(std::size_t max_batch_rows,
             reserve_config.exl3_linear_shape.present(), max_scheduled_requests);
     }
     const bool exl3 =
-        plamo_ != nullptr ? reserve_config.exl3_linear_shape.present()
+        hunyuan_ != nullptr ? reserve_config.exl3_linear_shape.present()
+        : plamo_ != nullptr ? reserve_config.exl3_linear_shape.present()
         : qwen4exp_ != nullptr ? true
         : moe_ != nullptr ? shelf::qwen35moe::uses_exl3_linear(moe_->weights())
                           : shelf::qwen35::uses_exl3_linear(dense_->weights());
@@ -289,6 +341,27 @@ Result<shelf::qwen35::Executor> LoadedModel::create_executor(
     gpu::GpuArena& arena,
     const shelf::qwen35::ExecutorConfig& config) const {
 
+    if (hunyuan_ != nullptr) {
+        if (config.tp != nullptr || config.stage.enabled || config.target_hidden_tap_count != 0 ||
+            config.emit_normed_token_hidden || config.external_hidden_input) {
+            return Status::unsupported(
+                "hunyuan_v1_dense: requested executor mode is not supported", __FILE__, __LINE__);
+        }
+        auto profile = shelf::hunyuan_dense::resolve_rope_profile(hunyuan_->config);
+        if (!profile.ok()) return profile.status();
+        auto lowered = shelf::hunyuan_dense::lower_to_primitives(
+            hunyuan_->config, hunyuan_->weights);
+        if (!lowered.ok()) return lowered.status();
+        shelf::qwen35::ExecutorModelInput input;
+        input.model.config = &hunyuan_->hybrid;
+        input.model.embed_tokens = &hunyuan_->weights.embed_tokens;
+        input.lowered = lowered.release();
+        shelf::qwen35::ExecutorConfig resolved = config;
+        resolved.exl3_linear_shape = exl3_linear_shape();
+        resolved.rope_profiles = {profile.value()};
+        return shelf::qwen35::create_executor(
+            std::move(input), sequence_pool, gdn_state_pool, kv_pool, arena, resolved);
+    }
     if (plamo_ != nullptr) {
         if (config.tp != nullptr || config.stage.enabled || config.target_hidden_tap_count != 0 ||
             config.emit_normed_token_hidden || config.external_hidden_input)

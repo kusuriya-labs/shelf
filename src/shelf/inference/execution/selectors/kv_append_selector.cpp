@@ -18,6 +18,7 @@ constexpr uint32_t kMeasuredMaxRows = kOptimizedMaxRows;
 constexpr KvAppendRule kKvAppendRules[] = {
     { ::shelf::kernel::KVCacheDType::BF16, 1, 128, 16, 1, kMeasuredMaxRows },
     { ::shelf::kernel::KVCacheDType::BF16, 4, 128, 16, 1, kMeasuredMaxRows },
+    { ::shelf::kernel::KVCacheDType::BF16, 8, 128, 16, 1, kMeasuredMaxRows },
     { ::shelf::kernel::KVCacheDType::OCTAVE, 4, 256, 16, 1, kMeasuredMaxRows },
     { ::shelf::kernel::KVCacheDType::OCTAVE, 2, 256, 16, 1, kMeasuredMaxRows },
     { ::shelf::kernel::KVCacheDType::OCTAVE, 1, 256, 16, 1, kMeasuredMaxRows },

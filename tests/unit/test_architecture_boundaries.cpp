@@ -263,12 +263,14 @@ void check_cmake_target_edges(const fs::path& root) {
         {"shelf_engine", "shelf_qwen35qsa"},
         {"shelf_engine", "shelf_qwen4exp"},
         {"shelf_engine", "shelf_plamo3"},
+        {"shelf_engine", "shelf_hunyuan_dense"},
         {"shelf_mtp", "shelf_qwen35"},
         {"shelf_mtp", "shelf_qwen35_runtime"},
         {"shelf_mtp", "shelf_qwen35moe"},
         {"shelf_mtp", "shelf_qwen35qsa"},
         {"shelf_mtp", "shelf_qwen4exp"},
         {"shelf_mtp", "shelf_plamo3"},
+        {"shelf_mtp", "shelf_hunyuan_dense"},
     };
     for (const auto& rule : forbidden_edges) {
         const std::vector<std::string> links = linked_targets(text, rule.target);
@@ -308,7 +310,8 @@ void check_cmake_target_edges(const fs::path& root) {
         if (lib == "shelf_engine") engine_link = true;
         if (lib == "shelf" || lib == "shelf_models" || lib == "shelf_qwen35" ||
             lib == "shelf_qwen35_runtime" || lib == "shelf_qwen35moe" ||
-            lib == "shelf_qwen35qsa" || lib == "shelf_qwen4exp" || lib == "shelf_plamo3") {
+            lib == "shelf_qwen35qsa" || lib == "shelf_qwen4exp" || lib == "shelf_plamo3" ||
+            lib == "shelf_hunyuan_dense") {
             fail("shelf-compute links " + lib + " directly");
         }
     }
@@ -342,12 +345,14 @@ void check_no_orphan_model_sources(const fs::path& root) {
 void check_compute_app_boundaries(const fs::path& root) {
     const std::vector<std::string> forbidden_headers = {
         "shelf/models/qwen35", "shelf/models/qwen35moe", "shelf/models/qwen35qsa",
-        "shelf/models/qwen4exp", "shelf/models/plamo3", "shelf/models/loaded_model.h",
+        "shelf/models/qwen4exp", "shelf/models/plamo3", "shelf/models/hunyuan_dense",
+        "shelf/models/loaded_model.h",
         "shelf/models/tp_rank_model.h", "shelf/models/pipeline_stage_model.h",
         "shelf/runtime/executor.h", "shelf/runtime/tp/tensor_parallel.h",
     };
     const std::vector<const char*> forbidden_code = {
         "qwen35::", "Qwen35", "qwen4exp::", "Qwen4Exp", "plamo3::", "Plamo3",
+        "hunyuan_dense::", "HunyuanDense",
         "qwen35moe", "qwen35qsa", "runtime::Executor", "runtime::TpCoordinator",
         "TpRankRuntime", "PipelineStageRuntime", "LoadedModel", "hipStream_t",
         "hipMalloc", "hipMemcpy",
@@ -381,8 +386,10 @@ void check_engine_boundaries(const fs::path& root) {
     };
     const std::vector<const char*> forbidden_family = {
         "shelf/models/qwen35", "shelf/models/qwen35moe", "shelf/models/qwen35qsa",
-        "shelf/models/qwen4exp", "shelf/models/plamo3", "qwen35::", "Qwen35",
+        "shelf/models/qwen4exp", "shelf/models/plamo3", "shelf/models/hunyuan_dense",
+        "qwen35::", "Qwen35",
         "qwen4exp::", "Qwen4Exp", "plamo3::", "Plamo3",
+        "hunyuan_dense::", "HunyuanDense",
     };
 
     // Public engine headers stay family neutral.

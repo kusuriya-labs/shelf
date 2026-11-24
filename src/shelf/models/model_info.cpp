@@ -28,11 +28,13 @@ ModelInfo make_model_info(const LoadedModel& model) {
     const auto topology = shelf::qwen_hybrid::count_layer_topology(text_config);
     const ModelFamily family = model.family();
 
-    info.family_name = family == ModelFamily::Plamo3
-        ? "plamo3"
-        : (family == ModelFamily::Qsa
-               ? "qsa"
-               : (model.runs_grouped_experts() ? "moe" : "dense"));
+    info.family_name = family == ModelFamily::HunyuanDense
+        ? "hunyuan_v1_dense"
+        : (family == ModelFamily::Plamo3
+               ? "plamo3"
+               : (family == ModelFamily::Qsa
+                      ? "qsa"
+                      : (model.runs_grouped_experts() ? "moe" : "dense")));
     info.hidden_size = text_config.hidden_size;
     info.num_hidden_layers = text_config.num_hidden_layers;
     info.num_attention_heads = text_config.num_attention_heads;

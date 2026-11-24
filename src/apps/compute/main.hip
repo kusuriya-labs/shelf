@@ -133,7 +133,10 @@ int main(int argc, char** argv) {
                         "original_max_position_embeddings=%u attention_factor=%.9f "
                         "beta_fast=%g beta_slow=%g truncate=%d source=%s\n",
                 rope_profile.type == shelf::runtime::EffectiveRopeProfile::Type::Yarn
-                    ? "yarn" : "default",
+                    ? "yarn"
+                    : (rope_profile.type == shelf::runtime::EffectiveRopeProfile::Type::NtkAlpha
+                           ? "ntk_alpha"
+                           : "default"),
                 rope_profile.factor, rope_profile.theta, rope_profile.rotary_dim,
                 rope_profile.original_max_position_embeddings,
                 rope_profile.attention_factor, rope_profile.beta_fast,

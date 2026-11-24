@@ -1,5 +1,6 @@
 #include <shelf/models/model_weights_factory.h>
 
+#include <shelf/models/hunyuan_dense/model/config.h>
 #include <shelf/models/plamo3/model/config.h>
 #include <shelf/models/qwen35/model/qwen35_config.h>
 #include <shelf/models/qwen35/model/qwen35_model.h>
@@ -9,6 +10,8 @@
 namespace shelf::models {
 
 ModelFamily model_family(const LoadedModelWeights& loaded) noexcept {
+    if (std::holds_alternative<shelf::hunyuan_dense::ModelWeights>(loaded))
+        return ModelFamily::HunyuanDense;
     if (std::holds_alternative<shelf::plamo3::ModelWeights>(loaded)) return ModelFamily::Plamo3;
     if (std::holds_alternative<shelf::qwen35qsa::Qwen35QsaModelWeights>(loaded))
         return ModelFamily::Qsa;
@@ -18,6 +21,13 @@ ModelFamily model_family(const LoadedModelWeights& loaded) noexcept {
 }
 
 Result<ModelFamily> probe_model_dir(const std::string& model_dir) {
+    auto hunyuan = shelf::hunyuan_dense::is_hunyuan_dense_config(model_dir);
+    if (!hunyuan.ok()) return hunyuan.status();
+    if (hunyuan.value()) {
+        auto config = shelf::hunyuan_dense::read_config(model_dir);
+        if (!config.ok()) return config.status();
+        return ModelFamily::HunyuanDense;
+    }
     auto plamo = shelf::plamo3::is_plamo3_config(model_dir);
     if (!plamo.ok()) return plamo.status();
     if (plamo.value()) {
@@ -47,6 +57,20 @@ Result<LoadedModelWeights> load_model_weights(
     if (!family.ok()) return family.status();
 
     switch (family.value()) {
+        case ModelFamily::HunyuanDense: {
+            if (options.stage.enabled || options.load_mtp_layers || options.weights.partition_plan ||
+                !options.load_embedding || !options.load_lm_head || !options.load_final_norm)
+                return Status::unsupported("hunyuan_v1_dense: pipeline, MTP and tensor parallel loading are not supported", __FILE__, __LINE__);
+            auto config = shelf::hunyuan_dense::read_config(model_dir);
+            if (!config.ok()) return config.status();
+            shelf::hunyuan_dense::LoadOptions load_opts;
+            load_opts.verify_quantized_payload_crc = options.verify_quantized_payload_crc;
+            load_opts.quantize_lm_head_int8_w32 = options.quantize_lm_head_int8_w32;
+            auto weights = shelf::hunyuan_dense::load_weights(
+                model_dir, config.value(), arena, stream, load_opts);
+            if (!weights.ok()) return weights.status();
+            return LoadedModelWeights{weights.release()};
+        }
         case ModelFamily::Plamo3: {
             if (options.stage.enabled || options.load_mtp_layers || options.weights.partition_plan ||
                 !options.load_embedding || !options.load_lm_head || !options.load_final_norm)

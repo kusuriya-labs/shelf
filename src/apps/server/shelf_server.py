@@ -722,7 +722,10 @@ async def _serve(opts) -> int:
         config = json.loads((Path(opts.model_dir) / "config.json").read_text())
     except (OSError, ValueError):
         config = {}
-    is_plamo = config.get("model_type") == "plamo3"
+    model_type = config.get("model_type")
+    is_plamo = model_type == "plamo3"
+    is_hunyuan_dense = model_type == "hunyuan_v1_dense"
+    non_reasoning = is_plamo or is_hunyuan_dense
     if opts.max_seq_len is None:
         opts.max_seq_len = 2048 if is_plamo else 32768
     if is_plamo and opts.max_seq_len > 2048:
@@ -731,9 +734,9 @@ async def _serve(opts) -> int:
     processor = await asyncio.to_thread(
         codec.load_processor, opts.model_dir, max_seq_len=opts.max_seq_len)
     reasoning_capability = ({"thinking": False, "effort": False, "close_token": -1}
-                            if is_plamo else await asyncio.to_thread(
+                            if non_reasoning else await asyncio.to_thread(
                                 codec.reasoning_capability, processor))
-    if not is_plamo and not (reasoning_capability["thinking"] and reasoning_capability["effort"]):
+    if not non_reasoning and not (reasoning_capability["thinking"] and reasoning_capability["effort"]):
         _log("Reasoning is part of the Chat Completions contract, but the "
              "loaded chat template does not support it.")
         _log(f"  probe: {reasoning_capability}")
@@ -775,6 +778,7 @@ async def _serve(opts) -> int:
         large_context_inference_budget_tokens=(
             opts.large_context_inference_budget_tokens),
         reasoning_close_token=reasoning_capability["close_token"],
+        supports_reasoning=not non_reasoning,
         vocab_size=(lambda config: config.get("text_config", config).get("vocab_size", 0))(
             json.loads((Path(opts.model_dir) / "config.json").read_text())),
     )

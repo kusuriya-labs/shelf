@@ -1,6 +1,7 @@
 #pragma once
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/status.h>
+#include <shelf/models/hunyuan_dense/weights/model_weights.h>
 #include <shelf/models/plamo3/weights/model_weights.h>
 #include <shelf/models/qwen35/weights/model_weights.h>
 #include <shelf/models/qwen35moe/weights/qwen35moe_model_load.h>
@@ -21,17 +22,15 @@ enum class ModelFamily : std::uint8_t {
     Qsa,
     Qwen4Exp,
     Plamo3,
+    HunyuanDense,
 };
 
-// A loaded model holds exactly one family's weights. There is no empty member of the
-// other family and no dense view of an MoE checkpoint, so an MoE model cannot be read as
-// if it had a dense FFN. Access is explicit: std::get_if<Qwen35MoeModelWeights>(...) is
-// null for a dense model.
 using LoadedModelWeights = std::variant<
     shelf::qwen35::Qwen35ModelWeights,
     shelf::qwen35moe::Qwen35MoeModelWeights,
     shelf::qwen35qsa::Qwen35QsaModelWeights,
-    shelf::plamo3::ModelWeights>;
+    shelf::plamo3::ModelWeights,
+    shelf::hunyuan_dense::ModelWeights>;
 
 ModelFamily model_family(const LoadedModelWeights& loaded) noexcept;
 
