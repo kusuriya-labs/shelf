@@ -100,13 +100,13 @@ host-mapped memory の flag を system-scope atomic で store / load する相�
 2 GPU で 20/20 成立した。一方、peer の device memory に置いた flag では
 両方が spin したまま進まない（kernel 完了まで store が見えない）。
 
-### peer device memory への kernel 書き込みは可視性が保証されない
+### peer device memory への kernel 書き込み（再測定で訂正）
 
-rank 0 が rank 1 の device buffer へ 8 KB を書き、host-mapped flag を立て、
-rank 1 が flag を見てから読む方式を 50 回試した。読み出しの L2 bypass
-(plain / system-scope atomic load / nontemporal) を変えても一致しない。
-方向依存もあり、device 0 → device 1 の書き込みは全語が stale のままだった。
-したがって「graph 内に閉じた collective」は現行 transport では正しさを保証できない。
+当時の測定は、読み手が同じバッファを直前に `hipMemset` して dirty line を残していた
+ことと、`__threadfence_system()` を block 0 だけで実行していたことによる artifact
+だった。`pci=disable_acs_redir` を入れた環境で条件を直すと、peer への push は
+running kernel から正しく見える。詳細と graph 内 barrier の PoC は
+`docs/research/20261124/full_graph_sync.md` を参照。
 
 ### collectives の kernel 融合は現行 transport では成立しない
 
