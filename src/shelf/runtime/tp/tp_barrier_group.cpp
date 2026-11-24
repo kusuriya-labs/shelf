@@ -100,14 +100,19 @@ Status TpBarrierGroup::arrive(int rank, const TpSumTarget& target, hipStream_t s
     if (rank < 0 || rank >= rank_count_) {
         return Status::invalid_argument("tp barrier rank out of range", __FILE__, __LINE__);
     }
-    if (transport_ != nullptr && transport_->fused_barrier_ready() &&
-        (target.fusion == TpCombineFusion::None ||
-         target.fusion == TpCombineFusion::ResidualAdd)) {
+    const bool fused_fusion =
+        target.fusion == TpCombineFusion::None ||
+        target.fusion == TpCombineFusion::ResidualAdd ||
+        (target.fusion == TpCombineFusion::HyperApply &&
+         target.dtype == ValueDType::BF16);
+    if (transport_ != nullptr && transport_->fused_barrier_ready() && fused_fusion &&
+        tp_target_bytes(target) <= transport_->inbox_capacity()) {
         if (tp_fused_debug())
             std::fprintf(stderr, "ARRIVE_FUSED rank=%d rows=%llu fusion=%d\n", rank,
                          static_cast<unsigned long long>(target.rows),
                          static_cast<int>(target.fusion));
         Status st = sum_hidden_fused(rank, target, stream, peer_written);
+        if (st.ok() && transport_ != nullptr) transport_->advance_barrier(rank);
         if (tp_fused_debug())
             std::fprintf(stderr, "ARRIVE_FUSED_DONE rank=%d ok=%d\n", rank, st.ok() ? 1 : 0);
         return st;
@@ -161,13 +166,16 @@ Status TpBarrierGroup::arrive(int rank, const TpSumTarget& target, hipStream_t s
         ++open_barrier_;
         completed_barriers_ = open_barrier_;
         cv_.notify_all();
+        if (transport_ != nullptr) transport_->advance_barrier(rank);
         return Status::make_ok();
     }
     cv_.wait(lock, [&] { return completed_barriers_ > seq || aborted_; });
     if (tp_fused_debug())
         std::fprintf(stderr, "ARRIVE_CPU_DONE rank=%d aborted=%d\n", rank,
                      aborted_ ? 1 : 0);
-    return aborted_ ? abort_status_ : Status::make_ok();
+    Status result = aborted_ ? abort_status_ : Status::make_ok();
+    if (result.ok() && transport_ != nullptr) transport_->advance_barrier(rank);
+    return result;
 }
 
 bool TpBarrierGroup::fused_barrier_ready() const noexcept {

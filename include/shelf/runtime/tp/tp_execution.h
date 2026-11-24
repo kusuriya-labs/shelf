@@ -93,6 +93,8 @@ public:
 
     virtual std::size_t inbox_capacity() const noexcept { return 0; }
 
+    virtual void advance_barrier(int rank) { (void)rank; }
+
     virtual Status reserve(std::size_t bytes) {
         (void)bytes;
         return Status::make_ok();

@@ -619,13 +619,22 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
         reserve_bytes = std::max(reserve_bytes, tp_inbox_bytes(rank->executor()));
     }
     if (reserve_bytes != 0) {
+        std::size_t group_count = 0;
+        for (const auto& group : tp_groups_) {
+            if (group.barrier != nullptr) ++group_count;
+        }
+        for (const auto& group : ep_groups_) {
+            if (group.barrier != nullptr) ++group_count;
+        }
         std::fprintf(stderr, "TP_WORKSPACE inbox_bytes=%zu groups=%zu\n", reserve_bytes,
-                     tp_groups_.size() + ep_groups_.size());
+                     group_count);
         for (auto& group : tp_groups_) {
+            if (group.barrier == nullptr) continue;
             Status st = group.barrier->reserve(reserve_bytes);
             if (!st.ok()) return st;
         }
         for (auto& group : ep_groups_) {
+            if (group.barrier == nullptr) continue;
             Status st = group.barrier->reserve(reserve_bytes);
             if (!st.ok()) return st;
         }

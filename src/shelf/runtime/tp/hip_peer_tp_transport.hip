@@ -198,11 +198,15 @@ struct TpFusedBarrierArgs {
     int* own_flag;
     int epoch;
     int* arrive_ctr;
+    const void* injection;
     uint32_t rows;
     uint32_t features;
     uint32_t stride;
     uint32_t residual_stride;
+    uint32_t injection_stride;
     uint32_t out_stride;
+    uint32_t hidden;
+    uint32_t hc;
     uint32_t fused;
     uint32_t copy_own;
 };
@@ -324,6 +328,26 @@ __global__ void tp_fused_bf16_kernel(TpFusedBarrierArgs a) {
         return;
     }
     const uint16_t* residual = static_cast<const uint16_t*>(a.residual);
+    if (a.fused == 2u) {
+        const uint16_t* injection = static_cast<const uint16_t*>(a.injection);
+        const uint64_t width = static_cast<uint64_t>(a.hc) * a.hidden;
+        const uint64_t total = static_cast<uint64_t>(a.rows) * width;
+        for (uint64_t i = base; i < total; i += step) {
+            const uint64_t row = i / width;
+            const uint64_t rest = i - row * width;
+            const uint32_t h = static_cast<uint32_t>(rest / a.hidden);
+            const uint64_t col = rest - static_cast<uint64_t>(h) * a.hidden;
+            const uint64_t src = row * a.stride + col;
+            const float value = tp_bf16_to_f32(own[src]) + tp_bf16_to_f32(inbox[src]);
+            const float gate =
+                tp_bf16_to_f32(injection[row * a.injection_stride + h]);
+            const uint64_t offset =
+                row * a.residual_stride + static_cast<uint64_t>(h) * a.hidden + col;
+            out[row * a.out_stride + static_cast<uint64_t>(h) * a.hidden + col] =
+                tp_f32_to_bf16(tp_bf16_to_f32(residual[offset]) + value * gate);
+        }
+        return;
+    }
     for (uint32_t r = 0; r < a.rows; ++r) {
         const uint64_t src = static_cast<uint64_t>(r) * a.stride;
         const uint64_t res = static_cast<uint64_t>(r) * a.residual_stride;
@@ -566,7 +590,7 @@ Result<std::unique_ptr<HipPeerTpTransport>> HipPeerTpTransport::create(
         transport->inbox_[r].assign(rank_count, {nullptr, nullptr});
         transport->inbox_ptrs_dev_[r] = {nullptr, nullptr};
     }
-    transport->parity_.assign(rank_count, 0);
+    transport->barrier_seq_.assign(rank_count, 0);
     transport->probe_buffers_.assign(rank_count, nullptr);
     transport->probe_streams_.assign(rank_count, nullptr);
     transport->probe_ready_.assign(rank_count, nullptr);
@@ -751,7 +775,7 @@ Status HipPeerTpTransport::enqueue_sum(const TpSumInvocation& invocation) {
     if (inbox_bytes_.load(std::memory_order_relaxed) < bytes) {
         return Status::unsupported("tp inbox is not reserved", __FILE__, __LINE__);
     }
-    const std::size_t parity = parity_[0];
+    const std::size_t parity = static_cast<std::size_t>(barrier_seq_[0] & 1u);
 
     if (!invocation.peer_write_complete) {
         for (std::size_t r = 0; r < rank_count; ++r) {
@@ -817,7 +841,6 @@ Status HipPeerTpTransport::enqueue_sum(const TpSumInvocation& invocation) {
             consumed_recorded_[r][q][parity] = 1;
         }
     }
-    for (std::size_t& p : parity_) p ^= 1u;
     return Status::make_ok();
 }
 
@@ -832,6 +855,11 @@ bool HipPeerTpTransport::fused_barrier_ready() const noexcept {
 
 std::size_t HipPeerTpTransport::inbox_capacity() const noexcept {
     return inbox_bytes_.load(std::memory_order_relaxed);
+}
+
+void HipPeerTpTransport::advance_barrier(int rank) {
+    if (rank < 0 || static_cast<std::size_t>(rank) >= barrier_seq_.size()) return;
+    ++barrier_seq_[static_cast<std::size_t>(rank)];
 }
 
 Status HipPeerTpTransport::reserve(std::size_t bytes) {
@@ -905,9 +933,16 @@ Status HipPeerTpTransport::sum_hidden_fused(int rank, const TpSumTarget& target,
         (target.ptr == nullptr || target.row_stride == 0u || target.feature_count == 0u))
         return Status::invalid_argument("fused barrier target is empty", __FILE__, __LINE__);
     if (target.fusion != TpCombineFusion::None &&
-        target.fusion != TpCombineFusion::ResidualAdd)
+        target.fusion != TpCombineFusion::ResidualAdd &&
+        !(target.fusion == TpCombineFusion::HyperApply &&
+          target.dtype == ValueDType::BF16))
         return Status::unsupported("fused barrier fusion is not supported", __FILE__,
                                    __LINE__);
+    if (target.rows != 0u && target.fusion == TpCombineFusion::HyperApply &&
+        (target.residual == nullptr || target.injection == nullptr ||
+         target.fusion_output == nullptr || target.hidden == 0u || target.hc == 0u))
+        return Status::invalid_argument("fused hyper apply target is empty", __FILE__,
+                                        __LINE__);
 
     const std::size_t bytes = static_cast<std::size_t>(target.rows) * target.row_stride *
                               ::shelf::runtime::value_dtype_bytes(target.dtype);
@@ -930,7 +965,7 @@ Status HipPeerTpTransport::sum_hidden_fused(int rank, const TpSumTarget& target,
         if (!fused_allocated_)
             return Status::invalid_state("tp fused state is not initialized", __FILE__,
                                          __LINE__);
-        parity = static_cast<std::size_t>(fused_epoch_[static_cast<std::size_t>(rank)] & 1);
+        parity = static_cast<std::size_t>(barrier_seq_[static_cast<std::size_t>(rank)] & 1u);
         epoch = ++fused_epoch_[static_cast<std::size_t>(rank)];
     }
     auto scope = shelf::gpu::ScopedDevice::create(devices_[static_cast<std::size_t>(rank)]);
@@ -940,9 +975,11 @@ Status HipPeerTpTransport::sum_hidden_fused(int rank, const TpSumTarget& target,
     const std::size_t peer_index = rank_count - 1u - static_cast<std::size_t>(rank);
     TpFusedBarrierArgs args{};
     args.own = target.ptr;
-    args.out = target.fusion == TpCombineFusion::ResidualAdd ? target.fusion_output
-                                                             : target.ptr;
-    args.residual = target.fusion == TpCombineFusion::ResidualAdd ? target.residual : nullptr;
+    args.out = target.fusion == TpCombineFusion::None ? target.ptr
+                                                      : target.fusion_output;
+    args.residual = target.fusion == TpCombineFusion::None ? nullptr : target.residual;
+    args.injection = target.fusion == TpCombineFusion::HyperApply ? target.injection
+                                                                 : nullptr;
     args.peer_dst = inbox_[peer_index][static_cast<std::size_t>(rank)][parity];
     args.inbox = inbox_[static_cast<std::size_t>(rank)][peer_index][parity];
     args.peer_flag = fused_flags_ + peer_index;
@@ -953,10 +990,14 @@ Status HipPeerTpTransport::sum_hidden_fused(int rank, const TpSumTarget& target,
     args.features = target.feature_count;
     args.stride = target.row_stride;
     args.residual_stride = target.residual_row_stride;
-    args.out_stride = target.fusion == TpCombineFusion::ResidualAdd
-                          ? target.output_row_stride
-                          : target.row_stride;
-    args.fused = target.fusion == TpCombineFusion::ResidualAdd ? 1u : 0u;
+    args.injection_stride = target.injection_row_stride;
+    args.out_stride = target.fusion == TpCombineFusion::None ? target.row_stride
+                                                             : target.output_row_stride;
+    args.hidden = target.hidden;
+    args.hc = target.hc;
+    args.fused = target.fusion == TpCombineFusion::ResidualAdd
+                     ? 1u
+                     : target.fusion == TpCombineFusion::HyperApply ? 2u : 0u;
     args.copy_own = peer_written ? 0u : 1u;
 
     const uint64_t elems = static_cast<uint64_t>(target.rows) * target.row_stride;
@@ -999,7 +1040,7 @@ Status HipPeerTpTransport::peer_write_target(int rank, std::size_t bytes, void*&
         std::fprintf(stderr, "PEER_WRITE_READY rank=%d\n", rank);
     const std::size_t peer = static_cast<std::size_t>(rank) == 0 ? 1 : 0;
     peer_out = inbox_[peer][static_cast<std::size_t>(rank)]
-                        [parity_[static_cast<std::size_t>(rank)]];
+                        [static_cast<std::size_t>(barrier_seq_[static_cast<std::size_t>(rank)] & 1u)];
     return Status::make_ok();
 }
 

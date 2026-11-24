@@ -25,6 +25,7 @@ public:
     bool supports_combine_fusion() const noexcept override;
     bool fused_barrier_ready() const noexcept override;
     std::size_t inbox_capacity() const noexcept override;
+    void advance_barrier(int rank) override;
     Status reserve(std::size_t bytes) override;
     Status sum_hidden_fused(int rank, const TpSumTarget& target, hipStream_t stream,
                             bool peer_written) override;
@@ -47,7 +48,8 @@ private:
     std::vector<std::vector<std::array<void*, 2>>> inbox_;
     std::vector<std::array<void*, 2>> inbox_ptrs_dev_;
     std::atomic<std::size_t> inbox_bytes_{0};
-    std::vector<std::size_t> parity_;    std::vector<std::pair<int, void*>> retired_inbox_;
+    std::vector<std::uint64_t> barrier_seq_;
+    std::vector<std::pair<int, void*>> retired_inbox_;
     int* fused_flags_ = nullptr;
     std::array<int*, 2> fused_arrive_{{nullptr, nullptr}};
     std::array<int, 2> fused_epoch_{{0, 0}};
