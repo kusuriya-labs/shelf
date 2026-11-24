@@ -1,5 +1,6 @@
 #include <shelf/models/hy4_flash/generate.h>
 #include <shelf/models/hy4_flash/target.h>
+#include <shelf/models/hy4_flash/decoder.h>
 
 #include <algorithm>
 #include <bit>
@@ -258,6 +259,62 @@ void benchmark_hy4_moe(Residency &gpu) {
             output = moe(op, i + 1, x);
         });
         print_hash(op, output);
+    }
+}
+
+void benchmark_hy4_router(Residency &gpu) {
+    Ops op(gpu);
+    auto w = static_cast<const uint16_t *>(op.param("model.layers.1.mlp.gate.weight").p);
+    auto b = static_cast<const float *>(op.param("model.layers.1.mlp.gate.e_score_correction_bias").p);
+    for (int rows : {32, 96, 1024}) {
+        op.arena.cursor = 0;
+        Mat hidden = input(op, rows, 3072);
+        Mat x = op.norm(hidden, "model.layers.1.post_attention_layernorm.weight");
+        auto ref = static_cast<Hy4Route *>(op.arena.next(size_t(rows) * 16 * sizeof(Hy4Route)));
+        auto got = static_cast<Hy4Route *>(op.arena.next(size_t(rows) * 16 * sizeof(Hy4Route)));
+        auto base = op.arena.cursor;
+        for (bool exact : {true, false}) {
+            measure(exact ? "router_exact" : "router_wmma", rows, 0, 5, [&](int) {
+                op.arena.cursor = base;
+                route_select(op, x, w, b, gpu.gate_expert_norms[0], exact ? ref : got, exact);
+            });
+        }
+        std::vector<Hy4Route> h_ref(size_t(rows) * 16), h_got(size_t(rows) * 16);
+        op.copy(h_ref.data(), ref, h_ref.size() * sizeof(Hy4Route), hipMemcpyDeviceToHost);
+        op.copy(h_got.data(), got, h_got.size() * sizeof(Hy4Route), hipMemcpyDeviceToHost);
+        if (std::memcmp(h_ref.data(), h_got.data(), h_ref.size() * sizeof(Hy4Route)) != 0)
+            throw std::runtime_error("router 出力が一致しません");
+        printf("router_match rows=%d\n", rows);
+    }
+    {
+        constexpr int rows = 40;
+        op.arena.cursor = 0;
+        std::vector<uint16_t> hx(size_t(rows) * 3072, 0x3c00u);
+        std::vector<uint16_t> hw(size_t(512) * 3072, 0x3c00u);
+        std::vector<float> hb(512, 0.f);
+        std::vector<float> hwn(512, std::sqrt(3072.f));
+        for (int c = 0; c < 3072; ++c) {
+            hx[1 * 3072 + c] = uint16_t(std::bit_cast<uint32_t>(float((c % 7) - 3) * 0.1f) >> 16);
+            hx[2 * 3072 + c] = c == 0 ? 0x7fc0u : 0x3c00u;
+        }
+        for (int e = 0; e < 512; ++e) {
+            hb[e] = e < 24 ? 0.5f + float(24 - e) * 1e-6f : 0.f;
+            if (e % 3 == 0) hw[size_t(e) * 3072] = 0xbc00u;
+        }
+        Mat ax{upload(op, hx), rows, 3072};
+        auto aw = upload(op, hw);
+        auto ab = upload(op, hb);
+        auto awn = upload(op, hwn);
+        auto ref = static_cast<Hy4Route *>(op.arena.next(size_t(rows) * 16 * sizeof(Hy4Route)));
+        auto got = static_cast<Hy4Route *>(op.arena.next(size_t(rows) * 16 * sizeof(Hy4Route)));
+        route_select(op, ax, aw, ab, awn, ref, true);
+        route_select(op, ax, aw, ab, awn, got, false);
+        std::vector<Hy4Route> h_ref(size_t(rows) * 16), h_got(size_t(rows) * 16);
+        op.copy(h_ref.data(), ref, h_ref.size() * sizeof(Hy4Route), hipMemcpyDeviceToHost);
+        op.copy(h_got.data(), got, h_got.size() * sizeof(Hy4Route), hipMemcpyDeviceToHost);
+        if (std::memcmp(h_ref.data(), h_got.data(), h_ref.size() * sizeof(Hy4Route)) != 0)
+            throw std::runtime_error("人工同点・僅差・非有限入力で router 出力が一致しません");
+        printf("router_edge_cases=pass\n");
     }
 }
 

@@ -94,6 +94,7 @@ struct Residency {
     void upload_experts(int rank, int layer);
     std::array<Hy4ExpertProjection *, 4> matrices{};
     std::array<int *, 4> moe_owners{};
+    std::array<float *, 4> gate_expert_norms{};
     std::array<uint64_t *, 4> moe_counts{};
     std::array<hipStream_t, 4> local_expert{};
     std::array<hipEvent_t, 4> local_ready{}, local_done{};

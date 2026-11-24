@@ -16,6 +16,7 @@ void benchmark_hy4_index(Residency &gpu);
 void check_hy4_prefill_capacity(Residency &gpu, int rows);
 void benchmark_hy4_prefill(Residency &gpu, int rows);
 void benchmark_hy4_moe(Residency &gpu);
+void benchmark_hy4_router(Residency &gpu);
 void benchmark_hy4_steps(Residency &gpu);
 void verify_hy4_layers(Residency &gpu, const Path &input, const Path &dump);
 bool trace_hy4_prefill(Residency &gpu, const Path &input, int chunk, const Path &dump);
@@ -508,6 +509,7 @@ int main(int argc, char **argv) {
     try {
         bool micro = argc == 3 && std::string_view(argv[2]) == "microbench";
         bool moe = argc == 3 && std::string_view(argv[2]) == "moebench";
+        bool router_b = argc == 3 && std::string_view(argv[2]) == "routerbench";
         bool steps = (argc == 5 || argc == 6) && std::string_view(argv[3]) == "stepbench";
         if (argc == 7 && std::string_view(argv[2]) == "prefillbench") {
             int length = std::stoi(argv[3]), chunk = std::stoi(argv[4]), ranks = std::stoi(argv[5]);
@@ -534,7 +536,7 @@ int main(int argc, char **argv) {
             gpu.shutdown();
             return 0;
         }
-        if (micro || moe || steps) {
+        if (micro || moe || router_b || steps) {
             Path draft = steps && std::string_view(argv[2]) != "-" ? Path(argv[2]) : Path{};
             Checkpoint model(argv[1], argv[1], draft, Owners{}, 1, 1);
             share_expert_weights(model);
@@ -549,6 +551,8 @@ int main(int argc, char **argv) {
                 benchmark_hy4_steps(gpu);
             } else if (moe) {
                 benchmark_hy4_moe(gpu);
+            } else if (router_b) {
+                benchmark_hy4_router(gpu);
             } else {
                 benchmark_hy4_decode(gpu);
             }

@@ -3,8 +3,10 @@
 #include <shelf/models/hy4_flash/routes.h>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <cstdio>
+#include <limits>
 #include <numeric>
 #include <stdexcept>
 #include <string_view>
@@ -93,7 +95,7 @@ Status Residency::reserve() {
         const bool attention_rank = tp_size > 1 || r == 0;
         overhead[r] = (tp_size > 1 ? size_t(1) << 30 : (r == 0 ? size_t(2) << 30 : size_t(512) << 20)) + matrix_bytes;
         if (attention_rank) {
-            overhead[r] += align(41 * 512 * sizeof(int)) + 256;
+            overhead[r] += align(41 * 512 * sizeof(int)) + align(41 * 512 * sizeof(float)) + 256;
             for (int i = 0; i < 42; ++i) {
                 bool sparse = i == 0 || i % 4 == 1;
                 overhead[r] += align(max_slots * 294 * (sparse ? tokens : std::min(tokens, size_t(518))));
@@ -173,6 +175,7 @@ void Residency::reserve_experts(int r, Region &buffer) {
     if (tp_size == 1 && r != 0)
         return;
     moe_owners[r] = static_cast<int *>(buffer.next(41 * 512 * sizeof(int)));
+    gate_expert_norms[r] = static_cast<float *>(buffer.next(41 * 512 * sizeof(float)));
     moe_counts[r] = static_cast<uint64_t *>(buffer.next(12 * sizeof(uint64_t)));
     check(hipMemset(moe_counts[r], 0, 12 * sizeof(uint64_t)));
     check(hipStreamCreateWithFlags(&local_expert[r], hipStreamNonBlocking));
@@ -324,6 +327,33 @@ void Residency::upload() {
         for (int layer = 1; layer < 42; ++layer)
             upload_experts(r, layer);
         fold_kv_weights(*this, r);
+    }
+    for (int layer = 1; layer < 42; ++layer) {
+        if (const auto *w = model.find("model.layers." + std::to_string(layer) + ".mlp.gate.weight", 0)) {
+            const auto *p = static_cast<const uint16_t *>(w->host);
+            std::array<float, 512> norms{};
+            for (int e = 0; e < 512; ++e) {
+                double sq = 0.0;
+                bool finite = true;
+                const uint16_t *row = p + size_t(e) * 3072;
+                for (int c = 0; c < 3072; ++c) {
+                    uint32_t bits = uint32_t(row[c]) << 16;
+                    float v;
+                    std::memcpy(&v, &bits, 4);
+                    if (!std::isfinite(v))
+                        finite = false;
+                    sq += double(v) * double(v);
+                }
+                float norm = float(std::sqrt(sq));
+                norms[e] = (finite && std::isfinite(norm)) ? norm : std::numeric_limits<float>::infinity();
+            }
+            for (int r = 0; r < ranks; ++r)
+                if (gate_expert_norms[r]) {
+                    check(hipSetDevice(physical[r]));
+                    check(hipMemcpy(gate_expert_norms[r] + (layer - 1) * 512, norms.data(),
+                                    512 * sizeof(float), hipMemcpyHostToDevice));
+                }
+        }
     }
     check(hipSetDevice(physical[0]));
 }

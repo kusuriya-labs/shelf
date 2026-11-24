@@ -6,6 +6,101 @@
 namespace shelf::hy4 {
 namespace {
 using namespace shelf::kernel::exl3_detail::mul24;
+using Bf16Frag = short __attribute__((ext_vector_type(8)));
+using Float8 = float __attribute__((ext_vector_type(8)));
+
+__device__ __forceinline__ Bf16Frag load_bf16_frag(const uint16_t *p) {
+    uint4 raw;
+    raw.x = *reinterpret_cast<const uint32_t *>(p);
+    raw.y = *reinterpret_cast<const uint32_t *>(p + 2);
+    raw.z = *reinterpret_cast<const uint32_t *>(p + 8);
+    raw.w = *reinterpret_cast<const uint32_t *>(p + 10);
+    return __builtin_bit_cast(Bf16Frag, raw);
+}
+
+__global__ void router_row_norms(Mat x, float *row_norms, int *fallback_count) {
+    __shared__ float wave_sum[8];
+    int row = blockIdx.x, t = threadIdx.x;
+    if (!row && !t)
+        *fallback_count = 0;
+    const uint4 *src = reinterpret_cast<const uint4 *>(x.p + size_t(row) * 3072);
+    float sum = 0.f;
+    for (int i = t; i < 3072 / 8; i += 256) {
+        uint4 v = src[i];
+        uint32_t words[4] = {v.x, v.y, v.z, v.w};
+#pragma unroll
+        for (int w = 0; w < 4; ++w) {
+            float a = bf16_bits_to_f32(uint16_t(words[w] & 0xffffu));
+            float b = bf16_bits_to_f32(uint16_t(words[w] >> 16));
+            sum += a * a + b * b;
+        }
+    }
+    for (int d = 16; d; d /= 2)
+        sum += __shfl_down(sum, d, 32);
+    if (!(t & 31))
+        wave_sum[t >> 5] = sum;
+    __syncthreads();
+    sum = t < 8 ? wave_sum[t] : 0.f;
+    if (t < 32) {
+        for (int d = 4; d; d /= 2)
+            sum += __shfl_down(sum, d, 32);
+        if (!t)
+            row_norms[row] = sqrtf(sum);
+    }
+}
+
+template <int kRowTiles, int kOutTiles>
+__global__ void router_wmma(Mat x, const uint16_t *weight, float *dots) {
+    int lane = threadIdx.x & 31, lane_lo = lane & 15, k_half = lane >> 4;
+    int out_start = blockIdx.x * (16 * kOutTiles);
+    int row_start = blockIdx.y * (16 * kRowTiles);
+    const uint16_t *wrow[kOutTiles];
+    Float8 acc[kOutTiles][kRowTiles];
+#pragma unroll
+    for (int ot = 0; ot < kOutTiles; ++ot) {
+        wrow[ot] = weight + size_t(out_start + ot * 16 + lane_lo) * 3072 + k_half * 4;
+#pragma unroll
+        for (int rt = 0; rt < kRowTiles; ++rt)
+            acc[ot][rt] = Float8{};
+    }
+    const uint16_t *xrow[kRowTiles];
+    bool row_valid[kRowTiles];
+#pragma unroll
+    for (int rt = 0; rt < kRowTiles; ++rt) {
+        int r = row_start + rt * 16 + lane_lo;
+        row_valid[rt] = r < x.rows;
+        xrow[rt] = x.p + size_t(row_valid[rt] ? r : 0) * 3072 + k_half * 4;
+    }
+    for (int ks = 0; ks < 3072; ks += 16) {
+        Bf16Frag a[kOutTiles];
+#pragma unroll
+        for (int ot = 0; ot < kOutTiles; ++ot)
+            a[ot] = load_bf16_frag(wrow[ot] + ks);
+#pragma unroll
+        for (int rt = 0; rt < kRowTiles; ++rt) {
+            Bf16Frag b{};
+            if (row_valid[rt])
+                b = load_bf16_frag(xrow[rt] + ks);
+#pragma unroll
+            for (int ot = 0; ot < kOutTiles; ++ot)
+                acc[ot][rt] = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12(a[ot], b, acc[ot][rt]);
+        }
+    }
+#pragma unroll
+    for (int ot = 0; ot < kOutTiles; ++ot) {
+        int o = out_start + ot * 16 + k_half * 8;
+#pragma unroll
+        for (int rt = 0; rt < kRowTiles; ++rt) {
+            int r = row_start + rt * 16 + lane_lo;
+            if (r < x.rows) {
+                float *dst = dots + size_t(r) * 512 + o;
+                *reinterpret_cast<float4 *>(dst) = float4{acc[ot][rt][0], acc[ot][rt][1], acc[ot][rt][2], acc[ot][rt][3]};
+                *reinterpret_cast<float4 *>(dst + 4) = float4{acc[ot][rt][4], acc[ot][rt][5], acc[ot][rt][6], acc[ot][rt][7]};
+            }
+        }
+    }
+}
+
 __global__ void router_single(Mat x, const uint16_t *weight, float *scores) {
     int expert = blockIdx.x * 4 + threadIdx.x / 32, lane = threadIdx.x % 32, row = blockIdx.y;
     float dot = 0;
@@ -81,6 +176,206 @@ __global__ void choose(const float *scores, const float *bias, Hy4Route *out) {
     __syncthreads();
     if (t < 16)
         out[row * 16 + t] = {row, ids[0][t], scores[ids[0][t]] / weight_sum * 3.998f};
+}
+__device__ __forceinline__ float sig_max_deriv(float d, float eps) {
+    float a = fmaxf(0.f, fabsf(d) - eps);
+    float s = 1.f / (1.f + expf(-a));
+    return s * (1.f - s);
+}
+__global__ void choose_verified(Mat x, const uint16_t *weight, const float *dots, const float *bias,
+                                const float *row_norms, const float *w_norms, Hy4Route *out,
+                                int *fallback_rows, int *fallback_count) {
+    __shared__ float values[2][256], weight_sum, exact_sig[64], exact_score[64], sorted_sig[16], wmin[16], min_top16_val;
+    __shared__ int ids[2][256], exact_id[64], sorted_id[16], cand_ids[64], cand_count, row_bad;
+    __shared__ uint8_t in_top16[512];
+    int t = threadIdx.x, row = blockIdx.x, lane = t % 32, wave = t / 32;
+    if (!t) {
+        row_bad = 0;
+        cand_count = 0;
+    }
+    in_top16[t] = 0;
+    __syncthreads();
+    float d = dots[size_t(row) * 512 + t];
+    float b = bias[t];
+    float xn = row_norms[row];
+    float wn = w_norms[t];
+    bool ok = isfinite(d) && isfinite(b) && isfinite(xn) && isfinite(wn);
+    float s = ok ? (1.f / (1.f + expf(-d)) + b) : 0.f;
+    float eps_dot = ok ? (1e-4f * xn * wn) : 0.f;
+    float delta = ok ? (sig_max_deriv(d, eps_dot) * eps_dot * 1.01f + 2e-6f * (1.f + fabsf(s))) : 0.f;
+    if (!ok || !isfinite(s) || !isfinite(delta))
+        row_bad = 1;
+    __syncthreads();
+    if (row_bad) {
+        if (!t)
+            fallback_rows[atomicAdd(fallback_count, 1)] = row;
+        return;
+    }
+    float value = s;
+    int id = t;
+    for (int width = 2; width <= 32; width *= 2)
+        for (int step = width / 2; step; step /= 2) {
+            float other = __shfl_xor(value, step, 32);
+            int other_id = __shfl_xor(id, step, 32);
+            bool keep_best = ((lane & step) == 0) == ((lane & width) == 0);
+            if (route_better(value, id, other, other_id) != keep_best) {
+                value = other;
+                id = other_id;
+            }
+        }
+    if (lane < 16) {
+        values[0][wave * 16 + lane] = value;
+        ids[0][wave * 16 + lane] = id;
+    }
+    __syncthreads();
+    for (int round = 0; round < 4; ++round) {
+        int from = round & 1, to = from ^ 1;
+        if (t < (8 >> round)) {
+            int left = t * 32, right = left + 16, i = 0, j = 0;
+            for (int k = 0; k < 16; ++k) {
+                bool take_left = j == 16 || (i < 16 && route_better(values[from][left + i], ids[from][left + i],
+                                                                     values[from][right + j], ids[from][right + j]));
+                int source = take_left ? left + i++ : right + j++;
+                values[to][t * 16 + k] = values[from][source];
+                ids[to][t * 16 + k] = ids[from][source];
+            }
+        }
+        __syncthreads();
+    }
+    if (t < 16)
+        in_top16[ids[0][t]] = 1;
+    __syncthreads();
+    float lo_cand = in_top16[t] ? (s - delta) : INFINITY;
+    for (int d17 = 16; d17; d17 /= 2)
+        lo_cand = fminf(lo_cand, __shfl_down(lo_cand, d17, 32));
+    if (!lane)
+        wmin[wave] = lo_cand;
+    __syncthreads();
+    if (!t) {
+        float m = wmin[0];
+        for (int w = 1; w < 16; ++w)
+            m = fminf(m, wmin[w]);
+        min_top16_val = m;
+    }
+    __syncthreads();
+    if (!isfinite(min_top16_val)) {
+        if (!t)
+            fallback_rows[atomicAdd(fallback_count, 1)] = row;
+        return;
+    }
+    if (in_top16[t] || (s + delta >= min_top16_val)) {
+        int pos = atomicAdd(&cand_count, 1);
+        if (pos < 64)
+            cand_ids[pos] = t;
+    }
+    __syncthreads();
+    int total = cand_count;
+    if (total > 64) {
+        if (!t)
+            fallback_rows[atomicAdd(fallback_count, 1)] = row;
+        return;
+    }
+    for (int idx = wave; idx < total; idx += 16) {
+        int expert = cand_ids[idx];
+        float dot = 0;
+        for (int c = lane; c < 3072; c += 32) {
+            float w = bf16_bits_to_f32(weight[expert * 3072 + c]);
+            dot += bf16_bits_to_f32(x.p[size_t(row) * 3072 + c]) * w;
+        }
+        for (int step = 16; step; step /= 2)
+            dot += __shfl_down(dot, step, 32);
+        if (!lane) {
+            float sig = 1.f / (1.f + expf(-dot));
+            exact_sig[idx] = sig;
+            exact_score[idx] = sig + bias[expert];
+            exact_id[idx] = expert;
+        }
+    }
+    __syncthreads();
+    if (t < total) {
+        int pos = 0;
+        float my_score = exact_score[t];
+        int my_id = exact_id[t];
+        for (int j = 0; j < total; ++j)
+            if (j != t && route_better(exact_score[j], exact_id[j], my_score, my_id))
+                ++pos;
+        if (pos < 16) {
+            sorted_id[pos] = my_id;
+            sorted_sig[pos] = exact_sig[t];
+        }
+    }
+    __syncthreads();
+    if (!t) {
+        float sum = 1e-20f;
+        for (int j = 0; j < 16; ++j)
+            sum += sorted_sig[j];
+        weight_sum = sum;
+    }
+    __syncthreads();
+    if (t < 16)
+        out[size_t(row) * 16 + t] = {row, sorted_id[t], sorted_sig[t] / weight_sum * 3.998f};
+}
+__global__ void router_choose_fallback(Mat x, const uint16_t *weight, const float *bias,
+                                       const int *fallback_rows, const int *fallback_count, Hy4Route *out) {
+    __shared__ float row_scores[512], values[2][256], weight_sum;
+    __shared__ int ids[2][256];
+    int nfb = *fallback_count;
+    for (int idx = blockIdx.x; idx < nfb; idx += gridDim.x) {
+        int row = fallback_rows[idx], t = threadIdx.x, lane = t % 32, wave = t / 32;
+        for (int expert = wave; expert < 512; expert += 16) {
+            float dot = 0;
+            for (int c = lane; c < 3072; c += 32) {
+                float w = bf16_bits_to_f32(weight[expert * 3072 + c]);
+                dot += bf16_bits_to_f32(x.p[size_t(row) * 3072 + c]) * w;
+            }
+            for (int d = 16; d; d /= 2)
+                dot += __shfl_down(dot, d, 32);
+            if (!lane)
+                row_scores[expert] = 1.f / (1.f + expf(-dot));
+        }
+        __syncthreads();
+        float value = row_scores[t] + bias[t];
+        int id = t;
+        for (int width = 2; width <= 32; width *= 2)
+            for (int step = width / 2; step; step /= 2) {
+                float other = __shfl_xor(value, step, 32);
+                int other_id = __shfl_xor(id, step, 32);
+                bool keep_best = ((lane & step) == 0) == ((lane & width) == 0);
+                if (route_better(value, id, other, other_id) != keep_best) {
+                    value = other;
+                    id = other_id;
+                }
+            }
+        if (lane < 16) {
+            values[0][wave * 16 + lane] = value;
+            ids[0][wave * 16 + lane] = id;
+        }
+        __syncthreads();
+        for (int round = 0; round < 4; ++round) {
+            int from = round & 1, to = from ^ 1;
+            if (t < (8 >> round)) {
+                int left = t * 32, right = left + 16, i = 0, j = 0;
+                for (int k = 0; k < 16; ++k) {
+                    bool take_left = j == 16 || (i < 16 && route_better(values[from][left + i], ids[from][left + i],
+                                                                         values[from][right + j], ids[from][right + j]));
+                    int source = take_left ? left + i++ : right + j++;
+                    values[to][t * 16 + k] = values[from][source];
+                    ids[to][t * 16 + k] = ids[from][source];
+                }
+            }
+            __syncthreads();
+        }
+        if (!t) {
+            float sum = 1e-20f;
+            for (int j = 0; j < 16; ++j)
+                sum += row_scores[ids[0][j]];
+            weight_sum = sum;
+        }
+        __syncthreads();
+        if (t < 16)
+            out[size_t(row) * 16 + t] = {row, ids[0][t], row_scores[ids[0][t]] / weight_sum * 3.998f};
+        __syncthreads();
+    }
 }
 __global__ void weighted(Mat x, const Hy4Route *route, const int *offsets, const int *inverse, Mat out) {
     int r = blockIdx.y, c = blockIdx.x * 256 + threadIdx.x;
@@ -527,19 +822,46 @@ static Mat prefill_moe(Ops &op, int layer, const std::string &p, Mat x, Mat late
     return op.norm(op.add(shared, op.linear(p + "routed_expert_up_proj", result)), p + "combine_output_norm.weight");
 }
 
+void route_select(Ops &op, Mat x, const uint16_t *weight, const float *bias, const float *w_norms, Hy4Route *picks,
+                  bool exact_only) {
+    auto mark = op.arena.cursor;
+    if (!exact_only && x.rows >= 32 && w_norms) {
+        auto dots = static_cast<float *>(op.arena.next(size_t(x.rows) * 512 * 4));
+        auto row_norms = static_cast<float *>(op.arena.next(size_t(x.rows) * 4));
+        auto fallback_rows = static_cast<int *>(op.arena.next(size_t(x.rows) * 4));
+        auto fallback_count = static_cast<int *>(op.arena.next(4));
+        router_row_norms<<<x.rows, 256, 0, op.stream>>>(x, row_norms, fallback_count);
+        if (x.rows >= 256)
+            router_wmma<4, 4><<<dim3(512 / 64, (x.rows + 63) / 64), 32, 0, op.stream>>>(x, weight, dots);
+        else
+            router_wmma<1, 1><<<dim3(512 / 16, (x.rows + 15) / 16), 32, 0, op.stream>>>(x, weight, dots);
+        choose_verified<<<x.rows, 512, 0, op.stream>>>(x, weight, dots, bias, row_norms, w_norms, picks,
+                                                        fallback_rows, fallback_count);
+        router_choose_fallback<<<std::min(x.rows, 64), 512, 0, op.stream>>>(x, weight, bias, fallback_rows,
+                                                                            fallback_count, picks);
+        checked(hipGetLastError());
+        op.arena.cursor = mark;
+        return;
+    }
+    auto scores = static_cast<float *>(op.arena.next(size_t(x.rows) * 512 * 4));
+    if (x.rows <= 16)
+        router_single<<<dim3(128, x.rows), 128, 0, op.stream>>>(x, weight, scores);
+    else
+        router<<<dim3(128, (x.rows + 3) / 4), 128, 0, op.stream>>>(x, weight, scores);
+    checked(hipGetLastError());
+    choose<<<x.rows, 512, 0, op.stream>>>(scores, bias, picks);
+    checked(hipGetLastError());
+    op.arena.cursor = mark;
+}
+
 Mat moe(Ops &op, int layer, Mat x) {
     std::string p = "model.layers." + std::to_string(layer) + ".mlp.";
     Mat latent = op.linear(p + "routed_expert_down_proj", x);
-    auto scores = static_cast<float *>(op.arena.next(size_t(x.rows) * 512 * 4));
-    if (x.rows <= 16)
-        router_single<<<dim3(128, x.rows), 128, 0, op.stream>>>(x, static_cast<const uint16_t *>(op.param(p + "gate.weight").p), scores);
-    else
-        router<<<dim3(128, (x.rows + 3) / 4), 128, 0, op.stream>>>(x, static_cast<const uint16_t *>(op.param(p + "gate.weight").p), scores);
-    checked(hipGetLastError());
     auto picks = static_cast<Hy4Route *>(op.arena.next(size_t(x.rows) * 16 * sizeof(Hy4Route)));
-    choose<<<x.rows, 512, 0, op.stream>>>(scores, static_cast<const float *>(op.param(p + "gate.e_score_correction_bias").p),
-                            picks);
-    checked(hipGetLastError());
+    const float *w_norms = op.gpu.gate_expert_norms[op.rank] ? op.gpu.gate_expert_norms[op.rank] + (layer - 1) * 512 : nullptr;
+    route_select(op, x, static_cast<const uint16_t *>(op.param(p + "gate.weight").p),
+                 static_cast<const float *>(op.param(p + "gate.e_score_correction_bias").p),
+                 w_norms, picks);
     if (op.batch_decode && x.rows > 1 && x.rows <= Hy4GroupedPlan::max_rows)
         return decode_moe<Hy4GroupedPlan>(op, layer, p, x, latent, picks);
     if (Hy4MoePlan::supports(x.rows))
