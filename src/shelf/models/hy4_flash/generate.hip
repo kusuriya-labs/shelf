@@ -295,7 +295,14 @@ void Target::sample(float *logits, int rows, int position, uint64_t rng, int *id
 }
 Mat Target::layers(const std::vector<int> &ids, bool verify, bool need_head) {
     int start = history.size();
-    Mat x = op.capture ? op.embed_device(op.params->ids, ids.size(), true) : op.embed(ids, true);
+    op.prefill_ids = nullptr;
+    if (!op.capture) {
+        for (int id : ids)
+            if (id < 0 || id >= 120832)
+                throw std::runtime_error("token ID が範囲外です");
+        op.prefill_ids = op.indices(ids);
+    }
+    Mat x = op.embed_device(op.capture ? op.params->ids : op.prefill_ids, ids.size(), true);
     for (int layer = 0; layer < 42; ++layer) {
         Selection selection;
         decoder_layer(op, layer, start, x, history, ids, selection);
@@ -316,6 +323,7 @@ Mat Target::layers(const std::vector<int> &ids, bool verify, bool need_head) {
             tapped[it - sources.begin()] = std::move(selection);
         }
     }
+    op.prefill_ids = nullptr;
     if (!need_head)
         return {};
     if (!verify)

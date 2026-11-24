@@ -60,9 +60,8 @@ __global__ void add_memory(Mat x, Mat k, Mat q, Mat value, const uint16_t *scale
             round_bf16(round_bf16(v * gate) + round_bf16(v * bf16_bits_to_f32(scale[i]))));
     }
 }
-}
-std::vector<uint8_t> gather_engram(const Checkpoint &model, int layer, int rows, const std::vector<int> &ids,
-                                   const std::vector<int> &prior) {
+void gather_engram_into(const Checkpoint &model, int layer, int rows, const std::vector<int> &ids,
+                        const std::vector<int> &prior, uint8_t *dst) {
     int g = (layer - 1) / 10;
     auto p = "model.layers." + std::to_string(layer) + ".engram_layer.";
     auto table = p + "multi_head_embedding.embedding.weight";
@@ -72,7 +71,6 @@ std::vector<uint8_t> gather_engram(const Checkpoint &model, int layer, int rows,
     auto lut = static_cast<const int32_t *>(lookup.host);
     auto bits = static_cast<const uint8_t *>(model.at(table, -1).host);
     auto scales = static_cast<const uint8_t *>(model.at(table + ".scale", -1).host);
-    std::vector<uint8_t> packed(size_t(rows) * 16 * 98);
     for (int r = 0; r < rows; ++r) {
         int64_t mix[3]{};
         for (int j = 0; j < 3; ++j) {
@@ -90,12 +88,18 @@ std::vector<uint8_t> gather_engram(const Checkpoint &model, int layer, int rows,
         for (int h = 0; h < 16; ++h) {
             int size = model.moduli[g][h];
             size_t idx = offset + ((mix[0] ^ mix[1] ^ (h < 8 ? 0 : mix[2])) % size);
-            auto dest = packed.data() + (r * 16 + h) * 98;
+            auto dest = dst + (size_t(r) * 16 + h) * 98;
             std::memcpy(dest, bits + idx * 96, 96);
             std::memcpy(dest + 96, scales + idx * 2, 2);
             offset += size;
         }
     }
+}
+}
+std::vector<uint8_t> gather_engram(const Checkpoint &model, int layer, int rows, const std::vector<int> &ids,
+                                   const std::vector<int> &prior) {
+    std::vector<uint8_t> packed(size_t(rows) * 16 * 98);
+    gather_engram_into(model, layer, rows, ids, prior, packed.data());
     return packed;
 }
 
@@ -116,7 +120,8 @@ static Mat apply_engram(Ops &op, int layer, Mat x, const uint8_t *memory, const 
     auto project = [&](const std::string &key) { return op.linear(p + key, embed); };
     constexpr float eps = 1.1920928955e-7f;
     auto values = op.norm_bias(project("value_proj"), bf("value_proj.bias"), p + "unified_pre_gamma", eps);
-    auto token_ids = op.capture ? (op.batch_decode ? op.gpu.batch_input->step.ids : op.params->ids) : op.indices(ids);
+    auto token_ids = op.capture ? (op.batch_decode ? op.gpu.batch_input->step.ids : op.params->ids)
+                                : (op.prefill_ids ? op.prefill_ids : op.indices(ids));
     for (int i = 0; i < 4; ++i) {
         auto s = std::to_string(i);
         auto k = op.norm_bias(project("key_projs." + s), bf("key_projs." + s + ".bias"),
@@ -130,15 +135,16 @@ static Mat apply_engram(Ops &op, int layer, Mat x, const uint8_t *memory, const 
 
 Mat engram(Ops &op, int layer, Mat x, const std::vector<int> &prior, const std::vector<int> &ids) {
     int g = (layer - 1) / 10;
-    uint8_t *memory = nullptr;
+    const uint8_t *memory = nullptr;
     if (op.capture)
         memory = op.gpu.graph_input->engram[g];
     else {
         auto packed = op.take_engram(g);
         if (packed.empty())
             packed = gather_engram(op.gpu.model, layer, x.rows, ids, prior);
-        memory = static_cast<uint8_t *>(op.arena.next(packed.size()));
-        op.copy(memory, packed.data(), packed.size(), hipMemcpyHostToDevice);
+        uint8_t *dev = static_cast<uint8_t *>(op.arena.next(packed.size()));
+        op.copy(dev, packed.data(), packed.size(), hipMemcpyHostToDevice);
+        memory = dev;
     }
     return apply_engram(op, layer, x, memory, ids);
 }
@@ -166,6 +172,10 @@ Mat engram_batch(Ops &op, int layer, Mat x, const std::vector<const std::vector<
     return apply_engram(op, layer, x, memory, ids);
 }
 
+Ops::~Ops() {
+    if (engram_future.valid())
+        engram_future.wait();
+}
 void Ops::prefetch_engram(const std::vector<int> &ids, const std::vector<int> &prior) {
     if (engram_future.valid())
         engram_future.wait();
@@ -173,7 +183,7 @@ void Ops::prefetch_engram(const std::vector<int> &ids, const std::vector<int> &p
     engram_future = std::async(std::launch::async, [this, ids, prior] {
         std::array<std::vector<uint8_t>, 4> result;
         for (int g = 0; g < 4; ++g)
-            result[g] = gather_engram(gpu.model, 1 + 10 * g, ids.size(), ids, prior);
+            result[g] = gather_engram(gpu.model, 1 + 10 * g, int(ids.size()), ids, prior);
         return result;
     });
 }
