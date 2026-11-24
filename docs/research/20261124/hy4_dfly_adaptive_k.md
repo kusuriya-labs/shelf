@@ -6,7 +6,7 @@ Hy4-Flash の DFly2 投機デコード候補数 `K` を直近の平均受理長�
 
 ## 設計と実装概要
 
-### 1. Adaptive `K` ポリシー（`Hy4DflyAdaptiveController`）
+### 1. 初版の Adaptive `K` ポリシー（`Hy4DflyAdaptiveController`）
 
 - `include/shelf/models/hy4_flash/generate.h` / `src/shelf/models/hy4_flash/generate.hip` に `Hy4DflyAdaptiveController` を実装した。
 - 初期値 `current_k` は解決済みの `--dfly-drafts` / `SHELF_HY4_DFLY_DRAFTS`（既定 `4`）を用いる。
@@ -33,7 +33,13 @@ Hy4-Flash の DFly2 投機デコード候補数 `K` を直近の平均受理長�
 - `shelf-server`（`src/apps/server/shelf_server.py`）に `--dfly-adaptive`（環境変数 `SHELF_HY4_DFLY_ADAPTIVE` 対応、CLI 優先）を追加し、`--dfly-dir` 指定時に `shelf-compute` へ転送する。`/v1/meta` の `speculative` は `{"method": "dfly2", "drafts": opts.dfly_drafts, "adaptive": bool(opts.dfly_adaptive)}` を返す。
 - JSONL 応答の `stats` イベントに `draft_tokens`・`k_switches`・`adaptive`、`done` イベントおよび CLI stderr ログに `draft_tokens`・`k_switches` を出力する。
 
-## 検証結果
+## K=2 からの復帰
+
+物理 R9700 4 枚での反復 128 トークンの検証では、初版の最終値は `K=2` だった。ラウンドごとの受理数は報告に含まれていない。単体テストでは、低受理の後にラウンドあたり 1 件の受理が続く条件で停滞を再現した。初版の小バッチの上昇しきい値は 1.25 件であり、この条件では観測を続けても届かない。また、17 スロット以上では `K=3` からの上昇に 3.35 件を必要とし、全候補を受理しても到達できなかった。
+
+候補数の切り替え後は新しい観測値で EMA を初期化し、各段で到達できる上昇しきい値を設定した。回帰テストは単一スロットで初期の受理数を 0 件、その後は `K=2` で 1 件、`K=3,4` で全件とし、2 → 3 → 4 → 5 の復帰を検査する。現行のしきい値は[開発者向け仕様](../../developer/hy4_flash.md)を参照。
+
+## 初版の検証結果
 
 ### CPU・文書同期・CLI 単体テスト
 

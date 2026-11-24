@@ -887,40 +887,31 @@ Hy4DflyAdaptiveController::Hy4DflyAdaptiveController(int initial_k, int switch_i
 void Hy4DflyAdaptiveController::reset(int initial_k) {
     current_k = Residency::resolve_draft_tokens(initial_k);
     acc_ema = 0.0;
-    has_sample = false;
     rounds = 0;
     rounds_since_switch = 0;
 }
 int Hy4DflyAdaptiveController::select_k(int current_k, double acc_ema, int batch_size) {
-    if (batch_size > 16) {
-        const double thr23 = current_k <= 2 ? 1.95 : 1.65;
-        const double thr34 = current_k <= 3 ? 3.35 : 3.05;
-        if (acc_ema < thr23)
-            return 2;
-        if (acc_ema < thr34)
-            return 3;
-        return 4;
-    }
-    const double thr23 = current_k <= 2 ? 1.25 : 1.05;
-    const double thr34 = current_k <= 3 ? 1.95 : 1.65;
-    const double thr45 = current_k <= 4 ? 3.35 : 3.05;
-    if (acc_ema < thr23)
+    const bool large_batch = batch_size > 16;
+    const double up23 = large_batch ? 1.50 : 0.90;
+    const double down23 = large_batch ? 1.20 : 0.70;
+    const double up34 = large_batch ? 2.55 : 1.95;
+    const double down34 = large_batch ? 2.25 : 1.65;
+    if (acc_ema < (current_k <= 2 ? up23 : down23))
         return 2;
-    if (acc_ema < thr34)
+    if (acc_ema < (current_k <= 3 ? up34 : down34))
         return 3;
-    if (acc_ema < thr45)
-        return 4;
-    return 5;
+    const double threshold45 = current_k <= 4 ? 3.35 : 3.05;
+    const int target_k = (large_batch || acc_ema < threshold45) ? 4 : 5;
+    return std::min(current_k + 1, target_k);
 }
 int Hy4DflyAdaptiveController::observe(double accepted_per_lane, int batch_size) {
-    if (batch_size < 1 || !std::isfinite(accepted_per_lane) || accepted_per_lane < 0.0)
+    if (batch_size < 1 || !std::isfinite(accepted_per_lane) || accepted_per_lane < 0.0 ||
+        accepted_per_lane > current_k)
         throw std::invalid_argument("Adaptive K の観測値が不正です");
-    if (!has_sample) {
+    if (rounds_since_switch == 0)
         acc_ema = accepted_per_lane;
-        has_sample = true;
-    } else {
-        acc_ema = (1.0 - double(ema_alpha)) * acc_ema + double(ema_alpha) * accepted_per_lane;
-    }
+    else
+        acc_ema += double(ema_alpha) * (accepted_per_lane - acc_ema);
     ++rounds;
     ++rounds_since_switch;
     if (rounds_since_switch < size_t(min_switch_interval))

@@ -27,7 +27,6 @@ struct Hy4DflyAdaptiveController {
     int min_switch_interval = 8;
     float ema_alpha = 0.25f;
     double acc_ema = 0.0;
-    bool has_sample = false;
     size_t rounds = 0;
     size_t rounds_since_switch = 0;
     size_t switches = 0;
