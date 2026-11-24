@@ -505,6 +505,15 @@ Status launch_program_run(
             ctx.value_trace == nullptr &&
             program_index < executor.tp_segment_graphs.size();
         if (tp_graph_ready) {
+            if (std::getenv("SHELF_TP_GRAPH_DEBUG") != nullptr) {
+                static bool printed = false;
+                if (!printed) {
+                    printed = true;
+                    std::fprintf(stderr, "[tp-graph] program dispatches=%zu segments=%zu\n",
+                                 program.dispatches.size(),
+                                 executor.tp_schedules[program_index].segments.size());
+                }
+            }
             ctx.tp_segment_graphs = &executor.tp_segment_graphs[program_index];
             ctx.tp_graph_policy = ctx.tp_graph_replay_only
                                       ? ::shelf::execution::TpGraphPolicy::ReplayOnly

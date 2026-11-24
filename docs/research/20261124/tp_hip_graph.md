@@ -134,6 +134,23 @@ CMakeCache の差も 0 だった。したがって 39.5 は環境ではなく、
 旧 build の 39.75 との差（約 8 %）は、`4e848d9e` の consumed 待ち（実測 3.8 %）と
 run ごとの key 計算・閾値の分。既定は graph on に戻した。
 
+### EXL3 と FP8 で graph の効き方が逆になる理由
+
+同じ 27B、TP=2、context 64、8 token で比較した。
+
+| model | graph off | graph on | program dispatches | trace の kernel 数 / agent | GPU busy / agent | 平均 kernel |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| EXL3-INT8-4bpw | 27.59 | **36.47（+32 %）** | 1,397 | 12,992 | 140 ms | 10.8 µs |
+| FP8 | **30.83** | 27.65（−10 %） | 1,653 | 10,406 | 174 ms | 16.7 µs |
+
+FP8 は program 上の dispatch は多いが、実行時の kernel は少なく、1 本あたりが長い。
+GPU busy が大きく、graph で回収できる host 待ちの idle が小さいため、131 回の
+graph launch と capture の費用が上回る。EXL3 は kernel が短く数が多いので idle が大きく、
+graph の効果が大きい。dispatch 数だけでは判定できない（1,653 > 1,397）。
+
+既定は on のまま（主 target の EXL3 / Flash-Next に合わせる）。FP8 のように
+「少なくて長い」kernel 構成の model では `SHELF_TP_HIP_GRAPH=0` を指定する。
+
 ### 39.5 tok/s の撤回（旧バイナリでの再測定）
 
 `4359002c` を worktree に取り、同じ build 設定で `shelf-bench` を作り直して
