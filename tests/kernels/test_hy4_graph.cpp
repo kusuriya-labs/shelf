@@ -434,7 +434,7 @@ void compare(const Path &body, const Path &draft, int ranks) {
     gpu.shutdown();
 }
 void compare_draft_counts(const Path &body, const Path &draft) {
-    Checkpoint model(body, body, draft, Owners{}, 1, 1);
+    Checkpoint model(body, resolve_engram(body), draft, Owners{}, 1, 1);
     share_expert_weights(model);
     for (auto &owners : model.owners)
         owners.fill(0);
@@ -863,15 +863,16 @@ void compare_transports(const Path &body, const Path &draft, int ranks, const Ow
 }
 
 void compare_lm_head_tp(const Path &body, const Path &draft) {
+    const Path engram = resolve_engram(body);
     setenv("SHELF_HY4_LM_HEAD_TP", "0", 1);
-    Checkpoint model_off(body, body, draft, Owners{}, 4, 1);
+    Checkpoint model_off(body, engram, draft, Owners{}, 4, 1);
     if (model_off.split_lm_head)
         throw std::runtime_error("SHELF_HY4_LM_HEAD_TP=0 でも split_lm_head が有効になりました");
     setenv("SHELF_HY4_LM_HEAD_TP", "1", 1);
-    Checkpoint model_on(body, body, draft, Owners{}, 4, 1);
+    Checkpoint model_on(body, engram, draft, Owners{}, 4, 1);
     if (!model_on.split_lm_head)
         throw std::runtime_error("4 rank 時に split_lm_head が有効になりませんでした");
-    Checkpoint model_ep3(body, body, draft, Owners{}, 3, 1);
+    Checkpoint model_ep3(body, engram, draft, Owners{}, 3, 1);
     if (model_ep3.split_lm_head)
         throw std::runtime_error("割り切れない 3 rank で split_lm_head が有効になりました");
     const size_t saved = model_off.bytes[0] - model_on.bytes[0];
@@ -888,7 +889,7 @@ void compare_lm_head_tp(const Path &body, const Path &draft) {
     std::vector<int> ref_greedy, ref_sample;
     std::vector<std::vector<int>> ref_batch;
     {
-        Checkpoint base_model(body, body, draft, Owners{}, 1, 1);
+        Checkpoint base_model(body, engram, draft, Owners{}, 1, 1);
         share_expert_weights(base_model);
         Residency gpu(base_model, 64, 1);
         auto st = gpu.reserve();
@@ -904,7 +905,7 @@ void compare_lm_head_tp(const Path &body, const Path &draft) {
         gpu.shutdown();
     }
     {
-        Checkpoint base_model(body, body, draft, Owners{}, 1, 1);
+        Checkpoint base_model(body, engram, draft, Owners{}, 1, 1);
         share_expert_weights(base_model);
         Residency gpu(base_model, 64, 4);
         auto st = gpu.reserve();
@@ -921,7 +922,7 @@ void compare_lm_head_tp(const Path &body, const Path &draft) {
     for (const char *transport : {"push", "peer", "host"}) {
         setenv("SHELF_HY4_EP_TRANSPORT", transport, 1);
         for (int slots : {1, 4}) {
-            Checkpoint base_model(body, body, draft, Owners{}, 1, 1);
+            Checkpoint base_model(body, engram, draft, Owners{}, 1, 1);
             share_expert_weights(base_model);
             Residency gpu(base_model, 64, slots);
             auto st = gpu.reserve();
@@ -1364,7 +1365,13 @@ void compare_tp(const Path &body, const Path &engram, const Path &draft) {
                     throw std::runtime_error("TP 疎な attention でバッチ Graph が起動しませんでした");
             }
             gpu.shutdown();
-            printf("ep=%d tp=%d sparse_2047_2053=pass\n", ep, tp);
+            printf("ep=%d tp=%d sparse_2047_2053=pass ids0=", ep, tp);
+            for (size_t i = 0; i < expected[0].size(); ++i)
+                printf("%s%d", i ? "," : "", expected[0][i]);
+            printf(" ids1=");
+            for (size_t i = 0; i < expected[1].size(); ++i)
+                printf("%s%d", i ? "," : "", expected[1][i]);
+            printf("\n");
         }
         fflush(stdout);
     }
@@ -1403,7 +1410,7 @@ int main(int argc, char **argv) {
             int length = std::stoi(argv[3]), chunk = std::stoi(argv[4]), ranks = std::stoi(argv[5]);
             if (length < 1 || length > 131072 || chunk < 1 || chunk > max_prefill_chunk || ranks < 1 || ranks > 4)
                 throw std::invalid_argument("prefill 計測の引数が範囲外です");
-            Checkpoint model(argv[1], argv[1], {}, Owners{}, 1, 1);
+            Checkpoint model(argv[1], resolve_engram(argv[1]), {}, Owners{}, 1, 1);
             share_expert_weights(model);
             Residency gpu(model, length + 1);
             auto status = gpu.reserve();
@@ -1426,7 +1433,7 @@ int main(int argc, char **argv) {
         }
         if (micro || moe || bits3 || router_b || steps || ctx_b) {
             Path draft = (steps || ctx_b) && std::string_view(argv[2]) != "-" ? Path(argv[2]) : Path{};
-            Checkpoint model(argv[1], argv[1], draft, Owners{}, 1, 1);
+            Checkpoint model(argv[1], resolve_engram(argv[1]), draft, Owners{}, 1, 1);
             share_expert_weights(model, bits3 || moe || steps || ctx_b);
             int slots = (steps || ctx_b) ? std::stoi(argv[4]) : 1;
             int ctx = ctx_b ? std::stoi(argv[5]) : 128;

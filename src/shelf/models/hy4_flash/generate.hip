@@ -1524,8 +1524,8 @@ Mat verify_batch(Target &target, const BatchLayout &layout,
 }
 struct BatchSync {
     std::vector<int> ids;
-    std::array<std::vector<int>, 16> actual;
-    std::array<int, 16> keep{};
+    std::array<std::vector<int>, 32> actual;
+    std::array<int, 32> keep{};
 };
 void decode_batch(Target &target, std::vector<BatchLane> &lanes, BatchStats &stats,
                   const std::function<void(int, int)> &emit, BatchSync *sync = nullptr) {
@@ -1940,7 +1940,7 @@ struct Hy4BatchSession::Impl {
     int draft_tokens;
     TpTeam team;
     std::array<std::optional<Target>, 4> targets;
-    std::array<std::array<std::vector<int>, 16>, 4> peer_histories, peer_generated;
+    std::array<std::array<std::vector<int>, 32>, 4> peer_histories, peer_generated;
     Emit emit;
     Done done;
     std::vector<std::optional<State>> states;
@@ -2355,7 +2355,7 @@ struct Hy4BatchSession::Impl {
         last_prefill_incomplete = false;
         team.run([&](int rank) {
             std::vector<BatchLane> lanes;
-            std::array<size_t, 16> peer_written{};
+            std::array<size_t, 32> peer_written{};
             for (size_t s : active_slots) {
                 auto &state = *states[s];
                 size_t cap = gpu.kv_pages_total ? std::min(gpu.tokens, state.reserved_pages * kv_page_tokens) : gpu.tokens;

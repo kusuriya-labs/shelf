@@ -10,7 +10,7 @@ expert の転送は peer access を有効にし、送信側 rank の kernel か�
 - K 分割: `o_proj`、Layer 0 MLP・DFly2 の `down_proj`、および `TP=2` 時の expert の `down_proj`
 - replicated: `q_a_proj`、`kv_a_proj_with_mqa`、`shared_experts`、indexer、router、embedding、norm、hyper-connection、`routed_expert_down_proj` / `up_proj`、`mtp_fusion.eh_proj`、および `TP=4` 時の expert 重み
 
-N / K の分割境界は 128 要素単位に揃える。attention は head を TP lane に割り当て、`learnable_sink_param` は lane ごとの head 範囲を使う。`shared_experts` は全 TP rank へ複製し、TP 専用 AllReduce を省いたうえで `<= 16` 行の融合 `gate+up+SwiGLU` カーネルと `routed_experts` + collective との別 stream 重複実行を有効にする。row-parallel 射影（`o_proj` / `down_proj`）と `TP>1` の routed expert 部分和は FP32 で保持・all-reduce した後に BF16 へ丸める（`TP=4` の `> 2 MiB` 転送は Two-Shot Reduce-Scatter + All-Gather）。greedy argmax 時は各 rank で局所 argmax を求めて `(val, id)` 8 byte/行 のみ集約する。TP と EP は別の受信バッファを使う。TP lane は全 rank が attention と KV を持つため、workspace は TP 時に 1 GiB、KV と index は全 rank に確保する。TP 時の prefill チャンク上限 `tp_prefill_rows` は 4096 行である。
+N / K の分割境界は 128 要素単位に揃える。attention は head を TP lane に割り当て、`learnable_sink_param` は lane ごとの head 範囲を使う。`shared_experts` は全 TP rank へ複製し、TP 専用 AllReduce を省いたうえで `<= 16` 行の融合 `gate+up+SwiGLU` カーネルと `routed_experts` + collective との別 stream 重複実行を有効にする。row-parallel 射影（`o_proj` / `down_proj`）と `TP>1` の routed expert 部分和は FP32 で保持・all-reduce した後に BF16 へ丸める（`TP=4` の `> 2 MiB` 転送は Two-Shot Reduce-Scatter + All-Gather）。greedy argmax 時は各 rank で局所 argmax を求めて `(val, id)` 8 byte/行 のみ集約する。TP（`tp_recv`）、`lm_head` / `tp_argmax`（`lm_head_recv` 32 KiB/rank と `lm_*` event）、EP（`ep_recv`）はそれぞれ独立した受信バッファと同期 event を使う。TP lane は全 rank が attention と KV を持つため、workspace は TP 時に 1 GiB、KV と index は全 rank に確保する。TP 時の prefill チャンク上限 `tp_prefill_rows` は 4096 行である。
 
 Attention は展開前の KV latent を用い、query と value に fold 済みの KV 射影を適用する。行数にかかわらず、各 query で参照する KV の列を確定してから、同じ順序で射影、スコアの正規化、値の集約を行う。線形射影の K 方向の分割数も行列の形状から決める。4 bpw の 3072 → 1536 射影は、6 行では K の各分割が使う 3 グループの符号とスケールを LDS に置く。同じ 4 bpw 形状の TP=1 の共有 FFN は 16 行以下で同じ入力に対する gate と up をまとめて起動し、出力回転と SwiGLU を融合する。部分和の加算順序、ゲートと up の BF16 丸め位置は個別の射影と同じである。
 
@@ -40,9 +40,9 @@ eager 実行では各 forward の開始時に 4 つの Engram 層の行を非同
 
 TP=1、EP=1〜4 では、SWA 30 層の固定長リングバッファと生成履歴をスロットごとに持ち、DSA 12 層の KV（294 B/tok/layer）と圧縮 index（64 B/tok/layer、4-token グループ単位）は `kv_page_tokens = 256` の共有ページプールとスロット別 `page_table` を介して参照する。DFly2 の隠れ状態と疎な attention の選択行もスロットに対応付ける。バッチ decode と verify は同じ rank 別 Graph を使う。EP=1 では層 0 と残りの層をまとめた 2 個の Graph を順に起動する。EP が複数の場合は rank 0 の routed expert と共有 FFN を別々の stream で実行し、合流後に部分和を加える。DFly2 の候補数 `K` は `--dfly-drafts` / `SHELF_HY4_DFLY_DRAFTS` で `2, 3, 4, 5`（既定 `4`）を指定でき、バッチ DFly2 は指定された `K` 候補を 1 回の Graph 起動で生成する。Target は最大 4 件、DFly2 は最大 2 件の Graph を予約単位で保持する。バッチのキーには稼働中の件数と候補数 `draft_tokens` を含め、上限を超えた場合は順番に入れ替える。疎な attention を使う行ではスロット番号と 2048 境界までの行数を区別し、draft ではスロットごとのサンプリング設定も区別する。位置、seed、受理行、token ID、Engram 入力は再生ごとに更新する。対応する転送構成と切替方法は[操作方法](../user/hy4_flash.md)を参照する。
 
-TP=1（EP=1〜4）、TP=2（EP=1〜2）、TP=4（EP=1）で `max_concurrent_requests=1..16` を受け付け、`generate_batch`、`Hy4BatchSession`、および `batch_draft` を利用できる。TP>1 の HIP Graph（Target / DFly2 / Batch）は rank ごとに capture した段グラフを collective 境界で分割し、`TpGraphStep` として peer 完了 event で連鎖再生する。
+TP=1（EP=1〜4）で `max_concurrent_requests=1..32`、TP=2（EP=1〜2）および TP=4（EP=1）で `max_concurrent_requests=1..16` を受け付け、`generate_batch`、`Hy4BatchSession`、および `batch_draft` を利用できる。TP>1 の HIP Graph（Target / DFly2 / Batch）は rank ごとに capture した段グラフを collective 境界で分割し、`TpGraphStep` として peer 完了 event で連鎖再生する。
 
-`generate_batch` は 1〜32 件を受け付ける。prefill は入力ごとに実行し、decode では処理中のスロットと位置を GPU に渡す。通常の dense・sliding decode は各層で全行のスコア計算、正規化、値の集約を 1 つのカーネルで行い、KV と index を一括更新する。疎な attention の対象になる位置はスロットごとに処理する。
+`generate_batch` は TP=1 で 1〜32 件、TP>1 で 1〜16 件を受け付ける。prefill は入力ごとに実行し、decode では処理中のスロットと位置を GPU に渡す。通常の dense・sliding decode は各層で全行のスコア計算、正規化、値の集約を 1 つのカーネルで行い、KV と index を一括更新する。疎な attention の対象になる位置はスロットごとに処理する。
 
 バッチ decode と verify で各 EP rank の GPU 計画は所有 expert、入力行、重み、元の加算順を保持する。複数行は expert ごとにまとめ、最大 16 行の `Hy4ExpertBatch` を全 rank で gfx1201 WMMA に渡す。部分和は各入力行の expert 順で計算し、rank 0 が rank 順に加算する。転送には通常経路と同じ方向別の peer 判定と 2 組の event を使用する。
 

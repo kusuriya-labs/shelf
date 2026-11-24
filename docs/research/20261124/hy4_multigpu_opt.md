@@ -46,7 +46,7 @@
 - **FP32 段階集約後の BF16 丸め (`tp_sum_f32`)**:
   - [linear.hip](file:///home/homelab1/coding-local/shelf/.worktrees/hy4-multigpu-opt/src/shelf/models/hy4_flash/linear.hip) / [moe.hip](file:///home/homelab1/coding-local/shelf/.worktrees/hy4-multigpu-opt/src/shelf/models/hy4_flash/moe.hip) / [ops.hip](file:///home/homelab1/coding-local/shelf/.worktrees/hy4-multigpu-opt/src/shelf/models/hy4_flash/ops.hip) / [residency.cpp](file:///home/homelab1/coding-local/shelf/.worktrees/hy4-multigpu-opt/src/shelf/models/hy4_flash/residency.cpp): `tp > 1` において、`row_parallel` な `o_proj` / `down_proj`（`EP=1, TP=4` 時はさらに `decode_experts` / `prefill_experts` の `routed_experts` も）の中間結果を BF16 へ丸めず FP32（`f32_output` / `result_f32`）として `tp_sum_f32` へ渡し、4 rank（または 2 rank）を FP32 のまま総和してから最後に 1 回だけ RNE で BF16 へ丸める経路を実装した。`tp == 1` の既存動作は一切変更しない。
 - **LM Head / Argmax の TP=4 分散**:
-  - [generate.hip](file:///home/homelab1/coding-local/shelf/.worktrees/hy4-multigpu-opt/src/shelf/models/hy4_flash/generate.hip) / [residency.cpp](file:///home/homelab1/coding-local/shelf/.worktrees/hy4-multigpu-opt/src/shelf/models/hy4_flash/residency.cpp) / [ops.hip](file:///home/homelab1/coding-local/shelf/.worktrees/hy4-multigpu-opt/src/shelf/models/hy4_flash/ops.hip): 語彙方向 `120,832` を TP 分割したまま、`greedy` 時は各 rank でローカル最大値＋グローバル語彙 ID をパック（`tp_argmax_pack`）して全 rank へ共有し `tp_argmax_reduce` で 8B/row のみの最小通信で確定トークンを決定する。サンプリング時または `logits` 要求時のみ `tp_gather_logits` で結合する。
+  - [generate.hip](file:///home/homelab1/coding-local/shelf/.worktrees/hy4-multigpu-opt/src/shelf/models/hy4_flash/generate.hip) / [residency.cpp](file:///home/homelab1/coding-local/shelf/.worktrees/hy4-multigpu-opt/src/shelf/models/hy4_flash/residency.cpp) / [ops.hip](file:///home/homelab1/coding-local/shelf/.worktrees/hy4-multigpu-opt/src/shelf/models/hy4_flash/ops.hip): 語彙方向 `120,832` を TP 分割したまま、`greedy` 時は各 rank でローカル最大値＋グローバル語彙 ID をパック（`tp_argmax_pack`）して専用の `lm_head_recv`（32 KiB/rank = `2 parity × 4 rank × lm_argmax_stride`、`lm_argmax_stride = 4096 B`）と `lm_*` event（`lm_ready` / `lm_done` / `lm_arrived` / `lm_consumed`）で共有し `tp_argmax_reduce` で 8B/row のみの最小通信で確定トークンを決定する。サンプリング時または `logits` 要求時のみ `tp_gather_logits` で結合する。
 - **DFlash2 5 層の TP 分割と `tp_prefill_rows=4096`**:
   - [checkpoint.cpp](file:///home/homelab1/coding-local/shelf/.worktrees/hy4-multigpu-opt/src/shelf/models/hy4_flash/checkpoint.cpp) / [residency.cpp](file:///home/homelab1/coding-local/shelf/.worktrees/hy4-multigpu-opt/src/shelf/models/hy4_flash/residency.cpp): DFlash2 の Attention・MLP を `Split::N`/`Split::K` で TP 分割し、`tp_prefill_rows` を `4096` へ引き上げるとともに [hy4_compute.cpp](file:///home/homelab1/coding-local/shelf/.worktrees/hy4-multigpu-opt/src/apps/compute/hy4_compute.cpp) / [shelf_server.py](file:///home/homelab1/coding-local/shelf/.worktrees/hy4-multigpu-opt/src/apps/server/shelf_server.py) の CLI・ドキュメントを `--tensor-parallel {1,2,4}` へ同期した。
 - **マルチスロット (`B=1..16`) ＋マルチランク HIP Graph (`TpGraphStep`)**:
@@ -116,7 +116,7 @@ R9700 × 4（各 `--capacity 31.859375` GiB = 34,208,743,424 B、`safety_gib=0.5
 
 実モデル（`BODY=/home/homelab1/llm-fast-load/Hy4-flash-exl3-4bpw-mul24`、`DRAFT=/home/homelab1/llm-fast-load/Hy4-flash-dfly-4bpw`、`ENGRAM=/home/homelab1/datapool/rocm-exl3-rdna2/hy4-flash-pilot/engram-e4m3fn`）を用い、`ROCR_VISIBLE_DEVICES=GPU-a8e9ddefa2d60f55`・`SHELF_HY4_CHECK_EVENT_REUSE=1`・`flock /tmp/r9700.lock` 下ですべての GPU 検証を実行した。
 
-- `./build/tests/test_hy4_reduce`: **PASS**（exit 0）
+- `./build/tests/test_hy4_reduce`: **PASS**（`check_peer_collectives`・`check_tp4_collectives`・`check_tp4_reduce_argmax_war` すべて exit 0）
 - `./build/tests/test_hy4_peer_transfer`: **PASS**（`probe fallback mode=push corrupt=0/1 pass`・`probe fallback mode=peer corrupt=0/1 pass`）
 - `SHELF_HY4_ENGRAM_DIR="$ENGRAM" ./build/tests/test_hy4_graph "$BODY" "$DRAFT"`（既定）: **PASS**（`ep=1/3/4`: いずれも `target=7/7 draft=7/7 target_captures=4 draft_captures=2 capture_fallback=pass`）
 - `./build/tests/test_hy4_graph "$BODY" "$DRAFT" tp "$ENGRAM"`:
@@ -126,15 +126,31 @@ R9700 × 4（各 `--capacity 31.859375` GiB = 34,208,743,424 B、`safety_gib=0.5
   - `EP=2, TP=2`（`SHELF_HY4_TP_FILTER=2,2`）: **PASS**
     - `transport=push/peer/host` すべて `prefill20_l2=312.232068`, `rel=2.382646e-01`, `ref_arg=269(12.7579)`, `tp_arg=297(12.3074)`
     - `graph_parity=pass target=7/7 draft=7/7 capture_fallback=pass`
-    - バッチ一致（`draft=0/1`, `graph=0/1`）: `B=2,4,8,16` すべて `greedy=B/B`、`session=pass draft_rounds=4`、`sparse_2047_2053=pass`
+    - バッチ一致（`draft=0/1`, `graph=0/1`）: `B=2,4,8,16` すべて `greedy=B/B`、`session=pass draft_rounds=4`、`sparse_2047_2053=pass`（`ids0=79,58,220,443,220,443`、`ids1=72,198,90,26,90,26`）
   - `EP=1, TP=4`（`SHELF_HY4_TP_FILTER=1,4`）: **PASS**
     - `transport=push/peer/host` すべて `prefill20_l2=337.009349`, `rel=2.571722e-01`, `ref_arg=269(12.7579)`, `tp_arg=297(12.4811)`
     - `graph_parity=pass target=7/7 draft=7/7 capture_fallback=pass`
     - 長文チャンク境界: `chunk1536_vs_512_l2=0.000000`, `rel=0.000000e+00`, `argmax=match`
-    - バッチ一致（`draft=0/1`, `graph=0/1`）: `B=2,4,8,16` すべて `greedy=B/B`、`session=pass draft_rounds=8`、`sparse_2047_2053=pass`
+    - バッチ一致（`draft=0/1`, `graph=0/1`）: `B=2,4,8,16` すべて `greedy=B/B`、`session=pass draft_rounds=8`、`sparse_2047_2053=pass`（`ids0=79,58,26,26,60,84`、`ids1=3600,82,1626,7756,331,76`）
   - 備考: `EP=1, TP=1` 基準（`ref_arg=269`）に対する `prefill20` の `rel ≒ 0.22〜0.26` および `tp_arg=297` は、`EP=4, TP=1` 時点から生じる layer 1 共有ウェイト構成下での 42 層ルーティング集約順序差に起因する。`push`/`peer`/`host` 輸送間・`eager`/`Graph` 間・`chunk 1536`/`512` 間・`B=1..16`・位置 `2047`/`2053` 混在セッションではすべて完全一致を確認済み。
 - `SHELF_HY4_ENGRAM_DIR="$ENGRAM" ./build/tests/test_hy4_graph "$BODY" "$DRAFT" batch`: **PASS**（`ep=1..4` すべて `draft=0/1`, `graph=0/1`, `B=2..16` で `greedy=B/B`、`session=pass draft_rounds=8`）
 - `SHELF_HY4_ENGRAM_DIR="$ENGRAM" ./build/tests/test_hy4_graph "$BODY" "$DRAFT" transport`: **PASS**（`ep=3/4`, `transport=push/peer/host`, `draft=0/1`, `B=1,2,4,8,16` すべて `greedy=B/B`）
+
+### 5.3 `tp_recv` / `tp_argmax` WAR ハザード修正と `EP=1, TP=4` 5/5 決定性検証
+
+- **事象・原因（EXP-WAR-1 / ACCEPT）**:
+  - `EP=1, TP=4` の `sparse_2047_2053`（DFly2 `6` 行検証ステップ直後の `tp_argmax`）を連続反復した際、`reduce_tp4` の `slot_2m` が `tp_recv[dst]` の parity 0 領域（`0..6 MiB`）・parity 1 領域（`6..12 MiB`）を使う一方、旧 `tp_argmax` が同一 `tp_recv[dst]` の先頭 `(parity_idx * 4 + src_tp) * 4096`（`0..32 KiB`）を両 parity 共通で上書きしていた。
+  - `tp_argmax` が parity 1 で `+16 KiB..32 KiB` へ書込む際、Wait 先イベントは `tp_consumed[dst][1]` であるため、parity 0 側 `reduce_tp4`（6 行 × 3072 FP32 = `73,728 B`）の受信側 `sum4` 読み出し完了前（特に Graph capture / replay 中や非同期実行中）に先頭 32 KiB が上書きされる WAR ハザードが発生していた。また `!push`（`peer`）経路の `tp_argmax` 末尾に `tp_consumed[dst][p]` 待ちが欠落していた。
+- **修正・統合内容（`origin/feat/hy4-r9700-ep-opt` `8272b158` へのリベース統合後）**:
+  - [residency.h](file:///home/homelab1/coding-local/shelf/.worktrees/hy4-multigpu-opt/include/shelf/models/hy4_flash/residency.h) / [residency.cpp](file:///home/homelab1/coding-local/shelf/.worktrees/hy4-multigpu-opt/src/shelf/models/hy4_flash/residency.cpp): `lm_head` / `tp_argmax` 専用の `lm_head_recv`（`2 * 4 * lm_argmax_stride = 32 KiB/rank`、`lm_argmax_stride = lm_argmax_max_rows * 8 = 4096 B`）および専用 event 群（`lm_ready` / `lm_done` / `lm_arrived` / `lm_consumed`）へ一本化して `tp_recv` から物理分離し、`bytes > lm_argmax_stride` ガード、Graph capture 時の `(tp_captured[rank].size() & 1u)` parity スロット選択、`!push` 経路の `lm_arrived` / `lm_ready` / `lm_consumed` 同期を統一した（論理 rank テスト確保側の [test_hy4_graph.cpp](file:///home/homelab1/coding-local/shelf/.worktrees/hy4-multigpu-opt/tests/kernels/test_hy4_graph.cpp)・[test_hy4_reduce.cpp](file:///home/homelab1/coding-local/shelf/.worktrees/hy4-multigpu-opt/tests/unit/test_hy4_reduce.cpp) および [docs/developer/hy4_flash.md](file:///home/homelab1/coding-local/shelf/.worktrees/hy4-multigpu-opt/docs/developer/hy4_flash.md) も同期）。併せて [generate.hip](file:///home/homelab1/coding-local/shelf/.worktrees/hy4-multigpu-opt/src/shelf/models/hy4_flash/generate.hip) の batch 同期バッファ（`BatchSync`・`peer_histories`・`peer_generated`・`peer_written`）上限も `32` スロットへ整合させた。
+  - [test_hy4_reduce.cpp](file:///home/homelab1/coding-local/shelf/.worktrees/hy4-multigpu-opt/tests/unit/test_hy4_reduce.cpp): 6 行 MoE FP32 reduction（`tp_sum_f32`, `6 * 1536` 要素）直後にストリーム同期なしで 6 行 `tp_argmax` を両 parity・全 4 輸送モード（`push`, `peer`, `host`, `mixed`）で連続実行する回帰テスト `check_tp4_reduce_argmax_war` を追加し、`test_hy4_reduce` で **PASS**。
+- **5/5 連続決定性検証（リベース統合後・R9700 上、各コマンド `SHELF_HY4_CHECK_EVENT_REUSE=1`）**:
+  - `SHELF_HY4_TP_FILTER=1,4 ./build/tests/test_hy4_graph "$BODY" "$DRAFT" tp "$ENGRAM"` を連続 5 回実行し、5/5 **PASS**、かつ全 5 回で非タイミング出力が 100% 一致（`diff` 差分ゼロ）:
+    - 2047 単独 prefill: `rank=0..3 prefill_choices=330710, 365000, 336021, 311101`、`decode_choices=3394, 3609, 3342, 3431`
+    - 2053 単独 prefill: `rank=0..3 prefill_choices=331680, 366067, 337001, 312020`、`decode_choices=3338, 3612, 3572, 3254`
+    - `ep=1 tp=4 session=pass draft_rounds=8`
+    - `ep=1 tp=4 sparse_2047_2053=pass ids0=79,58,26,26,60,84 ids1=3600,82,1626,7756,331,76`
+  - 全 GPU 回帰スイートもリベース統合後のビルドで合格: `test_hy4_graph`（`default`: `ep=1,3,4` `capture_fallback=pass`・`k_parity k=2..5`・`lm_head_tp ep=4 push/peer/host slots=1/4 pass` / `batch`: `ep=1..4 B=2..32 greedy=B/B`・`session=pass` / `transport`: `ep=3,4 push/peer/host B=1..16 greedy=B/B` / `bits3bench` / `tp`: `EP=4,1`, `EP=2,2`, `EP=1,4` / `stepbench 32 1`）、`test_hy4_reduce`、`test_hy4_peer_transfer`、`test_hy4_prefix_cache`（`ALL_HY4_PREFIX_CACHE_TESTS_PASSED`）。
 
 ---
 

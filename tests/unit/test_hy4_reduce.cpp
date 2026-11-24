@@ -539,6 +539,141 @@ void check_tp4_collectives() {
     }
     gpu.shutdown();
 }
+
+void check_tp4_reduce_argmax_war() {
+    using namespace shelf::hy4;
+    constexpr int rows = 6;
+    constexpr size_t moe_elements = size_t(rows) * 1536u;
+    constexpr size_t moe_bf16_bytes = moe_elements * sizeof(uint16_t);
+    constexpr size_t moe_f32_bytes = moe_elements * sizeof(float);
+    constexpr size_t recv_bytes = 12u << 20;
+    Checkpoint model;
+    Residency gpu(model, 64);
+    gpu.ranks = 4;
+    gpu.tp_size = 4;
+    gpu.ep_size = 1;
+    gpu.lm_head_tp = true;
+    gpu.physical.fill(0);
+    gpu.tp_barrier[0] = std::make_unique<SyncBarrier>(4);
+    gpu.all_barrier = std::make_unique<SyncBarrier>(4);
+    std::array<uint16_t *, 4> bf16_out{};
+    std::array<float *, 4> f32_in{}, local_vals{};
+    std::array<int *, 4> local_ids{}, tokens_out{};
+    for (int r = 0; r < gpu.ranks; ++r) {
+        auto arena = shelf::gpu::GpuArena::create(
+            0, moe_bf16_bytes + moe_f32_bytes + recv_bytes + 2 * 4 * lm_argmax_stride + 65536);
+        if (!arena.ok())
+            throw std::runtime_error(arena.status().message());
+        gpu.arenas.push_back(arena.release());
+        auto allocate = [&](size_t size) {
+            auto memory = gpu.arenas.back().allocate_aligned(size, 256);
+            if (!memory.ok())
+                throw std::runtime_error(memory.status().message());
+            return memory.value().data();
+        };
+        bf16_out[r] = static_cast<uint16_t *>(allocate(moe_bf16_bytes));
+        f32_in[r] = static_cast<float *>(allocate(moe_f32_bytes));
+        gpu.tp_recv[r] = allocate(recv_bytes);
+        gpu.lm_head_recv[r] = allocate(2 * 4 * lm_argmax_stride);
+        local_vals[r] = static_cast<float *>(allocate(rows * sizeof(float)));
+        local_ids[r] = static_cast<int *>(allocate(rows * sizeof(int)));
+        tokens_out[r] = static_cast<int *>(allocate(rows * sizeof(int)));
+        checked(hipHostMalloc(&gpu.reduce_staging[r], tp_prefill_rows * 3072u * 2u));
+        checked(hipHostMalloc(&gpu.lm_staging[r], Residency::lm_staging_bytes(), hipHostMallocPortable));
+        checked(hipStreamCreateWithFlags(&gpu.compute[r], hipStreamNonBlocking));
+        for (auto events : {&gpu.tp_ready, &gpu.tp_done, &gpu.tp_arrived, &gpu.tp_consumed, &gpu.tp_ag_done,
+                            &gpu.lm_ready, &gpu.lm_done, &gpu.lm_arrived, &gpu.lm_consumed})
+            for (auto &event : (*events)[r])
+                checked(hipEventCreateWithFlags(&event, hipEventDisableTiming | hipEventReleaseToSystem));
+    }
+    struct Mode {
+        bool push;
+        bool all_peer;
+        bool mixed;
+    };
+    const std::array<Mode, 4> modes{{
+        {true, true, false},
+        {false, true, false},
+        {true, false, false},
+        {false, false, true},
+    }};
+    for (const auto &mode : modes) {
+        gpu.push = mode.push;
+        for (int r = 0; r < 4; ++r) {
+            gpu.peer[r].fill(mode.all_peer || mode.mixed);
+            if (mode.mixed)
+                gpu.peer[0][1] = gpu.peer[1][0] = false;
+            gpu.peer[r][r] = true;
+        }
+        std::array<std::exception_ptr, 4> failures{};
+        std::array<std::jthread, 4> workers;
+        for (int r = 0; r < 4; ++r)
+            workers[r] = std::jthread([&, r] {
+                try {
+                    for (int pass = 0; pass < 16; ++pass) {
+                        if (pass == 8) {
+                            std::vector<float> flip_in(moe_elements, float(r + 1));
+                            checked(hipMemcpyAsync(f32_in[r], flip_in.data(), moe_f32_bytes, hipMemcpyHostToDevice,
+                                                   gpu.compute[r]));
+                            gpu.tp_sum_f32(bf16_out[r], f32_in[r], r, moe_bf16_bytes);
+                            checked(hipStreamSynchronize(gpu.compute[r]));
+                        }
+                        std::vector<float> host_f32(moe_elements);
+                        for (size_t idx = 0; idx < moe_elements; ++idx)
+                            host_f32[idx] = float((pass + r + 1) * 0.5f + float(idx % 17) * 0.25f);
+                        std::array<float, rows> vals{};
+                        std::array<int, rows> ids{};
+                        for (int row = 0; row < rows; ++row) {
+                            int winner = (pass + row) % 4;
+                            vals[row] = (r == winner) ? 100.0f + float(row + pass) : float(r + row);
+                            ids[row] = r * 1000 + pass * 10 + row;
+                        }
+                        checked(hipMemcpyAsync(f32_in[r], host_f32.data(), moe_f32_bytes, hipMemcpyHostToDevice,
+                                               gpu.compute[r]));
+                        checked(hipMemcpyAsync(local_vals[r], vals.data(), rows * sizeof(float), hipMemcpyHostToDevice,
+                                               gpu.compute[r]));
+                        checked(hipMemcpyAsync(local_ids[r], ids.data(), rows * sizeof(int), hipMemcpyHostToDevice,
+                                               gpu.compute[r]));
+                        gpu.tp_sum_f32(bf16_out[r], f32_in[r], r, moe_bf16_bytes);
+                        gpu.tp_argmax(local_vals[r], local_ids[r], tokens_out[r], r, rows);
+                        std::vector<uint16_t> out_bf16(moe_elements);
+                        std::array<int, rows> out_tokens{};
+                        checked(hipMemcpyAsync(out_bf16.data(), bf16_out[r], moe_bf16_bytes, hipMemcpyDeviceToHost,
+                                               gpu.compute[r]));
+                        checked(hipMemcpyAsync(out_tokens.data(), tokens_out[r], rows * sizeof(int),
+                                               hipMemcpyDeviceToHost, gpu.compute[r]));
+                        checked(hipStreamSynchronize(gpu.compute[r]));
+                        for (size_t idx = 0; idx < moe_elements; ++idx) {
+                            float expected_sum = 0.0f;
+                            for (int k = 0; k < 4; ++k)
+                                expected_sum += float((pass + k + 1) * 0.5f + float(idx % 17) * 0.25f);
+                            uint16_t expected = std::bit_cast<uint32_t>(expected_sum) >> 16;
+                            if (out_bf16[idx] != expected)
+                                throw std::runtime_error("TP=4 6行 F32 reduction と tp_argmax 連続実行で reduction 値が破損しました");
+                        }
+                        for (int row = 0; row < rows; ++row) {
+                            int winner = (pass + row) % 4;
+                            if (out_tokens[row] != winner * 1000 + pass * 10 + row)
+                                throw std::runtime_error("TP=4 6行 F32 reduction と tp_argmax 連続実行で argmax 値が破損しました");
+                        }
+                    }
+                } catch (const std::exception &e) {
+                    std::fprintf(stderr, "rank=%d err=%s\n", r, e.what());
+                    failures[r] = std::current_exception();
+                    gpu.abort_collectives();
+                } catch (...) {
+                    failures[r] = std::current_exception();
+                    gpu.abort_collectives();
+                }
+            });
+        for (auto &worker : workers)
+            worker.join();
+        for (auto &failure : failures)
+            if (failure)
+                std::rethrow_exception(failure);
+    }
+    gpu.shutdown();
+}
 }
 
 int main() {
@@ -574,6 +709,7 @@ int main() {
             check_peer_collectives();
             check_lm_head_collectives();
             check_tp4_collectives();
+            check_tp4_reduce_argmax_war();
         } catch (const std::exception &e) {
             std::fprintf(stderr, "%s\n", e.what());
             return 1;
