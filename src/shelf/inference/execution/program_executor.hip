@@ -706,7 +706,19 @@ static Status execute_tp_segment(const ::shelf::runtime::Program& program,
     if (slot.valid && !(slot.key == key))
         return execute_program_range(program, ctx, stream, begin, end);
     if (slot.valid) {
-        if (hipGraphLaunch(slot.exec, stream) == hipSuccess) return Status::make_ok();
+        if (hipGraphLaunch(slot.exec, stream) == hipSuccess) {
+            if (graph_debug) {
+                static uint32_t replay_log = 0u;
+                if (replay_log < 6u) {
+                    ++replay_log;
+                    std::fprintf(stderr, "[tp-graph] replay seg=%zu\n", segment_index);
+                }
+            }
+            return Status::make_ok();
+        }
+        if (graph_debug)
+            std::fprintf(stderr, "[tp-graph] replay failed seg=%zu err=%s\n", segment_index,
+                         hipGetErrorString(hipGetLastError()));
         shelf::gpu::discard_cleanup_result(hipGraphExecDestroy(slot.exec));
         slot = TpSegmentGraphSlot{};
         slot.failed = true;
