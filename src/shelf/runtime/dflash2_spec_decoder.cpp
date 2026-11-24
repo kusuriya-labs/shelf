@@ -2561,18 +2561,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             result_out.finished = true;
             continue;
         }
-        if (!plan.batched) {
-            const int32_t forced =
-                plan.thinking_allowance == 0u ? plan.thinking_close_token : -1;
-            const Status st = run_single_target(decoder, plan.anchor, result_out, forced,
-                                                plan.slot->token_bitmask);
-            if (!st.ok()) return st;
-            mark(single_ms);
-            if (qwen_hybrid::is_stop_token(decoder.config.eos_tokens, result_out.pending_token)) {
-                result_out.finished = true;
-            }
-            continue;
-        }
+        if (!plan.batched) continue;
 
         if (!tree_mode && env_flag_enabled("SHELF_DFLASH2_TREE_TRACE_CHAIN", false)) {
             std::fprintf(stderr, "DFCAND pos=%u sample_index=%llu ids=", plan.position,
@@ -2639,7 +2628,14 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         result_out.emitted_count = std::min(
             static_cast<uint32_t>(verify.emitted_tokens.size()), plan.remaining);
         for (uint32_t j = 0; j < result_out.emitted_count; ++j) {
-            result_out.emitted[j] = verify.emitted_tokens[j];
+            const int32_t token = verify.emitted_tokens[j];
+            if (token < 0 || static_cast<uint32_t>(token) >= decoder.target->model.config->vocab_size) {
+                char reason[160];
+                std::snprintf(reason, sizeof(reason), "invalid verify token %d at position %u, slot %u, row %u of %u",
+                              token, plan.position + j, decoder.sequence->slot, plan.row_begin + j, total_rows);
+                return Status::invalid_state(reason, __FILE__, __LINE__);
+            }
+            result_out.emitted[j] = token;
         }
         if (verify.correction_valid) {
             result_out.pending_token = verify.correction_token;
@@ -2866,6 +2862,18 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         if (profile) std::fprintf(stderr,
             "DFPHASE_SLOT slot=%u rows=%u drafts=%u accepted=%u emitted=%u\n",
             decoder.sequence->slot, plan.total_rows, plan.drafts, accepted, result_out.emitted_count);
+    }
+
+    for (std::size_t i = 0; i < plans.size(); ++i) {
+        const SlotPlan& plan = plans[i];
+        if (plan.batched || plan.stopped) continue;
+        auto& decoder = *plan.decoder;
+        auto& result_out = out.slots[i];
+        const int32_t forced = plan.thinking_allowance == 0u ? plan.thinking_close_token : -1;
+        const auto st = run_single_target(decoder, plan.anchor, result_out, forced, plan.slot->token_bitmask);
+        if (!st.ok()) return st;
+        mark(single_ms);
+        result_out.finished = qwen_hybrid::is_stop_token(decoder.config.eos_tokens, result_out.pending_token);
     }
 
     if (profile) {

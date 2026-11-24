@@ -8,7 +8,7 @@
 namespace shelf::runtime {
 
 constexpr uint32_t kDFlash2AdaptiveMaxK = 5u;
-constexpr uint32_t kDFlash2AdaptiveInitialK = 4u;
+constexpr uint32_t kDFlash2AdaptiveInitialK = kDFlash2AdaptiveMaxK;
 constexpr uint32_t kDFlash2AdaptiveSwitchInterval = 8u;
 constexpr double kDFlash2AdaptiveEmaAlpha = 0.25;
 

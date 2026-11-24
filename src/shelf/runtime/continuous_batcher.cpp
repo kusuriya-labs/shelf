@@ -401,20 +401,13 @@ void ContinuousBatcher::prefix_begin_capture(RuntimeRequest& request) {
     if (prefix_cache_->strategy() == PrefixCacheStrategy::Slot) {
         return;
     }
-    auto capture = prefix_cache_->begin_capture(request.sequence);
+    auto capture = prefix_cache_->begin_capture(request.sequence, stream_);
     if (!capture.ok()) {
         return;
     }
     request.prefix_capture = capture.value();
-    request.prefix_boundary_pos = 0;
     const uint32_t position = request.sequence.position;
-    if (position > 0 && position % config_.page_tokens == 0) {
-        const Status st =
-            prefix_cache_->capture_boundary(capture.value(), request.sequence, stream_);
-        if (st.ok()) {
-            request.prefix_boundary_pos = position;
-        }
-    }
+    request.prefix_boundary_pos = position % config_.page_tokens == 0u ? position : 0u;
 }
 
 void ContinuousBatcher::prefix_capture_after_step(RuntimeRequest& request) {
@@ -988,9 +981,12 @@ Result<StepResult> ContinuousBatcher::step() {
             if (scheduled.compute_logits) {
                 if (scheduled.sample) {
                     if (token < 0) {
-                        return Status::invalid_state(
-                            "greedy sampled request returned invalid token",
-                            __FILE__, __LINE__);
+                        char reason[160];
+                        std::snprintf(reason, sizeof(reason),
+                            "greedy sampling returned %d for request %lld at position %u (output %u of %u)",
+                            token, static_cast<long long>(request.external_request_id), scheduled.prefix_tokens,
+                            row - 1u, output.num_outputs);
+                        return Status::invalid_state(reason, __FILE__, __LINE__);
                     }
                     const CommitAction action =
                         commit_sampled_token(request, token, config_.eos_token_ids);
@@ -1264,16 +1260,12 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
                 slot.num_drafts = static_cast<uint32_t>(requested);
             }
         }
-        if (dflash_.adaptive || measure_drafts != nullptr) slot.proposal_drafts = dflash_.num_drafts;
+        if (!dflash_.adaptive && measure_drafts != nullptr) slot.proposal_drafts = dflash_.num_drafts;
         slot.remaining_tokens = request->max_new_tokens - request->generated_tokens;
         slot.page_tokens =
             request->prefix_capture != 0u ? config_.page_tokens : 0u;
-        if (slot.page_tokens != 0u && slot.decoder->gdn_ranks.size() == 1u &&
-            slot.decoder->tp_hook == nullptr) {
-            const auto& pools = slot.decoder->gdn_ranks.front().spec_pools;
-            if (pools.qsa == nullptr && pools.ple == nullptr)
-                slot.capture_boundary = [this, request] { prefix_capture_after_step(*request); };
-        }
+        if (slot.page_tokens != 0u && dflash2_can_capture_boundary(*slot.decoder))
+            slot.capture_boundary = [this, request] { prefix_capture_after_step(*request); };
         slot.thinking_allowance = thinking_allowance(*request);
         slot.thinking_close_token = request->thinking.close_token;
         if (request->structured_dflash) {
@@ -1329,7 +1321,28 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
         if (cost_trace) clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu_start);
         const auto cost_start = cost_trace ? std::chrono::steady_clock::now()
                                             : std::chrono::steady_clock::time_point{};
-        auto batch_result = dflash2_spec_step_batch(*dflash_.batch, slots, other_decoding_requests);
+        auto run_verify = [&]() -> Result<DFlash2SpecBatchOutput> {
+            constexpr std::size_t cohort = 8u;
+            if (!dflash_.adaptive || slots.size() <= 16u || prefix_cache_ == nullptr)
+                return dflash2_spec_step_batch(*dflash_.batch, slots, other_decoding_requests);
+            DFlash2SpecBatchOutput merged;
+            merged.slots.reserve(slots.size());
+            for (std::size_t first = 0; first < slots.size(); first += cohort) {
+                const auto group = std::span(slots).subspan(first, std::min(cohort, slots.size() - first));
+                auto part = dflash2_spec_step_batch(*dflash_.batch, group,
+                    other_decoding_requests + static_cast<uint32_t>(slots.size() - group.size()));
+                if (!part.ok()) return part.status();
+                auto& batch = part.value();
+                merged.slots.insert(merged.slots.end(), batch.slots.begin(), batch.slots.end());
+                merged.rounds += batch.rounds;
+                merged.total_rows += batch.total_rows;
+                merged.round_ms += batch.round_ms;
+                merged.draft_gpu_ms += batch.draft_gpu_ms;
+                merged.verify_gpu_ms += batch.verify_gpu_ms;
+            }
+            return merged;
+        };
+        auto batch_result = run_verify();
         if (cost_trace) clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu_end);
         const double cost_wall = cost_trace ? std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - cost_start).count() : 0.0;

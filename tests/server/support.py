@@ -243,7 +243,8 @@ class ComputeHarness:
                  mtp: bool = False,
                  mtp_drafts: int = 4,
                  mtp_window: int | None = None,
-                 mtp_sink: int | None = None):
+                 mtp_sink: int | None = None,
+                 adaptive_dflash: bool = False):
         self.log_path = log_path
         self.arena_gib = arena_gib
         self.auto_arena = auto_arena
@@ -254,6 +255,7 @@ class ComputeHarness:
         self.max_num_batched_tokens = max_num_batched_tokens
         self.prefill_chunk = prefill_chunk
         self.rope_factor = rope_factor
+        self.adaptive_dflash = adaptive_dflash
         self.mtp = mtp
         self.mtp_drafts = mtp_drafts
         self.mtp_window = (int(os.environ.get("SHELF_MTP_WINDOW", "0"))
@@ -336,6 +338,8 @@ class ComputeHarness:
             argv += ["--dflash2-model-dir", str(self.dflash2_model_dir),
                      "--dflash2-drafts", str(self.dflash2_drafts),
                      "--dflash2-tree-budget", "0"]
+        if self.adaptive_dflash:
+            argv += ["--dflash2-adaptive", "--dflash2-max-sessions", str(self.max_concurrent_requests)]
         if self.mtp:
             argv += ["--mtp", "--mtp-drafts", str(self.mtp_drafts)]
             if self.mtp_window:

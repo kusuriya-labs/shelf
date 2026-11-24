@@ -43,6 +43,7 @@ GROUPS = OrderedDict([
         "test_server_cli.py",
         "test_compute_client_reader.py",
         "test_dflash2_grammar_protocol.py",
+        "test_compute_adaptive_c32.py",
         "test_compute_input_ids.py",
         "test_compute_pids_scope.py",
         "test_compute_service.py",

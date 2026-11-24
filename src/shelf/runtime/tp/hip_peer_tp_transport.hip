@@ -361,8 +361,10 @@ hipError_t launch_tp_sum_bf16_4(uint16_t* dst, const uint16_t* s0, const uint16_
     const uintptr_t addresses = reinterpret_cast<uintptr_t>(dst) | reinterpret_cast<uintptr_t>(s0) |
         reinterpret_cast<uintptr_t>(s1) | reinterpret_cast<uintptr_t>(s2) | reinterpret_cast<uintptr_t>(s3);
     const ThreePeerInputs<uint16_t> peers{{s1, s2, s3}};
-    tp_add_peers_bf16_kernel<3u><<<tp_grid_for(count), 256, 0, stream>>>(s0, peers, 3u, dst, count,
-                                                                    (addresses & 15u) == 0u);
+    const bool aligned = (addresses & 15u) == 0u;
+    const auto workers = aligned ? (count + 7u) / 8u : count;
+    tp_add_peers_bf16_kernel<3u><<<tp_grid_for(workers), 256, 0, stream>>>(s0, peers, 3u, dst, count,
+                                                                    aligned);
     return hipGetLastError();
 }
 
@@ -374,8 +376,10 @@ hipError_t launch_tp_sum_f32_4(float* dst, const float* s0, const float* s1, con
     const uintptr_t addresses = reinterpret_cast<uintptr_t>(dst) | reinterpret_cast<uintptr_t>(s0) |
         reinterpret_cast<uintptr_t>(s1) | reinterpret_cast<uintptr_t>(s2) | reinterpret_cast<uintptr_t>(s3);
     const ThreePeerInputs<float> peers{{s1, s2, s3}};
-    tp_add_peers_f32_kernel<3u><<<tp_grid_for(count), 256, 0, stream>>>(s0, peers, 3u, dst, count,
-                                                                    (addresses & 15u) == 0u);
+    const bool aligned = (addresses & 15u) == 0u;
+    const auto workers = aligned ? (count + 3u) / 4u : count;
+    tp_add_peers_f32_kernel<3u><<<tp_grid_for(workers), 256, 0, stream>>>(s0, peers, 3u, dst, count,
+                                                                    aligned);
     return hipGetLastError();
 }
 

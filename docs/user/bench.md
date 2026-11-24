@@ -353,6 +353,20 @@ greedy argmax sampling。
 容量が実モデルと異なれば選択結果も異なる。GPU の分離と比較手順は
 [計測方法](../perf/methodology.md) を参照。
 
+## 複数ターンのサーバー計測
+
+`tools/bench/evalscope_agentic.py` は、前の応答を会話履歴に加えながら Chat Completions を繰り返す。`hy4-c32` では同時要求数を1、4、8、16、32に切り替える。サーバーは32要求を受け付けられる設定で起動し、準備時にはサーバーと同じ tokenizer を指定する。
+
+```sh
+python3 tools/bench/evalscope_agentic.py prepare --profile hy4-c32 \
+  --tokenizer-path "$MODEL_DIR" --synthetic-count 64 --output-path /tmp/agentic.json
+python3 tools/bench/evalscope_agentic.py run --profile hy4-c32 --runner builtin \
+  --url http://127.0.0.1:8080/v1/chat/completions --model shelf \
+  --dataset-path /tmp/agentic.json --sweep-dir /tmp/agentic-results
+```
+
+`summary.csv` と `summary.json` に同時要求数ごとの出力速度、最初のトークンまでの時間、プロンプトのキャッシュ利用率を保存する。既定で `ignore_eos` を有効にする。ストリームの更新1回に含まれるトークン数は、サーバー内部の投機ラウンド数とは別に集計する。
+
 ## 統一ベンチマークスイート（`tools/bench/shelf_bench_suite.py`）
 
 E2E 基礎性能・BetterBench 互換・凍結実タスク（`tools/bench/real_v1/`）・サービング同時計測をまとめて実行し、Markdown レポートへ整形するラッパーである。4 トラックの定義・使い分け・JSON 契約は [../perf/methodology.md](../perf/methodology.md#9-統一-4-トラック体系と-shelf_bench_suitepy) を参照。

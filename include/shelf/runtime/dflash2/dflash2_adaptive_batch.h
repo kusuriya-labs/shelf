@@ -27,6 +27,12 @@ inline uint32_t dflash2_adaptive_max_k(uint32_t configured_drafts) {
     return std::min(configured_drafts, kDFlash2AdaptiveMaxK);
 }
 
+inline bool dflash2_can_capture_boundary(const DFlash2SpecDecoder& decoder) {
+    if (decoder.tp_hook || decoder.gdn_ranks.size() != 1u) return false;
+    const auto& pools = decoder.gdn_ranks.front().spec_pools;
+    return !pools.qsa && !pools.ple;
+}
+
 inline void select_dflash2_adaptive(std::span<RuntimeRequest*> active,
                                     const DFlash2BatcherBinding& binding,
                                     const ContinuousBatcherConfig& config,
@@ -79,10 +85,11 @@ inline void select_dflash2_adaptive(std::span<RuntimeRequest*> active,
             : std::min(k, std::min(remaining - 1u, room - 1u));
         const uint32_t allowance = thinking_allowance(*request);
         if (allowance != kDFlash2NoThinkingAllowance) limit = std::min(limit, allowance);
-        if (request->prefix_capture != 0u && config.page_tokens != 0u && limit > 0u) {
+        if (request->prefix_capture != 0u && config.page_tokens != 0u && limit > 0u &&
+            (!session.decoder || !dflash2_can_capture_boundary(*session.decoder))) {
             limit = std::min(limit, config.page_tokens - position % config.page_tokens - 1u);
         }
-        session.adaptive_rows = limit ? limit + 1u : 0u;
+        session.adaptive_rows = room != 0u ? limit + 1u : 0u;
         if (session.adaptive_rows != 0u) ++admitted;
         if (binding.stats != nullptr) {
             auto& counts = binding.stats->adaptive_k_counts;

@@ -1621,9 +1621,7 @@ Status ServeController::draft_mask_request(int64_t external_request_id, uint64_t
     draft_count = 0;
     words_per_row = 0;
     auto it = impl_->inflight.find(external_request_id);
-    if (it == impl_->inflight.end()) {
-        return Status::invalid_argument("unknown request_id", __FILE__, __LINE__);
-    }
+    if (it == impl_->inflight.end()) return Status::make_ok();
     const RequestView active = impl_->session.request(it->second.internal_request_id);
     if (!active.found || active.state == runtime::RequestState::Finished ||
         active.draft_mask_state != runtime::DraftMaskState::PendingMask ||

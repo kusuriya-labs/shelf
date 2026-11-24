@@ -20,7 +20,7 @@ static void check(bool condition, const char* name) {
 
 static int controller_tests() {
     rt::DFlash2AdaptiveController ctrl;
-    check(ctrl.current_k == 4u && ctrl.switches == 0 && ctrl.rounds == 0, "initial state");
+    check(ctrl.current_k == 5u && ctrl.switches == 0 && ctrl.rounds == 0, "initial state");
     bool rejected = false;
     try {
         rt::DFlash2AdaptiveController bad(4u, 0u, 0.25);
@@ -37,7 +37,7 @@ static int controller_tests() {
     check(rejected, "reject zero alpha");
     ctrl.observe(1.0, 0u);
     ctrl.observe(-0.1, 1u);
-    check(ctrl.rounds == 0 && ctrl.current_k == 4u, "reject bad observations");
+    check(ctrl.rounds == 0 && ctrl.current_k == 5u, "reject bad observations");
 
     for (uint32_t batch : {1u, 16u, 32u}) {
         rt::DFlash2AdaptiveController c(4u);
@@ -110,6 +110,15 @@ static int batch_tests() {
     rt::select_dflash2_adaptive(active, binding, config, round);
     for (const auto& request : live)
         check(request.dflash->adaptive_rows == 2u, "one draft stays within the budget");
+    auto& tail = live.front();
+    tail.generated_tokens = tail.max_new_tokens - 1u;
+    rt::select_dflash2_adaptive(active, binding, config, round);
+    check(tail.dflash->adaptive_rows == 1u, "an admitted tail runs one target row in its own session");
+    tail.generated_tokens = 0u;
+    tail.prefix_capture = 1u;
+    tail.sequence.position = config.page_tokens - 1u;
+    rt::select_dflash2_adaptive(active, binding, config, round);
+    check(tail.dflash->adaptive_rows == 1u, "a boundary without replay support keeps the anchor");
     return g_failures;
 }
 

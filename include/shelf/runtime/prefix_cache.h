@@ -188,7 +188,7 @@ class PrefixCache {
         hipStream_t stream,
         const SpecRingRef* ring = nullptr);
 
-    Result<CaptureId> begin_capture(const PagedSequenceState& seq);
+    Result<CaptureId> begin_capture(const PagedSequenceState& seq, hipStream_t stream = nullptr);
 
     Status capture_boundary(
         CaptureId capture,
