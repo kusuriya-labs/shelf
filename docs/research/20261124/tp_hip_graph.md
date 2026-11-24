@@ -74,6 +74,21 @@ rank 1 が flag を見てから読む方式を 50 回試した。読み出しの
 方向依存もあり、device 0 → device 1 の書き込みは全語が stale のままだった。
 したがって「graph 内に閉じた collective」は現行 transport では正しさを保証できない。
 
+### collectives の kernel 融合は現行 transport では成立しない
+
+`tp_copy_bf16_kernel` を `hipMemcpyPeerAsync` に置き換える案を実測した。
+27B TP=2 の decode は 39.56 / 39.63 → 39.67 / 39.55 tok/s で中立。
+rocprofv3 の dispatch 総数も 25,984 で不変（`tp_copy` 1,572 が
+`__amd_rocclr_copyBuffer` 1,580 に置き換わっただけ）。copy engine へは逃げず、
+dispatch 削減にならないため不採用。
+
+copy + sum を 1 kernel に融合するには kernel 内 cross-GPU barrier が要る。
+host-mapped flag の barrier 自体は成立するが、peer の device memory へ書いた
+データは、書き込み側で `__threadfence_system()` を張り、読み出し側で
+L2 bypass / uncached allocation (`hipDeviceMallocUncached`) を使っても
+running kernel からは読めない（8 KB の 1 回転送で全語 stale）。
+現行 transport の push 型 collective を kernel 内へ畳む設計は採らない。
+
 ## 結論
 
 - segment graph は TP=2 の decode で +51 %、生成列一致。採用する。
