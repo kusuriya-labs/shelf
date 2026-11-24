@@ -103,3 +103,72 @@ router の WMMA 近似選択は未実装。近似 score の 16 位と 17 位の�
 profiler 付き実行の末尾 logits も基準と一致した。上記は未分類 kernel を含まない。物理 GPU 間転送は測定していない。
 
 最終候補で event 再利用検査付き `test_hy4_graph` は論理 EP=1 / 3 / 4 の Target・DFly2 とも 7/7、`test_hy4_reduce` と必須 CPU CTest 133 件も通過した。128k は要求どおり各版 1 回で、反復安定性は未評価。実機結果は expert 共有配置・単一 R9700 の測定である。
+
+## Step 3: 厳密誤差上界 WMMA router・decode/batch 固定射影・6 bpw `lm_head` argmax 融合・方向別 P2P プローブ
+
+Step 2 を基準として、次の 3 項目を実装・検証した。
+
+### 1. 厳密誤差上界検証付き WMMA router（採用）
+
+- `Residency::upload()` 時に層ごとのゲート重み行ノルム `gate_expert_norms`（`[41][512]`）を事前計算し、`route_select` 側で入力行ノルム `router_row_norms` を計算した。
+- `router_wmma`（`rows >= 256` は 4×4 tile、`< 256` は 1×1 tile）の BF16 積結果に対し、Higham 誤差上界 `1e-4f * ||x||_2 * ||w_e||_2` と正確な `sig_max_deriv` から候補集合 `C = top16 ∪ {s_e + δ_e >= min_top16}` を構成する。
+- `|C| <= 64` は `choose_verified` の単一 CTA 内で精密計算して上位 16 expert を確定し、`|C| > 64` または非有限値を含む行のみ 64 CTA の `router_choose_fallback` へ送る。
+- 効果（`routerbench`）: `32 rows` `113.344 → 52.973 us`、`96 rows` `277.477 → 54.282 us`、`1024 rows` `2774.598 → 277.061 us`（約 10 倍、全一致かつ人工 tie / near-tie / NaN ケース通過）。
+
+### 2. Decode/Batch 固定射影（1/6/16/96 行）・6 bpw `lm_head`・greedy argmax 融合
+
+- **採用**:
+  - `rotate_input` / `rotate_output` の `uint2` / `float4` ベクトル化（`linear.hip`）。
+  - `shared_gate_up` に `CompactRows = 1 / 6 / 16` のコンパクト LDS 配置と `SHUFFLE_PREVIOUS` を導入（`wmma.hip`）。`fixed_ffn` は `rows=6` `39.809 → 36.129 us`、`rows=16` `86.136 → 49.821 us`。
+  - 4 wave 構成の `gemm_fused_4w` と外部 3-launch（`rotate_input` + 4-wave `batch(..., ShufflePrev=true)` + `rotate_output`）の使い分け。`mla_o` は `rows=1` で `gemm_fused_4w`（`57.424 us`）を維持し、`rows=6`（`123.396 → 96.217 us`）および `rows=16`（`368.363 → 121.333 us`）で外部 3-launch へ切り替えた。
+  - `rows in (48, 96]` の 6 bpw（`lm_head`）へ `MT=3`（`batch<6, 3>`）を適用し、`lm_head rows=96` を `1581.811 → 1403.108 us` へ短縮した。
+  - greedy 時の `lm_head` + `best_ids` を `shelf_hy4_head_argmax`（`rotate_output_argmax_tiles` + `argmax_tiles_reduce`）へ融合し、`logits` 書き込み・読み出し（`120832 * 4` bytes/row）と `best_ids` 起動を削減した（`lm_head_argmax rows=96`: `1358.633 us`、`Target` Eager/Graph および `DFly2` へ組込）。あわせて `GraphPlan::release` およびキャプチャ時に `logits` / `tokens` を明示初期化するようにした。
+- **不採用・棄却**:
+  - 96 行への `expanded` + `prefill_wmma` 適用: `linear rows=96` が `39.3 → 43.6 us`、`mla_o rows=96` が `257.1 → 264.0 us` へ悪化したため棄却。
+  - 4 bpw `rows=96` への `MT=3` 適用と行長依存 `split_k` ヒューリスティック: 4 bpw では `splits` 固定下での occupancy 低下（3 block → 2 block）により `mla_o rows=96` が `257 → 286 us` へ悪化し、行長依存 `split_k` 変更は単一推論とバッチ推論・prefill チャンク境界のビット完全一致を崩すため棄却した。
+
+### 3. 起動時の方向別 P2P プローブと `host` 自動フォールバック（採用）
+
+- `Residency::configure_transports()` を追加し、`SHELF_HY4_EP_TRANSPORT=host` 指定時を除き、各方向 `src -> dst` で有効経路（`push` 時は `peer[src][dst]`、`peer` 時は `peer[dst][src]`）に 4 KiB パターン転送の実機プローブを実施する。
+- HIP エラーまたはリードバック不一致を検出した場合はその方向のみ `peer` を `false` に落とし、警告ログ 1 行を出力して `small_staging`（`tp_size == 1`）または `reduce_staging`（`tp_size > 1`）による `host` 転送へフォールバックする。
+- `tests/unit/test_hy4_peer_transfer.cpp` にエラー注入および破損データ注入テスト（`push` / `peer` 両モード、反対方向 P2P 維持、8 パスデータ整合、`__wrap_hipEventRecord` 検査）を追加した。
+
+### 計測結果（Step 2 基準との比較、単一 R9700・expert 共有配置）
+
+#### Prefill（chunk=1024、ranks=1、AB/BA 2 回ずつ、128k は各版 1 回）
+
+| 長さ（tokens） | Step 2 平均（秒） | Step 3 平均（秒） | 改善率 | 末尾 120,832 logits |
+|---|---:|---:|---:|---|
+| 2048 | 2.098 | 1.839 | -12.3% | バイト完全一致 |
+| 8192 | 9.511 | 8.565 | -9.9% | バイト完全一致 |
+| 32768 | 40.749 | 36.898 | -9.5% | バイト完全一致 |
+| 131072 | 183.521 | 167.246 | -8.9% | バイト完全一致 |
+
+- 4097 token のチャンク境界検証（`chunk = 16 / 512 / 1024`）も Step 2（`chunk=1024`）およびチャンク間で末尾 logits がバイト完全一致した。
+
+#### Decode microbench（`test_hy4_graph microbench`、全ハッシュ完全一致）
+
+| カーネル | 行数 | 基準（us） | Step 3（us） |
+|---|---:|---:|---:|
+| `linear` | 1 / 6 / 16 / 96 | 15.60 / 15.81 / 40.69 / 39.33 | 15.37 / 15.92 / 21.28 / 39.26 |
+| `fixed_ffn` | 1 / 6 / 16 / 96 | 31.32 / 39.81 / 86.14 / 119.61 | 31.04 / 36.13 / 49.82 / 119.34 |
+| `mla_qb` | 1 / 6 / 16 / 96 | 21.32 / 26.46 / 43.23 / 87.46 | 21.89 / 26.77 / 43.32 / 85.85 |
+| `mla_o` | 1 / 6 / 16 / 96 | 54.28 / 123.40 / 368.36 / 257.06 | 57.42 / 96.22 / 121.33 / 261.11 |
+| `lm_head` | 1 / 6 / 16 / 96 | 475.32 / 500.77 / 528.43 / 1581.81 | 476.12 / 502.09 / 529.71 / 1403.11 |
+| `lm_head_argmax` | 1 / 6 / 16 / 96 | - | 481.34 / 499.99 / 519.33 / 1358.63 |
+
+#### Decode stepbench 中央値（5 試行、`test_hy4_graph stepbench`）
+
+| 構成 | Graph | Step 2（ms） | Step 3（ms） |
+|---|---|---:|---:|
+| B=1, EP=1, DFly2 ON | OFF / ON | 55.58 / 57.11 | 55.55 / 56.78 |
+| B=1, EP=1, DFly2 OFF | OFF / ON | 26.74 / 25.58 | 26.68 / 25.52 |
+| B=16, EP=1, DFly2 ON | OFF / ON | 105.10 / 105.08 | 96.28 / 96.13 |
+| B=16, EP=1, DFly2 OFF | OFF / ON | 40.89 / 40.05 | 40.87 / 39.90 |
+| B=1, EP=3, DFly2 ON | OFF / ON | 146.69 / 137.59 | 145.00 / 136.07 |
+| B=16, EP=3, DFly2 ON | OFF / ON | 219.17 / 209.93 | 212.19 / 204.64 |
+
+#### 検証
+
+- `SHELF_HY4_CHECK_EVENT_REUSE=1 test_hy4_graph`（既定 EP=1/3/4、`batch` EP=1/2/3/4、`transport` EP=3/4 push/peer/host・DFly2 ON/OFF）すべて通過。
+- `test_hy4_routes`、`test_hy4_session`、`test_hy4_peer_transfer`（プローブ失敗注入含む）、`test_hy4_reduce`、および必須 CPU CTest 133 件すべて通過。
