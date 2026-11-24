@@ -340,18 +340,50 @@ Result<PleTable> PleTable::load_index_shards(const std::string& model_dir,
 
 Result<PleTable> PleTable::load(const std::string& model_dir,
                                 const Qwen4ExpTextConfig& config) {
+    const std::string manifest_path = model_dir + "/ngram_manifest.json";
     std::error_code manifest_error;
-    const auto manifest_status = std::filesystem::symlink_status(
-        std::filesystem::path(model_dir) / "ngram_manifest.json", manifest_error);
-    if (manifest_error && manifest_error != std::errc::no_such_file_or_directory)
-        return Status::invalid_argument("cannot inspect ngram manifest", __FILE__, __LINE__);
-    if (manifest_status.type() != std::filesystem::file_type::not_found)
-        return load_ngram(model_dir, config);
+    const auto manifest_status = std::filesystem::symlink_status(manifest_path, manifest_error);
+    if (manifest_error && manifest_error != std::errc::no_such_file_or_directory) {
+        return Status::invalid_argument(manifest_error.message().c_str(), __FILE__, __LINE__)
+            .with_context(manifest_path);
+    }
+    if (manifest_status.type() != std::filesystem::file_type::not_found) {
+        auto loaded = load_ngram(model_dir, config);
+        if (!loaded.ok()) return loaded.status().with_context(manifest_path);
+        return loaded;
+    }
     const std::string path = model_dir + "/ngram_embedding.safetensors";
     const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return load_index_shards(model_dir, config);
+    if (fd < 0) {
+        if (errno != ENOENT) {
+            return Status::invalid_argument(std::strerror(errno), __FILE__, __LINE__)
+                .with_context(path);
+        }
+        auto loaded = load_index_shards(model_dir, config);
+        if (!loaded.ok()) {
+            return loaded.status().with_context(model_dir + "/model.safetensors.index.json");
+        }
+        return loaded;
+    }
     ::close(fd);
-    return Status::unsupported("EXL3 PLE tables are not supported", __FILE__, __LINE__);
+    return Status::unsupported(
+        "EXL3 PLE tables are not supported. Install Ngram4 or Ngram5 table shards "
+        "and ngram_manifest.json in the model directory.", __FILE__, __LINE__)
+        .with_context(path);
+}
+
+Result<std::shared_ptr<const PleTable>> PleTable::load_shared(
+    const std::string& model_dir, const Qwen4ExpTextConfig& config) {
+    static std::mutex mutex;
+    static std::unordered_map<std::string, std::weak_ptr<const PleTable>> cache;
+    std::lock_guard<std::mutex> lock(mutex);
+    auto& entry = cache[model_dir];
+    if (auto existing = entry.lock()) return existing;
+    auto loaded = load(model_dir, config);
+    if (!loaded.ok()) return loaded.status();
+    auto table = std::make_shared<const PleTable>(loaded.release());
+    entry = table;
+    return table;
 }
 
 std::uint64_t PleTable::host_bytes() const noexcept {
@@ -480,10 +512,10 @@ Result<std::vector<std::uint64_t>> PleTable::ngram_rows(
     std::vector<std::uint64_t> rows;
     rows.reserve(out_len * head_count);
     const std::size_t first = n - out_len;
-    for (std::uint32_t ngram = 2; ngram <= ngram_size_; ++ngram) {
-        const std::size_t head_begin = (ngram - 2u) * heads_per_ngram_;
-        const std::size_t head_end = head_begin + heads_per_ngram_;
-        for (std::size_t position = first; position < n; ++position) {
+    for (std::size_t position = first; position < n; ++position) {
+        for (std::uint32_t ngram = 2; ngram <= ngram_size_; ++ngram) {
+            const std::size_t head_begin = (ngram - 2u) * heads_per_ngram_;
+            const std::size_t head_end = head_begin + heads_per_ngram_;
             std::uint64_t mixed = 0u;
             for (std::uint32_t shift = 0; shift < ngram; ++shift) {
                 std::int32_t token = eos_token_id_;

@@ -3,6 +3,7 @@
 #include <shelf/io/safetensors_reader.h>
 #include <shelf/models/common/qwen_hybrid/weight_slot.h>
 #include <shelf/models/qwen4exp/model/qwen4exp_config.h>
+#include <shelf/models/qwen4exp/model/qwen4exp_model.h>
 #include <shelf/models/qwen4exp/weights/ple_table.h>
 #include <shelf/models/qwen4exp/weights/qwen4exp_weights.h>
 
@@ -162,7 +163,9 @@ void verify_expert_sample(const std::string& model_dir, const shelf::qwen4exp::Q
 
 void verify_ple(const shelf::qwen4exp::PleTable& table,
                 const shelf::qwen4exp::Qwen4ExpTextConfig& config) {
-    check(table.rows() == 320001536u, "PLE row count is 320001536");
+    const auto expected_count = table.format() == shelf::qwen4exp::PleTable::TableFormat::Ngram
+        ? 320001446u : 320001536u;
+    check(table.rows() == expected_count, "PLE row count matches the checkpoint layout");
     check(table.row_width() == 160u, "PLE row width is 160");
     check(table.head_count() == 16u, "PLE head count is 16");
 
@@ -189,6 +192,15 @@ void verify_ple(const shelf::qwen4exp::PleTable& table,
     auto rows = table.ngram_rows(history, 1u);
     check(rows.ok() && rows.value() == expected_rows,
           "PLE n-gram hash rows match the reference");
+
+    auto batch = table.gather_bf16(history, 2u);
+    auto singles = table.gather_bf16_stateless({history.begin(), history.end() - 2},
+                                               std::span(history).last(2));
+    check(batch.ok() && singles.ok() && batch.value().size() == 2u * 16u * 160u &&
+              batch.value().size() == singles.value().size() &&
+              std::memcmp(batch.value().data(), singles.value().data(),
+                          batch.value().size() * sizeof(shelf::bf16_t)) == 0,
+          "PLE two-position BF16 gather matches single-position gathers bit for bit");
 
     auto gathered = table.gather(history, 3u);
     check(gathered.ok() && gathered.value().size() == 3u * 16u * 160u,
@@ -248,17 +260,17 @@ int main(int argc, char** argv) {
                  config.num_hidden_layers, config.hidden_size, config.ffn.num_experts,
                  config.ffn.num_experts_per_tok, config.hc_count, config.ple.layer_ids.size());
 
-    shelf::qwen4exp::PleTable ple;
+    std::shared_ptr<const shelf::qwen4exp::PleTable> ple;
     if (!skip_ple) {
-        auto ple_result = shelf::qwen4exp::PleTable::load(model_dir, config);
+        auto ple_result = shelf::qwen4exp::Qwen4ExpModel::adopt({}, config, model_dir);
         if (!ple_result.ok()) {
             std::fprintf(stderr, "PLE load: %s\n", ple_result.status().message().c_str());
             return 1;
         }
-        ple = ple_result.release();
+        ple = ple_result.value().ple_table();
         std::fprintf(stderr, "PLE resident: %.3f GiB\n",
-                     static_cast<double>(ple.payload_bytes()) / 1073741824.0);
-        verify_ple(ple, config);
+                     static_cast<double>(ple->payload_bytes()) / 1073741824.0);
+        verify_ple(*ple, config);
     }
 
     if (skip_gpu) {

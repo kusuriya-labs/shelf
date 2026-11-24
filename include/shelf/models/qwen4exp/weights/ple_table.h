@@ -31,6 +31,9 @@ public:
     static Result<PleTable> load(const std::string& model_dir,
                                  const Qwen4ExpTextConfig& config);
 
+    static Result<std::shared_ptr<const PleTable>> load_shared(
+        const std::string& model_dir, const Qwen4ExpTextConfig& config);
+
     PleTable() = default;
     PleTable(PleTable&&) noexcept = default;
     PleTable& operator=(PleTable&&) noexcept = default;

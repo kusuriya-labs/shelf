@@ -8,10 +8,13 @@
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
+#include <memory>
 #include <string>
 
 namespace shelf {
 namespace qwen4exp {
+
+class PleTable;
 
 class Qwen4ExpModel final {
  public:
@@ -28,16 +31,20 @@ class Qwen4ExpModel final {
         std::uint32_t ep_size = 0u, std::uint32_t ep_rank = 0u);
 
     static Result<Qwen4ExpModel> adopt(Qwen4ExpRankWeights&& weights,
-                                       Qwen4ExpTextConfig config);
+                                       Qwen4ExpTextConfig config,
+                                       const std::string& model_dir = {});
 
     [[nodiscard]] const Qwen4ExpTextConfig& text_config() const noexcept { return config_; }
     [[nodiscard]] const Qwen4ExpRankWeights& weights() const noexcept { return weights_; }
+
+    [[nodiscard]] const std::shared_ptr<const PleTable>& ple_table() const noexcept { return ple_table_; }
 
  private:
     Qwen4ExpModel(Qwen4ExpRankWeights&& weights, Qwen4ExpTextConfig config);
 
     Qwen4ExpRankWeights weights_;
     Qwen4ExpTextConfig config_;
+    std::shared_ptr<const PleTable> ple_table_;
 };
 
 }  // namespace qwen4exp

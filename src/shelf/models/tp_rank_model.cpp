@@ -139,20 +139,6 @@ private:
     qhy::TensorParallelContext context_;
 };
 
-std::shared_ptr<const qwen4exp::PleTable> shared_ple_table(
-    const std::string& model_dir, const qwen4exp::Qwen4ExpTextConfig& config) {
-    static std::mutex mutex;
-    static std::unordered_map<std::string, std::weak_ptr<const qwen4exp::PleTable>> cache;
-    std::lock_guard<std::mutex> lock(mutex);
-    auto& entry = cache[model_dir];
-    if (auto existing = entry.lock()) return existing;
-    auto loaded = qwen4exp::PleTable::load(model_dir, config);
-    if (!loaded.ok()) return nullptr;
-    auto table = std::make_shared<qwen4exp::PleTable>(loaded.release());
-    entry = table;
-    return table;
-}
-
 std::mutex prefetched_ple_mutex;
 std::unordered_map<std::string, std::shared_ptr<const qwen4exp::PleTable>> prefetched_ple;
 
@@ -197,10 +183,9 @@ class Qwen4ExpTpRankModel final : public TpRankModel {
 public:
     Qwen4ExpTpRankModel(qwen4exp::Qwen4ExpModel&& model,
                         qhy::TensorParallelContext&& context,
-                        std::uint32_t max_context_tokens,
-                        std::shared_ptr<const qwen4exp::PleTable> ple_table)
+                        std::uint32_t max_context_tokens)
         : model_(std::move(model)), context_(context),
-          max_context_tokens_(max_context_tokens), ple_table_(std::move(ple_table)) {
+          max_context_tokens_(max_context_tokens) {
         if (model_.weights().host_experts != 0u) {
             cache_ = qwen4exp::MoeExpertCache::create(model_.weights());
         }
@@ -262,7 +247,8 @@ public:
     }
 
     std::uint64_t host_ple_table_bytes() const override {
-        return ple_table_ != nullptr ? ple_table_->host_bytes() : 0u;
+        const auto& table = model_.ple_table();
+        return table != nullptr ? table->host_bytes() : 0u;
     }
 
     std::size_t token_row_ffn_size() const override {
@@ -369,7 +355,7 @@ public:
         q35::PagedKVPool& kv_pool, gpu::GpuArena& arena,
         const q35::ExecutorConfig& config) const override {
         auto created = create_qwen4exp_model_executor(
-            model_, ple_table_, sequence_pool, gdn_state_pool, kv_pool, arena, config);
+            model_, sequence_pool, gdn_state_pool, kv_pool, arena, config);
         if (created.ok() && cache_ != nullptr) {
             auto cache = cache_;
             created.value().after_batch = [cache](hipStream_t stream) {
@@ -418,7 +404,6 @@ private:
     qwen4exp::Qwen4ExpModel model_;
     qhy::TensorParallelContext context_;
     std::uint32_t max_context_tokens_ = 512u;
-    std::shared_ptr<const qwen4exp::PleTable> ple_table_;
     std::shared_ptr<qwen4exp::MoeExpertCache> cache_;
 };
 
@@ -427,10 +412,10 @@ private:
 void prefetch_qwen4exp_ple_table(const std::string& model_dir) {
     auto config_result = qwen4exp::read_qwen4exp_text_config(model_dir);
     if (!config_result.ok()) return;
-    auto table = shared_ple_table(model_dir, config_result.value());
-    if (table == nullptr) return;
+    auto table = qwen4exp::PleTable::load_shared(model_dir, config_result.value());
+    if (!table.ok()) return;
     std::lock_guard<std::mutex> lock(prefetched_ple_mutex);
-    prefetched_ple[model_dir] = std::move(table);
+    prefetched_ple[model_dir] = table.release();
 }
 
 void release_prefetched_qwen4exp_ple_table() {
@@ -438,16 +423,8 @@ void release_prefetched_qwen4exp_ple_table() {
     prefetched_ple.clear();
 }
 
-std::shared_ptr<const qwen4exp::PleTable> get_qwen4exp_ple_table(
-    const std::string& model_dir) {
-    auto config_result = qwen4exp::read_qwen4exp_text_config(model_dir);
-    if (!config_result.ok()) return nullptr;
-    return shared_ple_table(model_dir, config_result.value());
-}
-
 Result<q35::Executor> create_qwen4exp_model_executor(
     const qwen4exp::Qwen4ExpModel& model,
-    const std::shared_ptr<const qwen4exp::PleTable>& ple_table,
     q35::SequenceSlotPool& sequence_pool,
     q35::GdnStatePool& gdn_state_pool,
     q35::PagedKVPool& kv_pool,
@@ -492,7 +469,8 @@ Result<q35::Executor> create_qwen4exp_model_executor(
     auto executor = q35::create_executor(std::move(input), sequence_pool, gdn_state_pool,
                                          kv_pool, arena, config);
     if (!executor.ok()) return executor.status();
-    if (state_layouts.uses_ple_conv && ple_table != nullptr) {
+    if (state_layouts.uses_ple_conv) {
+        const auto& ple_table = model.ple_table();
         auto runtime = qwen4exp::PleInputRuntime::create(
             ple_table, static_cast<std::uint32_t>(cfg.hidden_size));
         if (runtime == nullptr) {
@@ -658,13 +636,8 @@ Result<std::unique_ptr<TpRankModel>> build_qwen4exp_tp_rank_model(
     context.local_moe_intermediate_size =
         static_cast<std::uint32_t>(cfg.ffn.moe_intermediate_size / config.tp_size);
 
-    auto ple_table = shared_ple_table(config.model_dir, cfg);
-    if (ple_table == nullptr) {
-        return Status::invalid_argument("Qwen4Exp PLE table could not be loaded", __FILE__,
-                                        __LINE__);
-    }
     return std::unique_ptr<TpRankModel>(std::make_unique<Qwen4ExpTpRankModel>(
-        model.release(), std::move(context), config.max_seq_len + 1u, ple_table));
+        model.release(), std::move(context), config.max_seq_len + 1u));
 }
 
 Result<std::unique_ptr<TpRankModel>> build_moe_tp_rank_model(

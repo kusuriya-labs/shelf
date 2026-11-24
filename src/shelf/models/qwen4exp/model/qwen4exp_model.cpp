@@ -1,4 +1,5 @@
 #include <shelf/models/qwen4exp/model/qwen4exp_model.h>
+#include <shelf/models/qwen4exp/weights/ple_table.h>
 
 #include <utility>
 
@@ -33,12 +34,22 @@ Result<Qwen4ExpModel> Qwen4ExpModel::load_from_safetensors(
                                  backbone_tp_rank, options.ep_size, options.ep_rank,
                                  tp_size);
     if (!valid.ok()) return valid;
-    return Qwen4ExpModel(weights.release(), config.release());
+    return adopt(weights.release(), config.release(), model_dir);
 }
 
 Result<Qwen4ExpModel> Qwen4ExpModel::adopt(Qwen4ExpRankWeights&& weights,
-                                           Qwen4ExpTextConfig config) {
-    return Qwen4ExpModel(std::move(weights), std::move(config));
+                                           Qwen4ExpTextConfig config,
+                                           const std::string& model_dir) {
+    Qwen4ExpModel model(std::move(weights), std::move(config));
+    if (!model.config_.ple.layer_ids.empty()) {
+        if (model_dir.empty()) {
+            return Status::invalid_argument("PLE layers require a model directory", __FILE__, __LINE__);
+        }
+        auto table = PleTable::load_shared(model_dir, model.config_);
+        if (!table.ok()) return table.status();
+        model.ple_table_ = table.release();
+    }
+    return model;
 }
 
 }  // namespace qwen4exp

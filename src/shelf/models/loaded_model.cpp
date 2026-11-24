@@ -97,7 +97,6 @@ Result<LoadedModel> LoadedModel::load(
         out.owns_qwen4exp_ =
             std::make_unique<shelf::qwen4exp::Qwen4ExpModel>(loaded.release());
         out.qwen4exp_ = out.owns_qwen4exp_.get();
-        out.model_dir_ = model_dir;
         if (out.qwen4exp_->weights().host_experts != 0u) {
             out.moe_cache_ =
                 shelf::qwen4exp::MoeExpertCache::create(out.qwen4exp_->weights());
@@ -216,7 +215,7 @@ HostMemoryBytes LoadedModel::host_memory_bytes() const noexcept {
     out.embedding = host_pinned_bytes();
     if (qwen4exp_ != nullptr) {
         out.offload_experts = qwen4exp_->weights().host_expert_bytes();
-        if (ple_table_ != nullptr) out.ple_table = ple_table_->host_bytes();
+        if (const auto& table = qwen4exp_->ple_table()) out.ple_table = table->host_bytes();
     }
     return out;
 }
@@ -320,10 +319,8 @@ Result<shelf::qwen35::Executor> LoadedModel::create_executor(
                                                kv_pool, arena, resolved);
     }
     if (qwen4exp_ != nullptr) {
-        auto ple_table = shelf::models::get_qwen4exp_ple_table(model_dir_);
-        ple_table_ = ple_table;
         auto created = shelf::models::create_qwen4exp_model_executor(
-            *qwen4exp_, ple_table, sequence_pool, gdn_state_pool, kv_pool, arena, config);
+            *qwen4exp_, sequence_pool, gdn_state_pool, kv_pool, arena, config);
         if (created.ok() && moe_cache_ != nullptr) {
             auto cache = moe_cache_;
             created.value().after_batch = [cache](hipStream_t stream) {

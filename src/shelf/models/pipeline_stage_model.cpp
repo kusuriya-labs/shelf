@@ -161,9 +161,8 @@ private:
 
 class Qwen4ExpPipelineStageModel final : public PipelineStageModel {
 public:
-    Qwen4ExpPipelineStageModel(q4::Qwen4ExpModel&& model,
-                               std::shared_ptr<const q4::PleTable> ple_table)
-        : model_(std::move(model)), ple_table_(std::move(ple_table)) {}
+    explicit Qwen4ExpPipelineStageModel(q4::Qwen4ExpModel&& model)
+        : model_(std::move(model)) {}
 
     const qhy::QwenHybridConfig& hybrid_config() const override { return model_.text_config(); }
 
@@ -239,7 +238,7 @@ public:
                                           q35::PagedKVPool& kv_pool, gpu::GpuArena& arena,
                                           const q35::ExecutorConfig& config) const override {
         return create_qwen4exp_model_executor(
-            model_, ple_table_, sequence_pool, gdn_state_pool, kv_pool, arena, config);
+            model_, sequence_pool, gdn_state_pool, kv_pool, arena, config);
     }
 
     const q4::Qwen4ExpModel* qwen4exp_model() const override { return &model_; }
@@ -251,7 +250,6 @@ public:
 
 private:
     q4::Qwen4ExpModel model_;
-    std::shared_ptr<const q4::PleTable> ple_table_;
 };
 
 }  // namespace
@@ -277,12 +275,8 @@ Result<std::unique_ptr<PipelineStageModel>> build_qwen4exp_pipeline_stage_model(
     auto model = q4::Qwen4ExpModel::load_from_safetensors(model_dir, 1u, 0u, arena, stream,
                                                           options);
     if (!model.ok()) return model.status();
-    auto config = q4::read_qwen4exp_text_config(model_dir);
-    if (!config.ok()) return config.status();
-    auto table = q4::PleTable::load(model_dir, config.value());
-    if (!table.ok()) return table.status();
-    return std::unique_ptr<PipelineStageModel>(std::make_unique<Qwen4ExpPipelineStageModel>(
-        model.release(), std::make_shared<const q4::PleTable>(table.release())));
+    return std::unique_ptr<PipelineStageModel>(
+        std::make_unique<Qwen4ExpPipelineStageModel>(model.release()));
 }
 
 Result<std::unique_ptr<PipelineStageModel>> build_moe_pipeline_stage_model(

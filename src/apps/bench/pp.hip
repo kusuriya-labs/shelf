@@ -715,12 +715,12 @@ int run_pp(int argc, char** argv) {
     const char* ple_prefetch_env = std::getenv("SHELF_PLE_PREFETCH");
     const bool ple_prefetch_on =
         ple_prefetch_env != nullptr && ple_prefetch_env[0] != '0';
-    std::shared_ptr<const shelf::qwen4exp::PleTable> ple_table;
     std::optional<PlePrefetchWorker> ple_worker;
     if (ple_prefetch_on) {
-        ple_table = shelf::models::get_qwen4exp_ple_table(opts.model_dir);
-        if (ple_table != nullptr) {
-            ple_worker.emplace(ple_table.get());
+        const auto* model = tp1_loaded ? tp1_loaded->qwen4exp_model()
+                                       : tp_coordinator->rank(0).rank_model()->qwen4exp_model();
+        if (model != nullptr && model->ple_table() != nullptr) {
+            ple_worker.emplace(model->ple_table().get());
             fprintf(stderr, "PLE_PREFETCH enabled (one-chunk-ahead worker)\n");
         } else {
             fprintf(stderr, "PLE_PREFETCH requested but no PLE table found; "

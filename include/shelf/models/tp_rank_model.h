@@ -147,11 +147,6 @@ shelf::Result<std::unique_ptr<TpRankModel>> build_moe_tp_rank_model(
 void prefetch_qwen4exp_ple_table(const std::string& model_dir);
 void release_prefetched_qwen4exp_ple_table();
 
-// Returns the process-shared PLE table for a Qwen4Exp model dir (loaded on first use).
-// Returns nullptr when the dir is not a Qwen4Exp model or the table is absent.
-std::shared_ptr<const shelf::qwen4exp::PleTable> get_qwen4exp_ple_table(
-    const std::string& model_dir);
-
 // Sets config.build_rank_model to the family config.model_dir declares, read from
 // num_experts before any tensor is opened.
 shelf::Status select_tp_rank_model(shelf::runtime::TpCoordinatorConfig& config);
@@ -161,7 +156,6 @@ shelf::Status select_tp_rank_model(shelf::runtime::TpCoordinatorConfig& config);
 // way, so the lowering options are stated once.
 shelf::Result<shelf::qwen35::Executor> create_qwen4exp_model_executor(
     const shelf::qwen4exp::Qwen4ExpModel& model,
-    const std::shared_ptr<const shelf::qwen4exp::PleTable>& ple_table,
     shelf::qwen35::SequenceSlotPool& sequence_pool,
     shelf::qwen35::GdnStatePool& gdn_state_pool,
     shelf::qwen35::PagedKVPool& kv_pool,

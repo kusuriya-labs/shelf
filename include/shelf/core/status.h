@@ -37,6 +37,9 @@ public:
     bool ok() const noexcept { return code_ == Code::ok; }
     Code code() const noexcept { return code_; }
     const std::string& message() const noexcept { return message_; }
+    Status with_context(const std::string& context) const {
+        return ok() ? *this : Status(code_, context + ": " + message_);
+    }
 
 private:
     Status(Code code, std::string msg)

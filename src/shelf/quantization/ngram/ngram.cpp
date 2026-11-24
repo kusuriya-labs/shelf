@@ -193,7 +193,10 @@ Status TableReader::decode_row(std::size_t row, std::span<float> out) const {
 }
 Status validate_bundle(const std::filesystem::path& root, const Manifest& m) {
     auto st = validate_manifest(m); if (!st.ok()) return st;
-    for (const auto& t : m.tables) { auto r = TableReader::open(root,t); if (!r.ok()) return r.status(); }
+    for (const auto& table : m.tables) {
+        auto reader = TableReader::open(root, table);
+        if (!reader.ok()) return reader.status().with_context((root / table.shard).string());
+    }
     return Status::make_ok();
 }
 }

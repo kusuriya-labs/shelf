@@ -18,10 +18,6 @@
 #include <memory>
 #include <string>
 
-namespace shelf::qwen4exp {
-class PleTable;
-}
-
 namespace shelf::models {
 
 class TpRankModel;
@@ -197,8 +193,6 @@ private:
     const shelf::qwen35moe::Qwen35MoeModel* moe_ = nullptr;
     const shelf::qwen4exp::Qwen4ExpModel* qwen4exp_ = nullptr;
     const shelf::qwen35qsa::Qwen35QsaModel* qsa_ = nullptr;
-    mutable std::shared_ptr<const shelf::qwen4exp::PleTable> ple_table_;
-    std::string model_dir_;
 };
 
 }  // namespace shelf::models

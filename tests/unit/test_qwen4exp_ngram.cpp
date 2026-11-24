@@ -1,9 +1,11 @@
+#include <shelf/models/qwen4exp/model/qwen4exp_model.h>
 #include <shelf/models/qwen4exp/weights/ple_table.h>
 #include <shelf/quantization/ngram/ngram.h>
 #include <shelf/io/safetensors_writer.h>
 #include <bit>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <vector>
@@ -27,6 +29,20 @@ int main() {
     auto sizes = shelf::qwen4exp::qwen4exp_ple_head_vocab_sizes(config).value();
     auto root = fs::temp_directory_path() / ("shelf-qwen-ngram-" + std::to_string(getpid()));
     fs::create_directories(root);
+    std::ofstream(root / "ngram_embedding.safetensors") << "exl3";
+    auto legacy = shelf::qwen4exp::Qwen4ExpModel::adopt({}, config, root.string());
+    const auto& status = legacy.status();
+    check(!legacy.ok() && status.code() == shelf::Status::Code::unsupported &&
+              status.message().find((root / "ngram_embedding.safetensors").string()) != std::string::npos &&
+              status.message().find("EXL3") != std::string::npos &&
+              status.message().find("Ngram4") != std::string::npos &&
+              status.message().find("Ngram5") != std::string::npos &&
+              status.message().find("ngram_manifest.json") != std::string::npos,
+          "TP=1 model rejects EXL3 PLE with the table path and Ngram installation details");
+    auto no_ple_config = config;
+    no_ple_config.ple.layer_ids.clear();
+    auto no_ple = shelf::qwen4exp::Qwen4ExpModel::adopt({}, no_ple_config, root.string());
+    check(no_ple.ok() && !no_ple.value().ple_table(), "model without PLE needs no table");
     for (int profile = 0; profile < 3; ++profile) {
         nq::Manifest manifest;
         manifest.profile = profile == 0 ? "ngram4" : profile == 1 ? "ngram5" : "mixed";
@@ -75,27 +91,44 @@ int main() {
         std::ofstream(root / "ngram_manifest.json") << json.value();
         for (const char* cache : {"0", "0.001"}) {
             setenv("SHELF_PLE_HOT_CACHE_GIB", cache, 1);
-            auto table = PleTable::load(root.string(), config);
-            check(table.ok(), "load");
-            if (!table.ok()) continue;
-            auto rows = table.value().ngram_rows({1, 2, 3}, 1);
-            auto gathered = table.value().gather_bf16({1, 2, 3}, 1);
+            auto model = shelf::qwen4exp::Qwen4ExpModel::adopt({}, config, root.string());
+            check(model.ok() && model.value().ple_table(), "TP=1 model loads Ngram PLE");
+            if (!model.ok() || !model.value().ple_table()) continue;
+            const auto& table = *model.value().ple_table();
+            auto rows = table.ngram_rows({1, 2, 3}, 1);
+            auto gathered = table.gather_bf16({1, 2, 3}, 1);
             check(rows.ok() && gathered.ok(), "gather");
             if (!rows.ok() || !gathered.ok()) continue;
             for (std::size_t h = 0; h < 16; ++h) {
                 auto reader = nq::TableReader::open(root, manifest.tables[h]);
                 std::vector<float> direct(160);
-                auto local = rows.value()[h] - table.value().head_offsets()[h];
+                auto local = rows.value()[h] - table.head_offsets()[h];
                 check(reader.ok() && reader.value().decode_row(local, direct).ok(), "direct decode");
                 for (std::size_t j = 0; j < 160; ++j)
                     check(gathered.value()[h * 160 + j].data == shelf::f32_to_bf16_rne(direct[j]), "bitwise gather");
             }
-            check((table.value().cached_blocks() > 0) == (cache[1] == '.'), "cache path");
+            check((table.cached_blocks() > 0) == (cache[1] == '.'), "cache path");
             std::uint64_t payload = 0;
             for (const auto& t : manifest.tables)
                 payload += t.rows * (nq::row_bytes(t.dim, t.bits).value() + 2u) + (2u << t.bits);
-            check(table.value().payload_bytes() == payload, "payload size");
-            check(table.value().host_bytes() <= payload, "host size");
+            check(table.payload_bytes() == payload, "payload size");
+            check(table.host_bytes() <= payload, "host size");
+            const std::vector<std::int32_t> history = {9, 5, 1, 2, 3};
+            for (const std::size_t count : {2u, 3u}) {
+                auto batch = table.gather_bf16(history, count);
+                std::vector<shelf::bf16_t> expected;
+                for (std::size_t end = history.size() - count + 1; end <= history.size(); ++end) {
+                    auto single = table.gather_bf16({history.begin(), history.begin() + end}, 1);
+                    check(single.ok(), "single-position gather");
+                    if (!single.ok()) break;
+                    expected.insert(expected.end(), single.value().begin(), single.value().end());
+                }
+                check(batch.ok() && expected.size() == count * table.head_count() * table.row_width() &&
+                          batch.value().size() == expected.size() &&
+                          std::memcmp(batch.value().data(), expected.data(),
+                                      expected.size() * sizeof(shelf::bf16_t)) == 0,
+                      "batch gather matches consecutive single-position gathers bit for bit");
+            }
         }
         auto bad = manifest;
         bad.tables[0].head = 16;
@@ -112,15 +145,14 @@ int main() {
             const char invalid_scale[2] = {0, static_cast<char>(0xfc)};
             file.write(invalid_scale, sizeof(invalid_scale));
         }
-        check(!PleTable::load(root.string(), config).ok(), "reject corrupt payload");
+        auto corrupt = shelf::qwen4exp::Qwen4ExpModel::adopt({}, config, root.string());
+        check(!corrupt.ok() && corrupt.status().code() == shelf::Status::Code::invalid_argument &&
+                  corrupt.status().message().find((root / manifest.tables[0].shard).string()) != std::string::npos &&
+                  corrupt.status().message().find("invalid scale") != std::string::npos,
+              "TP=1 model reports the corrupt Ngram shard and cause");
         std::ofstream(root / "ngram_manifest.json") << "{";
         check(!PleTable::load(root.string(), config).ok(), "reject corrupt manifest");
     }
-    fs::remove(root / "ngram_manifest.json");
-    std::ofstream(root / "ngram_embedding.safetensors") << "exl3";
-    auto legacy = PleTable::load(root.string(), config);
-    check(!legacy.ok() && legacy.status().code() == shelf::Status::Code::unsupported,
-          "reject EXL3 PLE");
     unsetenv("SHELF_PLE_HOT_CACHE_GIB");
     fs::remove_all(root);
     return failures ? 1 : 0;
