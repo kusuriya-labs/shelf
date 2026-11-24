@@ -6,7 +6,7 @@
 namespace shelf::hy4 {
 namespace {
 using namespace shelf::kernel::exl3_detail::mul24;
-__global__ void router(Mat x, const uint16_t *weight, float *scores) {
+__global__ void router_single(Mat x, const uint16_t *weight, float *scores) {
     int expert = blockIdx.x * 4 + threadIdx.x / 32, lane = threadIdx.x % 32, row = blockIdx.y;
     float dot = 0;
     for (int c = lane; c < 3072; c += 32)
@@ -16,39 +16,71 @@ __global__ void router(Mat x, const uint16_t *weight, float *scores) {
     if (!lane)
         scores[row * 512 + expert] = 1.f / (1.f + expf(-dot));
 }
+__global__ void router(Mat x, const uint16_t *weight, float *scores) {
+    int expert = blockIdx.x * 4 + threadIdx.x / 32, lane = threadIdx.x % 32, row = blockIdx.y * 4;
+    float dot[4] = {};
+    for (int c = lane; c < 3072; c += 32) {
+        float w = bf16_bits_to_f32(weight[expert * 3072 + c]);
+        for (int i = 0; i < 4; ++i)
+            if (row + i < x.rows)
+                dot[i] += bf16_bits_to_f32(x.p[(row + i) * 3072 + c]) * w;
+    }
+    for (int d = 16; d; d /= 2)
+        for (int i = 0; i < 4; ++i)
+            dot[i] += __shfl_down(dot[i], d, 32);
+    if (!lane)
+        for (int i = 0; i < 4; ++i)
+            if (row + i < x.rows)
+                scores[(row + i) * 512 + expert] = 1.f / (1.f + expf(-dot[i]));
+}
+__device__ bool route_better(float a, int ai, float b, int bi) {
+    return a > b || (a == b && ai < bi);
+}
 __global__ void choose(const float *scores, const float *bias, Hy4Route *out) {
-    __shared__ float values[512], weight_sum;
-    __shared__ int ids[512];
-    int t = threadIdx.x, row = blockIdx.x;
+    __shared__ float values[2][256], weight_sum;
+    __shared__ int ids[2][256];
+    int t = threadIdx.x, row = blockIdx.x, lane = t % 32, wave = t / 32;
     scores += row * 512;
-    for (int i = t; i < 512; i += 256) {
-        ids[i] = i;
-        values[i] = scores[i] + bias[i];
+    float value = scores[t] + bias[t];
+    int id = t;
+    for (int width = 2; width <= 32; width *= 2)
+        for (int step = width / 2; step; step /= 2) {
+            float other = __shfl_xor(value, step, 32);
+            int other_id = __shfl_xor(id, step, 32);
+            bool keep_best = ((lane & step) == 0) == ((lane & width) == 0);
+            if (route_better(value, id, other, other_id) != keep_best) {
+                value = other;
+                id = other_id;
+            }
+        }
+    if (lane < 16) {
+        values[0][wave * 16 + lane] = value;
+        ids[0][wave * 16 + lane] = id;
     }
     __syncthreads();
-    for (int width = 2; width <= 512; width *= 2)
-        for (int step = width / 2; step; step /= 2) {
-            int a = (t / step) * 2 * step + t % step, b = a + step;
-            bool order = values[a] > values[b] || (values[a] == values[b] && ids[a] < ids[b]);
-            if (order == bool(a & width)) {
-                float va = values[a];
-                int ia = ids[a];
-                values[a] = values[b];
-                ids[a] = ids[b];
-                values[b] = va;
-                ids[b] = ia;
+    for (int round = 0; round < 4; ++round) {
+        int from = round & 1, to = from ^ 1;
+        if (t < (8 >> round)) {
+            int left = t * 32, right = left + 16, i = 0, j = 0;
+            for (int k = 0; k < 16; ++k) {
+                bool take_left = j == 16 || (i < 16 && route_better(values[from][left + i], ids[from][left + i],
+                                                                     values[from][right + j], ids[from][right + j]));
+                int source = take_left ? left + i++ : right + j++;
+                values[to][t * 16 + k] = values[from][source];
+                ids[to][t * 16 + k] = ids[from][source];
             }
-            __syncthreads();
         }
+        __syncthreads();
+    }
     if (!t) {
         float sum = 1e-20f;
         for (int j = 0; j < 16; ++j)
-            sum += scores[ids[j]];
+            sum += scores[ids[0][j]];
         weight_sum = sum;
     }
     __syncthreads();
     if (t < 16)
-        out[row * 16 + t] = {row, ids[t], scores[ids[t]] / weight_sum * 3.998f};
+        out[row * 16 + t] = {row, ids[0][t], scores[ids[0][t]] / weight_sum * 3.998f};
 }
 __global__ void weighted(Mat x, const Hy4Route *route, const int *offsets, const int *inverse, Mat out) {
     int r = blockIdx.y, c = blockIdx.x * 256 + threadIdx.x;
@@ -499,10 +531,13 @@ Mat moe(Ops &op, int layer, Mat x) {
     std::string p = "model.layers." + std::to_string(layer) + ".mlp.";
     Mat latent = op.linear(p + "routed_expert_down_proj", x);
     auto scores = static_cast<float *>(op.arena.next(size_t(x.rows) * 512 * 4));
-    router<<<dim3(128, x.rows), 128, 0, op.stream>>>(x, static_cast<const uint16_t *>(op.param(p + "gate.weight").p), scores);
+    if (x.rows <= 16)
+        router_single<<<dim3(128, x.rows), 128, 0, op.stream>>>(x, static_cast<const uint16_t *>(op.param(p + "gate.weight").p), scores);
+    else
+        router<<<dim3(128, (x.rows + 3) / 4), 128, 0, op.stream>>>(x, static_cast<const uint16_t *>(op.param(p + "gate.weight").p), scores);
     checked(hipGetLastError());
     auto picks = static_cast<Hy4Route *>(op.arena.next(size_t(x.rows) * 16 * sizeof(Hy4Route)));
-    choose<<<x.rows, 256, 0, op.stream>>>(scores, static_cast<const float *>(op.param(p + "gate.e_score_correction_bias").p),
+    choose<<<x.rows, 512, 0, op.stream>>>(scores, static_cast<const float *>(op.param(p + "gate.e_score_correction_bias").p),
                             picks);
     checked(hipGetLastError());
     if (op.batch_decode && x.rows > 1 && x.rows <= Hy4GroupedPlan::max_rows)
