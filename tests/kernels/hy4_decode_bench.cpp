@@ -223,23 +223,84 @@ void benchmark_hy4_prefill(Residency &gpu, int rows) {
     }
 }
 
+void print_f32_hash(Ops &op, const float *p, int rows, int cols) {
+    std::vector<uint32_t> words(size_t(rows) * cols);
+    op.copy(words.data(), p, words.size() * sizeof(uint32_t), hipMemcpyDeviceToHost);
+    uint64_t hash = 14695981039346656037ull;
+    for (uint32_t word : words) hash = (hash ^ word) * 1099511628211ull;
+    printf("output_hash=%016llx\n", static_cast<unsigned long long>(hash));
+}
+
 void benchmark_hy4_decode(Residency &gpu) {
     Ops op(gpu);
-    for (int rows : {1, 6}) {
+    for (int rows : {1, 6, 16, 96}) {
         op.arena.cursor = 0;
         Mat x = input(op, rows, 3072);
+        Mat qx = input(op, rows, 1024);
+        Mat ox = input(op, rows, 16384);
         auto base = op.arena.cursor;
         Mat output{};
-        measure("linear", rows, 3072 * 1536 / 2 + (3072 + 1536) * sizeof(uint16_t), 64, [&](int i) {
+        int warmup = rows <= 16 ? 16 : 5;
+        measure("linear", rows, 3072 * 1536 / 2 + (3072 + 1536) * sizeof(uint16_t), warmup, [&](int i) {
             op.arena.cursor = base;
             output = op.linear("model.layers." + std::to_string(i + 1) + ".mlp.shared_experts.gate_proj", x);
         });
         print_hash(op, output);
-        measure("fixed_ffn", rows, 3 * (3072 * 1536 / 2 + (3072 + 1536) * sizeof(uint16_t)), 32, [&](int i) {
+        measure("fixed_ffn", rows, 3 * (3072 * 1536 / 2 + (3072 + 1536) * sizeof(uint16_t)), warmup, [&](int i) {
             op.arena.cursor = base;
             output = feedforward(op, "model.layers." + std::to_string(i + 1) + ".mlp.shared_experts", x);
         });
         print_hash(op, output);
+        measure("mla_qb", rows, 1024 * 16384 / 2 + (1024 + 16384) * sizeof(uint16_t), warmup, [&](int i) {
+            op.arena.cursor = base;
+            int layer = 2 + (i % 10) * 4;
+            if (layer % 4 == 1) ++layer;
+            output = op.linear("model.layers." + std::to_string(layer) + ".self_attn.q_b_proj", qx);
+        });
+        print_hash(op, output);
+        measure("mla_o", rows, 16384 * 3072 / 2 + (16384 + 3072) * sizeof(uint16_t), warmup, [&](int i) {
+            op.arena.cursor = base;
+            int layer = 2 + (i % 10) * 4;
+            if (layer % 4 == 1) ++layer;
+            output = op.linear("model.layers." + std::to_string(layer) + ".self_attn.o_proj", ox);
+        });
+        print_hash(op, output);
+        auto codes = static_cast<int8_t *>(op.arena.next(size_t(rows) * 3072));
+        auto scales = static_cast<float *>(op.arena.next(size_t(rows) * 24 * 4));
+        auto partial = static_cast<float *>(op.arena.next(size_t(rows) * 120832 * 4));
+        auto logits = static_cast<float *>(op.arena.next(size_t(rows) * 120832 * 4));
+        auto suh = static_cast<const uint16_t *>(op.param("lm_head.suh").p);
+        auto svh = static_cast<const uint16_t *>(op.param("lm_head.svh").p);
+        auto trellis = static_cast<const uint32_t *>(op.param("lm_head.trellis").p);
+        auto tile_vals = static_cast<float *>(op.arena.next(size_t(rows) * 944 * 4));
+        auto tile_ids = static_cast<int *>(op.arena.next(size_t(rows) * 944 * 4));
+        auto tokens = static_cast<int *>(op.arena.next(size_t(rows) * sizeof(int)));
+        measure("lm_head", rows, 3072ull * 120832 * 6 / 8 + (3072 + 120832) * sizeof(uint16_t), 3, [&](int) {
+            checked(shelf_hy4_head(x.p, suh, svh, trellis, codes, scales, partial, logits, rows, op.stream));
+        });
+        print_f32_hash(op, logits, rows, 120832);
+        measure("lm_head_argmax", rows, 3072ull * 120832 * 6 / 8 + (3072 + 120832) * sizeof(uint16_t), 3, [&](int) {
+            checked(shelf_hy4_head_argmax(x.p, suh, svh, trellis, codes, scales, partial, tile_vals, tile_ids, tokens,
+                                          rows, op.stream));
+        });
+        std::vector<float> host_logits(size_t(rows) * 120832);
+        std::vector<int> host_tokens(rows);
+        op.copy(host_logits.data(), logits, host_logits.size() * sizeof(float), hipMemcpyDeviceToHost);
+        op.copy(host_tokens.data(), tokens, host_tokens.size() * sizeof(int), hipMemcpyDeviceToHost);
+        for (int r = 0; r < rows; ++r) {
+            float best = -INFINITY;
+            int ref_id = -1;
+            const float *row = host_logits.data() + size_t(r) * 120832;
+            for (int c = 0; c < 120832; ++c) {
+                if (row[c] > best) {
+                    best = row[c];
+                    ref_id = c;
+                }
+            }
+            if (host_tokens[r] != ref_id)
+                throw std::runtime_error("lm_head_argmax が不一致です");
+        }
+        printf("argmax_match=%d/%d\n", rows, rows);
     }
     for (int rows : {1, 4, 8, 16, 6, 24, 48, 96}) {
         op.arena.cursor = 0;

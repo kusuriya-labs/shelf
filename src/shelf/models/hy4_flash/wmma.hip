@@ -2,35 +2,101 @@
 #include <shelf/models/hy4_flash/linear.h>
 
 namespace {
-template <int Bits, int Tiles>
+template <int Bits, int Tiles, bool Pipe = false, bool ShufflePrev = false>
 __global__ void batch(const int8_t *codes, const float *scales, const uint32_t *weight, float *partial,
                       int rows, int k, int n, int blocks) {
-    shelf::kernel::exl3_detail::mul24::group_body<Bits, Tiles, false, 4, false, true>(
+    shelf::kernel::exl3_detail::mul24::group_body<Bits, Tiles, Pipe, 4, false, true, ShufflePrev>(
         codes, scales, k, k / 128, weight, partial, rows, nullptr, n, k, (k / 128 + gridDim.z - 1) / gridDim.z,
         blocks, blockIdx.x, blockIdx.z);
 }
 template <int Bits>
 void launch(const int8_t *codes, const float *scales, const uint32_t *weight, float *partial, int rows, int k,
             int n, hipStream_t stream, int splits) {
-    if (rows >= 32) {
+    if (rows > 48 && rows <= 96) {
+        int blocks = (rows + 47) / 48;
+        batch<Bits, 3, false, Bits == 4><<<dim3(blocks * (n / 64), 1, splits), 128, 0, stream>>>(
+            codes, scales, weight, partial, rows, k, n, blocks);
+    } else if (rows >= 32) {
         int blocks = (rows + 31) / 32;
-        batch<Bits, 2><<<dim3(blocks * (n / 64), 1, splits), 128, 0, stream>>>(codes, scales, weight, partial,
-                                                                               rows, k, n, blocks);
+        batch<Bits, 2, false, Bits == 4><<<dim3(blocks * (n / 64), 1, splits), 128, 0, stream>>>(
+            codes, scales, weight, partial, rows, k, n, blocks);
     } else {
         int blocks = (rows + 15) / 16;
-        batch<Bits, 1><<<dim3(blocks * (n / 64), 1, splits), 128, 0, stream>>>(codes, scales, weight, partial,
-                                                                               rows, k, n, blocks);
+        batch<Bits, 1, false, Bits == 4><<<dim3(blocks * (n / 64), 1, splits), 128, 0, stream>>>(
+            codes, scales, weight, partial, rows, k, n, blocks);
     }
 }
 }
 namespace {
-template <int Bits, bool OutFused, bool Pair = false, bool Compact = false>
+template <int Bits>
+__global__ void __launch_bounds__(128u) gemm_fused_4w(
+    const uint16_t *input, const uint16_t *suh, const uint32_t *trellis, float *partial,
+    int rows, int input_width, int padded_input, int padded_output, int splits) {
+    using namespace shelf::kernel::exl3_detail;
+    using namespace shelf::kernel::exl3_detail::mul24;
+    extern __shared__ uint8_t shared[];
+    auto codes = reinterpret_cast<int8_t *>(shared);
+    const uint32_t groups = padded_input / 128u;
+    const uint32_t gps = (groups + splits - 1u) / splits;
+    const uint32_t code_stride = gps * 128u;
+    auto scales = reinterpret_cast<float *>(shared + size_t(rows) * code_stride);
+    const uint32_t lane = threadIdx.x & 31u, wave = threadIdx.x >> 5u;
+    const uint32_t tiles = padded_output / 64u;
+    const uint32_t tile = blockIdx.x % tiles, split = blockIdx.x / tiles;
+    const uint32_t g0 = split * gps, g1 = groups < g0 + gps ? groups : g0 + gps;
+    const uint32_t active_groups = g1 > g0 ? g1 - g0 : 0u;
+    for (uint32_t part = wave; part < uint32_t(rows) * active_groups; part += 4u) {
+        const int m = int(part / active_groups);
+        const uint32_t g = g0 + part % active_groups;
+        const uint32_t local_group = g - g0;
+        float v[4];
+        const int base = int(g * 128u) + int(lane * 4u);
+        if (base + 3 < input_width && (input_width & 3) == 0) {
+            const uint2 raw = *reinterpret_cast<const uint2 *>(input + size_t(m) * input_width + base);
+            const uint2 hs = *reinterpret_cast<const uint2 *>(suh + base);
+            v[0] = bf16_bits_to_f32(uint16_t(raw.x & 0xffffu)) * f16_bits_to_f32(uint16_t(hs.x & 0xffffu));
+            v[1] = bf16_bits_to_f32(uint16_t(raw.x >> 16)) * f16_bits_to_f32(uint16_t(hs.x >> 16));
+            v[2] = bf16_bits_to_f32(uint16_t(raw.y & 0xffffu)) * f16_bits_to_f32(uint16_t(hs.y & 0xffffu));
+            v[3] = bf16_bits_to_f32(uint16_t(raw.y >> 16)) * f16_bits_to_f32(uint16_t(hs.y >> 16));
+        } else {
+            for (int i = 0; i < 4; ++i)
+                v[i] = base + i < input_width ? bf16_bits_to_f32(input[size_t(m) * input_width + base + i]) *
+                                                    f16_bits_to_f32(suh[base + i])
+                                              : 0.0f;
+        }
+        fwht128(v[0], v[1], v[2], v[3], lane);
+        float peak = 0;
+        for (float &x : v) {
+            x *= kInvSqrt128;
+            peak = fmaxf(peak, fabsf(x));
+        }
+        for (int mask = 16; mask; mask /= 2)
+            peak = fmaxf(peak, __shfl_xor(peak, mask, 32));
+        const float scale = peak / 127.0f;
+        uint32_t packed = 0;
+        for (int i = 0; i < 4; ++i) {
+            int8_t q = scale ? int8_t(rintf(v[i] / scale)) : 0;
+            packed |= uint32_t(uint8_t(q)) << (8 * i);
+        }
+        *reinterpret_cast<uint32_t *>(codes + size_t(m) * code_stride + local_group * 128u + lane * 4u) = packed;
+        if (!lane)
+            scales[size_t(m) * gps + local_group] = scale;
+    }
+    __syncthreads();
+    trellis += size_t(g0) * 128u * padded_output * Bits / 32u;
+    float *yprime = partial + size_t(split) * rows * padded_output;
+    shelf::kernel::exl3_detail::mul24::group_body<Bits, 1, false, 4, false, true, Bits == 4>(
+        codes, scales, code_stride, gps, trellis, yprime, rows, nullptr, padded_output, code_stride, active_groups, 1u,
+        tile, 0u);
+}
+
+template <int Bits, bool OutFused, bool Pair = false, int CompactRows = 0>
 __global__ void __launch_bounds__(256u) gemm_fused(
     const uint16_t *input, const uint16_t *suh, const uint16_t *svh, uint16_t *output, const uint32_t *trellis,
     float *partial, int rows, int input_width, int output_width, int padded_input, int padded_output, int row_chunk,
     int splits, const uint16_t *up_suh = nullptr, const uint32_t *up_trellis = nullptr) {
-    if constexpr (Compact) {
-        rows = row_chunk = 6;
+    if constexpr (CompactRows > 0) {
+        rows = row_chunk = CompactRows;
         input_width = padded_input = 3072;
         output_width = padded_output = 1536;
         splits = 8;
@@ -48,7 +114,7 @@ __global__ void __launch_bounds__(256u) gemm_fused(
     auto codes = reinterpret_cast<int8_t *>(shared);
     const uint32_t groups = padded_input / 128u;
     const uint32_t gps = (groups + splits - 1u) / splits;
-    const uint32_t local_groups = Compact ? gps : groups;
+    const uint32_t local_groups = CompactRows > 0 ? gps : groups;
     const uint32_t code_stride = local_groups * 128;
     auto scales = reinterpret_cast<float *>(shared + size_t(row_chunk) * code_stride);
     const uint32_t lane = threadIdx.x & 31u, wave = threadIdx.x >> 5u;
@@ -56,10 +122,10 @@ __global__ void __launch_bounds__(256u) gemm_fused(
     const uint32_t tiles = padded_output / 128u;
     const uint32_t tile = blockIdx.x % tiles, split = blockIdx.x / tiles;
     const uint32_t g0 = split * gps, g1 = groups < g0 + gps ? groups : g0 + gps;
-    const int row0 = Compact ? 0 : int(blockIdx.y) * row_chunk;
-    const int cr = Compact ? 6 : min(rows - row0, row_chunk);
+    const int row0 = CompactRows > 0 ? 0 : int(blockIdx.y) * row_chunk;
+    const int cr = CompactRows > 0 ? CompactRows : min(rows - row0, row_chunk);
     auto rotate = [&](int m, uint32_t g) {
-        const uint32_t local_group = Compact ? g - g0 : g;
+        const uint32_t local_group = CompactRows > 0 ? g - g0 : g;
         float v[4];
         for (int i = 0; i < 4; ++i) {
             int c = int(g * 128u) + int(lane * 4u) + i;
@@ -85,8 +151,8 @@ __global__ void __launch_bounds__(256u) gemm_fused(
         if (!lane)
             scales[size_t(m) * local_groups + local_group] = scale;
     };
-    if constexpr (Compact) {
-        for (uint32_t part = wave; part < 6 * 3; part += waves)
+    if constexpr (CompactRows > 0) {
+        for (uint32_t part = wave; part < uint32_t(CompactRows * 3); part += waves)
             rotate(part / 3, g0 + part % 3);
     } else {
         for (int m = 0; m < cr; ++m)
@@ -101,13 +167,13 @@ __global__ void __launch_bounds__(256u) gemm_fused(
         ep.out_stride = output_width;
     }
     float *yprime = partial + (size_t(row0) + size_t(split) * (rows - cr)) * padded_output;
-    if constexpr (Compact) {
+    if constexpr (CompactRows > 0) {
         trellis += size_t(g0) * 128 * padded_output * Bits / 32;
         yprime += size_t(split) * cr * padded_output;
     }
-    shelf::kernel::exl3_detail::mul24::group_body<Bits, 1, OutFused, waves, OutFused, true>(
+    shelf::kernel::exl3_detail::mul24::group_body<Bits, 1, OutFused, waves, OutFused, true, Bits == 4 && !OutFused>(
         codes, scales, code_stride, local_groups, trellis, yprime, cr, nullptr, padded_output, code_stride, gps, 1u,
-        tile, Compact ? 0 : split, &ep);
+        tile, CompactRows > 0 ? 0 : split, &ep);
 }
 __global__ void shared_swiglu(const float *partial, const uint16_t *gate_svh, const uint16_t *up_svh,
                               uint16_t *output) {
@@ -143,10 +209,22 @@ hipError_t shelf_hy4_shared_gate_up(const uint16_t *input, Hy4ExpertProjection g
     };
     if (!input || !output || !partial || rows < 1 || rows > 16 || !supported(gate) || !supported(up))
         return hipErrorInvalidValue;
-    size_t shared = size_t(rows) * (3072 + 24 * sizeof(float));
-    gemm_fused<4, false, true><<<dim3(12 * 8, 1, 2), 256, shared, stream>>>(
-        input, gate.suh, nullptr, nullptr, gate.trellis, partial, rows, 3072, 1536, 3072, 1536, rows, 8,
-        up.suh, up.trellis);
+    if (rows == 1)
+        gemm_fused<4, false, true, 1><<<dim3(12 * 8, 1, 2), 256, 1 * 3 * 132, stream>>>(
+            input, gate.suh, nullptr, nullptr, gate.trellis, partial, rows, 3072, 1536, 3072, 1536, rows, 8,
+            up.suh, up.trellis);
+    else if (rows == 6)
+        gemm_fused<4, false, true, 6><<<dim3(12 * 8, 1, 2), 256, 6 * 3 * 132, stream>>>(
+            input, gate.suh, nullptr, nullptr, gate.trellis, partial, rows, 3072, 1536, 3072, 1536, rows, 8,
+            up.suh, up.trellis);
+    else if (rows == 16)
+        gemm_fused<4, false, true, 16><<<dim3(12 * 8, 1, 2), 256, 16 * 3 * 132, stream>>>(
+            input, gate.suh, nullptr, nullptr, gate.trellis, partial, rows, 3072, 1536, 3072, 1536, rows, 8,
+            up.suh, up.trellis);
+    else
+        gemm_fused<4, false, true><<<dim3(12 * 8, 1, 2), 256, size_t(rows) * (3072 + 24 * sizeof(float)), stream>>>(
+            input, gate.suh, nullptr, nullptr, gate.trellis, partial, rows, 3072, 1536, 3072, 1536, rows, 8,
+            up.suh, up.trellis);
     auto status = hipGetLastError();
     if (status != hipSuccess) return status;
     shared_swiglu<<<dim3(12, rows), 32, 0, stream>>>(partial, gate.svh, up.svh, output);
@@ -163,6 +241,18 @@ hipError_t shelf_hy4_linear_fused_gemm(const uint16_t *input, const uint16_t *su
     const bool out_fused = svh && output && output_width == padded_output && splits == 1;
     const uint32_t groups = padded_input / 128u;
     const uint32_t gps = (groups + splits - 1u) / splits;
+    const size_t compact_shared = size_t(rows) * gps * 132u;
+    if (!out_fused && !(bits == 4 && rows == 6 && splits == 8 && input_width == 3072 && output_width == 1536) &&
+        compact_shared <= 48u * 1024u) {
+        const dim3 grid4((padded_output / 64u) * splits, 1);
+        if (bits == 4)
+            gemm_fused_4w<4><<<grid4, 128, compact_shared, stream>>>(
+                input, suh, trellis, partial, rows, input_width, padded_input, padded_output, splits);
+        else
+            gemm_fused_4w<6><<<grid4, 128, compact_shared, stream>>>(
+                input, suh, trellis, partial, rows, input_width, padded_input, padded_output, splits);
+        return hipGetLastError();
+    }
     const size_t per_row = size_t(padded_input) + size_t(groups) * 4u;
     const size_t budget = out_fused ? 56u * 1024u : 64u * 1024u;
     int row_chunk = rows < 16 ? rows : 16;
@@ -173,7 +263,7 @@ hipError_t shelf_hy4_linear_fused_gemm(const uint16_t *input, const uint16_t *su
     const dim3 grid(tiles * splits, (rows + row_chunk - 1) / row_chunk);
     if (bits == 4 && rows == 6 && splits == 8 && input_width == 3072 && padded_input == 3072 &&
         output_width == 1536 && padded_output == 1536) {
-        gemm_fused<4, false, false, true><<<grid, 256, rows * gps * 132, stream>>>(
+        gemm_fused<4, false, false, 6><<<grid, 256, rows * gps * 132, stream>>>(
             input, suh, svh, output, trellis, partial, rows, input_width, output_width, padded_input,
             padded_output, row_chunk, splits);
     } else if (out_fused) {

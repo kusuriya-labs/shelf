@@ -232,24 +232,43 @@ float *Target::head_logits(Mat hidden) {
                            partial, logits, hidden.rows, op.stream));
     return logits;
 }
+void Target::head_argmax(Mat hidden, int *tokens) {
+    auto codes = static_cast<int8_t *>(op.arena.next(size_t(hidden.rows) * 3072));
+    auto scales = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 24 * 4));
+    auto partial = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 120832 * 4));
+    auto tile_vals = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 944 * 4));
+    auto tile_ids = static_cast<int *>(op.arena.next(size_t(hidden.rows) * 944 * 4));
+    checked(shelf_hy4_head_argmax(hidden.p, static_cast<const uint16_t *>(op.param("lm_head.suh").p),
+                                  static_cast<const uint16_t *>(op.param("lm_head.svh").p),
+                                  static_cast<const uint32_t *>(op.param("lm_head.trellis").p), codes, scales,
+                                  partial, tile_vals, tile_ids, tokens, hidden.rows, op.stream));
+}
 std::vector<int> Target::predict(Mat hidden, int position, bool draft, const Path &dump,
-                                 float *distribution, float *logits) {
+                                 float *distribution, float *logits, int *tokens) {
     std::chrono::steady_clock::time_point begin;
     if (op.gpu.tp_size == 1 && op.rank == 0 && op.gpu.expert_begin[0])
         begin = std::chrono::steady_clock::now();
     size_t mark = op.arena.cursor;
-    if (!logits)
-        logits = head_logits(hidden);
-    if (!dump.empty()) {
-        std::vector<float> host(120832);
-        op.copy(host.data(), logits + size_t(hidden.rows - 1) * 120832, host.size() * 4,
-                hipMemcpyDeviceToHost);
-        std::ofstream file(dump, std::ios::binary);
-        if (!file.write(reinterpret_cast<const char *>(host.data()), host.size() * 4))
-            throw std::runtime_error("logits を保存できません");
+    int *device_ids = tokens;
+    if (!device_ids) {
+        device_ids = static_cast<int *>(op.arena.next(hidden.rows * sizeof(int)));
+        if (!logits && temperature == 0 && !distribution && dump.empty()) {
+            head_argmax(hidden, device_ids);
+        } else {
+            if (!logits)
+                logits = head_logits(hidden);
+            if (!dump.empty()) {
+                std::vector<float> host(120832);
+                op.copy(host.data(), logits + size_t(hidden.rows - 1) * 120832, host.size() * 4,
+                        hipMemcpyDeviceToHost);
+                std::ofstream file(dump, std::ios::binary);
+                if (!file.write(reinterpret_cast<const char *>(host.data()), host.size() * 4))
+                    throw std::runtime_error("logits を保存できません");
+            }
+            sample(logits, hidden.rows, position, seed ^ (draft ? 0x735a7ec51b09ull : 0ull), device_ids,
+                   distribution);
+        }
     }
-    auto device_ids = static_cast<int *>(op.arena.next(hidden.rows * sizeof(int)));
-    sample(logits, hidden.rows, position, seed ^ (draft ? 0x735a7ec51b09ull : 0ull), device_ids, distribution);
     std::vector<int> result(hidden.rows);
     op.copy(result.data(), device_ids, result.size() * 4, hipMemcpyDeviceToHost);
     op.arena.cursor = mark;
@@ -313,13 +332,22 @@ std::vector<int> Target::forward(const std::vector<int> &ids, bool verify, bool 
         throw std::runtime_error("token ID が範囲外です");
     auto &gpu = op.gpu;
     op.arena.cursor = base;
-    if (gpu.graph_input && target_graph && !gpu.target_capture_failed && need_head && Hy4MoePlan::supports(rows) && (verify || rows == 1)) {
+    if (gpu.graph_input && target_graph && !gpu.target_capture_failed && need_head && dump.empty() &&
+        Hy4MoePlan::supports(rows) && (verify || rows == 1)) {
         const int dense = std::clamp(2048 - start, 0, rows);
         int bucket = std::max(2048, (start + rows + 1023) / 1024 * 1024);
-        GraphKey key{rows, dense, bucket, verify, base, 0, 0, 0};
+        GraphKey key{rows, dense, bucket, verify, base, temperature == 0 ? 0.0f : 1.0f, 0, 0};
         auto plan = capture_cached(op, gpu.target_graphs, gpu.target_victim, gpu.target_capture_failed, key,
             [&](GraphPlan &slot) {
-                slot.logits = head_logits(layers(ids, verify, true));
+                Mat hidden = layers(ids, verify, true);
+                if (temperature == 0) {
+                    slot.tokens = static_cast<int *>(op.arena.next(size_t(rows) * sizeof(int)));
+                    slot.logits = nullptr;
+                    head_argmax(hidden, slot.tokens);
+                } else {
+                    slot.logits = head_logits(hidden);
+                    slot.tokens = nullptr;
+                }
                 slot.cursor = op.arena.cursor;
             });
         if (plan) {
@@ -348,7 +376,8 @@ std::vector<int> Target::forward(const std::vector<int> &ids, bool verify, bool 
             }
             history.insert(history.end(), ids.begin(), ids.end());
             op.arena.cursor = plan->cursor;
-            return predict(state.row(0, rows), start + 1, false, dump, verify ? target_probs : nullptr, plan->logits);
+            return predict(state.row(0, rows), start + 1, false, dump, verify ? target_probs : nullptr, plan->logits,
+                           plan->tokens);
         }
         op.arena.cursor = base;
     }
@@ -416,7 +445,10 @@ std::vector<int> Target::draft_steps(int anchor, int *device_ids) {
         float *distribution = draft_probs ? draft_probs + (i - 1) * 120832 : nullptr;
         if (device_ids) {
             size_t mark = op.arena.cursor;
-            sample(head_logits(corrected), 1, i, 0x735a7ec51b09ull, device_ids + i, distribution, op.params);
+            if (temperature == 0 && !distribution)
+                head_argmax(corrected, device_ids + i);
+            else
+                sample(head_logits(corrected), 1, i, 0x735a7ec51b09ull, device_ids + i, distribution, op.params);
             op.arena.cursor = mark;
         } else {
             previous = predict(corrected, start + i, true, {}, distribution)[0];
@@ -798,6 +830,10 @@ GraphKey batch_graph_key(Target &target, const std::vector<BatchLane> &lanes, in
             key.lanes[i].top_k = lane.options.top_k;
         }
     }
+    if (!draft)
+        key.temperature = std::all_of(lanes.begin(), lanes.end(), [](const BatchLane &lane) {
+            return lane.options.temperature == 0;
+        }) ? 0.0f : 1.0f;
     key.bucket = end <= 2048 ? int(std::bit_ceil(unsigned(end))) : (end + 1023) / 1024 * 1024;
     return key;
 }
@@ -848,6 +884,8 @@ int *draft_batch_steps(Target &target, const std::vector<BatchLane> &lanes, cons
     auto device = op.capture ? op.gpu.batch_input->candidates : static_cast<int *>(op.arena.next(5 * batch * sizeof(int)));
     int *previous = op.capture ? op.gpu.batch_input->step.anchors : op.indices(anchors);
     mark = op.arena.cursor;
+    const bool all_greedy =
+        std::all_of(lanes.begin(), lanes.end(), [](const BatchLane &lane) { return lane.options.temperature == 0; });
     for (int i = 1; i <= 5; ++i) {
         Mat hidden = gather(x, nullptr, i);
         Mat q = op.norm(hidden, correction + ".hidden_norm.weight");
@@ -855,7 +893,10 @@ int *draft_batch_steps(Target &target, const std::vector<BatchLane> &lanes, cons
         Mat k = op.norm(embedding, correction + ".embed_norm.weight");
         Mat corrected = op.add(hidden, feedforward(op, correction, op.join(q, k)));
         previous = device + (i - 1) * batch;
-        sample_batch(op, lanes, target.head_logits(corrected), previous, 1, i);
+        if (all_greedy)
+            target.head_argmax(corrected, previous);
+        else
+            sample_batch(op, lanes, target.head_logits(corrected), previous, 1, i);
         op.arena.cursor = mark;
     }
     return device;
@@ -962,15 +1003,25 @@ void decode_batch(Target &target, std::vector<BatchLane> &lanes, BatchStats &sta
     }
     BatchGraphParams step;
     std::array<std::vector<uint8_t>, 4> engrams;
+    const bool all_greedy =
+        std::all_of(lanes.begin(), lanes.end(), [](const BatchLane &lane) { return lane.options.temperature == 0; });
     Mat h{};
     float *logits = nullptr;
+    int *tokens = nullptr;
     if (gpu.batch_input && target.target_graph && !gpu.target_capture_failed) {
         auto key = batch_graph_key(target, lanes, rows, false);
         auto plan = capture_cached(op, gpu.target_graphs, gpu.target_victim, gpu.target_capture_failed, key,
             [&](GraphPlan &slot) {
                 Mat hidden = verify_batch(target, layout, ids, rows);
                 slot.hidden = hidden.p;
-                slot.logits = target.head_logits(hidden);
+                if (all_greedy) {
+                    slot.tokens = static_cast<int *>(op.arena.next(ids.size() * sizeof(int)));
+                    slot.logits = nullptr;
+                    target.head_argmax(hidden, slot.tokens);
+                } else {
+                    slot.logits = target.head_logits(hidden);
+                    slot.tokens = nullptr;
+                }
                 slot.cursor = op.arena.cursor;
             });
         op.arena.cursor = key.workspace;
@@ -989,14 +1040,23 @@ void decode_batch(Target &target, std::vector<BatchLane> &lanes, BatchStats &sta
             op.arena.cursor = plan->cursor;
             h = {plan->hidden, int(ids.size()), 3072};
             logits = plan->logits;
+            tokens = plan->tokens;
         }
     }
-    if (!logits) {
+    if (!logits && !tokens) {
         h = verify_batch(target, layout, ids, rows);
-        logits = target.head_logits(h);
+        if (all_greedy) {
+            tokens = static_cast<int *>(op.arena.next(ids.size() * sizeof(int)));
+            target.head_argmax(h, tokens);
+        } else {
+            logits = target.head_logits(h);
+        }
     }
-    auto device = static_cast<int *>(op.arena.next(ids.size() * sizeof(int)));
-    sample_batch(op, lanes, logits, device, rows, 0);
+    int *device = tokens;
+    if (!device) {
+        device = static_cast<int *>(op.arena.next(ids.size() * sizeof(int)));
+        sample_batch(op, lanes, logits, device, rows, 0);
+    }
     std::vector<int> next(ids.size());
     op.copy(next.data(), device, next.size() * sizeof(int), hipMemcpyDeviceToHost);
     if (std::find(next.begin(), next.end(), -1) != next.end())

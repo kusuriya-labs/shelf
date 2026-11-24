@@ -22,6 +22,7 @@ struct Target {
     void accept(int keep, int submitted);
 
     float *head_logits(Mat hidden);
+    void head_argmax(Mat hidden, int *tokens);
 
     bool target_graph = false, draft_graph = false;
 
@@ -29,7 +30,7 @@ struct Target {
     void sample(float *logits, int rows, int position, uint64_t rng, int *ids, float *distribution,
                 const Hy4StepParams *params = nullptr);
     std::vector<int> predict(Mat hidden, int position, bool draft = false, const Path &dump = {},
-                             float *distribution = nullptr, float *logits = nullptr);
+                             float *distribution = nullptr, float *logits = nullptr, int *tokens = nullptr);
     Mat layers(const std::vector<int> &ids, bool verify, bool need_head);
     std::vector<int> draft_steps(int anchor, int *device_ids);
 };

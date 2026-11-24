@@ -24,10 +24,19 @@ __global__ void rotate_input(const uint16_t *input, const uint16_t *suh, int8_t 
     const unsigned lane = threadIdx.x;
     const int base = blockIdx.x * 128 + lane * 4;
     float v[4];
-    for (int i = 0; i < 4; ++i)
-        v[i] = base + i < width ? bf16_bits_to_f32(input[size_t(blockIdx.y) * width + base + i]) *
-                                      f16_bits_to_f32(suh[base + i])
-                                : 0.0f;
+    if (!group && base + 3 < width && (width & 3) == 0) {
+        const uint2 raw = *reinterpret_cast<const uint2 *>(input + size_t(blockIdx.y) * width + base);
+        const uint2 hs = *reinterpret_cast<const uint2 *>(suh + base);
+        v[0] = bf16_bits_to_f32(uint16_t(raw.x & 0xffffu)) * f16_bits_to_f32(uint16_t(hs.x & 0xffffu));
+        v[1] = bf16_bits_to_f32(uint16_t(raw.x >> 16)) * f16_bits_to_f32(uint16_t(hs.x >> 16));
+        v[2] = bf16_bits_to_f32(uint16_t(raw.y & 0xffffu)) * f16_bits_to_f32(uint16_t(hs.y & 0xffffu));
+        v[3] = bf16_bits_to_f32(uint16_t(raw.y >> 16)) * f16_bits_to_f32(uint16_t(hs.y >> 16));
+    } else {
+        for (int i = 0; i < 4; ++i)
+            v[i] = base + i < width ? bf16_bits_to_f32(input[size_t(blockIdx.y) * width + base + i]) *
+                                          f16_bits_to_f32(suh[base + i])
+                                    : 0.0f;
+    }
     fwht128(v[0], v[1], v[2], v[3], lane);
     float peak = 0;
     for (float &x : v) {
@@ -39,8 +48,12 @@ __global__ void rotate_input(const uint16_t *input, const uint16_t *suh, int8_t 
     const float scale = peak / 127.0f;
     if (lane == 0)
         scales[size_t(blockIdx.y) * (padded / 128) + blockIdx.x] = scale;
-    for (int i = 0; i < 4; ++i)
-        codes[size_t(blockIdx.y) * padded + base + i] = scale ? int8_t(rintf(v[i] / scale)) : 0;
+    uint32_t packed = 0;
+    for (int i = 0; i < 4; ++i) {
+        int8_t q = scale ? int8_t(rintf(v[i] / scale)) : 0;
+        packed |= uint32_t(uint8_t(q)) << (8 * i);
+    }
+    *reinterpret_cast<uint32_t *>(codes + size_t(blockIdx.y) * padded + base) = packed;
 }
 
 __global__ void rotate_output(const float *partial, const uint16_t *svh, uint16_t *output, int width,
@@ -52,20 +65,40 @@ __global__ void rotate_output(const float *partial, const uint16_t *svh, uint16_
     if (group)
         svh = group[(routes ? routes[blockIdx.y].expert : blockIdx.y) * stride].svh;
     const int base = blockIdx.x * 128 + threadIdx.x * 4;
-    float v[4];
-    for (int i = 0; i < 4; ++i)
-        v[i] = partial[size_t(blockIdx.y) * padded + base + i];
-    for (int s = 1; s < splits; ++s)
-        for (int i = 0; i < 4; ++i)
-            v[i] += partial[(size_t(s) * gridDim.y + blockIdx.y) * padded + base + i];
+    float4 acc = *reinterpret_cast<const float4 *>(partial + size_t(blockIdx.y) * padded + base);
+    for (int s = 1; s < splits; ++s) {
+        float4 add = *reinterpret_cast<const float4 *>(partial + (size_t(s) * gridDim.y + blockIdx.y) * padded + base);
+        acc.x += add.x;
+        acc.y += add.y;
+        acc.z += add.z;
+        acc.w += add.w;
+    }
+    float v[4] = {acc.x, acc.y, acc.z, acc.w};
     fwht128(v[0], v[1], v[2], v[3], threadIdx.x);
-    for (int i = 0; i < 4 && base + i < width; ++i) {
-        float value = v[i] * kInvSqrt128 * f16_bits_to_f32(svh[base + i]);
-        size_t offset = size_t(blockIdx.y) * width + base + i;
-        if (logits)
-            logits[offset] = value;
-        else
-            output[offset] = f32_to_bf16_rne_device(value);
+    if (base + 3 < width && (width & 3) == 0) {
+        const uint2 hs = *reinterpret_cast<const uint2 *>(svh + base);
+        float s0 = v[0] * kInvSqrt128 * f16_bits_to_f32(uint16_t(hs.x & 0xffffu));
+        float s1 = v[1] * kInvSqrt128 * f16_bits_to_f32(uint16_t(hs.x >> 16));
+        float s2 = v[2] * kInvSqrt128 * f16_bits_to_f32(uint16_t(hs.y & 0xffffu));
+        float s3 = v[3] * kInvSqrt128 * f16_bits_to_f32(uint16_t(hs.y >> 16));
+        size_t offset = size_t(blockIdx.y) * width + base;
+        if (logits) {
+            *reinterpret_cast<float4 *>(logits + offset) = float4{s0, s1, s2, s3};
+        } else {
+            uint2 packed;
+            packed.x = uint32_t(f32_to_bf16_rne_device(s0)) | (uint32_t(f32_to_bf16_rne_device(s1)) << 16);
+            packed.y = uint32_t(f32_to_bf16_rne_device(s2)) | (uint32_t(f32_to_bf16_rne_device(s3)) << 16);
+            *reinterpret_cast<uint2 *>(output + offset) = packed;
+        }
+    } else {
+        for (int i = 0; i < 4 && base + i < width; ++i) {
+            float value = v[i] * kInvSqrt128 * f16_bits_to_f32(svh[base + i]);
+            size_t offset = size_t(blockIdx.y) * width + base + i;
+            if (logits)
+                logits[offset] = value;
+            else
+                output[offset] = f32_to_bf16_rne_device(value);
+        }
     }
 }
 __global__ void gather_rotate_pair(const uint16_t *input, const Hy4Route *routes, const int *d_count,
@@ -163,7 +196,11 @@ hipError_t shelf_hy4_linear_workspace(const uint16_t *input, const uint16_t *suh
     if (splits < 1 || splits > padded_input / 128)
         return hipErrorInvalidValue;
     auto status = hipSuccess;
-    if (rows <= 16 && (bits == 4 || bits == 6)) {
+    const bool use_fused = (rows <= 16 && (bits == 4 || bits == 6)) &&
+                           ((splits == 1 && output_width == padded_output) ||
+                            (rows <= 6 && (rows == 1 || padded_input <= 3072) &&
+                             size_t(rows) * ((padded_input / 128 + splits - 1) / splits) * 132 <= 48u * 1024u));
+    if (use_fused) {
         const bool out_fused = splits == 1 && output_width == padded_output;
         status = shelf_hy4_linear_fused_gemm(input, suh, out_fused ? svh : nullptr, trellis, partial,
                                              out_fused ? output : nullptr, rows, input_width, output_width,
@@ -230,6 +267,71 @@ extern "C" hipError_t shelf_hy4_expert_linear(const uint16_t *x, const Hy4Expert
     return hipGetLastError();
 }
 
+__global__ void rotate_output_argmax_tiles(const float *partial, const uint16_t *svh, float *tile_vals,
+                                           int *tile_ids) {
+    const int base = blockIdx.x * 128 + threadIdx.x * 4;
+    float4 acc = *reinterpret_cast<const float4 *>(partial + size_t(blockIdx.y) * 120832 + base);
+    float v[4] = {acc.x, acc.y, acc.z, acc.w};
+    fwht128(v[0], v[1], v[2], v[3], threadIdx.x);
+    const uint2 hs = *reinterpret_cast<const uint2 *>(svh + base);
+    const float s[4] = {
+        v[0] * kInvSqrt128 * f16_bits_to_f32(uint16_t(hs.x & 0xffffu)),
+        v[1] * kInvSqrt128 * f16_bits_to_f32(uint16_t(hs.x >> 16)),
+        v[2] * kInvSqrt128 * f16_bits_to_f32(uint16_t(hs.y & 0xffffu)),
+        v[3] * kInvSqrt128 * f16_bits_to_f32(uint16_t(hs.y >> 16)),
+    };
+    float best = -INFINITY;
+    int id = -1;
+    for (int i = 0; i < 4; ++i) {
+        if (s[i] > best) {
+            best = s[i];
+            id = base + i;
+        }
+    }
+    for (int mask = 16; mask; mask >>= 1) {
+        float ov = __shfl_xor(best, mask, 32);
+        int oi = __shfl_xor(id, mask, 32);
+        if (ov > best || (ov == best && oi < id)) {
+            best = ov;
+            id = oi;
+        }
+    }
+    if (!threadIdx.x) {
+        const size_t idx = size_t(blockIdx.y) * 944 + blockIdx.x;
+        tile_vals[idx] = best;
+        tile_ids[idx] = id;
+    }
+}
+
+__global__ void argmax_tiles_reduce(const float *tile_vals, const int *tile_ids, int *tokens) {
+    __shared__ float vals[256];
+    __shared__ int ids[256];
+    const int tid = threadIdx.x, row = blockIdx.x;
+    const size_t base = size_t(row) * 944;
+    float best = -INFINITY;
+    int id = -1;
+    for (int t = tid; t < 944; t += 256) {
+        float v = tile_vals[base + t];
+        int i = tile_ids[base + t];
+        if (v > best || (v == best && i < id)) {
+            best = v;
+            id = i;
+        }
+    }
+    vals[tid] = best;
+    ids[tid] = id;
+    __syncthreads();
+    for (int d = 128; d; d >>= 1) {
+        if (tid < d && (vals[tid + d] > vals[tid] || (vals[tid + d] == vals[tid] && ids[tid + d] < ids[tid]))) {
+            vals[tid] = vals[tid + d];
+            ids[tid] = ids[tid + d];
+        }
+        __syncthreads();
+    }
+    if (!tid)
+        tokens[row] = ids[0];
+}
+
 hipError_t shelf_hy4_head(const uint16_t *x, const uint16_t *suh, const uint16_t *svh, const uint32_t *trellis,
                           int8_t *codes, float *scales, float *partial, float *logits, int rows, hipStream_t stream) {
     if (!x || !suh || !svh || !trellis || !codes || !scales || !partial || !logits || rows < 1 || rows > 96)
@@ -242,6 +344,27 @@ hipError_t shelf_hy4_head(const uint16_t *x, const uint16_t *suh, const uint16_t
     if (status != hipSuccess)
         return status;
     rotate_output<<<dim3(944, rows), 32, 0, stream>>>(partial, svh, nullptr, 120832, 120832, nullptr, 0, logits);
+    return hipGetLastError();
+}
+
+hipError_t shelf_hy4_head_argmax(const uint16_t *x, const uint16_t *suh, const uint16_t *svh,
+                                 const uint32_t *trellis, int8_t *codes, float *scales, float *partial,
+                                 float *tile_vals, int *tile_ids, int *tokens, int rows, hipStream_t stream) {
+    if (!x || !suh || !svh || !trellis || !codes || !scales || !partial || !tile_vals || !tile_ids || !tokens ||
+        rows < 1 || rows > 96)
+        return hipErrorInvalidValue;
+    rotate_input<<<dim3(24, rows), 32, 0, stream>>>(x, suh, codes, scales, 3072, 3072);
+    auto status = hipGetLastError();
+    if (status != hipSuccess)
+        return status;
+    status = shelf_hy4_wmma(codes, scales, trellis, partial, rows, 3072, 120832, 6, stream, 1);
+    if (status != hipSuccess)
+        return status;
+    rotate_output_argmax_tiles<<<dim3(944, rows), 32, 0, stream>>>(partial, svh, tile_vals, tile_ids);
+    status = hipGetLastError();
+    if (status != hipSuccess)
+        return status;
+    argmax_tiles_reduce<<<rows, 256, 0, stream>>>(tile_vals, tile_ids, tokens);
     return hipGetLastError();
 }
 

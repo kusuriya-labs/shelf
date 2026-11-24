@@ -132,6 +132,10 @@ void GraphPlan::release(Residency &gpu, std::string &errors) {
         }
     }
     key = {};
+    logits = nullptr;
+    tokens = nullptr;
+    hidden = nullptr;
+    cursor = 0;
     replay_recorded = {};
     replay_slot = 0;
     events_ready = false;

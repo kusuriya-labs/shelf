@@ -51,6 +51,7 @@ struct GraphPlan {
     std::array<GraphLayer, 41> layers{};
     hipGraphExec_t entry{}, tail{};
     float *logits{};
+    int *tokens{};
     uint16_t *hidden{};
     size_t cursor{};
     std::array<hipEvent_t, 2> replay_done{};
