@@ -1421,7 +1421,7 @@ Mat attention_inner(Ops &op, const std::string &p, int layer, int start, Mat hid
                     Mat rot, Mat gate, Selection &selected, bool draft, int heads, bool sliding, bool index_ready = false) {
     int bucket = op.max_kv_len > 0 ? op.max_kv_len : std::max(2048, (start + hidden.rows + 63) / 64 * 64);
     Param sinks = op.param(p + "learnable_sink_param");
-    if (op.gpu.tp_size > 1 && !draft) {
+    if (op.gpu.tp_size > 1) {
         const int first = (op.rank % op.gpu.tp_size) * heads;
         sinks.p = sinks.type == io::SType::F32
                       ? static_cast<const void *>(static_cast<const float *>(sinks.p) + first)
@@ -1473,7 +1473,7 @@ Mat attention_inner(Ops &op, const std::string &p, int layer, int start, Mat hid
         int *mask = nullptr, *meta = nullptr, *rev = nullptr;
         unsigned *bits = nullptr;
         if (draft && !chunk_contiguous && op.gpu.sparse_top[op.rank][layer]) {
-            int last = op.slot_draft ? op.gpu.sparse_last[op.slot][layer] : op.sparse_last_layer[layer];
+            int last = op.slot_draft ? op.gpu.sparse_last[op.rank][op.slot][layer] : op.sparse_last_layer[layer];
             int pos = start - 1;
             int tail_len = (pos & 3) + 1, tail_base = pos & ~3;
             int base_len = 2044 + tail_len;
@@ -1491,7 +1491,7 @@ Mat attention_inner(Ops &op, const std::string &p, int layer, int start, Mat hid
             offsets_gpu = static_cast<int *>(op.arena.next(size_t(n) * stride * 4));
             sparse_clear<<<(std::max({(width + 31) / 32, words, rev_count, 516}) + 255) / 256, 256, 0, op.stream>>>(
                 mask, (width + 31) / 32, bits, words, meta, rev, rev_count);
-            auto top = op.slot_draft ? op.gpu.sparse_top_slot(layer, op.slot) : op.gpu.sparse_top[op.rank][layer];
+            auto top = op.slot_draft ? op.gpu.sparse_top_slot(layer, op.slot, op.rank) : op.gpu.sparse_top[op.rank][layer];
             sort_top<<<1, 512, 0, op.stream>>>(top, groups, mask, last, 1, width, op.params);
             sparse_group_ids<<<1, 256, 0, op.stream>>>(mask, 1, width, meta, ids_gpu, rev, bits,
                                                                        start, -1, op.params);
@@ -1601,8 +1601,16 @@ Mat attention_batch(Ops &op, const std::string &prefix, int layer, const std::ve
         throw std::invalid_argument("attention のバッチ長が不正です");
     std::string p = prefix + "self_attn.";
     bool sliding = layer != 0 && layer % 4 != 1;
-    int heads = sliding ? 64 : 32;
+    const auto *projection = op.gpu.model.shape_of(p + "q_b_proj", op.rank);
+    int heads = projection ? projection->at(1) / 256 : (sliding ? 64 : 32);
     float theta = sliding ? 1e4f : 1e7f;
+    Param sinks = op.param(p + "learnable_sink_param");
+    if (op.gpu.tp_size > 1) {
+        const int first = (op.rank % op.gpu.tp_size) * heads;
+        sinks.p = sinks.type == io::SType::F32
+                      ? static_cast<const void *>(static_cast<const float *>(sinks.p) + first)
+                      : static_cast<const void *>(static_cast<const uint16_t *>(sinks.p) + first);
+    }
     Mat qres = op.norm(op.linear(p + "q_a_proj", hidden), p + "q_a_layernorm.weight");
     Mat raw = op.linear(p + "q_b_proj", qres);
     Mat ka = op.linear(p + "kv_a_proj_with_mqa", hidden);
@@ -1668,11 +1676,10 @@ Mat attention_batch(Ops &op, const std::string &prefix, int layer, const std::ve
         checked(hipGetLastError());
         if (block_rows > 1)
             attend_absorbed(op, p + "kv_b_proj", a, b, q.row(first, rows), gate.row(first, rows), offsets, stride,
-                            op.param(p + "learnable_sink_param"), out.row(first, rows), true, sliding, 0, 0,
-                            nullptr, prequant);
+                            sinks, out.row(first, rows), true, sliding, 0, 0, nullptr, prequant);
         else
             attend_absorbed_batch(op, p + "kv_b_proj", a, b, q.row(first, rows), gate.row(first, rows), offsets,
-                                  stride, device_positions + first, op.param(p + "learnable_sink_param"),
+                                  stride, device_positions + first, sinks,
                                   out.row(first, rows), sliding, prequant);
         op.arena.cursor = mark;
         first = last;
@@ -1687,7 +1694,7 @@ Mat attention_batch(Ops &op, const std::string &prefix, int layer, const std::ve
             int b = sparse_block_list[k], row = b * block_rows;
             args.block[k] = b;
             args.slot[k] = slots[row];
-            args.draft_last[k] = draft ? op.gpu.sparse_last[slots[row]][layer] : -1;
+            args.draft_last[k] = draft ? op.gpu.sparse_last[op.rank][slots[row]][layer] : -1;
             max_end = std::max(max_end, positions[row] + block_rows);
         }
         int bucket = op.max_kv_len > 0 ? op.max_kv_len : std::max(2048, (max_end + 63) / 64 * 64);
@@ -1750,7 +1757,7 @@ Mat attention_batch(Ops &op, const std::string &prefix, int layer, const std::ve
         auto all_offsets = static_cast<int *>(op.arena.next(size_t(sparse_rows) * attn_stride * sizeof(int)));
         build_sparse_indices_batch<<<K, 512, 0, op.stream>>>(
             top_slot_base_read, selected_buf, sparse_slots_dev, sparse_positions_dev, args,
-            op.capture ? op.gpu.batch_input : nullptr, all_ids, id_counts, all_offsets, block_rows, id_stride,
+            op.capture ? op.gpu.batch_input[op.rank] : nullptr, all_ids, id_counts, all_offsets, block_rows, id_stride,
             attn_stride, draft);
         checked(hipGetLastError());
         auto prequant_sparse = static_cast<_Float16 *>(op.arena.next(size_t(K) * id_stride * 512 * sizeof(_Float16)));
@@ -1768,7 +1775,7 @@ Mat attention_batch(Ops &op, const std::string &prefix, int layer, const std::ve
         checked(hipGetLastError());
         attend_absorbed_sparse_batch(op, p + "kv_b_proj", prequant_sparse, rotary_sparse, q, gate, all_offsets,
                                      attn_stride, id_stride, sparse_positions_dev, sparse_blocks_dev,
-                                     op.param(p + "learnable_sink_param"), out, K, block_rows, draft);
+                                     sinks, out, K, block_rows, draft);
         op.arena.cursor = mark;
     }
     if (!draft) {

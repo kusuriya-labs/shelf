@@ -202,6 +202,29 @@ class Hy4FlashTests(unittest.TestCase):
             self.assertEqual(results["1"]["lm_head_bytes_per_rank"], lm_total // 4)
             self.assertLess(results["1"]["peak_estimate"][0], results["0"]["peak_estimate"][0])
 
+    def test_tp4_placement(self):
+        experts = dict.fromkeys(range(41 * 512), EXPERT_BYTES)
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            storage = {f"model.layers.{i}.self_attn.kv_b_proj.weight":
+                       {"original_shape": [512, 14336 if i == 0 or i % 4 == 1 else 28672]} for i in range(42)}
+            (directory / "config.json").write_text(json.dumps({"quantization_config": {"linear_storage": storage}}))
+            argv = ["placement.py", tmp, "--draft", tmp, "--tensor-parallel", "4",
+                    "--tokens", "32768", "--max-concurrent-requests", "16", "--capacity", "32", "32", "32", "32"]
+            output = io.StringIO()
+            with patch.object(sys, "argv", argv), patch.object(placement, "checkpoint_sizes",
+                    side_effect=[(4329651680, experts), (424428112, {})]), patch.object(
+                    placement, "split_checkpoint_sizes",
+                    side_effect=[(2900 << 20, 1400 << 20), (350 << 20, 74 << 20)]), contextlib.redirect_stdout(output):
+                placement.main()
+            result = json.loads(output.getvalue())
+            self.assertEqual(result["expert_bytes"], EXPERT_BYTES)
+            self.assertEqual(result["graph_bytes_per_rank"], 256 << 20)
+            self.assertEqual(sum(result["rank_experts"]), 41 * 512)
+            self.assertEqual(max(result["rank_experts"]) - min(result["rank_experts"]), 0)
+            self.assertGreater(min(result["free_after"]), 0)
+            self.assertLessEqual(max(result["peak_estimate"]), (32 << 30) - (512 << 20))
+
 
 if __name__ == "__main__":
     torch.set_num_threads(1)

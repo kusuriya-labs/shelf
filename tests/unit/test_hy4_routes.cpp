@@ -23,7 +23,8 @@ int main() {
         for (auto &row : peer)
             row.fill(true);
         check(graph_topology(ranks, 1, true, true, peer), "EP の Graph が無効です");
-        check(!graph_topology(ranks, 2, true, true, peer), "TP の Graph が有効です");
+        check(graph_topology(ranks, 2, true, true, peer) == (ranks <= 2), "TP=2 の Graph 判定が不正です");
+        check(graph_topology(ranks, 4, true, true, peer) == (ranks == 1), "TP=4 の Graph 判定が不正です");
         check(!graph_topology(ranks, 1, false, true, peer), "push 以外の Graph が有効です");
         check(!graph_topology(ranks, 1, true, false, peer), "VRAM 不足時の Graph が有効です");
         if (ranks > 1) {

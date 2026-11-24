@@ -12,10 +12,13 @@ struct Residency;
 inline constexpr size_t graph_headroom = 256ull << 20;
 
 inline bool graph_topology(int ep, int tp, bool push, bool room, const std::array<std::array<bool, 4>, 4> &peer) {
-    if (ep < 1 || ep > 4 || tp != 1 || !push || !room)
+    const int ranks = ep * tp;
+    if (ep < 1 || tp < 1 || ranks < 1 || ranks > 4 || !push || !room)
         return false;
-    for (int src = 0; src < ep; ++src)
-        for (int dst = 0; dst < ep; ++dst)
+    if (tp != 1 && tp != 2 && !(tp == 4 && ep == 1))
+        return false;
+    for (int src = 0; src < ranks; ++src)
+        for (int dst = 0; dst < ranks; ++dst)
             if (src != dst && !peer[src][dst])
                 return false;
     return true;
@@ -55,6 +58,12 @@ struct GraphHeadStep {
     std::array<std::array<hipEvent_t, 4>, 2> rank_done{};
 };
 
+struct TpGraphStep {
+    std::array<hipGraphExec_t, 4> exec{};
+    std::array<std::array<hipEvent_t, 4>, 2> done{};
+    uint8_t group_mode = 0;
+};
+
 struct GraphPlan {
     GraphKey key{};
     std::array<GraphLayer, 41> layers{};
@@ -64,10 +73,20 @@ struct GraphPlan {
     int *tokens{};
     uint16_t *hidden{};
     size_t cursor{};
+    std::vector<TpGraphStep> tp_steps{};
+    std::array<std::vector<hipGraphExec_t>, 4> tp_captured{};
+    std::array<std::vector<uint8_t>, 4> tp_modes{};
+    std::array<std::array<hipEvent_t, 4>, 2> tp_rank_done{};
+    std::array<float *, 4> tp_logits{};
+    std::array<int *, 4> tp_tokens{};
+    std::array<uint16_t *, 4> tp_hidden{};
+    std::array<size_t, 4> tp_cursor{};
+    int tp_ranks = 0;
     std::array<hipEvent_t, 2> replay_done{};
     std::array<bool, 2> replay_recorded{};
     unsigned replay_slot{};
     bool events_ready{};
+    void finalize_tp();
     void launch(Residency &gpu);
     void release(Residency &gpu, std::string &errors);
 };
@@ -76,9 +95,11 @@ class GraphCapture {
   public:
     Residency &gpu;
     GraphPlan &plan;
-    GraphCapture(Residency &gpu, GraphPlan &plan) : gpu(gpu), plan(plan) {}
-    void begin(int rank);
+    int rank = 0;
+    GraphCapture(Residency &gpu, GraphPlan &plan, int rank = 0) : gpu(gpu), plan(plan), rank(rank) {}
+    void begin(int r);
     void finish(hipGraphExec_t &exec);
+    void step(uint8_t sync_mode);
     void cancel(std::string &errors);
 
   private:

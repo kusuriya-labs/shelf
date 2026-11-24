@@ -440,6 +440,65 @@ __global__ void add_bf16_kernel(uint16_t *dst, const uint16_t *src, size_t count
     if (i < count)
         dst[i] = f32_to_bf16_rne_device(bf16_bits_to_f32(dst[i]) + bf16_bits_to_f32(src[i]));
 }
+__global__ void sum_bf16_4_vec_kernel(uint16_t *dst, const uint16_t *s0, const uint16_t *s1, const uint16_t *s2,
+                                      const uint16_t *s3, size_t count) {
+    size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i * 4 + 3 < count) {
+        uint2 a = reinterpret_cast<const uint2 *>(s0)[i];
+        uint2 b = reinterpret_cast<const uint2 *>(s1)[i];
+        uint2 c = reinterpret_cast<const uint2 *>(s2)[i];
+        uint2 d = reinterpret_cast<const uint2 *>(s3)[i];
+        auto add2 = [](uint32_t x0, uint32_t x1, uint32_t x2, uint32_t x3) {
+            float f0 = bf16_bits_to_f32(uint16_t(x0 & 0xffffu)) + bf16_bits_to_f32(uint16_t(x1 & 0xffffu)) +
+                       bf16_bits_to_f32(uint16_t(x2 & 0xffffu)) + bf16_bits_to_f32(uint16_t(x3 & 0xffffu));
+            float f1 = bf16_bits_to_f32(uint16_t(x0 >> 16)) + bf16_bits_to_f32(uint16_t(x1 >> 16)) +
+                       bf16_bits_to_f32(uint16_t(x2 >> 16)) + bf16_bits_to_f32(uint16_t(x3 >> 16));
+            return uint32_t(f32_to_bf16_rne_device(f0)) | (uint32_t(f32_to_bf16_rne_device(f1)) << 16);
+        };
+        reinterpret_cast<uint2 *>(dst)[i] = {add2(a.x, b.x, c.x, d.x), add2(a.y, b.y, c.y, d.y)};
+        return;
+    }
+    for (size_t k = i * 4; k < count; ++k)
+        dst[k] = f32_to_bf16_rne_device(bf16_bits_to_f32(s0[k]) + bf16_bits_to_f32(s1[k]) +
+                                        bf16_bits_to_f32(s2[k]) + bf16_bits_to_f32(s3[k]));
+}
+__global__ void sum_bf16_4_scalar_kernel(uint16_t *dst, const uint16_t *s0, const uint16_t *s1, const uint16_t *s2,
+                                         const uint16_t *s3, size_t count) {
+    size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < count)
+        dst[i] = f32_to_bf16_rne_device(bf16_bits_to_f32(s0[i]) + bf16_bits_to_f32(s1[i]) +
+                                        bf16_bits_to_f32(s2[i]) + bf16_bits_to_f32(s3[i]));
+}
+__global__ void add_f32_to_bf16_kernel(uint16_t *dst, const float *s0, const float *s1, size_t count) {
+    size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < count)
+        dst[i] = f32_to_bf16_rne_device(s0[i] + s1[i]);
+}
+__global__ void sum_f32_to_bf16_4_vec_kernel(uint16_t *dst, const float *s0, const float *s1, const float *s2,
+                                             const float *s3, size_t count) {
+    size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i * 4 + 3 < count) {
+        float4 a = reinterpret_cast<const float4 *>(s0)[i];
+        float4 b = reinterpret_cast<const float4 *>(s1)[i];
+        float4 c = reinterpret_cast<const float4 *>(s2)[i];
+        float4 d = reinterpret_cast<const float4 *>(s3)[i];
+        uint2 out;
+        out.x = uint32_t(f32_to_bf16_rne_device(a.x + b.x + c.x + d.x)) |
+                (uint32_t(f32_to_bf16_rne_device(a.y + b.y + c.y + d.y)) << 16);
+        out.y = uint32_t(f32_to_bf16_rne_device(a.z + b.z + c.z + d.z)) |
+                (uint32_t(f32_to_bf16_rne_device(a.w + b.w + c.w + d.w)) << 16);
+        reinterpret_cast<uint2 *>(dst)[i] = out;
+        return;
+    }
+    for (size_t k = i * 4; k < count; ++k)
+        dst[k] = f32_to_bf16_rne_device(s0[k] + s1[k] + s2[k] + s3[k]);
+}
+__global__ void sum_f32_to_bf16_4_scalar_kernel(uint16_t *dst, const float *s0, const float *s1, const float *s2,
+                                                const float *s3, size_t count) {
+    size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < count)
+        dst[i] = f32_to_bf16_rne_device(s0[i] + s1[i] + s2[i] + s3[i]);
+}
 }
 void tp_add_bf16(void *dst, const void *src, size_t bytes, hipStream_t stream) {
     if (!bytes)
@@ -487,6 +546,48 @@ __global__ void scatter_logits_vec4_kernel(const float4 *src, float4 *dst, int r
     int r = int(idx / local_v4);
     int c = int(idx - size_t(r) * local_v4);
     dst[size_t(r) * full_v4 + off_v4 + c] = src[idx];
+}
+void tp_sum_bf16_4(void *dst, const void *s0, const void *s1, const void *s2, const void *s3, size_t bytes,
+                   hipStream_t stream) {
+    if (!bytes)
+        return;
+    size_t count = bytes / 2;
+    uintptr_t bits = reinterpret_cast<uintptr_t>(dst) | reinterpret_cast<uintptr_t>(s0) |
+                     reinterpret_cast<uintptr_t>(s1) | reinterpret_cast<uintptr_t>(s2) |
+                     reinterpret_cast<uintptr_t>(s3);
+    if ((bits & 7u) == 0 && count >= 4) {
+        size_t vecs = (count + 3) / 4;
+        sum_bf16_4_vec_kernel<<<(vecs + 255) / 256, 256, 0, stream>>>(
+            static_cast<uint16_t *>(dst), static_cast<const uint16_t *>(s0), static_cast<const uint16_t *>(s1),
+            static_cast<const uint16_t *>(s2), static_cast<const uint16_t *>(s3), count);
+    } else {
+        sum_bf16_4_scalar_kernel<<<(count + 255) / 256, 256, 0, stream>>>(
+            static_cast<uint16_t *>(dst), static_cast<const uint16_t *>(s0), static_cast<const uint16_t *>(s1),
+            static_cast<const uint16_t *>(s2), static_cast<const uint16_t *>(s3), count);
+    }
+    checked(hipGetLastError());
+}
+void tp_add_f32_to_bf16(void *dst, const float *s0, const float *s1, size_t count, hipStream_t stream) {
+    if (!count)
+        return;
+    add_f32_to_bf16_kernel<<<(count + 255) / 256, 256, 0, stream>>>(static_cast<uint16_t *>(dst), s0, s1, count);
+    checked(hipGetLastError());
+}
+void tp_sum_f32_to_bf16_4(void *dst, const float *s0, const float *s1, const float *s2, const float *s3,
+                          size_t count, hipStream_t stream) {
+    if (!count)
+        return;
+    uintptr_t fbits = reinterpret_cast<uintptr_t>(s0) | reinterpret_cast<uintptr_t>(s1) |
+                      reinterpret_cast<uintptr_t>(s2) | reinterpret_cast<uintptr_t>(s3);
+    if ((reinterpret_cast<uintptr_t>(dst) & 7u) == 0 && (fbits & 15u) == 0 && count >= 4) {
+        size_t vecs = (count + 3) / 4;
+        sum_f32_to_bf16_4_vec_kernel<<<(vecs + 255) / 256, 256, 0, stream>>>(
+            static_cast<uint16_t *>(dst), s0, s1, s2, s3, count);
+    } else {
+        sum_f32_to_bf16_4_scalar_kernel<<<(count + 255) / 256, 256, 0, stream>>>(
+            static_cast<uint16_t *>(dst), s0, s1, s2, s3, count);
+    }
+    checked(hipGetLastError());
 }
 void tp_argmax_pack(const float *vals, const int *ids, void *out_pairs, int rows, hipStream_t stream) {
     if (rows <= 0)
@@ -563,13 +664,16 @@ Mat Ops::linear(const std::string &name, Mat x) {
         splits *= 2;
     auto partial = static_cast<float *>(arena.next(size_t(x.rows) * pn * 4 * splits));
     auto expanded = x.rows >= 256 ? static_cast<int8_t *>(arena.next(size_t(pk) * pn)) : nullptr;
+    float *f32 = gpu.tp_size > 1 && gpu.model.row_parallel(name, rank)
+                     ? static_cast<float *>(arena.next(y.bytes() * 2))
+                     : nullptr;
     checked(shelf_hy4_linear_workspace(x.p, static_cast<const uint16_t *>(param(name + ".suh").p),
                              static_cast<const uint16_t *>(param(name + ".svh").p),
                              static_cast<const uint32_t *>(param(name + ".trellis").p), codes, scales, partial,
                              y.p, x.rows, x.cols, y.cols, pk, pn, it->spec.shape[2] / 16, stream,
-                             splits, expanded));
-    if (gpu.model.row_parallel(name, rank))
-        gpu.tp_sum(y.p, rank, y.bytes());
+                             splits, expanded, f32));
+    if (f32)
+        gpu.tp_sum_f32(y.p, f32, rank, y.bytes(), capture);
     arena.cursor = save;
     return y;
 }

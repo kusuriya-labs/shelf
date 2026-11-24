@@ -120,7 +120,7 @@ static Mat apply_engram(Ops &op, int layer, Mat x, const uint8_t *memory, const 
     auto project = [&](const std::string &key) { return op.linear(p + key, embed); };
     constexpr float eps = 1.1920928955e-7f;
     auto values = op.norm_bias(project("value_proj"), bf("value_proj.bias"), p + "unified_pre_gamma", eps);
-    auto token_ids = op.capture ? (op.batch_decode ? op.gpu.batch_input->step.ids : op.params->ids)
+    auto token_ids = op.capture ? (op.batch_decode ? op.gpu.batch_input[op.rank]->step.ids : op.params->ids)
                                 : (op.prefill_ids ? op.prefill_ids : op.indices(ids));
     for (int i = 0; i < 4; ++i) {
         auto s = std::to_string(i);
@@ -137,7 +137,7 @@ Mat engram(Ops &op, int layer, Mat x, const std::vector<int> &prior, const std::
     int g = (layer - 1) / 10;
     const uint8_t *memory = nullptr;
     if (op.capture)
-        memory = op.gpu.graph_input->engram[g];
+        memory = op.gpu.graph_input[op.rank]->engram[g];
     else {
         auto packed = op.take_engram(g);
         if (packed.empty())
@@ -163,7 +163,7 @@ std::vector<uint8_t> gather_batch_engram(const Checkpoint &model, int layer,
 Mat engram_batch(Ops &op, int layer, Mat x, const std::vector<const std::vector<int> *> &priors,
                  const std::vector<int> &ids) {
     if (op.capture) {
-        auto memory = op.gpu.batch_input->engram + (layer - 1) / 10 * x.rows * 16 * 98;
+        auto memory = op.gpu.batch_input[op.rank]->engram + (layer - 1) / 10 * x.rows * 16 * 98;
         return apply_engram(op, layer, x, memory, ids);
     }
     auto packed = gather_batch_engram(op.gpu.model, layer, priors, ids);

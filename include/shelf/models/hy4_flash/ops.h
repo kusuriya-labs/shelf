@@ -38,6 +38,7 @@ class Ops {
     int max_kv_len = 0;
     explicit Ops(Residency &g, int r = 0) : gpu(g), rank(r), arena(g.workspace.at(r)), stream(g.compute.at(r)) {}
     ~Ops();
+    Ops(Residency &g, int r, Region &a, hipStream_t s) : gpu(g), rank(r), arena(a), stream(s) {}
     void prefetch_engram(const std::vector<int> &ids, const std::vector<int> &prior);
     std::vector<uint8_t> take_engram(int group);
     Mat mat(int rows, int cols);

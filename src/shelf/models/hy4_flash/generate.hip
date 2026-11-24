@@ -6,6 +6,7 @@
 #include <bit>
 #include <charconv>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <fstream>
 #include <stdexcept>
@@ -145,32 +146,96 @@ __global__ void fuse_anchor(Mat anchor, Mat fusion, const uint16_t *gate) {
 template <size_t N, typename Body>
 GraphPlan *capture_cached(Ops &op, std::array<GraphPlan, N> &slots, size_t &victim, bool &failed,
                           const GraphKey &key, Body body) {
+    auto &gpu = op.gpu;
+    if (gpu.tp_size == 1) {
+        for (auto &slot : slots)
+            if (slot.tail && slot.key == key)
+                return &slot;
+        auto &slot = slots[victim++ % N];
+        std::string errors;
+        if (slot.tail)
+            slot.release(gpu, errors);
+        if (!errors.empty())
+            throw std::runtime_error(errors);
+        GraphCapture capture(gpu, slot, 0);
+        auto last = std::to_array(op.sparse_last_layer);
+        op.params = key.batch ? nullptr : &gpu.graph_input[op.rank]->step;
+        op.max_kv_len = key.bucket;
+        op.capture = &capture;
+        try {
+            capture.begin(0);
+            body(slot);
+            capture.finish(slot.tail);
+            slot.key = key;
+        } catch (const std::exception &e) {
+            capture.cancel(errors);
+            slot.release(gpu, errors);
+            failed = true;
+            (void)hipGetLastError();
+            fprintf(stderr, "Hy4 Graph の capture に失敗したため eager に切り替えます: %s\n", e.what());
+        }
+        if (key.batch) op.slot = 0;
+        op.params = nullptr;
+        op.capture = nullptr;
+        op.max_kv_len = 0;
+        std::copy(last.begin(), last.end(), op.sparse_last_layer);
+        if (!errors.empty())
+            throw std::runtime_error(errors);
+        return failed ? nullptr : &slot;
+    }
+    gpu.all_barrier->arrive_and_wait();
     for (auto &slot : slots)
-        if (slot.tail && slot.key == key)
+        if (!slot.tp_steps.empty() && slot.key == key) {
+            gpu.all_barrier->arrive_and_wait();
             return &slot;
-    auto &slot = slots[victim++ % N];
+        }
+    auto &slot = slots[victim % N];
     std::string errors;
-    if (slot.tail)
-        slot.release(op.gpu, errors);
+    if (op.rank == 0) {
+        if (!slot.tp_steps.empty() || slot.tail)
+            slot.release(gpu, errors);
+        slot.tp_ranks = gpu.ranks;
+        gpu.capture_failed = false;
+    }
+    gpu.all_barrier->arrive_and_wait();
     if (!errors.empty())
         throw std::runtime_error(errors);
-    GraphCapture capture(op.gpu, slot);
+    GraphCapture capture(gpu, slot, op.rank);
     auto last = std::to_array(op.sparse_last_layer);
-    op.params = key.batch ? nullptr : &op.gpu.graph_input->step;
+    op.params = key.batch ? nullptr : &gpu.graph_input[op.rank]->step;
     op.max_kv_len = key.bucket;
     op.capture = &capture;
     try {
-        capture.begin(0);
+        capture.begin(op.rank);
         body(slot);
-        capture.finish(slot.tail);
-        slot.key = key;
+        hipGraphExec_t exec{};
+        capture.finish(exec);
+        slot.tp_captured[op.rank].push_back(exec);
+        slot.tp_modes[op.rank].push_back(2);
     } catch (const std::exception &e) {
+        gpu.capture_failed = true;
+        gpu.abort_collectives();
         capture.cancel(errors);
-        slot.release(op.gpu, errors);
-        failed = true;
         (void)hipGetLastError();
-        fprintf(stderr, "Hy4 Graph の capture に失敗したため eager に切り替えます: %s\n", e.what());
+        if (op.rank == 0 || !dynamic_cast<const CollectiveAborted *>(&e))
+            fprintf(stderr, "Hy4 Graph の capture に失敗したため eager に切り替えます (rank=%d): %s\n", op.rank,
+                    e.what());
     }
+    gpu.capture_barrier->arrive_and_wait();
+    const bool any_failed = gpu.capture_failed.load();
+    if (op.rank == 0) {
+        ++victim;
+        if (any_failed) {
+            slot.release(gpu, errors);
+            gpu.reset_collectives();
+        } else {
+            slot.finalize_tp();
+            slot.key = key;
+        }
+    }
+    if (any_failed)
+        failed = true;
+    gpu.capture_barrier->arrive_and_wait();
     if (key.batch) op.slot = 0;
     op.params = nullptr;
     op.capture = nullptr;
@@ -178,7 +243,7 @@ GraphPlan *capture_cached(Ops &op, std::array<GraphPlan, N> &slots, size_t &vict
     std::copy(last.begin(), last.end(), op.sparse_last_layer);
     if (!errors.empty())
         throw std::runtime_error(errors);
-    return failed ? nullptr : &slot;
+    return any_failed ? nullptr : &slot;
 }
 
 bool graph_enabled(const char *name) {
@@ -285,17 +350,16 @@ Target::Target(Residency &gpu, float temp, uint64_t rng, int k, float p, int ran
     bool topology = graph_topology(gpu.ep_size, gpu.tp_size, gpu.push, room, gpu.peer);
     target_graph = topology && graph_enabled("SHELF_HY4_GRAPH");
     bool draft_available = gpu.max_slots == 1 ? gpu.model.has_draft : gpu.batch_draft;
-    draft_graph = draft_available && graph_enabled("SHELF_HY4_DRAFT_GRAPH") &&
-        ((gpu.max_slots == 1 && !gpu.lm_head_tp) ? (gpu.tp_size == 1 && room) : topology);
-    if ((target_graph || draft_graph) && !gpu.graph_input && !gpu.batch_input) {
+    draft_graph = draft_available && graph_enabled("SHELF_HY4_DRAFT_GRAPH") && topology;
+    if ((target_graph || draft_graph) && !gpu.graph_input[rank] && !gpu.batch_input[rank]) {
         if (gpu.max_slots > 1)
-            gpu.batch_input = static_cast<BatchGraphInput *>(op.reserve_persistent(sizeof(BatchGraphInput)));
+            gpu.batch_input[rank] = static_cast<BatchGraphInput *>(op.reserve_persistent(sizeof(BatchGraphInput)));
         else
-            gpu.graph_input = static_cast<GraphInput *>(op.reserve_persistent(sizeof(GraphInput)));
+            gpu.graph_input[rank] = static_cast<GraphInput *>(op.reserve_persistent(sizeof(GraphInput)));
         if (gpu.tokens > 2048)
             for (int layer = 0; layer < 42; ++layer)
-                if (gpu.index_keys[0][layer] && !gpu.sparse_top[0][layer])
-                    gpu.sparse_top[0][layer] = static_cast<int *>(op.reserve_persistent(
+                if (gpu.index_keys[rank][layer] && !gpu.sparse_top[rank][layer])
+                    gpu.sparse_top[rank][layer] = static_cast<int *>(op.reserve_persistent(
                         size_t(gpu.prefill_rows() + (gpu.batch_draft ? gpu.max_slots * max_verify_rows : 0)) * 511 * sizeof(int)));
     }
 }
@@ -303,8 +367,8 @@ float *Target::head_logits(Mat hidden) {
     if (!op.gpu.lm_head_tp) {
         auto codes = static_cast<int8_t *>(op.arena.next(size_t(hidden.rows) * 3072));
         auto scales = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 24 * 4));
-        auto partial = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 120832 * 4));
-        auto logits = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 120832 * 4));
+        auto partial = static_cast<float *>(op.arena.next(size_t(hidden.rows) * hy4_vocab_size * 4));
+        auto logits = static_cast<float *>(op.arena.next(size_t(hidden.rows) * hy4_vocab_size * 4));
         checked(shelf_hy4_head(hidden.p, static_cast<const uint16_t *>(op.param("lm_head.suh").p),
                                static_cast<const uint16_t *>(op.param("lm_head.svh").p),
                                static_cast<const uint32_t *>(op.param("lm_head.trellis").p), codes, scales,
@@ -326,7 +390,7 @@ float *Target::head_logits(Mat hidden) {
                                static_cast<const uint16_t *>(op.param("lm_head.svh").p),
                                static_cast<const uint32_t *>(op.param("lm_head.trellis").p), codes, scales,
                                partial, local_logits, hidden.rows, op.stream, local_vocab));
-        op.gpu.tp_gather_logits(local_logits, logits, op.rank, hidden.rows, local_vocab, hy4_vocab_size);
+        op.gpu.tp_gather_logits(local_logits, logits, op.rank, hidden.rows, local_vocab, hy4_vocab_size, op.capture);
         op.arena.cursor = work_mark;
         return logits;
     }
@@ -412,7 +476,7 @@ void Target::head_argmax(Mat hidden, int *tokens) {
     if (!op.gpu.lm_head_tp) {
         auto codes = static_cast<int8_t *>(op.arena.next(size_t(hidden.rows) * 3072));
         auto scales = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 24 * 4));
-        auto partial = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 120832 * 4));
+        auto partial = static_cast<float *>(op.arena.next(size_t(hidden.rows) * hy4_vocab_size * 4));
         auto tile_vals = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 944 * 4));
         auto tile_ids = static_cast<int *>(op.arena.next(size_t(hidden.rows) * 944 * 4));
         checked(shelf_hy4_head_argmax(hidden.p, static_cast<const uint16_t *>(op.param("lm_head.suh").p),
@@ -438,7 +502,7 @@ void Target::head_argmax(Mat hidden, int *tokens) {
                                       static_cast<const uint32_t *>(op.param("lm_head.trellis").p), codes, scales,
                                       partial, tile_vals, tile_ids, nullptr, hidden.rows, op.stream, local_vocab,
                                       op.rank * local_vocab, best_vals, best_ids));
-        op.gpu.tp_argmax(best_vals, best_ids, tokens, op.rank, hidden.rows);
+        op.gpu.tp_argmax(best_vals, best_ids, tokens, op.rank, hidden.rows, op.capture);
         op.arena.cursor = mark;
         return;
     }
@@ -532,7 +596,7 @@ void Target::head_argmax(Mat hidden, int *tokens) {
     }
 }
 std::vector<int> Target::predict(Mat hidden, int position, bool draft, const Path &dump,
-                                 float *distribution, float *logits, int *tokens) {
+                                 float *distribution, float *logits, int *tokens, bool precomputed) {
     std::chrono::steady_clock::time_point begin;
     if (op.gpu.tp_size == 1 && op.rank == 0 && op.gpu.expert_begin[0])
         begin = std::chrono::steady_clock::now();
@@ -540,10 +604,10 @@ std::vector<int> Target::predict(Mat hidden, int position, bool draft, const Pat
     int *device_ids = tokens;
     if (!device_ids) {
         device_ids = static_cast<int *>(op.arena.next(hidden.rows * sizeof(int)));
-        if (!logits && temperature == 0 && !distribution && dump.empty()) {
+        if (!precomputed && !logits && temperature == 0 && !distribution && dump.empty()) {
             head_argmax(hidden, device_ids);
         } else {
-            if (!logits)
+            if (!precomputed && !logits)
                 logits = head_logits(hidden);
             if (op.rank == 0 || !op.gpu.lm_head_tp || op.gpu.tp_size == 1) {
                 if (!dump.empty()) {
@@ -597,17 +661,17 @@ Mat Target::layers(const std::vector<int> &ids, bool verify, bool need_head) {
     for (int layer = 0; layer < 42; ++layer) {
         Selection selection;
         decoder_layer(op, layer, start, x, history, ids, selection);
-        if (!layer && op.capture) {
+        if (!layer && op.capture && op.gpu.tp_size == 1) {
             op.capture->finish(op.capture->plan.entry);
             op.capture->begin(0);
         }
         auto it = std::find(sources.begin(), sources.end(), layer);
         if (!op.capture && it != sources.end()) {
             if (op.slot_draft && need_head && start + ids.size() > 2048) {
-                checked(hipMemcpyAsync(op.gpu.sparse_top_slot(layer, op.slot),
+                checked(hipMemcpyAsync(op.gpu.sparse_top_slot(layer, op.slot, op.rank),
                                        op.gpu.sparse_top[op.rank][layer] + (ids.size() - 1) * 511,
                                        511 * sizeof(int), hipMemcpyDeviceToDevice, op.stream));
-                op.gpu.sparse_last[op.slot][layer] = 0;
+                op.gpu.sparse_last[op.rank][op.slot][layer] = 0;
             }
             if (!verify)
                 selection = Selection{std::move(selection.back())};
@@ -634,7 +698,7 @@ std::vector<int> Target::forward(const std::vector<int> &ids, bool verify, bool 
     if (gpu.kv_pages_total > 0 && !gpu.allocate_slot_pages(op.slot, size_t(start) + size_t(rows)))
         throw std::runtime_error("KV ページが不足しています");
     op.arena.cursor = base;
-    if (gpu.graph_input && target_graph && !gpu.target_capture_failed && need_head && dump.empty() &&
+    if (gpu.graph_input[op.rank] && target_graph && !gpu.target_capture_failed && need_head && dump.empty() &&
         Hy4MoePlan::supports(rows) && (verify || rows == 1)) {
         const int dense = std::clamp(2048 - start, 0, rows);
         int bucket = std::max(2048, (start + rows + 1023) / 1024 * 1024);
@@ -643,31 +707,56 @@ std::vector<int> Target::forward(const std::vector<int> &ids, bool verify, bool 
             [&](GraphPlan &slot) {
                 Mat hidden = layers(ids, verify, true);
                 if (temperature == 0) {
-                    slot.tokens = static_cast<int *>(op.arena.next(size_t(rows) * sizeof(int)));
-                    slot.logits = nullptr;
-                    head_argmax(hidden, slot.tokens);
+                    int *tok = static_cast<int *>(op.arena.next(size_t(rows) * sizeof(int)));
+                    if (gpu.tp_size > 1) {
+                        slot.tp_tokens[op.rank] = tok;
+                        slot.tp_logits[op.rank] = nullptr;
+                    } else {
+                        slot.tokens = tok;
+                        slot.logits = nullptr;
+                    }
+                    head_argmax(hidden, tok);
                 } else {
-                    slot.logits = head_logits(hidden);
-                    slot.tokens = nullptr;
+                    float *lgt = head_logits(hidden);
+                    if (gpu.tp_size > 1) {
+                        slot.tp_logits[op.rank] = lgt;
+                        slot.tp_tokens[op.rank] = nullptr;
+                    } else {
+                        slot.logits = lgt;
+                        slot.tokens = nullptr;
+                    }
                 }
-                slot.cursor = op.arena.cursor;
+                if (gpu.tp_size > 1)
+                    slot.tp_cursor[op.rank] = op.arena.cursor;
+                else
+                    slot.cursor = op.arena.cursor;
             });
         if (plan) {
             GraphInput input{};
             input.step.position = start;
             input.step.rows = rows;
             std::copy(ids.begin(), ids.end(), input.step.ids);
-            checked(hipMemcpyAsync(&gpu.graph_input->step, &input.step, sizeof(input.step),
+            checked(hipMemcpyAsync(&gpu.graph_input[op.rank]->step, &input.step, sizeof(input.step),
                                    hipMemcpyHostToDevice, op.stream));
-            checked(hipGraphLaunch(plan->entry, op.stream));
+            if (gpu.tp_size == 1)
+                checked(hipGraphLaunch(plan->entry, op.stream));
             for (int g = 0; g < 4; ++g) {
                 auto packed = gather_engram(gpu.model, 1 + g * 10, rows, ids, history);
                 std::copy(packed.begin(), packed.end(), input.engram[g]);
             }
-            checked(hipMemcpyAsync(gpu.graph_input->engram, input.engram, sizeof(input.engram),
+            checked(hipMemcpyAsync(gpu.graph_input[op.rank]->engram, input.engram, sizeof(input.engram),
                                    hipMemcpyHostToDevice, op.stream));
-            plan->launch(gpu);
-            ++gpu.target_replays;
+            if (gpu.tp_size > 1) {
+                gpu.all_barrier->arrive_and_wait();
+                if (op.rank == 0) {
+                    plan->launch(gpu);
+                    ++gpu.target_replays;
+                }
+                gpu.all_barrier->arrive_and_wait();
+            } else {
+                plan->launch(gpu);
+                ++gpu.target_replays;
+            }
             for (size_t k = 0; k < sources.size(); ++k) {
                 op.sparse_last_layer[sources[k]] = rows - 1;
                 tapped[k].assign(rows, {});
@@ -677,9 +766,10 @@ std::vector<int> Target::forward(const std::vector<int> &ids, bool verify, bool 
                 }
             }
             history.insert(history.end(), ids.begin(), ids.end());
-            op.arena.cursor = plan->cursor;
-            return predict(state.row(0, rows), start + 1, false, dump, verify ? target_probs : nullptr, plan->logits,
-                           plan->tokens);
+            op.arena.cursor = gpu.tp_size > 1 ? plan->tp_cursor[op.rank] : plan->cursor;
+            return predict(state.row(0, rows), start + 1, false, dump, verify ? target_probs : nullptr,
+                           gpu.tp_size > 1 ? plan->tp_logits[op.rank] : plan->logits,
+                           gpu.tp_size > 1 ? plan->tp_tokens[op.rank] : plan->tokens, true);
         }
         op.arena.cursor = base;
     }
@@ -749,10 +839,15 @@ std::vector<int> Target::draft_steps(int anchor, int *device_ids) {
         float *distribution = draft_probs ? draft_probs + (i - 1) * 120832 : nullptr;
         if (device_ids) {
             size_t mark = op.arena.cursor;
-            if (temperature == 0 && !distribution)
+            if (temperature == 0 && !distribution) {
                 head_argmax(corrected, device_ids + i);
-            else
-                sample(head_logits(corrected), 1, i, 0x735a7ec51b09ull, device_ids + i, distribution, op.params);
+            } else {
+                float *logits = head_logits(corrected);
+                if (op.rank == 0 || !op.gpu.lm_head_tp || op.gpu.tp_size == 1)
+                    sample(logits, 1, i, 0x735a7ec51b09ull, device_ids + i, distribution, op.params);
+                if (op.gpu.tp_size > 1 && op.gpu.lm_head_tp)
+                    op.gpu.tp_broadcast_ids(device_ids + i, op.rank, 1, op.capture);
+            }
             op.arena.cursor = mark;
         } else {
             previous = predict(corrected, start + i, true, {}, distribution)[0];
@@ -765,7 +860,7 @@ std::vector<int> Target::propose(int anchor) {
     if (anchor < 0 || anchor >= 120832)
         throw std::runtime_error("token ID が範囲外です");
     auto &gpu = op.gpu;
-    if (!gpu.graph_input || gpu.draft_capture_failed || !draft_graph)
+    if (!gpu.graph_input[op.rank] || gpu.draft_capture_failed || !draft_graph)
         return draft_steps(anchor, nullptr);
     const int drafts = draft_tokens;
     const int block_rows = drafts + 1;
@@ -774,7 +869,7 @@ std::vector<int> Target::propose(int anchor) {
     int bucket = dense ? 2048 : (start + block_rows + 1023) / 1024 * 1024;
     GraphKey key{block_rows, int(dense), bucket, false, base, temperature, top_p, top_k, 0, drafts};
     auto plan = capture_cached(op, gpu.draft_graphs, gpu.draft_victim, gpu.draft_capture_failed, key,
-        [&](GraphPlan &) { draft_steps(anchor, gpu.graph_input->step.ids); });
+        [&](GraphPlan &) { draft_steps(anchor, gpu.graph_input[op.rank]->step.ids); });
     if (!plan)
         return draft_steps(anchor, nullptr);
     Hy4StepParams params{};
@@ -784,11 +879,20 @@ std::vector<int> Target::propose(int anchor) {
     params.draft_last = op.sparse_last_layer[sources[0]];
     params.ids[0] = anchor;
     std::fill_n(params.ids + 1, drafts, 120009);
-    checked(hipMemcpyAsync(&gpu.graph_input->step, &params, sizeof(params), hipMemcpyHostToDevice, op.stream));
-    plan->launch(gpu);
-    ++gpu.draft_replays;
+    checked(hipMemcpyAsync(&gpu.graph_input[op.rank]->step, &params, sizeof(params), hipMemcpyHostToDevice, op.stream));
+    if (gpu.tp_size > 1) {
+        gpu.all_barrier->arrive_and_wait();
+        if (op.rank == 0) {
+            plan->launch(gpu);
+            ++gpu.draft_replays;
+        }
+        gpu.all_barrier->arrive_and_wait();
+    } else {
+        plan->launch(gpu);
+        ++gpu.draft_replays;
+    }
     std::vector<int> result(drafts);
-    op.copy(result.data(), gpu.graph_input->step.ids + 1, drafts * sizeof(int), hipMemcpyDeviceToHost);
+    op.copy(result.data(), gpu.graph_input[op.rank]->step.ids + 1, drafts * sizeof(int), hipMemcpyDeviceToHost);
     if (std::find(result.begin(), result.end(), -1) != result.end())
         throw std::runtime_error("有効な出力 logit がありません");
     return result;
@@ -1057,7 +1161,9 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
                 block.insert(block.end(), draft.begin(), draft.end());
                 max_written = std::max(max_written, target.history.size() + size_t(block_rows));
                 auto actual = target.forward(block, true);
-                int keep = verify_speculation(target.op, target.target_probs, target.draft_probs,
+                int keep = 1;
+                if (gpu.tp_size == 1 || !gpu.lm_head_tp || rank == 0)
+                    keep = verify_speculation(target.op, target.target_probs, target.draft_probs,
                                               target.history.size() - drafts, seed, draft, actual);
                 broadcast(actual, keep);
                 ++stats.rounds;
@@ -1219,7 +1325,7 @@ void sample_batch(Ops &op, const std::vector<BatchLane> &lanes, float *logits, i
             probabilities<<<rows, 256, 0, op.stream>>>(row, probs, o.temperature);
             checked(hipGetLastError());
         }
-        auto params = op.capture ? &op.gpu.batch_input->step.lanes[r] : nullptr;
+        auto params = op.capture ? &op.gpu.batch_input[op.rank]->step.lanes[r] : nullptr;
         int position = (params ? 0 : int(lane.history.size())) + (stage ? stage : 1);
         uint64_t seed = (params ? 0 : o.seed) ^ (stage ? 0x735a7ec51b09ull : 0);
         best_ids<<<rows, 256, 0, op.stream>>>(row, ids + r * rows, position, seed, o.temperature, nullptr, params);
@@ -1232,7 +1338,10 @@ GraphKey batch_graph_key(Target &target, const std::vector<BatchLane> &lanes, in
     key.rows = rows;
     key.draft_tokens = rows > 1 ? rows - 1 : 0;
     key.workspace = target.op.arena.cursor;
-    key.state = target.state.p;
+    key.state = target.op.gpu.tp_size > 1
+                    ? reinterpret_cast<const uint16_t *>(reinterpret_cast<const uint8_t *>(target.state.p) -
+                                                         target.op.gpu.workspace[target.op.rank].base)
+                    : target.state.p;
     int end = 0;
     for (int i = 0; i < key.batch; ++i) {
         const auto &lane = lanes[i];
@@ -1264,7 +1373,7 @@ BatchGraphParams batch_step(Ops &op, const std::vector<BatchLane> &lanes, const 
         params.position = lanes[i].history.size();
         params.rows = ids.size() / lanes.size();
         params.seed = lanes[i].options.seed;
-        if (draft) params.draft_last = op.gpu.sparse_last[lanes[i].slot][sources[0]];
+        if (draft) params.draft_last = op.gpu.sparse_last[op.rank][lanes[i].slot][sources[0]];
     }
     return step;
 }
@@ -1274,7 +1383,7 @@ int *draft_batch_steps(Target &target, const std::vector<BatchLane> &lanes, cons
     const int drafts = target.draft_tokens;
     const int block_rows = drafts + 1;
     int batch = lanes.size();
-    Mat x = op.capture ? op.embed_device(op.gpu.batch_input->step.ids, ids.size(), false) : op.embed(ids, false);
+    Mat x = op.capture ? op.embed_device(op.gpu.batch_input[op.rank]->step.ids, ids.size(), false) : op.embed(ids, false);
     const std::string p = "model.dfly_layers.";
     auto gather = [&](Mat src, const int *slots, int src_stride, int slot_stride, int offset) {
         Mat out = op.mat(batch, 3072);
@@ -1301,8 +1410,8 @@ int *draft_batch_steps(Target &target, const std::vector<BatchLane> &lanes, cons
     }
     x = op.norm(x, p + "final_norm.weight");
     const std::string correction = p + "hidden_correction";
-    auto device = op.capture ? op.gpu.batch_input->candidates : static_cast<int *>(op.arena.next(drafts * batch * sizeof(int)));
-    int *previous = op.capture ? op.gpu.batch_input->step.anchors : op.indices(anchors);
+    auto device = op.capture ? op.gpu.batch_input[op.rank]->candidates : static_cast<int *>(op.arena.next(drafts * batch * sizeof(int)));
+    int *previous = op.capture ? op.gpu.batch_input[op.rank]->step.anchors : op.indices(anchors);
     mark = op.arena.cursor;
     const bool all_greedy =
         std::all_of(lanes.begin(), lanes.end(), [](const BatchLane &lane) { return lane.options.temperature == 0; });
@@ -1313,10 +1422,15 @@ int *draft_batch_steps(Target &target, const std::vector<BatchLane> &lanes, cons
         Mat k = op.norm(embedding, correction + ".embed_norm.weight");
         Mat corrected = op.add(hidden, feedforward(op, correction, op.join(q, k)));
         previous = device + (i - 1) * batch;
-        if (all_greedy)
+        if (all_greedy) {
             target.head_argmax(corrected, previous);
-        else
-            sample_batch(op, lanes, target.head_logits(corrected), previous, 1, i);
+        } else {
+            float *logits = target.head_logits(corrected);
+            if (op.rank == 0 || !op.gpu.lm_head_tp || op.gpu.tp_size == 1)
+                sample_batch(op, lanes, logits, previous, 1, i);
+            if (op.gpu.tp_size > 1 && op.gpu.lm_head_tp)
+                op.gpu.tp_broadcast_ids(previous, op.rank, batch, op.capture);
+        }
         op.arena.cursor = mark;
     }
     return device;
@@ -1334,17 +1448,26 @@ std::vector<int> propose_batch(Target &target, const std::vector<BatchLane> &lan
     }
     BatchGraphParams step;
     int *device = nullptr;
-    if (gpu.batch_input && target.draft_graph && !gpu.draft_capture_failed) {
+    if (gpu.batch_input[op.rank] && target.draft_graph && !gpu.draft_capture_failed) {
         auto key = batch_graph_key(target, lanes, block_rows, true);
         auto plan = capture_cached(op, gpu.draft_graphs, gpu.draft_victim, gpu.draft_capture_failed, key,
             [&](GraphPlan &) { draft_batch_steps(target, lanes, layout, ids, anchors); });
         op.arena.cursor = key.workspace;
         if (plan) {
             step = batch_step(op, lanes, ids, true);
-            checked(hipMemcpyAsync(&gpu.batch_input->step, &step, sizeof(step), hipMemcpyHostToDevice, op.stream));
-            plan->launch(gpu);
-            ++gpu.draft_replays;
-            device = gpu.batch_input->candidates;
+            checked(hipMemcpyAsync(&gpu.batch_input[op.rank]->step, &step, sizeof(step), hipMemcpyHostToDevice, op.stream));
+            if (gpu.tp_size > 1) {
+                gpu.all_barrier->arrive_and_wait();
+                if (op.rank == 0) {
+                    plan->launch(gpu);
+                    ++gpu.draft_replays;
+                }
+                gpu.all_barrier->arrive_and_wait();
+            } else {
+                plan->launch(gpu);
+                ++gpu.draft_replays;
+            }
+            device = gpu.batch_input[op.rank]->candidates;
         }
     }
     if (!device) device = draft_batch_steps(target, lanes, layout, ids, anchors);
@@ -1363,11 +1486,12 @@ Mat verify_batch(Target &target, const BatchLayout &layout,
     auto &gpu = op.gpu;
     auto now = std::chrono::steady_clock::now;
     const auto &[slots, positions, priors, device_slots, device_positions] = layout;
-    Mat x = op.capture ? op.embed_device(gpu.batch_input->step.ids, ids.size(), true) : op.embed(ids, true);
+    Mat x = op.capture ? op.embed_device(gpu.batch_input[op.rank]->step.ids, ids.size(), true) : op.embed(ids, true);
     size_t mark = op.arena.cursor;
+    const bool profile_rank = gpu.tp_size == 1 && op.rank == 0 && gpu.expert_begin[0];
     for (int layer = 0; layer < 42; ++layer) {
         auto start = now();
-        if (gpu.expert_begin[0]) checked(hipStreamSynchronize(op.stream));
+        if (profile_rank) checked(hipStreamSynchronize(op.stream));
         auto p = "model.layers." + std::to_string(layer) + ".";
         if (layer % 10 == 1 && layer <= 31) engram_batch(op, layer, x, priors, ids);
         float *post;
@@ -1375,7 +1499,7 @@ Mat verify_batch(Target &target, const BatchLayout &layout,
         a = attention_batch(op, p, layer, slots, positions, device_slots, device_positions, a, rows);
         op.expand(x, a, post);
         op.arena.cursor = mark;
-        if (gpu.expert_begin[0]) {
+        if (profile_rank) {
             checked(hipStreamSynchronize(op.stream));
             auto end = now();
             gpu.attention_ms += std::chrono::duration<double, std::milli>(end - start).count();
@@ -1386,11 +1510,11 @@ Mat verify_batch(Target &target, const BatchLayout &layout,
                        : moe(op, layer, f);
         op.expand(x, f, post);
         op.arena.cursor = mark;
-        if (!layer && op.capture) {
+        if (!layer && op.capture && gpu.tp_size == 1) {
             op.capture->finish(op.capture->plan.entry);
             op.capture->begin(0);
         }
-        if (gpu.expert_begin[0]) {
+        if (profile_rank) {
             checked(hipStreamSynchronize(op.stream));
             gpu.ffn_ms += std::chrono::duration<double, std::milli>(now() - start).count();
         }
@@ -1398,8 +1522,13 @@ Mat verify_batch(Target &target, const BatchLayout &layout,
     float *post;
     return op.collapse_norm(x, "model.hc_head.hc_head_", post, "model.norm.weight");
 }
+struct BatchSync {
+    std::vector<int> ids;
+    std::array<std::vector<int>, 16> actual;
+    std::array<int, 16> keep{};
+};
 void decode_batch(Target &target, std::vector<BatchLane> &lanes, BatchStats &stats,
-                  const std::function<void(int, int)> &emit) {
+                  const std::function<void(int, int)> &emit, BatchSync *sync = nullptr) {
     Ops &op = target.op;
     auto &gpu = op.gpu;
     op.batch_decode = true;
@@ -1429,6 +1558,13 @@ void decode_batch(Target &target, std::vector<BatchLane> &lanes, BatchStats &sta
         size_t mark = op.arena.cursor;
         ids = propose_batch(target, lanes, layout);
         op.arena.cursor = mark;
+        if (sync) {
+            if (op.rank == 0)
+                sync->ids = ids;
+            gpu.all_barrier->arrive_and_wait();
+            ids = sync->ids;
+            gpu.all_barrier->arrive_and_wait();
+        }
     } else {
         for (auto &lane : lanes) ids.push_back(lane.generated.back());
     }
@@ -1439,42 +1575,76 @@ void decode_batch(Target &target, std::vector<BatchLane> &lanes, BatchStats &sta
     Mat h{};
     float *logits = nullptr;
     int *tokens = nullptr;
-    if (gpu.batch_input && target.target_graph && !gpu.target_capture_failed) {
+    bool replayed = false;
+    if (gpu.batch_input[op.rank] && target.target_graph && !gpu.target_capture_failed) {
         auto key = batch_graph_key(target, lanes, rows, false);
         auto plan = capture_cached(op, gpu.target_graphs, gpu.target_victim, gpu.target_capture_failed, key,
             [&](GraphPlan &slot) {
                 Mat hidden = verify_batch(target, layout, ids, rows);
-                slot.hidden = hidden.p;
+                if (gpu.tp_size > 1)
+                    slot.tp_hidden[op.rank] = hidden.p;
+                else
+                    slot.hidden = hidden.p;
                 if (all_greedy) {
-                    slot.tokens = static_cast<int *>(op.arena.next(ids.size() * sizeof(int)));
-                    slot.logits = nullptr;
-                    target.head_argmax(hidden, slot.tokens);
+                    int *tok = static_cast<int *>(op.arena.next(ids.size() * sizeof(int)));
+                    if (gpu.tp_size > 1) {
+                        slot.tp_tokens[op.rank] = tok;
+                        slot.tp_logits[op.rank] = nullptr;
+                    } else {
+                        slot.tokens = tok;
+                        slot.logits = nullptr;
+                    }
+                    target.head_argmax(hidden, tok);
                 } else {
-                    slot.logits = target.head_logits(hidden);
-                    slot.tokens = nullptr;
+                    float *lgt = target.head_logits(hidden);
+                    if (gpu.tp_size > 1) {
+                        slot.tp_logits[op.rank] = lgt;
+                        slot.tp_tokens[op.rank] = nullptr;
+                    } else {
+                        slot.logits = lgt;
+                        slot.tokens = nullptr;
+                    }
                 }
-                slot.cursor = op.arena.cursor;
+                if (gpu.tp_size > 1)
+                    slot.tp_cursor[op.rank] = op.arena.cursor;
+                else
+                    slot.cursor = op.arena.cursor;
             });
         op.arena.cursor = key.workspace;
         if (plan) {
+            replayed = true;
             step = batch_step(op, lanes, ids, false);
-            checked(hipMemcpyAsync(&gpu.batch_input->step, &step, sizeof(step), hipMemcpyHostToDevice, op.stream));
-            checked(hipGraphLaunch(plan->entry, op.stream));
+            checked(hipMemcpyAsync(&gpu.batch_input[op.rank]->step, &step, sizeof(step), hipMemcpyHostToDevice, op.stream));
+            if (gpu.tp_size == 1)
+                checked(hipGraphLaunch(plan->entry, op.stream));
             for (int g = 0; g < 4; ++g) {
                 auto &packed = engrams[g];
                 packed = gather_batch_engram(gpu.model, 1 + 10 * g, layout.priors, ids);
-                checked(hipMemcpyAsync(gpu.batch_input->engram + g * packed.size(), packed.data(), packed.size(),
+                checked(hipMemcpyAsync(gpu.batch_input[op.rank]->engram + g * packed.size(), packed.data(), packed.size(),
                                        hipMemcpyHostToDevice, op.stream));
             }
-            plan->launch(gpu);
-            ++gpu.target_replays;
-            op.arena.cursor = plan->cursor;
-            h = {plan->hidden, int(ids.size()), 3072};
-            logits = plan->logits;
-            tokens = plan->tokens;
+            if (gpu.tp_size > 1) {
+                gpu.all_barrier->arrive_and_wait();
+                if (op.rank == 0) {
+                    plan->launch(gpu);
+                    ++gpu.target_replays;
+                }
+                gpu.all_barrier->arrive_and_wait();
+                op.arena.cursor = plan->tp_cursor[op.rank];
+                h = {plan->tp_hidden[op.rank], int(ids.size()), 3072};
+                logits = plan->tp_logits[op.rank];
+                tokens = plan->tp_tokens[op.rank];
+            } else {
+                plan->launch(gpu);
+                ++gpu.target_replays;
+                op.arena.cursor = plan->cursor;
+                h = {plan->hidden, int(ids.size()), 3072};
+                logits = plan->logits;
+                tokens = plan->tokens;
+            }
         }
     }
-    if (!logits && !tokens) {
+    if (!replayed) {
         h = verify_batch(target, layout, ids, rows);
         if (all_greedy) {
             tokens = static_cast<int *>(op.arena.next(ids.size() * sizeof(int)));
@@ -1486,43 +1656,169 @@ void decode_batch(Target &target, std::vector<BatchLane> &lanes, BatchStats &sta
     int *device = tokens;
     if (!device) {
         device = static_cast<int *>(op.arena.next(ids.size() * sizeof(int)));
-        sample_batch(op, lanes, logits, device, rows, 0);
+        if (op.rank == 0 || !gpu.lm_head_tp || gpu.tp_size == 1)
+            sample_batch(op, lanes, logits, device, rows, 0);
+        if (gpu.tp_size > 1 && gpu.lm_head_tp)
+            gpu.tp_broadcast_ids(device, op.rank, int(ids.size()));
     }
     std::vector<int> next(ids.size());
     op.copy(next.data(), device, next.size() * sizeof(int), hipMemcpyDeviceToHost);
     if (std::find(next.begin(), next.end(), -1) != next.end())
         throw std::runtime_error("有効な出力 logit がありません");
+    std::vector<std::vector<int>> lane_actual(lanes.size());
+    std::vector<int> lane_keep(lanes.size(), 1);
     for (size_t r = 0; r < lanes.size(); ++r) {
         auto &lane = lanes[r];
         lane.max_written = std::max(lane.max_written, lane.history.size() + size_t(rows));
-        int first = r * rows, keep = 1;
-        std::vector<int> actual(next.begin() + first, next.begin() + first + rows);
-        if (speculative) {
-            keep = verify_speculation(op, lane.target_probs, lane.draft_probs, int(lane.history.size()) + 1,
-                                      lane.options.seed, {ids.begin() + first + 1, ids.begin() + first + rows}, actual);
-            ++stats.rounds;
-            stats.accepted += keep - 1;
+        if (!sync || op.rank == 0) {
+            int first = r * rows, keep = 1;
+            std::vector<int> actual(next.begin() + first, next.begin() + first + rows);
+            if (speculative) {
+                keep = verify_speculation(op, lane.target_probs, lane.draft_probs, int(lane.history.size()) + 1,
+                                          lane.options.seed, {ids.begin() + first + 1, ids.begin() + first + rows}, actual);
+                ++stats.rounds;
+                stats.accepted += keep - 1;
+            }
+            keep = std::min(keep, lane.limit - int(lane.generated.size()));
+            if (!lane.ignore_eos) {
+                auto stop = std::find(actual.begin(), actual.begin() + keep, 120025);
+                if (stop != actual.begin() + keep) keep = int(stop - actual.begin()) + 1;
+            }
+            lane_actual[r] = std::move(actual);
+            lane_keep[r] = keep;
         }
-        keep = std::min(keep, lane.limit - int(lane.generated.size()));
-        if (!lane.ignore_eos) {
-            auto stop = std::find(actual.begin(), actual.begin() + keep, 120025);
-            if (stop != actual.begin() + keep) keep = int(stop - actual.begin()) + 1;
+    }
+    if (sync) {
+        if (op.rank == 0)
+            for (size_t r = 0; r < lanes.size(); ++r) {
+                sync->actual[r] = lane_actual[r];
+                sync->keep[r] = lane_keep[r];
+            }
+        gpu.all_barrier->arrive_and_wait();
+        for (size_t r = 0; r < lanes.size(); ++r) {
+            lane_actual[r] = sync->actual[r];
+            lane_keep[r] = sync->keep[r];
         }
+        gpu.all_barrier->arrive_and_wait();
+    }
+    for (size_t r = 0; r < lanes.size(); ++r) {
+        auto &lane = lanes[r];
+        int first = r * rows, keep = lane_keep[r];
+        const auto &actual = lane_actual[r];
         if (gpu.batch_draft) {
             Mat state = target.state.row(lane.slot * max_verify_rows, rows);
             checked(hipMemcpyAsync(state.p, h.row(first).p, state.bytes(), hipMemcpyDeviceToDevice, op.stream));
             if (keep > 1)
                 checked(hipMemcpyAsync(state.p, state.row(keep - 1).p, state.row(0).bytes(),
                                        hipMemcpyDeviceToDevice, op.stream));
-            for (int layer : sources) gpu.sparse_last[lane.slot][layer] = keep - 1;
+            for (int layer : sources) gpu.sparse_last[op.rank][lane.slot][layer] = keep - 1;
         }
         lane.history.insert(lane.history.end(), ids.begin() + first, ids.begin() + first + keep);
         lane.generated.insert(lane.generated.end(), actual.begin(), actual.begin() + keep);
         stats.tokens += keep;
-        if (emit)
+        if (emit && op.rank == 0)
             for (int i = 0; i < keep; ++i) emit(lane.id, actual[i]);
     }
 }
+class TpTeam {
+  public:
+    explicit TpTeam(Residency &gpu) : gpu(gpu), n(gpu.tp_size > 1 ? gpu.ranks : 1) {
+        if (n <= 1)
+            return;
+        for (int r = 1; r < n; ++r)
+            workers.emplace_back([this, r] { worker(r); });
+    }
+    ~TpTeam() {
+        if (n <= 1)
+            return;
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            stop = true;
+            ++epoch;
+        }
+        cv.notify_all();
+        for (auto &w : workers)
+            w.join();
+    }
+    template <class Fn> void run(Fn &&fn) {
+        if (n <= 1) {
+            fn(0);
+            return;
+        }
+        gpu.reset_collectives();
+        failures.assign(n, nullptr);
+        is_abort.assign(n, false);
+        current = [&](int r) { fn(r); };
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            remaining = n - 1;
+            ++epoch;
+        }
+        cv.notify_all();
+        run_one(0);
+        {
+            std::unique_lock<std::mutex> lock(mu);
+            done_cv.wait(lock, [&] { return remaining == 0; });
+        }
+        std::exception_ptr first;
+        bool first_abort = false;
+        for (int r = 0; r < n; ++r) {
+            if (!failures[r])
+                continue;
+            if (!first || (first_abort && !is_abort[r])) {
+                first = failures[r];
+                first_abort = is_abort[r];
+            }
+        }
+        if (first)
+            std::rethrow_exception(first);
+    }
+
+  private:
+    Residency &gpu;
+    int n;
+    std::vector<std::thread> workers;
+    std::mutex mu;
+    std::condition_variable cv, done_cv;
+    size_t epoch = 0;
+    int remaining = 0;
+    bool stop = false;
+    std::function<void(int)> current;
+    std::vector<std::exception_ptr> failures;
+    std::vector<bool> is_abort;
+    void run_one(int r) {
+        try {
+            checked(hipSetDevice(gpu.physical[r]));
+            current(r);
+        } catch (...) {
+            auto err = std::current_exception();
+            bool aborted = false;
+            try {
+                std::rethrow_exception(err);
+            } catch (const CollectiveAborted &) {
+                aborted = true;
+            } catch (...) {}
+            gpu.abort_collectives();
+            failures[r] = err;
+            is_abort[r] = aborted;
+        }
+    }
+    void worker(int r) {
+        size_t seen = 0;
+        for (;;) {
+            std::unique_lock<std::mutex> lock(mu);
+            cv.wait(lock, [&] { return stop || epoch != seen; });
+            if (stop)
+                return;
+            seen = epoch;
+            lock.unlock();
+            run_one(r);
+            lock.lock();
+            if (--remaining == 0)
+                done_cv.notify_one();
+        }
+    }
+};
 }
 std::vector<std::vector<int>> generate_batch(Residency &gpu, const std::vector<std::vector<int>> &prompts,
                                               const std::vector<int> &counts, const Hy4BatchOptions &options,
@@ -1562,36 +1858,60 @@ std::vector<std::vector<int>> generate_batch(Residency &gpu, const std::vector<s
                 throw std::runtime_error("バッチの KV ページが不足しています");
         }
     }
-    Target target(gpu, options.temperature, options.seed, options.top_k, options.top_p, 0, resolved_drafts);
-    target.op.slot_draft = gpu.batch_draft;
-    std::vector<std::vector<int>> histories(batch), generated(batch);
-    std::vector<size_t> written(batch, 0);
-    for (size_t s = 0; s < batch; ++s) {
-        target.history.clear();
-        target.op.slot = int(s);
-        int next = 0;
-        for (size_t first = 0; first < prompts[s].size(); first += options.chunk) {
-            auto end = std::min(first + size_t(options.chunk), prompts[s].size());
-            auto result = target.forward({prompts[s].begin() + first, prompts[s].begin() + end}, false,
-                                         end == prompts[s].size());
-            if (!result.empty()) next = result.back();
+    const int chunk = gpu.tp_size > 1 ? std::min(options.chunk, tp_prefill_rows) : options.chunk;
+    std::array<std::vector<std::vector<int>>, 4> histories, generated;
+    std::array<BatchStats, 4> rank_stats{};
+    std::chrono::steady_clock::time_point prefill{};
+    int shared_token = 0;
+    BatchSync sync;
+    TpTeam team(gpu);
+    team.run([&](int rank) {
+        Target target(gpu, options.temperature, options.seed, options.top_k, options.top_p, rank, resolved_drafts);
+        target.op.slot_draft = gpu.batch_draft;
+        histories[rank].resize(batch);
+        generated[rank].resize(batch);
+        std::vector<size_t> written(batch, 0);
+        for (size_t s = 0; s < batch; ++s) {
+            target.history.clear();
+            target.op.slot = int(s);
+            int next = 0;
+            for (size_t first = 0; first < prompts[s].size(); first += chunk) {
+                auto end = std::min(first + size_t(chunk), prompts[s].size());
+                auto result = target.forward({prompts[s].begin() + first, prompts[s].begin() + end}, false,
+                                             end == prompts[s].size());
+                if (!result.empty())
+                    next = result.back();
+            }
+            if (gpu.tp_size > 1) {
+                if (rank == 0)
+                    shared_token = next;
+                gpu.all_barrier->arrive_and_wait();
+                next = shared_token;
+                gpu.all_barrier->arrive_and_wait();
+            }
+            histories[rank][s] = target.history;
+            written[s] = prompts[s].size();
+            generated[rank][s].push_back(next);
+            if (rank == 0 && emit)
+                emit(int(s), next);
         }
-        histories[s] = target.history;
-        written[s] = prompts[s].size();
-        generated[s].push_back(next);
-        if (emit) emit(int(s), next);
-    }
-    target.op.slot = 0;
-    auto prefill = now();
-    BatchStats stats;
-    for (;;) {
-        std::vector<BatchLane> lanes;
-        for (size_t s = 0; s < batch; ++s)
-            if (generated[s].size() < size_t(counts[s]) && (options.ignore_eos || generated[s].back() != 120025))
-                lanes.push_back({int(s), int(s), counts[s], histories[s], generated[s], options, written[s], options.ignore_eos});
-        if (lanes.empty()) break;
-        decode_batch(target, lanes, stats, emit);
-    }
+        target.op.slot = 0;
+        if (rank == 0)
+            prefill = now();
+        for (;;) {
+            std::vector<BatchLane> lanes;
+            for (size_t s = 0; s < batch; ++s)
+                if (generated[rank][s].size() < size_t(counts[s]) &&
+                    (options.ignore_eos || generated[rank][s].back() != 120025))
+                    lanes.push_back({int(s), int(s), counts[s], histories[rank][s], generated[rank][s], options,
+                                     written[s], options.ignore_eos});
+            if (lanes.empty())
+                break;
+            decode_batch(target, lanes, rank_stats[rank], rank == 0 ? emit : std::function<void(int, int)>{},
+                         gpu.tp_size > 1 ? &sync : nullptr);
+        }
+    });
+    const auto &stats = rank_stats[0];
     size_t decode_tokens = stats.tokens;
     fprintf(stderr, "batch_draft_rounds=%zu batch_accepted=%zu\n", stats.rounds, stats.accepted);
     auto end = now();
@@ -1599,7 +1919,7 @@ std::vector<std::vector<int>> generate_batch(Residency &gpu, const std::vector<s
     double tg = std::chrono::duration<double>(end - prefill).count();
     fprintf(stderr, "batch_prefill_s=%.6f batch_decode_s=%.6f batch_decode_tokens=%zu batch_agg_tok_s=%.6f batch_slot_tok_s=%.6f\n",
             pp, tg, decode_tokens, tg ? decode_tokens / tg : 0, tg ? decode_tokens / tg / batch : 0);
-    return generated;
+    return generated[0];
 }
 
 struct Hy4BatchSession::Impl {
@@ -1613,12 +1933,14 @@ struct Hy4BatchSession::Impl {
         size_t snap_max_written = 0;
         size_t reserved_pages = 0;
         uint64_t admit_seq = 0;
-        std::vector<uint8_t> swa_snap_buf;
-        std::vector<uint8_t> swa_pending;
+        std::array<std::vector<uint8_t>, 4> swa_snap_buf;
+        std::array<std::vector<uint8_t>, 4> swa_pending;
     };
     Residency &gpu;
     int draft_tokens;
-    std::optional<Target> target;
+    TpTeam team;
+    std::array<std::optional<Target>, 4> targets;
+    std::array<std::array<std::vector<int>, 16>, 4> peer_histories, peer_generated;
     Emit emit;
     Done done;
     std::vector<std::optional<State>> states;
@@ -1627,6 +1949,8 @@ struct Hy4BatchSession::Impl {
     std::vector<size_t> slot_reserved_pages;
     std::deque<Hy4Request> waiting;
     BatchStats stats;
+    std::array<BatchStats, 4> peer_stats{};
+    BatchSync sync;
     Hy4PrefixStats prefix;
     uint64_t use_clock = 0;
     uint64_t admit_clock = 0;
@@ -1639,11 +1963,9 @@ struct Hy4BatchSession::Impl {
     size_t max_prefix_entries = 64;
     Impl(Residency &gpu, Emit emit, Done done, int drafts)
         : gpu(gpu), draft_tokens(Residency::resolve_draft_tokens(drafts ? drafts : gpu.draft_tokens)),
-          emit(std::move(emit)), done(std::move(done)), states(gpu.max_slots),
+          team(gpu), emit(std::move(emit)), done(std::move(done)), states(gpu.max_slots),
           slot_swa_gen(gpu.max_slots, 0), slot_reserved_pages(gpu.max_slots, 0),
           max_prefix_entries(std::max<size_t>(size_t(gpu.max_slots) * 4, 64)) {
-        if (gpu.tp_size > 1)
-            throw std::invalid_argument("バッチセッションは TP=1 で使用してください");
         prefix.enabled = true;
         prefix.reuse_slots = gpu.max_slots;
         if (const char *env = std::getenv("SHELF_HY4_PREFILL_DECODE_INTERVAL"); env && *env) {
@@ -1759,7 +2081,7 @@ struct Hy4BatchSession::Impl {
             }
             int chosen = best_pref_slot >= 0 ? best_pref_slot : free_slot;
             size_t total_pages = gpu.kv_pages_total ? gpu.pages_for_tokens(req.input_ids.size() + size_t(req.count)) : 0;
-            std::vector<uint8_t> snap_copy;
+            std::array<std::vector<uint8_t>, 4> snap_copy;
             if (gpu.kv_pages_total > 0) {
                 size_t shared_full = best_match / kv_page_tokens;
                 size_t rem = best_match % kv_page_tokens;
@@ -1794,8 +2116,9 @@ struct Hy4BatchSession::Impl {
                 gpu.release_slot_pages(chosen);
                 if (best != prefix_entries.end() && best_match > 0) {
                     auto &entry = *best;
-                    if (best_snap && !entry.swa_snap.empty())
-                        snap_copy = entry.swa_snap[0];
+                    if (best_snap)
+                        for (size_t r = 0; r < std::min<size_t>(entry.swa_snap.size(), 4); ++r)
+                            snap_copy[r] = entry.swa_snap[r];
                     std::vector<int32_t> restored_pages;
                     restored_pages.reserve(shared_full + (rem > 0 ? 1 : 0));
                     for (size_t pi = 0; pi < shared_full; ++pi)
@@ -1816,8 +2139,15 @@ struct Hy4BatchSession::Impl {
                     }
                     gpu.slot_page_tables[chosen] = std::move(restored_pages);
                     gpu.sync_slot_page_table(chosen);
-                    if (tail_src >= 0)
-                        copy_dsa_page_prefix(gpu, 0, gpu.slot_page_tables[chosen].back(), tail_src, int(rem), gpu.compute[0]);
+                    if (tail_src >= 0) {
+                        for (int r = 0; r < gpu.ranks; ++r)
+                            if (gpu.cache[r][0]) {
+                                checked(hipSetDevice(gpu.physical[r]));
+                                copy_dsa_page_prefix(gpu, r, gpu.slot_page_tables[chosen].back(), tail_src, int(rem),
+                                                     gpu.compute[r]);
+                            }
+                        checked(hipSetDevice(gpu.physical[0]));
+                    }
                     if (steal_tail) {
                         gpu.release_pages(entry.pages);
                         prefix_entries.erase(best);
@@ -1828,8 +2158,9 @@ struct Hy4BatchSession::Impl {
                 }
                 if (!gpu.allocate_slot_pages(chosen, req.input_ids.size()))
                     throw std::runtime_error("KV ページ割当に失敗しました");
-            } else if (best != prefix_entries.end() && best_match > 0 && best_snap && !best->swa_snap.empty()) {
-                snap_copy = best->swa_snap[0];
+            } else if (best != prefix_entries.end() && best_match > 0 && best_snap) {
+                for (size_t r = 0; r < std::min<size_t>(best->swa_snap.size(), 4); ++r)
+                    snap_copy[r] = best->swa_snap[r];
             }
             ++slot_swa_gen[chosen];
             slot_reserved_pages[chosen] = total_pages;
@@ -1842,8 +2173,10 @@ struct Hy4BatchSession::Impl {
                 if (best_match > 0) {
                     ++prefix.hits;
                     ++prefix.restores;
-                    if (best_snap && !snap_copy.empty())
-                        state.swa_pending = std::move(snap_copy);
+                    if (best_snap)
+                        for (int r = 0; r < 4; ++r)
+                            if (!snap_copy[r].empty())
+                                state.swa_pending[r] = std::move(snap_copy[r]);
                     state.prefetched = best_match;
                     state.restored_tokens = best_match;
                     state.max_written = best_match;
@@ -1868,10 +2201,11 @@ struct Hy4BatchSession::Impl {
             cache.valid = true;
             cache.snap_pos = state.snap_pos;
             cache.snap_max_written = state.snap_max_written;
-            cache.snap_valid = !state.swa_snap_buf.empty() && cache.snap_pos > 0;
+            cache.snap_valid = !state.swa_snap_buf[0].empty() && cache.snap_pos > 0;
             if (cache.snap_valid) {
-                cache.swa_snap.resize(1);
-                cache.swa_snap[0] = std::move(state.swa_snap_buf);
+                cache.swa_snap.resize(gpu.ranks);
+                for (int r = 0; r < gpu.ranks; ++r)
+                    cache.swa_snap[r] = std::move(state.swa_snap_buf[r]);
             }
             cache.live_swa_slot = slot;
             cache.live_swa_gen = slot_swa_gen[slot];
@@ -1903,13 +2237,18 @@ struct Hy4BatchSession::Impl {
     }
     void step() {
         fill();
-        if (!target) {
+        const int n = gpu.tp_size > 1 ? gpu.ranks : 1;
+        if (!targets[0]) {
             if (std::none_of(states.begin(), states.end(), [](const auto &state) { return bool(state); }))
                 return;
-            target.emplace(gpu, 0, 0, 0, 1, 0, draft_tokens);
-            target->op.slot_draft = gpu.batch_draft;
+            team.run([&](int rank) {
+                targets[rank].emplace(gpu, 0, 0, 0, 1, rank, draft_tokens);
+                targets[rank]->op.slot_draft = gpu.batch_draft;
+            });
         }
-        target->draft_tokens = draft_tokens;
+        for (int r = 0; r < n; ++r)
+            if (targets[r])
+                targets[r]->draft_tokens = draft_tokens;
         int prefill_slot = -1;
         uint64_t best_admit = UINT64_MAX;
         bool has_decode = false;
@@ -1933,24 +2272,59 @@ struct Hy4BatchSession::Impl {
             const int s = prefill_slot;
             auto &state = *states[s];
             auto &request = state.request;
-            if (!state.swa_pending.empty()) {
-                restore_swa_snapshot(gpu, s, 0, target->op.stream, state.swa_pending);
-                checked(hipStreamSynchronize(target->op.stream));
-                state.swa_pending.clear();
-            }
-            auto end = std::min(state.prefetched + size_t(request.options.chunk), request.input_ids.size());
-            const size_t chunk_len = end - state.prefetched;
+            const int chunk = gpu.tp_size > 1 ? std::min(request.options.chunk, tp_prefill_rows) : request.options.chunk;
+            const size_t first = state.prefetched;
+            auto end = std::min(first + size_t(chunk), request.input_ids.size());
+            const size_t chunk_len = end - first;
             const bool incomplete = end < request.input_ids.size();
-            target->op.batch_decode = false;
-            target->op.slot = s;
-            target->history = std::move(state.history);
-            target->temperature = request.options.temperature;
-            target->seed = request.options.seed;
-            target->top_k = request.options.top_k;
-            target->top_p = request.options.top_p;
-            auto result = target->forward({request.input_ids.begin() + state.prefetched, request.input_ids.begin() + end},
-                                         false, !incomplete);
-            state.history = std::move(target->history);
+            int shared_token = -1;
+            bool has_token = false;
+            team.run([&](int rank) {
+                auto &t = *targets[rank];
+                if (!state.swa_pending[rank].empty()) {
+                    restore_swa_snapshot(gpu, s, rank, t.op.stream, state.swa_pending[rank]);
+                    checked(hipStreamSynchronize(t.op.stream));
+                    state.swa_pending[rank].clear();
+                }
+                if (first == state.restored_tokens && rank > 0) {
+                    peer_histories[rank][s].assign(request.input_ids.begin(),
+                                                   request.input_ids.begin() + state.restored_tokens);
+                    peer_generated[rank][s].clear();
+                }
+                t.op.batch_decode = false;
+                t.op.slot = s;
+                t.history = std::move(rank == 0 ? state.history : peer_histories[rank][s]);
+                t.temperature = request.options.temperature;
+                t.seed = request.options.seed;
+                t.top_k = request.options.top_k;
+                t.top_p = request.options.top_p;
+                auto result = t.forward({request.input_ids.begin() + first, request.input_ids.begin() + end},
+                                        false, !incomplete);
+                if (rank == 0)
+                    state.history = std::move(t.history);
+                else
+                    peer_histories[rank][s] = std::move(t.history);
+                if (!incomplete && prefix.enabled && gpu.cache[rank][2] && align_hy4_prefix(end, end + 1) > 0)
+                    save_swa_snapshot(gpu, s, rank, t.op.stream, state.swa_snap_buf[rank]);
+                if (gpu.tp_size > 1) {
+                    if (rank == 0) {
+                        has_token = !result.empty();
+                        shared_token = has_token ? result.back() : -1;
+                    }
+                    gpu.all_barrier->arrive_and_wait();
+                    if (has_token) {
+                        if (rank == 0)
+                            state.generated.push_back(shared_token);
+                        else
+                            peer_generated[rank][s].push_back(shared_token);
+                    }
+                    gpu.all_barrier->arrive_and_wait();
+                } else if (!result.empty()) {
+                    has_token = true;
+                    shared_token = result.back();
+                    state.generated.push_back(shared_token);
+                }
+            });
             state.max_written = std::max(state.max_written, end);
             state.prefetched = end;
             ++prefill_chunks_since_decode;
@@ -1959,13 +2333,10 @@ struct Hy4BatchSession::Impl {
             if (!incomplete && prefix.enabled && gpu.cache[0][2]) {
                 state.snap_pos = align_hy4_prefix(end, end + 1);
                 state.snap_max_written = end;
-                if (state.snap_pos > 0)
-                    save_swa_snapshot(gpu, s, 0, target->op.stream, state.swa_snap_buf);
             }
-            if (!result.empty()) {
-                state.generated.push_back(result.back());
-                if (emit) emit(request.id, result.back());
-                const bool hit_eos = !request.options.ignore_eos && result.back() == 120025;
+            if (has_token) {
+                if (emit) emit(request.id, shared_token);
+                const bool hit_eos = !request.options.ignore_eos && shared_token == 120025;
                 if (hit_eos || state.generated.size() == size_t(request.count)) {
                     finish(s, hit_eos ? "stop" : "length");
                     fill();
@@ -1973,27 +2344,38 @@ struct Hy4BatchSession::Impl {
             }
             return;
         }
-        std::vector<BatchLane> lanes;
-        for (size_t s = 0; s < states.size(); ++s) if (states[s] && states[s]->prefetched == states[s]->request.input_ids.size()) {
-            auto &state = *states[s];
-            size_t cap = gpu.kv_pages_total ? std::min(gpu.tokens, state.reserved_pages * kv_page_tokens) : gpu.tokens;
-            lanes.push_back({int(s), state.request.id, state.request.count, state.history, state.generated,
-                             state.request.options, state.max_written, state.request.options.ignore_eos,
-                             nullptr, nullptr, cap});
-        }
-        if (lanes.empty()) return;
-        target->draft_tokens = draft_tokens;
+        std::vector<size_t> active_slots;
+        for (size_t s = 0; s < states.size(); ++s)
+            if (states[s] && states[s]->prefetched == states[s]->request.input_ids.size())
+                active_slots.push_back(s);
+        if (active_slots.empty())
+            return;
         prefill_chunks_since_decode = 0;
         prefill_tokens_since_decode = 0;
         last_prefill_incomplete = false;
-        decode_batch(*target, lanes, stats, emit);
+        team.run([&](int rank) {
+            std::vector<BatchLane> lanes;
+            std::array<size_t, 16> peer_written{};
+            for (size_t s : active_slots) {
+                auto &state = *states[s];
+                size_t cap = gpu.kv_pages_total ? std::min(gpu.tokens, state.reserved_pages * kv_page_tokens) : gpu.tokens;
+                peer_written[s] = state.max_written;
+                lanes.push_back({int(s), state.request.id, state.request.count,
+                                 rank == 0 ? state.history : peer_histories[rank][s],
+                                 rank == 0 ? state.generated : peer_generated[rank][s],
+                                 state.request.options, rank == 0 ? state.max_written : peer_written[s],
+                                 state.request.options.ignore_eos, nullptr, nullptr, cap});
+            }
+            decode_batch(*targets[rank], lanes, rank == 0 ? stats : peer_stats[rank],
+                         rank == 0 ? emit : std::function<void(int, int)>{},
+                         gpu.tp_size > 1 ? &sync : nullptr);
+        });
         bool any_finished = false;
-        for (auto &lane : lanes) {
-            int slot = lane.slot;
-            auto &state = *states[slot];
+        for (size_t s : active_slots) {
+            auto &state = *states[s];
             const bool hit_eos = !state.request.options.ignore_eos && state.generated.back() == 120025;
             if (hit_eos || state.generated.size() == size_t(state.request.count)) {
-                finish(slot, hit_eos ? "stop" : "length");
+                finish(int(s), hit_eos ? "stop" : "length");
                 any_finished = true;
             }
         }

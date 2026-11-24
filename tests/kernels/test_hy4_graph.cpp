@@ -9,6 +9,7 @@
 #include <cstring>
 #include <numeric>
 #include <stdexcept>
+#include <thread>
 
 namespace shelf::hy4 {
 void benchmark_hy4_decode(Residency &gpu);
@@ -108,6 +109,145 @@ void logical_lm_head_tp(Residency &gpu, Checkpoint &sharded) {
     }
 }
 
+void share_tp_weights(Checkpoint &model) {
+    if (model.mixed)
+        throw std::invalid_argument("expert 領域を共有する試験には 4 bpw checkpoint が必要です");
+    for (int r = 0; r < model.ranks; ++r) {
+        model.bytes[r] = 0;
+        model.upload_order[r].clear();
+        for (auto &[key, weight] : model.local[r]) {
+            auto pos = key.find(".mlp.experts.");
+            if (pos != std::string::npos && !key.starts_with("model.layers.1."))
+                continue;
+            weight.offset = (model.bytes[r] + 15) & ~size_t(15);
+            model.bytes[r] = weight.offset + weight.bytes;
+            model.upload_order[r].push_back(&weight);
+        }
+        for (auto &[key, weight] : model.local[r]) {
+            auto pos = key.find(".mlp.experts.");
+            if (pos != std::string::npos)
+                weight.offset = model.local[r].at("model.layers.1" + key.substr(pos)).offset;
+        }
+    }
+}
+
+Owners make_tp_owners(int mg) {
+    Owners layout{};
+    for (auto &row : layout)
+        for (int e = 0; e < 512; ++e)
+            row[e] = e % mg;
+    return layout;
+}
+
+Path resolve_engram(const Path &body) {
+    const char *env = std::getenv("SHELF_HY4_ENGRAM_DIR");
+    return env && *env ? Path(env) : body;
+}
+
+void reserve_logical(Residency &gpu, size_t work = size_t(1) << 30) {
+    auto align = [](size_t n) { return (n + 255) & ~size_t(255); };
+    gpu.ranks = gpu.model.ranks;
+    gpu.lm_head_tp = gpu.model.split_lm_head;
+    gpu.lm_host_fallback = false;
+    gpu.lm_parity = 0;
+    gpu.lm_recorded = {};
+    gpu.lm_ready_rec = {};
+    gpu.lm_done_rec = {};
+    gpu.lm_arrived_rec = {};
+    gpu.lm_consumed_rec = {};
+    gpu.kv_page_stride = gpu.pages_for_tokens(gpu.tokens);
+    gpu.kv_pages_total = size_t(gpu.max_slots) * gpu.kv_page_stride;
+    gpu.physical.fill(0);
+    std::array<std::array<bool, 4>, 4> peer{};
+    for (auto &row : peer)
+        row.fill(true);
+    gpu.graph_room = graph_topology(gpu.ep_size, gpu.tp_size, true, true, peer);
+    for (int r = 0; r < gpu.ranks; ++r) {
+        const bool attention_rank = gpu.tp_size > 1 || r == 0;
+        size_t overhead = work + Residency::matrix_bytes;
+        if (attention_rank) {
+            overhead += align(41 * 512 * sizeof(int)) + align(41 * 512 * sizeof(float)) + 256;
+            overhead += align(size_t(gpu.max_slots) * gpu.kv_page_stride * sizeof(int32_t));
+            for (int i = 0; i < 42; ++i) {
+                if (!Residency::is_sparse_layer(i)) {
+                    overhead += align(gpu.max_slots * 294 * std::min(gpu.tokens, size_t(518)));
+                } else {
+                    overhead += align(gpu.kv_pages_total * kv_page_tokens * 294);
+                    overhead += align(gpu.kv_pages_total * kv_page_groups * 128 * sizeof(uint16_t));
+                    overhead += align(size_t(gpu.max_slots) * 12 * 128 * sizeof(uint16_t));
+                }
+            }
+            for (const auto &[name, ignored] : gpu.folded[r])
+                overhead += size_t(gpu.model.shape_of(name, r)->at(1)) * 512 * 2;
+        }
+        if (gpu.tp_size > 1)
+            overhead += tp_prefill_rows * 3072u * 2u;
+        if (gpu.tp_size > 1 && gpu.ep_size > 1)
+            overhead += tp_prefill_rows * 1536u * 2u;
+        if (gpu.lm_head_tp) {
+            overhead += 2 * lm_hidden_chunk_bytes + 2 * 4 * lm_argmax_stride;
+            if (r == 0 || gpu.tp_size > 1)
+                overhead += 2 * lm_logits_chunk_bytes;
+        }
+        size_t bytes = align(gpu.model.bytes[r]) + overhead;
+        auto result = gpu::GpuArena::create(0, bytes);
+        if (!result.ok())
+            throw std::runtime_error(result.status().message());
+        gpu.arenas.push_back(result.release());
+        auto allocation = gpu.arenas.back().allocate_aligned(bytes, 256);
+        if (!allocation.ok())
+            throw std::runtime_error(allocation.status().message());
+        checked(hipMemset(allocation.value().data(), 0, bytes));
+        Region buffer{static_cast<uint8_t *>(allocation.value().data()), bytes};
+        checked(hipStreamCreateWithFlags(&gpu.compute[r], hipStreamNonBlocking));
+        gpu.weight_base[r] = static_cast<uint8_t *>(buffer.next(gpu.model.bytes[r]));
+        if (attention_rank) {
+            gpu.page_table[r] = static_cast<int32_t *>(buffer.next(size_t(gpu.max_slots) * gpu.kv_page_stride * sizeof(int32_t)));
+            checked(hipMemset(gpu.page_table[r], 0xff, size_t(gpu.max_slots) * gpu.kv_page_stride * sizeof(int32_t)));
+            for (int i = 0; i < 42; ++i) {
+                if (!Residency::is_sparse_layer(i)) {
+                    gpu.cache[r][i] = static_cast<uint8_t *>(
+                        buffer.next(gpu.max_slots * 294 * std::min(gpu.tokens, size_t(518))));
+                } else {
+                    gpu.cache[r][i] = static_cast<uint8_t *>(buffer.next(gpu.kv_pages_total * kv_page_tokens * 294));
+                    gpu.index_keys[r][i] = static_cast<uint16_t *>(
+                        buffer.next(gpu.kv_pages_total * kv_page_groups * 128 * sizeof(uint16_t)));
+                    gpu.index_pending[r][i] = static_cast<uint16_t *>(
+                        buffer.next(size_t(gpu.max_slots) * 12 * 128 * sizeof(uint16_t)));
+                }
+            }
+            for (auto &[name, ptr] : gpu.folded[r])
+                ptr = buffer.next(size_t(gpu.model.shape_of(name, r)->at(1)) * 512 * 2);
+        }
+        if (gpu.tp_size > 1)
+            gpu.tp_recv[r] = buffer.next(tp_prefill_rows * 3072u * 2u);
+        if (gpu.tp_size > 1 && gpu.ep_size > 1)
+            gpu.ep_recv[r] = buffer.next(tp_prefill_rows * 1536u * 2u);
+        if (gpu.lm_head_tp) {
+            gpu.lm_hidden_buf[r] = buffer.next(2 * lm_hidden_chunk_bytes);
+            gpu.lm_head_recv[r] = buffer.next(2 * 4 * lm_argmax_stride);
+            if (r == 0 || gpu.tp_size > 1)
+                gpu.lm_logits_recv[r] = buffer.next(2 * lm_logits_chunk_bytes);
+        }
+        gpu.reserve_experts(r, buffer);
+        gpu.workspace[r] = {static_cast<uint8_t *>(buffer.next(work)), work};
+    }
+    if (gpu.tp_size > 1) {
+        for (int g = 0; g < gpu.ep_size; ++g)
+            gpu.tp_barrier[g] = std::make_unique<SyncBarrier>(gpu.tp_size);
+        if (gpu.ep_size > 1)
+            for (int t = 0; t < gpu.tp_size; ++t)
+                gpu.ep_barrier[t] = std::make_unique<SyncBarrier>(gpu.ep_size);
+        gpu.all_barrier = std::make_unique<SyncBarrier>(gpu.ranks);
+        gpu.capture_barrier = std::make_unique<SyncBarrier>(gpu.ranks);
+    }
+    gpu.kv_page_refs.assign(gpu.kv_pages_total, 0);
+    gpu.kv_free_pages.resize(gpu.kv_pages_total);
+    for (size_t i = 0; i < gpu.kv_pages_total; ++i)
+        gpu.kv_free_pages[i] = int32_t(gpu.kv_pages_total - 1 - i);
+    gpu.slot_page_tables.assign(gpu.max_slots, {});
+    gpu.upload();
+}
 void reset_history(Residency &gpu) {
     gpu.release_slot_pages(0);
     if (!gpu.allocate_slot_pages(0, gpu.tokens))
@@ -125,29 +265,33 @@ void reset_history(Residency &gpu) {
     std::vector<uint16_t> groups((gpu.tokens / 4 + 12) * 128);
     for (size_t i = 0; i < groups.size(); ++i)
         groups[i] = uint16_t(std::bit_cast<uint32_t>(float(int(i * 37 % 101) - 50) / 64) >> 16);
-    for (int l = 0; l < 42; ++l) {
-        if (!Residency::is_sparse_layer(l)) {
-            auto slots = std::min(gpu.tokens, size_t(518));
-            checked(hipMemcpy(gpu.cache[0][l], kv.data(), slots * 294, hipMemcpyHostToDevice));
+    for (int r = 0; r < gpu.ranks; ++r) {
+        if (!gpu.cache[r][0])
             continue;
-        }
-        const auto &pages = gpu.slot_page_tables[0];
-        const size_t total_groups = gpu.tokens / 4;
-        for (size_t pi = 0; pi < pages.size(); ++pi) {
-            const int32_t phys = pages[pi];
-            const size_t tok_off = pi * kv_page_tokens;
-            const size_t tok_cnt = std::min(kv_page_tokens, gpu.tokens - tok_off);
-            checked(hipMemcpy(gpu.cache[0][l] + size_t(phys) * kv_page_tokens * 294,
-                              kv.data() + tok_off * 294, tok_cnt * 294, hipMemcpyHostToDevice));
-            const size_t grp_off = pi * kv_page_groups;
-            if (grp_off < total_groups) {
-                const size_t grp_cnt = std::min(kv_page_groups, total_groups - grp_off);
-                checked(hipMemcpy(gpu.index_keys[0][l] + size_t(phys) * kv_page_groups * 128,
-                                  groups.data() + grp_off * 128, grp_cnt * 256, hipMemcpyHostToDevice));
+        for (int l = 0; l < 42; ++l) {
+            if (!Residency::is_sparse_layer(l)) {
+                auto slots = std::min(gpu.tokens, size_t(518));
+                checked(hipMemcpy(gpu.cache[r][l], kv.data(), slots * 294, hipMemcpyHostToDevice));
+                continue;
             }
+            const auto &pages = gpu.slot_page_tables[0];
+            const size_t total_groups = gpu.tokens / 4;
+            for (size_t pi = 0; pi < pages.size(); ++pi) {
+                const int32_t phys = pages[pi];
+                const size_t tok_off = pi * kv_page_tokens;
+                const size_t tok_cnt = std::min(kv_page_tokens, gpu.tokens - tok_off);
+                checked(hipMemcpy(gpu.cache[r][l] + size_t(phys) * kv_page_tokens * 294,
+                                  kv.data() + tok_off * 294, tok_cnt * 294, hipMemcpyHostToDevice));
+                const size_t grp_off = pi * kv_page_groups;
+                if (grp_off < total_groups) {
+                    const size_t grp_cnt = std::min(kv_page_groups, total_groups - grp_off);
+                    checked(hipMemcpy(gpu.index_keys[r][l] + size_t(phys) * kv_page_groups * 128,
+                                      groups.data() + grp_off * 128, grp_cnt * 256, hipMemcpyHostToDevice));
+                }
+            }
+            checked(hipMemcpy(gpu.index_pending[r][l], groups.data() + total_groups * 128,
+                              12 * 256, hipMemcpyHostToDevice));
         }
-        checked(hipMemcpy(gpu.index_pending[0][l], groups.data() + total_groups * 128,
-                          12 * 256, hipMemcpyHostToDevice));
     }
 }
 
@@ -251,7 +395,7 @@ void check_capture_failure(Residency &gpu) {
 }
 
 void compare(const Path &body, const Path &draft, int ranks) {
-    Checkpoint model(body, body, draft, Owners{}, 1, 1);
+    Checkpoint model(body, resolve_engram(body), draft, Owners{}, 1, 1);
     share_expert_weights(model);
     Residency gpu(model, 2080);
     auto status = gpu.reserve();
@@ -413,7 +557,7 @@ void compare_draft_counts(const Path &body, const Path &draft) {
     gpu.shutdown();
 }
 void compare_batches(const Path &body, const Path &draft, int ranks) {
-    Checkpoint model(body, body, draft, Owners{}, 1, 1);
+    Checkpoint model(body, resolve_engram(body), draft, Owners{}, 1, 1);
     share_expert_weights(model);
     const std::vector<std::vector<int>> prompts{{802, 15063}, {12286, 859, 444}, {401, 82, 44, 276}, {120000}};
     constexpr int count = 4;
@@ -658,7 +802,7 @@ void check_prefill(Residency &gpu, const std::vector<int> &prompt) {
 }
 
 void compare_transports(const Path &body, const Path &draft, int ranks, const Owners *placement = nullptr) {
-    Checkpoint model(body, body, draft, placement ? *placement : Owners{}, placement ? ranks : 1, 1);
+    Checkpoint model(body, resolve_engram(body), draft, placement ? *placement : Owners{}, placement ? ranks : 1, 1);
     if (!placement)
         share_expert_weights(model);
     const std::vector<int> prompt32{802, 8778, 299, 9480, 341, 39144, 13, 360, 46544, 52315, 533,
@@ -830,6 +974,402 @@ void compare_lm_head_tp(const Path &body, const Path &draft) {
     setenv("SHELF_HY4_DRAFT_GRAPH", "1", 1);
 }
 
+template <class Fn> void run_ranks(Residency &gpu, Fn &&fn) {
+    gpu.reset_collectives();
+    std::array<std::exception_ptr, 4> failures{};
+    std::array<std::jthread, 4> workers;
+    for (int r = 0; r < gpu.ranks; ++r)
+        workers[r] = std::jthread([&, r] {
+            try {
+                checked(hipSetDevice(gpu.physical[r]));
+                fn(r);
+            } catch (...) {
+                failures[r] = std::current_exception();
+                gpu.abort_collectives();
+            }
+        });
+    for (auto &w : workers)
+        w.join();
+    for (auto &f : failures)
+        if (f)
+            std::rethrow_exception(f);
+}
+
+std::vector<Output> run_tp(Residency &gpu, bool graphs) {
+    setenv("SHELF_HY4_GRAPH", graphs ? "1" : "0", 1);
+    setenv("SHELF_HY4_DRAFT_GRAPH", graphs ? "1" : "0", 1);
+    reset_history(gpu);
+    std::vector<Output> rank0_results;
+    run_ranks(gpu, [&](int rank) {
+        Target target(gpu, 0.8f, 42, 0, 1, rank, 5);
+        target.history.assign(7, 120000);
+        std::vector<Output> results;
+        for (int keep : {0, 3, 0, 0, 4, 2, 5}) {
+            if (results.size() == 2) {
+                gpu.all_barrier->arrive_and_wait();
+                if (rank == 0)
+                    reset_history(gpu);
+                gpu.all_barrier->arrive_and_wait();
+                target.history.assign(2044, 120000);
+            }
+            int start = target.history.size();
+            std::vector<int> ids = keep ? std::vector<int>{802, 15063, 2576, 12286, 859, 444} : std::vector<int>{start};
+            Output out;
+            out.ids = target.forward(ids, keep != 0);
+            if (rank == 0) {
+                out.state.resize(ids.size() * 3072);
+                target.op.copy(out.state.data(), target.state.p, out.state.size() * 2, hipMemcpyDeviceToHost);
+                if (keep) {
+                    out.target_probs.resize(6 * 120832);
+                    target.op.copy(out.target_probs.data(), target.target_probs, out.target_probs.size() * 4,
+                                   hipMemcpyDeviceToHost);
+                }
+            }
+            if (keep)
+                target.accept(keep, 6);
+            out.draft = target.propose(500 + start);
+            if (rank == 0) {
+                out.draft_probs.resize(5 * 120832);
+                target.op.copy(out.draft_probs.data(), target.draft_probs, out.draft_probs.size() * 4,
+                               hipMemcpyDeviceToHost);
+                results.push_back(std::move(out));
+            } else {
+                results.emplace_back();
+            }
+        }
+        if (rank == 0)
+            rank0_results = std::move(results);
+    });
+    return rank0_results;
+}
+
+void check_tp_capture_failure(Residency &gpu) {
+    const auto before_target = gpu.target_replays, before_draft = gpu.draft_replays;
+    std::vector<int> expected_ids, expected_draft;
+    for (bool inject : {false, true}) {
+        setenv("SHELF_HY4_GRAPH", inject ? "1" : "0", 1);
+        setenv("SHELF_HY4_DRAFT_GRAPH", inject ? "1" : "0", 1);
+        reset_history(gpu);
+        std::vector<int> rank0_ids, rank0_draft;
+        run_ranks(gpu, [&](int rank) {
+            Target target(gpu, 0.f, 177, 0, 1.f, rank, 5);
+            target.history.assign(2047, 120000);
+            if (rank == 0)
+                remaining_instantiations = inject ? 3 : 0;
+            gpu.all_barrier->arrive_and_wait();
+            auto ids = target.forward({850, 401, 82, 44, 276, 903}, true);
+            target.accept(3, 6);
+            gpu.all_barrier->arrive_and_wait();
+            if (rank == 0)
+                remaining_instantiations = inject ? 1 : 0;
+            gpu.all_barrier->arrive_and_wait();
+            auto draft = target.propose(ids[2]);
+            if (rank == 0) {
+                rank0_ids = std::move(ids);
+                rank0_draft = std::move(draft);
+            }
+        });
+        if (!inject) {
+            expected_ids = rank0_ids;
+            expected_draft = rank0_draft;
+        } else if (rank0_ids != expected_ids || rank0_draft != expected_draft || !gpu.target_capture_failed ||
+                   !gpu.draft_capture_failed || gpu.target_replays != before_target || gpu.draft_replays != before_draft)
+            throw std::runtime_error("TP capture 失敗後の eager 実行が基準と一致しません");
+    }
+}
+
+std::vector<float> tp_prefill_logits(Residency &gpu, const std::vector<int> &prompt, int chunk, int *head_arg = nullptr) {
+    std::vector<float> logits(120832);
+    int argmax_id = -1;
+    run_ranks(gpu, [&](int rank) {
+        Target target(gpu, 0.f, 0, 0, 1.f, rank);
+        for (size_t i = 0; i < prompt.size(); i += chunk) {
+            size_t end = std::min(i + chunk, prompt.size());
+            target.forward({prompt.begin() + i, prompt.begin() + end}, false, end == prompt.size());
+        }
+        auto mark = target.op.arena.cursor;
+        int *arg_dev = static_cast<int *>(target.op.arena.next(sizeof(int)));
+        target.head_argmax(target.state.row(0), arg_dev);
+        if (rank == 0)
+            target.op.copy(&argmax_id, arg_dev, sizeof(int), hipMemcpyDeviceToHost);
+        target.op.arena.cursor = mark;
+        auto device = target.head_logits(target.state.row(0));
+        if (rank == 0)
+            target.op.copy(logits.data(), device, logits.size() * sizeof(float), hipMemcpyDeviceToHost);
+    });
+    if (head_arg)
+        *head_arg = argmax_id;
+    if (argmax_id != int(std::max_element(logits.begin(), logits.end()) - logits.begin()))
+        throw std::runtime_error("TP head_argmax が head_logits の argmax と一致しません");
+    return logits;
+}
+
+double logits_l2(const std::vector<float> &a, const std::vector<float> &b, double *rel = nullptr) {
+    double sq = 0.0, ref_sq = 0.0;
+    for (size_t i = 0; i < a.size(); ++i) {
+        double d = double(a[i]) - double(b[i]);
+        sq += d * d;
+        ref_sq += double(b[i]) * double(b[i]);
+    }
+    double l2 = std::sqrt(sq);
+    if (rel)
+        *rel = ref_sq > 0.0 ? l2 / std::sqrt(ref_sq) : 0.0;
+    return l2;
+}
+
+int argmax_of(const std::vector<float> &logits) {
+    return int(std::max_element(logits.begin(), logits.end()) - logits.begin());
+}
+
+void compare_tp(const Path &body, const Path &engram, const Path &draft) {
+    const std::vector<int> prompt20{802, 8778, 299, 9480, 341, 39144, 13, 360, 46544, 52315,
+                                    533, 10044, 565, 1823, 269, 7370, 587, 269, 10575, 2417};
+    const std::vector<std::vector<int>> batch_prompts{{802, 15063}, {12286, 859, 444}, {401, 82, 44, 276}, {120000}};
+    std::vector<float> ref_logits20;
+    std::vector<int> ref_gen_nodraft, ref_gen_draft;
+    std::vector<std::vector<int>> ref_batch_nodraft, ref_batch_draft;
+    {
+        Checkpoint ref_model(body, engram, draft, Owners{}, 1, 1);
+        share_tp_weights(ref_model);
+        Residency ref_gpu(ref_model, 2080);
+        auto st = ref_gpu.reserve();
+        if (!st.ok())
+            throw std::runtime_error(st.message());
+        ref_gpu.upload();
+        ref_logits20 = prefill_logits(ref_gpu, prompt20, 20);
+        ref_model.has_draft = false;
+        ref_gen_nodraft = generate(ref_gpu, prompt20, 4, 20, 0.f, 0, {});
+        for (const auto &bp : batch_prompts)
+            ref_batch_nodraft.push_back(generate(ref_gpu, bp, 4, 20, 0.f, 0, {}));
+        ref_model.has_draft = true;
+        ref_gen_draft = generate(ref_gpu, prompt20, 4, 20, 0.f, 0, {});
+        for (const auto &bp : batch_prompts)
+            ref_batch_draft.push_back(generate(ref_gpu, bp, 4, 20, 0.f, 0, {}));
+        ref_gpu.shutdown();
+    }
+    const char *filter = std::getenv("SHELF_HY4_TP_FILTER");
+    for (auto [ep, tp] : {std::pair{4, 1}, std::pair{2, 2}, std::pair{1, 4}}) {
+        if (filter && std::string_view(filter) != (std::to_string(ep) + "," + std::to_string(tp)))
+            continue;
+        Owners owners = make_tp_owners(tp == 4 ? 4 : ep);
+        Checkpoint model(body, engram, draft, owners, ep, tp);
+        share_tp_weights(model);
+        if (tp == 1) {
+            setenv("SHELF_HY4_EP_TRANSPORT", "push", 1);
+            model.has_draft = true;
+            Residency gpu(model, 2080);
+            reserve_logical(gpu);
+            auto logits = prefill_logits(gpu, prompt20, 20);
+            double rel = 0.0;
+            double l2 = logits_l2(logits, ref_logits20, &rel);
+            int r_arg = argmax_of(ref_logits20), t_arg = argmax_of(logits);
+            printf("ep=%d tp=%d transport=push prefill20_l2=%.6f rel=%.6e ref_arg=%d(%.4f) tp_arg=%d(%.4f)\n",
+                   ep, tp, l2, rel, r_arg, ref_logits20[r_arg], t_arg, logits[t_arg]);
+            fflush(stdout);
+            gpu.shutdown();
+        }
+        if (tp > 1) {
+            std::vector<float> push_logits;
+            std::vector<int> tp_gen_nodraft, tp_gen_draft;
+            for (const char *transport : {"push", "peer", "host"}) {
+                setenv("SHELF_HY4_EP_TRANSPORT", transport, 1);
+                model.has_draft = true;
+                Residency gpu(model, 2080);
+                reserve_logical(gpu);
+                auto logits = tp_prefill_logits(gpu, prompt20, 20);
+                double rel = 0.0;
+                double l2 = logits_l2(logits, ref_logits20, &rel);
+                int r_arg = argmax_of(ref_logits20), t_arg = argmax_of(logits);
+                printf("ep=%d tp=%d transport=%s prefill20_l2=%.6f rel=%.6e ref_arg=%d(%.4f) tp_arg=%d(%.4f) s0=%.3f/%.3f\n",
+                       ep, tp, transport, l2, rel, r_arg, ref_logits20[r_arg], t_arg, logits[t_arg],
+                       ref_logits20[0], logits[0]);
+                fflush(stdout);
+                if (!std::all_of(logits.begin(), logits.end(), [](float v) { return std::isfinite(v); }) || rel > 0.35)
+                    throw std::runtime_error("TP prefill logits が許容誤差を超えました");
+                if (push_logits.empty())
+                    push_logits = logits;
+                else if (logits_l2(logits, push_logits) > 1e-4)
+                    throw std::runtime_error("TP transport 間で logits が異なります");
+                for (bool speculate : {false, true}) {
+                    model.has_draft = speculate;
+                    for (bool graphs : {false, true}) {
+                        setenv("SHELF_HY4_GRAPH", graphs ? "1" : "0", 1);
+                        setenv("SHELF_HY4_DRAFT_GRAPH", graphs ? "1" : "0", 1);
+                        auto ids = generate(gpu, prompt20, 4, 20, 0.f, 0, {});
+                        auto &expected = speculate ? tp_gen_draft : tp_gen_nodraft;
+                        if (expected.empty())
+                            expected = ids;
+                        else if (ids != expected)
+                            throw std::runtime_error("TP generate が eager/graph または transport 間で一致しません");
+                        if (!graphs && std::string_view(transport) == "push") {
+                            const auto &ref_bp = speculate ? ref_batch_draft : ref_batch_nodraft;
+                            int bp_matches = 0;
+                            for (size_t bi = 0; bi < batch_prompts.size(); ++bi) {
+                                auto bids = generate(gpu, batch_prompts[bi], 4, 20, 0.f, 0, {});
+                                if (bids == ref_bp[bi])
+                                    ++bp_matches;
+                            }
+                            printf("ep=%d tp=%d draft=%d short_prompt_ref_match=%d/%zu\n", ep, tp, speculate, bp_matches,
+                                   batch_prompts.size());
+                            fflush(stdout);
+                        }
+                    }
+                }
+                if (std::string_view(transport) == "push") {
+                    model.has_draft = true;
+                    const auto before_target = gpu.target_replays, before_draft = gpu.draft_replays;
+                    auto eager = run_tp(gpu, false);
+                    auto graph = run_tp(gpu, true);
+                    for (size_t i = 0; i < eager.size(); ++i) {
+                        if (eager[i].ids != graph[i].ids || eager[i].state != graph[i].state ||
+                            !same_bits(eager[i].target_probs, graph[i].target_probs))
+                            throw std::runtime_error("TP Target eager/graph が一致しません");
+                        if (eager[i].draft != graph[i].draft || !same_bits(eager[i].draft_probs, graph[i].draft_probs))
+                            throw std::runtime_error("TP DFly2 eager/graph が一致しません");
+                    }
+                    if (gpu.target_replays - before_target != 7 || gpu.draft_replays - before_draft != 7)
+                        throw std::runtime_error("TP Graph の replay 回数が不正です");
+                    check_tp_capture_failure(gpu);
+                    printf("ep=%d tp=%d graph_parity=pass target=7/7 draft=7/7 capture_fallback=pass\n", ep, tp);
+                }
+                gpu.shutdown();
+            }
+            if (tp == 4) {
+                setenv("SHELF_HY4_EP_TRANSPORT", "push", 1);
+                model.has_draft = true;
+                Residency gpu(model, 2080);
+                reserve_logical(gpu);
+                std::vector<int> prompt1536(1536);
+                for (size_t i = 0; i < prompt1536.size(); ++i)
+                    prompt1536[i] = 100 + int((i * 37) % 1024);
+                auto l_big = tp_prefill_logits(gpu, prompt1536, 1536);
+                auto l_chunk = tp_prefill_logits(gpu, prompt1536, 512);
+                if (!std::all_of(l_big.begin(), l_big.end(), [](float v) { return std::isfinite(v); }))
+                    throw std::runtime_error("TP=4 1536 token prefill に非有限値があります");
+                double rel = 0.0;
+                double l2 = logits_l2(l_big, l_chunk, &rel);
+                if (argmax_of(l_big) != argmax_of(l_chunk))
+                    throw std::runtime_error("TP=4 1536 token prefill の argmax が分割時と一致しません");
+                printf("ep=%d tp=%d chunk1536_vs_512_l2=%.6f rel=%.6e argmax=match\n", ep, tp, l2, rel);
+                gpu.shutdown();
+            }
+        }
+        for (auto [speculate, slots] : {std::pair{false, 16}, std::pair{true, 16}, std::pair{true, 4}}) {
+            setenv("SHELF_HY4_EP_TRANSPORT", "push", 1);
+            setenv("SHELF_HY4_BATCH_DFLY", speculate ? "1" : "0", 1);
+            model.has_draft = true;
+            Residency gpu(model, 64, slots);
+            reserve_logical(gpu);
+            std::vector<std::vector<int>> baseline;
+            model.has_draft = speculate;
+            for (const auto &prompt : batch_prompts)
+                baseline.push_back(generate_batch(gpu, {prompt}, {4}, {}).front());
+            model.has_draft = true;
+            for (int batch : {2, 4, 8, 16}) {
+                if (slots < batch)
+                    continue;
+                std::vector<std::vector<int>> inputs;
+                for (int i = 0; i < batch; ++i)
+                    inputs.push_back(batch_prompts[i % batch_prompts.size()]);
+                for (bool graph : {false, true}) {
+                    setenv("SHELF_HY4_GRAPH", graph ? "1" : "0", 1);
+                    setenv("SHELF_HY4_DRAFT_GRAPH", graph ? "1" : "0", 1);
+                    auto target_before = gpu.target_replays, draft_before = gpu.draft_replays;
+                    auto results = generate_batch(gpu, inputs, std::vector<int>(batch, 4), {});
+                    for (int i = 0; i < batch; ++i)
+                        if (results.at(i) != baseline[i % batch_prompts.size()])
+                            throw std::runtime_error("TP バッチ生成が単独実行と異なります");
+                    bool active = graph && graph_topology(ep, tp, gpu.push, gpu.graph_room, gpu.peer);
+                    if ((gpu.target_replays > target_before) != active ||
+                        (gpu.draft_replays > draft_before) != (active && speculate))
+                        throw std::runtime_error("TP バッチ Graph の起動条件が異なります");
+                    printf("ep=%d tp=%d draft=%d graph=%d batch=%d greedy=%d/%d\n", ep, tp, speculate, graph, batch,
+                           batch, batch);
+                    fflush(stdout);
+                }
+            }
+            if (slots == 4 && tp > 1) {
+                std::vector<int> near_end(61, 802);
+                auto tail = generate_batch(gpu, {near_end}, {3}, {}).front();
+                std::array<std::vector<int>, 7> streamed;
+                std::array<std::string, 7> reason;
+                std::vector<int> started;
+                Hy4BatchSession session(gpu, [&](int id, int token) {
+                    if (streamed[id].empty())
+                        started.push_back(id);
+                    streamed[id].push_back(token);
+                }, [&](int id, const std::vector<int> &ids, const char *finish) {
+                    if (ids != streamed[id])
+                        throw std::runtime_error("TP セッション配信 ID と終了通知が異なります");
+                    reason[id] = finish;
+                });
+                for (int id = 0; id < 6; ++id)
+                    session.admit({id, id == 5 ? near_end : batch_prompts[id % 4], id == 5 ? 3 : 4, {}});
+                session.admit({6, batch_prompts[2], 4, {}});
+                session.cancel(6);
+                for (int i = 0; i < 5; ++i)
+                    session.step();
+                session.cancel(1);
+                for (int i = 0; session.active() || session.queued(); ++i) {
+                    if (i > 64)
+                        throw std::runtime_error("TP セッションが完了しません");
+                    session.step();
+                }
+                if (started != std::vector<int>{0, 1, 2, 3, 4, 5} || !session.draft_rounds() ||
+                    reason[1] != "cancelled" || reason[6] != "cancelled" || streamed[5] != tail)
+                    throw std::runtime_error("TP セッションの FIFO/キャンセル検証に失敗しました");
+                for (int id : {0, 2, 3, 4})
+                    if (streamed[id] != baseline[id % 4])
+                        throw std::runtime_error("TP スロット再利用後の生成 ID が異なります");
+                printf("ep=%d tp=%d session=pass draft_rounds=%zu\n", ep, tp, session.draft_rounds());
+            }
+            gpu.shutdown();
+        }
+        if (tp > 1) {
+            setenv("SHELF_HY4_BATCH_DFLY", "1", 1);
+            model.has_draft = true;
+            Residency gpu(model, 2070, 2);
+            reserve_logical(gpu);
+            Hy4BatchOptions options{128};
+            std::vector<std::vector<int>> inputs{std::vector<int>(2047), std::vector<int>(2053)};
+            for (auto &input : inputs)
+                for (size_t i = 0; i < input.size(); ++i)
+                    input[i] = 100 + int(i % 7);
+            std::vector<std::vector<int>> expected;
+            for (bool graph : {false, true}) {
+                setenv("SHELF_HY4_GRAPH", graph ? "1" : "0", 1);
+                setenv("SHELF_HY4_DRAFT_GRAPH", graph ? "1" : "0", 1);
+                if (!graph)
+                    for (auto &input : inputs)
+                        expected.push_back(generate_batch(gpu, {input}, {6}, options).front());
+                auto target_before = gpu.target_replays, draft_before = gpu.draft_replays;
+                std::vector<std::vector<int>> generated(2);
+                Hy4BatchSession session(gpu, [&](int id, int token) { generated[id].push_back(token); },
+                                         [](int, const auto &, const char *) {});
+                for (int i = 0; i < 2; ++i)
+                    session.admit({i, inputs[i], 6, options});
+                while (session.active() || session.queued())
+                    session.step();
+                if (generated != expected) {
+                    for (size_t i = 0; i < 2; ++i) {
+                        fprintf(stderr, "graph=%d slot=%zu expected:", int(graph), i);
+                        for (int id : expected[i]) fprintf(stderr, " %d", id);
+                        fprintf(stderr, "\ngraph=%d slot=%zu generated:", int(graph), i);
+                        for (int id : generated[i]) fprintf(stderr, " %d", id);
+                        fprintf(stderr, "\n");
+                    }
+                    throw std::runtime_error("TP 位置 2047・2053 混在時の生成 ID が異なります");
+                }
+                if (graph && (gpu.target_replays == target_before || gpu.draft_replays == draft_before))
+                    throw std::runtime_error("TP 疎な attention でバッチ Graph が起動しませんでした");
+            }
+            gpu.shutdown();
+            printf("ep=%d tp=%d sparse_2047_2053=pass\n", ep, tp);
+        }
+        fflush(stdout);
+    }
+}
+
 }
 extern "C" hipError_t __real_hipEventRecord(hipEvent_t, hipStream_t);
 extern "C" hipError_t __wrap_hipEventRecord(hipEvent_t event, hipStream_t stream) {
@@ -918,6 +1458,10 @@ int main(int argc, char **argv) {
             return 0;
         }
 
+        if ((argc == 4 || argc == 5) && std::string_view(argv[3]) == "tp") {
+            compare_tp(argv[1], argc == 5 ? Path(argv[4]) : resolve_engram(argv[1]), argv[2]);
+            return 0;
+        }
         if ((argc == 4 || argc == 5) && std::string_view(argv[3]) == "transport") {
             if (argc == 5) {
                 int count = 0;

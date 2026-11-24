@@ -31,7 +31,8 @@ struct Target {
     void sample(float *logits, int rows, int position, uint64_t rng, int *ids, float *distribution,
                 const Hy4StepParams *params = nullptr);
     std::vector<int> predict(Mat hidden, int position, bool draft = false, const Path &dump = {},
-                             float *distribution = nullptr, float *logits = nullptr, int *tokens = nullptr);
+                             float *distribution = nullptr, float *logits = nullptr, int *tokens = nullptr,
+                             bool precomputed = false);
     Mat layers(const std::vector<int> &ids, bool verify, bool need_head);
     std::vector<int> draft_steps(int anchor, int *device_ids);
 };

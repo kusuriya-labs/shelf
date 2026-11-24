@@ -17,7 +17,7 @@ hipError_t shelf_hy4_linear_workspace(const uint16_t *input, const uint16_t *suh
                                        const uint32_t *trellis, int8_t *codes, float *scales, float *partial,
                                        uint16_t *output, int rows, int input_width, int output_width,
                                        int padded_input, int padded_output, int bits, hipStream_t stream,
-                                       int splits, int8_t *expanded);
+                                       int splits, int8_t *expanded, float *f32_output = nullptr);
 
 struct Hy4ExpertBatch {
     int first, count;
