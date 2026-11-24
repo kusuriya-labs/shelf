@@ -213,6 +213,123 @@ int main() {
     (void)hipFree(d_injection);
     (void)hipFree(d_apply);
 
+    {
+        constexpr std::uint32_t rows = 33u;
+        const auto big_gate = random_bf16(rows * kWidth, rng);
+        const auto big_normed = random_bf16(rows * kWidth, rng);
+        const auto big_raw = random_bf16(rows * kWidth, rng);
+        const auto big_y = random_bf16(rows * kHidden, rng);
+        const auto big_injection = random_bf16(rows * kHc, rng);
+        std::vector<float> want_big_mix(rows * kHidden);
+        std::vector<float> want_big_apply(rows * kWidth);
+        for (std::uint32_t row = 0u; row < rows; ++row) {
+            for (std::uint32_t i = 0u; i < kHidden; ++i) {
+                float acc = 0.0f;
+                for (std::uint32_t h = 0u; h < kHc; ++h) {
+                    const std::uint32_t offset = row * kWidth + h * kHidden + i;
+                    const float g = bf16_to_float(big_gate[offset].data);
+                    acc += (1.0f / (1.0f + std::exp(-g))) *
+                           bf16_to_float(big_normed[offset].data);
+                }
+                want_big_mix[row * kHidden + i] = acc / static_cast<float>(kHc);
+            }
+            for (std::uint32_t h = 0u; h < kHc; ++h) {
+                const float scale = bf16_to_float(big_injection[row * kHc + h].data);
+                for (std::uint32_t i = 0u; i < kHidden; ++i) {
+                    const std::uint32_t offset = row * kWidth + h * kHidden + i;
+                    want_big_apply[offset] =
+                        bf16_to_float(big_raw[offset].data) +
+                        bf16_to_float(big_y[row * kHidden + i].data) * scale;
+                }
+            }
+        }
+        void* d_bg = nullptr;
+        void* d_bn = nullptr;
+        void* d_bm = nullptr;
+        void* d_br = nullptr;
+        void* d_by = nullptr;
+        void* d_bi = nullptr;
+        void* d_ba = nullptr;
+        bool ok = hipMalloc(&d_bg, big_gate.size() * sizeof(shelf::bf16_t)) == hipSuccess;
+        ok = ok && hipMalloc(&d_bn, big_normed.size() * sizeof(shelf::bf16_t)) == hipSuccess;
+        ok = ok && hipMalloc(&d_bm, rows * kHidden * sizeof(shelf::bf16_t)) == hipSuccess;
+        ok = ok && hipMalloc(&d_br, big_raw.size() * sizeof(shelf::bf16_t)) == hipSuccess;
+        ok = ok && hipMalloc(&d_by, big_y.size() * sizeof(shelf::bf16_t)) == hipSuccess;
+        ok = ok && hipMalloc(&d_bi, big_injection.size() * sizeof(shelf::bf16_t)) == hipSuccess;
+        ok = ok && hipMalloc(&d_ba, rows * kWidth * sizeof(shelf::bf16_t)) == hipSuccess;
+        if (ok) {
+            ok = hipMemcpy(d_bg, big_gate.data(), big_gate.size() * sizeof(shelf::bf16_t),
+                           hipMemcpyHostToDevice) == hipSuccess;
+            ok = ok && hipMemcpy(d_bn, big_normed.data(),
+                                 big_normed.size() * sizeof(shelf::bf16_t),
+                                 hipMemcpyHostToDevice) == hipSuccess;
+            ok = ok && hipMemcpy(d_br, big_raw.data(), big_raw.size() * sizeof(shelf::bf16_t),
+                                 hipMemcpyHostToDevice) == hipSuccess;
+            ok = ok && hipMemcpy(d_by, big_y.data(), big_y.size() * sizeof(shelf::bf16_t),
+                                 hipMemcpyHostToDevice) == hipSuccess;
+            ok = ok && hipMemcpy(d_bi, big_injection.data(),
+                                 big_injection.size() * sizeof(shelf::bf16_t),
+                                 hipMemcpyHostToDevice) == hipSuccess;
+            shelf::kernel::HyperMixArgs bm{};
+            bm.gate = static_cast<const shelf::bf16_t*>(d_bg);
+            bm.normed = static_cast<const shelf::bf16_t*>(d_bn);
+            bm.output = static_cast<shelf::bf16_t*>(d_bm);
+            bm.rows = rows;
+            bm.hc = kHc;
+            bm.hidden = kHidden;
+            bm.gate_stride = kWidth;
+            bm.normed_stride = kWidth;
+            bm.output_stride = kHidden;
+            bm.sigmoid_gate = 1u;
+            shelf::kernel::HyperApplyArgs ba{};
+            ba.raw = static_cast<const shelf::bf16_t*>(d_br);
+            ba.y = static_cast<const shelf::bf16_t*>(d_by);
+            ba.injection = static_cast<const shelf::bf16_t*>(d_bi);
+            ba.output = static_cast<shelf::bf16_t*>(d_ba);
+            ba.rows = rows;
+            ba.hc = kHc;
+            ba.hidden = kHidden;
+            ba.raw_stride = kWidth;
+            ba.y_stride = kHidden;
+            ba.injection_stride = kHc;
+            ba.output_stride = kWidth;
+            ok = ok && shelf::kernel::launch_hyper_mix(bm, nullptr) == hipSuccess;
+            ok = ok && shelf::kernel::launch_hyper_apply(ba, nullptr) == hipSuccess;
+            ok = ok && hipDeviceSynchronize() == hipSuccess;
+            std::vector<shelf::bf16_t> got_mix(rows * kHidden);
+            std::vector<shelf::bf16_t> got_apply(rows * kWidth);
+            ok = ok && hipMemcpy(got_mix.data(), d_bm, got_mix.size() * sizeof(shelf::bf16_t),
+                                 hipMemcpyDeviceToHost) == hipSuccess;
+            ok = ok && hipMemcpy(got_apply.data(), d_ba,
+                                 got_apply.size() * sizeof(shelf::bf16_t),
+                                 hipMemcpyDeviceToHost) == hipSuccess;
+            double big_mix_err = 0.0;
+            double big_apply_err = 0.0;
+            for (std::size_t i = 0u; ok && i < got_mix.size(); ++i)
+                big_mix_err = std::max(big_mix_err,
+                    std::fabs(static_cast<double>(bf16_to_float(got_mix[i].data)) -
+                              want_big_mix[i]));
+            for (std::size_t i = 0u; ok && i < got_apply.size(); ++i)
+                big_apply_err = std::max(big_apply_err,
+                    std::fabs(static_cast<double>(bf16_to_float(got_apply[i].data)) -
+                              want_big_apply[i]));
+            std::fprintf(stderr, "rows>16 mix max_abs=%g apply max_abs=%g\n",
+                         big_mix_err, big_apply_err);
+            check(ok && big_mix_err <= 2.0e-2, "hyper mix rows>16 matches CPU reference");
+            check(ok && big_apply_err <= 2.0e-2,
+                  "hyper apply rows>16 matches CPU reference");
+        } else {
+            check(false, "hyper rows>16 device setup");
+        }
+        (void)hipFree(d_bg);
+        (void)hipFree(d_bn);
+        (void)hipFree(d_bm);
+        (void)hipFree(d_br);
+        (void)hipFree(d_by);
+        (void)hipFree(d_bi);
+        (void)hipFree(d_ba);
+    }
+
     std::fprintf(stderr, failures == 0 ? "PASS\n" : "FAILURES=%d\n", failures);
     return failures == 0 ? 0 : 1;
 }

@@ -97,6 +97,10 @@ public:
         const std::vector<std::int32_t>& prefix_tail,
         std::span<const std::int32_t> tokens) const;
 
+    Result<std::vector<bf16_t>> gather_bf16_batch(
+        const std::vector<std::int32_t>& prefix_tail,
+        std::span<const std::int32_t> tokens) const;
+
 
 private:
     struct NgramHead {

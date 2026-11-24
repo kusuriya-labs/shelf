@@ -823,3 +823,4 @@ shelf_add_test(NAME test_token_mask_scheduler SOURCE unit/test_token_mask_schedu
 
 shelf_add_test(NAME test_ngram_quantization SOURCE unit/test_ngram_quantization.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES shelf_quant_ngram)
 shelf_add_test(NAME test_qwen4exp_ngram SOURCE unit/test_qwen4exp_ngram.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES shelf_qwen4exp shelf_quant_ngram)
+shelf_add_test(NAME test_ple_batch_gather SOURCE unit/test_ple_batch_gather.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES shelf_qwen4exp shelf_quant_ngram)

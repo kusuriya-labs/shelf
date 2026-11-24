@@ -579,24 +579,50 @@ Result<std::vector<bf16_t>> PleTable::gather_bf16(
     return out;
 }
 
+Result<std::vector<bf16_t>> PleTable::gather_bf16_batch(
+    const std::vector<std::int32_t>& prefix_tail,
+    std::span<const std::int32_t> tokens) const {
+    std::vector<bf16_t> out;
+    if (tokens.empty()) return out;
+    if (ngram_size_ < 2u || heads_per_ngram_ == 0u) {
+        return Status::invalid_argument("PLE hash geometry is invalid", __FILE__, __LINE__);
+    }
+    std::vector<std::int32_t> history(prefix_tail);
+    history.reserve(prefix_tail.size() + tokens.size());
+    history.insert(history.end(), tokens.begin(), tokens.end());
+    auto rows = ngram_rows(history, tokens.size());
+    if (!rows.ok()) return rows.status();
+    const std::size_t ngrams = ngram_size_ - 1u;
+    const std::size_t expected =
+        tokens.size() * ngrams * heads_per_ngram_ * row_width_;
+    out.reserve(expected);
+    for (std::size_t pos = 0u; pos < tokens.size(); ++pos) {
+        for (std::size_t ngram = 0u; ngram < ngrams; ++ngram) {
+            for (std::uint32_t h = 0u; h < heads_per_ngram_; ++h) {
+                const std::uint64_t row =
+                    rows.value()[(ngram * tokens.size() + pos) * heads_per_ngram_ + h];
+                auto decoded = decode_row(row);
+                if (!decoded.ok()) return decoded.status();
+                if (decoded.value().size() != row_width_) {
+                    return Status::invalid_state("PLE batch gather width mismatch", __FILE__,
+                                                 __LINE__);
+                }
+                for (const float value : decoded.value())
+                    out.push_back(bf16_t{shelf::f32_to_bf16_rne(value)});
+            }
+        }
+    }
+    if (out.size() != expected) {
+        return Status::invalid_state("PLE batch gather size is inconsistent", __FILE__,
+                                     __LINE__);
+    }
+    return out;
+}
+
 Result<std::vector<bf16_t>> PleTable::gather_bf16_stateless(
     const std::vector<std::int32_t>& prefix_tail,
     std::span<const std::int32_t> tokens) const {
-    const std::size_t head_count = head_offsets_.size();
-    std::vector<std::int32_t> history(prefix_tail.begin(), prefix_tail.end());
-    std::vector<bf16_t> out;
-    out.reserve(tokens.size() * head_count * row_width_);
-    for (std::size_t t = 0; t < tokens.size(); ++t) {
-        history.push_back(tokens[t]);
-        auto rows = gather_bf16(history, 1u);
-        if (!rows.ok()) return rows.status();
-        if (rows.value().size() != head_count * row_width_) {
-            return Status::invalid_state("PLE stateless gather width mismatch", __FILE__,
-                                         __LINE__);
-        }
-        out.insert(out.end(), rows.value().begin(), rows.value().end());
-    }
-    return out;
+    return gather_bf16_batch(prefix_tail, tokens);
 }
 
 }  // namespace qwen4exp
