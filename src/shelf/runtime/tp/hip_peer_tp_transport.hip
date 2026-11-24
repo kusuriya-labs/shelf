@@ -139,6 +139,11 @@ __global__ void tp_copy_f32_kernel(float* out, const float* in, uint64_t count) 
     }
 }
 
+bool tp_reduce_legacy() {
+    const char* env = std::getenv("SHELF_TP_REDUCE");
+    return env != nullptr && std::strcmp(env, "legacy") == 0;
+}
+
 uint32_t tp_grid_for(uint64_t count) {
     const uint64_t blocks = (count + 255u) / 256u;
     if (blocks == 0) return 1;
@@ -328,17 +333,17 @@ Result<std::unique_ptr<HipPeerTpTransport>> HipPeerTpTransport::create(
         if (!scope.ok()) return scope.status();
         for (std::size_t q = 0; q < rank_count; ++q) {
             if (q == r) continue;
+            unsigned event_flags = hipEventDisableTiming;
+            if (!tp_reduce_legacy()) event_flags |= hipEventReleaseToSystem;
             for (int p = 0; p < 2; ++p) {
-                if (hipEventCreateWithFlags(&transport->sent_[r][q][p],
-                                            hipEventDisableTiming |
-                                                hipEventReleaseToSystem) != hipSuccess) {
+                if (hipEventCreateWithFlags(&transport->sent_[r][q][p], event_flags) !=
+                    hipSuccess) {
                     return Status::hip_error("hipEventCreate tp send",
                                              hipGetErrorString(hipGetLastError()), __FILE__,
                                              __LINE__);
                 }
-                if (hipEventCreateWithFlags(&transport->consumed_[r][q][p],
-                                            hipEventDisableTiming |
-                                                hipEventReleaseToSystem) != hipSuccess) {
+                if (hipEventCreateWithFlags(&transport->consumed_[r][q][p], event_flags) !=
+                    hipSuccess) {
                     return Status::hip_error("hipEventCreate tp consumed",
                                              hipGetErrorString(hipGetLastError()), __FILE__,
                                              __LINE__);
@@ -451,7 +456,7 @@ Status HipPeerTpTransport::enqueue_sum(const TpSumInvocation& invocation) {
             if (!scope.ok()) return scope.status();
             for (std::size_t q = 0; q < rank_count; ++q) {
                 if (q == r) continue;
-                if (consumed_recorded_[q][r][parity] != 0) {
+                if (!tp_reduce_legacy() && consumed_recorded_[q][r][parity] != 0) {
                     if (hipStreamWaitEvent(invocation.streams[r],
                                            consumed_[q][r][parity], 0) != hipSuccess) {
                         return Status::hip_error("hipStreamWaitEvent tp consumed",

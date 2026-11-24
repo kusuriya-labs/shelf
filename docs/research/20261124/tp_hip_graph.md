@@ -87,10 +87,27 @@ capture 144 回・`begin failed` / `capture failed` / `instantiate failed` は 0
 replay の失敗も 0 だった。したがって「ACS 無効化で graph が capture できなくなった」という
 説明は成り立たない。差が出るのは replay の実行時間側で、未解決である。
 
-ACS 有効側の測定は `/etc/default/grub` から `pci=disable_acs_redir` を外して再起動した後、
-`tools/bench/tp_graph_grid.sh` を実行して `boot=default` の行として取る。ACS 有効時は
-peer の probe が失敗して host 転送へ落ちる可能性があるため、CSV だけでなく各セルの log に
-`method=` 行が残っているかも確認する。
+### ACS 有効 boot と reduce 方式のグリッド
+
+`/etc/default/grub` から `pci=disable_acs_redir` を外して再起動し、同じ script を
+`REDUCE_LIST="default legacy"` で実行した（ACS 有効、3 回ずつの中央値）:
+
+| tp | graph | reduce | 中央値 tok/s |
+| --- | --- | --- | ---: |
+| 1 | off | default | 25.50 |
+| 1 | on | default | 25.45 |
+| 2 | off | default | 27.11 |
+| 2 | off | legacy | 27.09 |
+| 2 | on | default | 26.18 |
+| 2 | on | legacy | 26.84 |
+
+- ACS 有効と無効で TP=2 は 2 % 程度しか変わらない（27.66 → 27.11）。ACS の有無は
+  39.5 tok/s の再現と無関係だった。
+- `4e848d9e`（consumed 待ち + `hipEventReleaseToSystem`）は eager 経路では差がない
+  （27.11 / 27.09）。graph 経路では 26.84 → 26.18 と 2.5 % 遅くなる。隣の barrier の
+  消費を待つぶん、graph が本来稼ぐ host 待ちの削減を食っている。
+- どの組み合わせでも 39.5 tok/s は出ず、最大でも 27.22 だった。再起動前の値は
+  同じコードの再測定で再現しないため、以後はこの 3 軸グリッドの中央値を正本にする。
 
 ### Verify の segment graph（実装・opt-in）
 
