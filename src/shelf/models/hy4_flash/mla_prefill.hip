@@ -539,7 +539,7 @@ __global__ void recall_fused_batch(const _Float16 *input, const _Float16 *query,
                                    const uint16_t *q, const int *ids, const int *row_positions, int heads,
                                    int stride, int pitch, float *scores, uint16_t *probs, _Float16 *values,
                                    const void *sinks, bool sink_fp32, bool sliding) {
-    __shared__ float parts[8];
+    __shared__ float parts[2][8];
     int r = blockIdx.y, head_base = blockIdx.x * 16;
     int eff_stride = sliding ? min(row_positions[r] + 1, 512) : row_positions[r] + 1;
     int lane = threadIdx.x % 32, lo = lane % 16, hi = lane / 16;
@@ -582,14 +582,14 @@ __global__ void recall_fused_batch(const _Float16 *input, const _Float16 *query,
                                : bf16_bits_to_f32(static_cast<const uint16_t *>(sinks)[head]);
         float peak = sink;
         for (int i = threadIdx.x; i < limit; i += 256) peak = fmaxf(peak, scores[base + i]);
-        peak = reduce<true>(peak, parts);
+        peak = reduce<true>(peak, parts[0]);
         float sum = threadIdx.x ? 0.f : expf(sink - peak);
         for (int i = threadIdx.x; i < limit; i += 256) {
             float e = expf(scores[base + i] - peak);
             scores[base + i] = e;
             sum += e;
         }
-        sum = reduce<false>(sum, parts);
+        sum = reduce<false>(sum, parts[1]);
         for (int i = threadIdx.x; i < limit; i += 256)
             probs[base + i] = f32_to_bf16_rne_device(scores[base + i] / sum);
         __syncthreads();
@@ -668,7 +668,7 @@ __global__ void recall_scores_sparse(const _Float16 *input, const _Float16 *quer
 }
 __global__ void normalize_sparse(float *scores, uint16_t *probs, const void *sinks, bool fp32, int pitch, int stride,
                                  const int *row_positions, int block_rows, bool draft) {
-    __shared__ float parts[8];
+    __shared__ float parts[2][8];
     int h = blockIdx.x, r = blockIdx.y, t = threadIdx.x;
     int limit = sparse_eff_stride(stride, block_rows, row_positions, r, draft);
     limit = (limit + 15) / 16 * 16;
@@ -678,14 +678,14 @@ __global__ void normalize_sparse(float *scores, uint16_t *probs, const void *sin
     float peak = sink;
     for (int i = t; i < limit; i += 256)
         peak = fmaxf(peak, scores[base + i]);
-    peak = reduce<true>(peak, parts);
+    peak = reduce<true>(peak, parts[0]);
     float sum = t ? 0.f : expf(sink - peak);
     for (int i = t; i < limit; i += 256) {
         float e = expf(scores[base + i] - peak);
         scores[base + i] = e;
         sum += e;
     }
-    sum = reduce<false>(sum, parts);
+    sum = reduce<false>(sum, parts[1]);
     for (int i = t; i < limit; i += 256)
         probs[base + i] = f32_to_bf16_rne_device(scores[base + i] / sum);
 }
