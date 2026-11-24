@@ -82,6 +82,16 @@ TP=1/2 × graph=on/off を 3 回ずつ、セルを交互に実行した中央値
 
 `SHELF_TP_HIP_GRAPH` は opt-in に変更した（既定 off）。
 
+この boot で capture と replay の両方が動いていることは確認済み。`SHELF_TP_GRAPH_DEBUG=1` で
+capture 144 回・`begin failed` / `capture failed` / `instantiate failed` は 0、
+replay の失敗も 0 だった。したがって「ACS 無効化で graph が capture できなくなった」という
+説明は成り立たない。差が出るのは replay の実行時間側で、未解決である。
+
+ACS 有効側の測定は `/etc/default/grub` から `pci=disable_acs_redir` を外して再起動した後、
+`tools/bench/tp_graph_grid.sh` を実行して `boot=default` の行として取る。ACS 有効時は
+peer の probe が失敗して host 転送へ落ちる可能性があるため、CSV だけでなく各セルの log に
+`method=` 行が残っているかも確認する。
+
 ### Verify の segment graph（実装・opt-in）
 
 `SHELF_TP_HIP_GRAPH_VERIFY=1` で verify も capture する。key からは context 長
