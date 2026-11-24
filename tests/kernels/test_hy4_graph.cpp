@@ -2,6 +2,7 @@
 #include <shelf/models/hy4_flash/target.h>
 #include <shelf/models/hy4_flash/generate.h>
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cmath>
 #include <cstdio>
@@ -24,7 +25,7 @@ void benchmark_hy4_bits3(Residency &gpu);
 }
 
 namespace {
-int remaining_instantiations = 0;
+std::atomic<int> remaining_instantiations{0};
 using namespace shelf;
 using namespace shelf::hy4;
 
