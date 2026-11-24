@@ -280,6 +280,7 @@ void Residency::sync_slot_page_table(int slot) {
         if (count < kv_page_stride)
             check(hipMemsetAsync(page_table[r] + size_t(slot) * kv_page_stride + count, 0xff,
                                  (kv_page_stride - count) * sizeof(int32_t), compute[r]));
+        check(hipStreamSynchronize(compute[r]));
     }
     if (ranks > 0)
         check(hipSetDevice(physical[0]));
@@ -297,32 +298,42 @@ bool Residency::allocate_slot_pages(int slot, size_t needed_tokens) {
         return true;
     if (need - table.size() > kv_free_pages.size())
         return false;
-    while (table.size() < need) {
-        int32_t page = kv_free_pages.back();
-        kv_free_pages.pop_back();
-        kv_page_refs[page] = 1;
-        table.push_back(page);
-    }
+    table.reserve(need);
+    while (table.size() < need)
+        table.push_back(alloc_single_page());
     sync_slot_page_table(slot);
     return true;
 }
 void Residency::release_slot_pages(int slot) {
     if (slot < 0 || size_t(slot) >= slot_page_tables.size())
         return;
-    release_pages(slot_page_tables[slot]);
+    if (!slot_page_tables[slot].empty()) {
+        release_pages(slot_page_tables[slot]);
+        sync_slot_page_table(slot);
+    }
 }
 void Residency::retain_pages(const std::vector<int32_t> &pages) {
     for (int32_t p : pages) {
-        if (p >= 0 && size_t(p) < kv_page_refs.size())
-            ++kv_page_refs[p];
+        if (!kv_page_refs.at(p))
+            throw std::logic_error("未使用の KV ページは共有できません");
+        ++kv_page_refs[p];
     }
 }
 void Residency::release_pages(std::vector<int32_t> &pages) {
-    for (int32_t p : pages) {
-        if (p >= 0 && size_t(p) < kv_page_refs.size()) {
-            if (--kv_page_refs[p] == 0)
-                kv_free_pages.push_back(p);
+    if (std::any_of(pages.begin(), pages.end(), [&](int32_t p) { return kv_page_refs.at(p) == 1; })) {
+        for (int r = 0; r < ranks; ++r) {
+            if (page_table[r]) {
+                check(hipSetDevice(physical[r]));
+                check(hipStreamSynchronize(compute[r]));
+            }
         }
+        check(hipSetDevice(physical[0]));
+    }
+    for (int32_t p : pages) {
+        if (!kv_page_refs.at(p))
+            throw std::logic_error("未使用の KV ページを解放しようとしました");
+        if (--kv_page_refs[p] == 0)
+            kv_free_pages.push_back(p);
     }
     pages.clear();
 }
@@ -472,14 +483,10 @@ bool Residency::configure_transports(PeerProbe probe) {
             if (available || small_staging[src][dst]) {
                 for (int q = 0; q < 2; ++q) {
                     if (!ready[src][dst][q]) {
-                        check(hipSetDevice(physical[src]));
-                        check(hipEventCreateWithFlags(&ready[src][dst][q],
-                                                      hipEventDisableTiming | hipEventReleaseToSystem));
+                        create_event(ready[src][dst][q], src);
                     }
                     if (!ack[dst][src][q]) {
-                        check(hipSetDevice(physical[dst]));
-                        check(hipEventCreateWithFlags(&ack[dst][src][q],
-                                                      hipEventDisableTiming | hipEventReleaseToSystem));
+                        create_event(ack[dst][src][q], dst);
                     }
                 }
             }
@@ -553,10 +560,10 @@ void Residency::upload() {
         if (tp_size > 1) {
             for (int p = 0; p < 2; ++p) {
                 for (auto events : {&tp_ready, &tp_done, &tp_arrived, &tp_consumed})
-                    check(hipEventCreateWithFlags(&(*events)[r][p], hipEventDisableTiming | hipEventReleaseToSystem));
+                    create_event((*events)[r][p], r);
                 if (ep_size > 1)
                     for (auto events : {&ep_ready, &ep_done, &ep_arrived, &ep_consumed})
-                        check(hipEventCreateWithFlags(&(*events)[r][p], hipEventDisableTiming | hipEventReleaseToSystem));
+                        create_event((*events)[r][p], r);
             }
             if (host_reduce)
                 check(hipHostMalloc(&reduce_staging[r], tp_prefill_rows * 3072u * 2u, hipHostMallocPortable));
@@ -564,7 +571,7 @@ void Residency::upload() {
         if (lm_head_tp) {
             for (int p = 0; p < 2; ++p)
                 for (auto events : {&lm_ready, &lm_done, &lm_arrived, &lm_consumed})
-                    check(hipEventCreateWithFlags(&(*events)[r][p], hipEventDisableTiming | hipEventReleaseToSystem));
+                    create_event((*events)[r][p], r);
         }
         for (int layer = 1; layer < 42; ++layer)
             upload_experts(r, layer);
@@ -599,6 +606,22 @@ void Residency::upload() {
     }
     check(hipSetDevice(physical[0]));
 }
+void Residency::create_event(RankEvent &event, int rank) {
+    check(hipSetDevice(physical[rank]));
+    check(hipEventCreateWithFlags(&event.handle, hipEventDisableTiming | hipEventReleaseToSystem));
+    event.owner = rank;
+}
+void Residency::record_event(const RankEvent &event, int rank) const {
+    if (event.owner != rank)
+        throw std::logic_error("event と記録先 stream の所有 rank が一致しません");
+    check(hipEventRecord(event.handle, compute[rank]));
+}
+void Residency::sync_record(const RankEvent &event, bool &recorded, int rank) const {
+    if (recorded)
+        check(hipEventSynchronize(event));
+    record_event(event, rank);
+    recorded = true;
+}
 void Residency::transfer(void *dst, int destination, const void *src, int source, size_t bytes, int prefill_rows) {
     transfer_bytes[source][destination] += bytes;
     std::chrono::steady_clock::time_point begin;
@@ -619,25 +642,25 @@ void Residency::transfer(void *dst, int destination, const void *src, int source
     parity[source][destination] = p ^ 1;
     if (!host && push) {
         check(hipSetDevice(physical[destination]));
-        check(hipEventRecord(ack_event, compute[destination]));
+        record_event(ack_event, destination);
         check(hipSetDevice(physical[source]));
         check(hipStreamWaitEvent(compute[source], ack_event, 0));
         copy(compute[source]);
-        check(hipEventRecord(ready_event, compute[source]));
+        record_event(ready_event, source);
         check(hipSetDevice(physical[destination]));
         check(hipStreamWaitEvent(compute[destination], ready_event, 0));
     } else {
         check(hipSetDevice(physical[source]));
         if (host)
             check(hipMemcpyAsync(host, src, bytes, hipMemcpyDeviceToHost, compute[source]));
-        check(hipEventRecord(ready_event, compute[source]));
+        record_event(ready_event, source);
         check(hipSetDevice(physical[destination]));
         check(hipStreamWaitEvent(compute[destination], ready_event, 0));
         if (host)
             check(hipMemcpyAsync(dst, host, bytes, hipMemcpyHostToDevice, compute[destination]));
         else
             copy(compute[destination]);
-        check(hipEventRecord(ack_event, compute[destination]));
+        record_event(ack_event, destination);
         check(hipSetDevice(physical[source]));
         check(hipStreamWaitEvent(compute[source], ack_event, 0));
         check(hipSetDevice(physical[destination]));
@@ -680,7 +703,7 @@ void Residency::reduce_pair(void *data, int rank, size_t bytes, bool ep) {
         check(hipEventSynchronize(consumed_events[rank][p]));
     tp_ptr[rank] = data;
     tp_bytes[rank] = bytes;
-    check(hipEventRecord(ready_events[rank][p], compute[rank]));
+    record_event(ready_events[rank][p], rank);
     barrier->arrive_and_wait();
     if (rank == a) {
         if (tp_bytes[a] != tp_bytes[b] || bytes > tp_prefill_rows * (ep ? 1536u : 3072u) * 2u)
@@ -694,7 +717,7 @@ void Residency::reduce_pair(void *data, int rank, size_t bytes, bool ep) {
                 if (recorded[destination][p ^ 1])
                     check(hipStreamWaitEvent(compute[source], consumed_events[destination][p ^ 1], 0));
                 peer_copy(recv[destination], tp_ptr[source], bytes, compute[source]);
-                check(hipEventRecord(done_events[source][p], compute[source]));
+                record_event(done_events[source][p], source);
                 check(hipSetDevice(physical[destination]));
                 check(hipStreamWaitEvent(compute[destination], done_events[source][p], 0));
             } else if (mode == ReduceTransport::peer) {
@@ -705,20 +728,20 @@ void Residency::reduce_pair(void *data, int rank, size_t bytes, bool ep) {
                 check(hipSetDevice(physical[source]));
                 check(hipMemcpyAsync(reduce_staging[source], tp_ptr[source], bytes, hipMemcpyDeviceToHost,
                                      compute[source]));
-                check(hipEventRecord(done_events[source][p], compute[source]));
+                record_event(done_events[source][p], source);
                 check(hipSetDevice(physical[destination]));
                 check(hipStreamWaitEvent(compute[destination], done_events[source][p], 0));
                 check(hipMemcpyAsync(recv[destination], reduce_staging[source], bytes, hipMemcpyHostToDevice,
                                      compute[destination]));
             }
-            check(hipEventRecord(arrived_events[destination][p], compute[destination]));
+            record_event(arrived_events[destination][p], destination);
         }
         for (int destination : {a, b}) {
             check(hipSetDevice(physical[destination]));
             check(hipStreamWaitEvent(compute[destination], arrived_events[a][p], 0));
             check(hipStreamWaitEvent(compute[destination], arrived_events[b][p], 0));
             tp_add_bf16(tp_ptr[destination], recv[destination], bytes, compute[destination]);
-            check(hipEventRecord(consumed_events[destination][p], compute[destination]));
+            record_event(consumed_events[destination][p], destination);
         }
         recorded[a][p] = recorded[b][p] = true;
         parity ^= 1;
@@ -739,12 +762,6 @@ void Residency::lm_scatter_hidden(const void *src, size_t bytes, std::array<void
         }
         return;
     }
-    auto sync_record = [&](hipEvent_t ev, bool &rec, hipStream_t stream) {
-        if (rec)
-            check(hipEventSynchronize(ev));
-        check(hipEventRecord(ev, stream));
-        rec = true;
-    };
     const int p = lm_parity;
     check(hipSetDevice(physical[0]));
     bool any_host = false;
@@ -761,7 +778,7 @@ void Residency::lm_scatter_hidden(const void *src, size_t bytes, std::array<void
         if (push && peer[0][r])
             peer_copy(dst_out[r], src, bytes, compute[0]);
     }
-    sync_record(lm_ready[0][p], lm_ready_rec[0][p], compute[0]);
+    sync_record(lm_ready[0][p], lm_ready_rec[0][p], 0);
     if (any_host)
         check(hipEventSynchronize(lm_ready[0][p]));
     for (int r = 1; r < ranks; ++r) {
@@ -782,12 +799,6 @@ void Residency::lm_gather_argmax(const std::array<const float *, 4> &vals, const
                                  int rows, int *out_ids) {
     if (!lm_head_tp || tp_size > 1 || rows <= 0)
         return;
-    auto sync_record = [&](hipEvent_t ev, bool &rec, hipStream_t stream) {
-        if (rec)
-            check(hipEventSynchronize(ev));
-        check(hipEventRecord(ev, stream));
-        rec = true;
-    };
     for (int first = 0; first < rows; first += lm_argmax_max_rows) {
         const int count = std::min(lm_argmax_max_rows, rows - first);
         const size_t bytes = size_t(count) * 8;
@@ -805,17 +816,17 @@ void Residency::lm_gather_argmax(const std::array<const float *, 4> &vals, const
                 if (lm_consumed_rec[0][p])
                     check(hipStreamWaitEvent(compute[r], lm_consumed[0][p], 0));
                 peer_copy(dst_r, local_pairs, bytes, compute[r]);
-                sync_record(lm_done[r][p], lm_done_rec[r][p], compute[r]);
+                sync_record(lm_done[r][p], lm_done_rec[r][p], r);
                 check(hipSetDevice(physical[0]));
                 check(hipStreamWaitEvent(compute[0], lm_done[r][p], 0));
             } else if (mode == ReduceTransport::peer) {
-                sync_record(lm_done[r][p], lm_done_rec[r][p], compute[r]);
+                sync_record(lm_done[r][p], lm_done_rec[r][p], r);
                 check(hipSetDevice(physical[0]));
                 check(hipStreamWaitEvent(compute[0], lm_done[r][p], 0));
                 peer_copy(dst_r, local_pairs, bytes, compute[0]);
             } else {
                 check(hipMemcpyAsync(lm_staging[r], local_pairs, bytes, hipMemcpyDeviceToHost, compute[r]));
-                sync_record(lm_done[r][p], lm_done_rec[r][p], compute[r]);
+                sync_record(lm_done[r][p], lm_done_rec[r][p], r);
                 check(hipEventSynchronize(lm_done[r][p]));
                 check(hipSetDevice(physical[0]));
                 check(hipMemcpyAsync(dst_r, lm_staging[r], bytes, hipMemcpyHostToDevice, compute[0]));
@@ -824,7 +835,7 @@ void Residency::lm_gather_argmax(const std::array<const float *, 4> &vals, const
         }
         check(hipSetDevice(physical[0]));
         tp_argmax_reduce(base_recv0, lm_argmax_max_rows, ranks, count, out_ids + first, compute[0]);
-        sync_record(lm_consumed[0][p], lm_consumed_rec[0][p], compute[0]);
+        sync_record(lm_consumed[0][p], lm_consumed_rec[0][p], 0);
         lm_recorded[0][p] = true;
         lm_parity ^= 1;
     }
@@ -833,12 +844,6 @@ void Residency::lm_gather_logits(const std::array<const float *, 4> &local_logit
                                  int full_vocab, float *out_logits) {
     if (!lm_head_tp || tp_size > 1 || rows <= 0)
         return;
-    auto sync_record = [&](hipEvent_t ev, bool &rec, hipStream_t stream) {
-        if (rec)
-            check(hipEventSynchronize(ev));
-        check(hipEventRecord(ev, stream));
-        rec = true;
-    };
     check(hipSetDevice(physical[0]));
     tp_scatter_logits(local_logits[0], out_logits, rows, local_vocab, full_vocab, 0, compute[0]);
     const int chunk_rows = std::max(1, int(lm_logits_chunk_bytes / (size_t(local_vocab) * sizeof(float))));
@@ -846,7 +851,7 @@ void Residency::lm_gather_logits(const std::array<const float *, 4> &local_logit
         auto mode = select_reduce_transport(push, peer[r][0], peer[0][r]);
         if (mode == ReduceTransport::peer) {
             check(hipSetDevice(physical[r]));
-            sync_record(lm_ready[r][0], lm_ready_rec[r][0], compute[r]);
+            sync_record(lm_ready[r][0], lm_ready_rec[r][0], r);
             check(hipSetDevice(physical[0]));
             check(hipStreamWaitEvent(compute[0], lm_ready[r][0], 0));
         }
@@ -862,7 +867,7 @@ void Residency::lm_gather_logits(const std::array<const float *, 4> &local_logit
                 if (lm_consumed_rec[0][p])
                     check(hipStreamWaitEvent(compute[r], lm_consumed[0][p], 0));
                 peer_copy(recv_r, src_r, chunk_bytes, compute[r]);
-                sync_record(lm_done[r][p], lm_done_rec[r][p], compute[r]);
+                sync_record(lm_done[r][p], lm_done_rec[r][p], r);
                 check(hipSetDevice(physical[0]));
                 check(hipStreamWaitEvent(compute[0], lm_done[r][p], 0));
             } else if (mode == ReduceTransport::peer) {
@@ -871,7 +876,7 @@ void Residency::lm_gather_logits(const std::array<const float *, 4> &local_logit
             } else {
                 check(hipSetDevice(physical[r]));
                 check(hipMemcpyAsync(lm_staging[r], src_r, chunk_bytes, hipMemcpyDeviceToHost, compute[r]));
-                sync_record(lm_done[r][p], lm_done_rec[r][p], compute[r]);
+                sync_record(lm_done[r][p], lm_done_rec[r][p], r);
                 check(hipEventSynchronize(lm_done[r][p]));
                 check(hipSetDevice(physical[0]));
                 check(hipMemcpyAsync(recv_r, lm_staging[r], chunk_bytes, hipMemcpyHostToDevice, compute[0]));
@@ -880,13 +885,13 @@ void Residency::lm_gather_logits(const std::array<const float *, 4> &local_logit
             check(hipSetDevice(physical[0]));
             tp_scatter_logits(recv_r, out_logits + size_t(first) * full_vocab, count, local_vocab, full_vocab,
                               r * local_vocab, compute[0]);
-            sync_record(lm_consumed[0][p], lm_consumed_rec[0][p], compute[0]);
+            sync_record(lm_consumed[0][p], lm_consumed_rec[0][p], 0);
             lm_recorded[0][p] = true;
             lm_parity ^= 1;
         }
         if (mode == ReduceTransport::peer) {
             check(hipSetDevice(physical[0]));
-            sync_record(lm_arrived[0][0], lm_arrived_rec[0][0], compute[0]);
+            sync_record(lm_arrived[0][0], lm_arrived_rec[0][0], 0);
             check(hipSetDevice(physical[r]));
             check(hipStreamWaitEvent(compute[r], lm_arrived[0][0], 0));
         }
@@ -911,7 +916,8 @@ void Residency::tp_argmax(const float *vals, const int *ids, int *out_ids, int r
         lm_src_ptr[rank] = local_buf;
         lm_dst_ptr[rank] = out_ids + first;
         lm_xfer_bytes[rank] = bytes;
-        check(hipEventRecord(lm_ready[rank][p], compute[rank]));
+        if (rank != 0)
+            record_event(lm_ready[rank][p], rank);
         all_barrier->arrive_and_wait();
         if (rank == 0) {
             char *base_recv0 = static_cast<char *>(lm_head_recv[0]) + size_t(p) * 4 * lm_argmax_stride;
@@ -922,7 +928,7 @@ void Residency::tp_argmax(const float *vals, const int *ids, int *out_ids, int r
                     check(hipSetDevice(physical[src]));
                     check(hipStreamWaitEvent(compute[src], lm_ready[src][p], 0));
                     peer_copy(dst_r, lm_src_ptr[src], bytes, compute[src]);
-                    check(hipEventRecord(lm_done[src][p], compute[src]));
+                    record_event(lm_done[src][p], src);
                     check(hipSetDevice(physical[0]));
                     check(hipStreamWaitEvent(compute[0], lm_done[src][p], 0));
                 } else if (mode == ReduceTransport::peer) {
@@ -933,7 +939,7 @@ void Residency::tp_argmax(const float *vals, const int *ids, int *out_ids, int r
                     check(hipSetDevice(physical[src]));
                     check(hipStreamWaitEvent(compute[src], lm_ready[src][p], 0));
                     check(hipMemcpyAsync(lm_staging[src], lm_src_ptr[src], bytes, hipMemcpyDeviceToHost, compute[src]));
-                    check(hipEventRecord(lm_done[src][p], compute[src]));
+                    record_event(lm_done[src][p], src);
                     check(hipEventSynchronize(lm_done[src][p]));
                     check(hipSetDevice(physical[0]));
                     check(hipMemcpyAsync(dst_r, lm_staging[src], bytes, hipMemcpyHostToDevice, compute[0]));
@@ -942,43 +948,7 @@ void Residency::tp_argmax(const float *vals, const int *ids, int *out_ids, int r
             check(hipSetDevice(physical[0]));
             tp_argmax_reduce(base_recv0, lm_argmax_max_rows, ranks, count, static_cast<int *>(lm_dst_ptr[0]),
                              compute[0]);
-            check(hipEventRecord(lm_ready[0][p], compute[0]));
-            bool bcast_host = false;
-            for (int dst = 1; dst < ranks; ++dst)
-                if (!(push ? peer[0][dst] : peer[dst][0]))
-                    bcast_host = true;
-            if (bcast_host) {
-                check(hipMemcpyAsync(lm_staging[0], lm_dst_ptr[0], id_bytes, hipMemcpyDeviceToHost, compute[0]));
-                check(hipEventRecord(lm_done[0][p], compute[0]));
-                check(hipEventSynchronize(lm_done[0][p]));
-            }
-            for (int dst = 1; dst < ranks; ++dst) {
-                auto mode = select_reduce_transport(push, peer[0][dst], peer[dst][0]);
-                if (mode == ReduceTransport::push) {
-                    check(hipSetDevice(physical[0]));
-                    peer_copy(lm_dst_ptr[dst], lm_dst_ptr[0], id_bytes, compute[0]);
-                    check(hipEventRecord(lm_consumed[0][p], compute[0]));
-                    check(hipSetDevice(physical[dst]));
-                    check(hipStreamWaitEvent(compute[dst], lm_consumed[0][p], 0));
-                    check(hipEventRecord(lm_arrived[dst][p], compute[dst]));
-                } else if (mode == ReduceTransport::peer) {
-                    check(hipSetDevice(physical[dst]));
-                    check(hipStreamWaitEvent(compute[dst], lm_ready[0][p], 0));
-                    peer_copy(lm_dst_ptr[dst], lm_dst_ptr[0], id_bytes, compute[dst]);
-                    check(hipEventRecord(lm_arrived[dst][p], compute[dst]));
-                } else {
-                    check(hipSetDevice(physical[dst]));
-                    check(hipMemcpyAsync(lm_dst_ptr[dst], lm_staging[0], id_bytes, hipMemcpyHostToDevice,
-                                         compute[dst]));
-                    check(hipStreamSynchronize(compute[dst]));
-                    check(hipEventRecord(lm_arrived[dst][p], compute[dst]));
-                }
-                lm_recorded[dst][p] = true;
-            }
-            check(hipSetDevice(physical[0]));
-            check(hipEventRecord(lm_arrived[0][p], compute[0]));
-            lm_recorded[0][p] = true;
-            lm_parity ^= 1;
+            broadcast_lm_ids(id_bytes, p);
         }
         all_barrier->arrive_and_wait();
         check(hipSetDevice(physical[rank]));
@@ -992,7 +962,7 @@ void Residency::tp_gather_logits(const float *local_logits, float *out_logits, i
     if (rank == 0)
         tp_scatter_logits(local_logits, out_logits, rows, local_vocab, full_vocab, 0, compute[0]);
     lm_src_ptr[rank] = local_logits;
-    check(hipEventRecord(lm_ready[rank][0], compute[rank]));
+    record_event(lm_ready[rank][0], rank);
     all_barrier->arrive_and_wait();
     if (rank == 0) {
         const int chunk_rows = std::max(1, int(lm_logits_chunk_bytes / (size_t(local_vocab) * sizeof(float))));
@@ -1020,7 +990,7 @@ void Residency::tp_gather_logits(const float *local_logits, float *out_logits, i
                     if (lm_recorded[0][p])
                         check(hipStreamWaitEvent(compute[src], lm_consumed[0][p], 0));
                     peer_copy(recv_r, src_r, chunk_bytes, compute[src]);
-                    check(hipEventRecord(lm_done[src][p], compute[src]));
+                    record_event(lm_done[src][p], src);
                     check(hipSetDevice(physical[0]));
                     check(hipStreamWaitEvent(compute[0], lm_done[src][p], 0));
                 } else if (mode == ReduceTransport::peer) {
@@ -1029,7 +999,7 @@ void Residency::tp_gather_logits(const float *local_logits, float *out_logits, i
                 } else {
                     check(hipSetDevice(physical[src]));
                     check(hipMemcpyAsync(lm_staging[src], src_r, chunk_bytes, hipMemcpyDeviceToHost, compute[src]));
-                    check(hipEventRecord(lm_done[src][p], compute[src]));
+                    record_event(lm_done[src][p], src);
                     check(hipEventSynchronize(lm_done[src][p]));
                     check(hipSetDevice(physical[0]));
                     check(hipMemcpyAsync(recv_r, lm_staging[src], chunk_bytes, hipMemcpyHostToDevice, compute[0]));
@@ -1038,69 +1008,71 @@ void Residency::tp_gather_logits(const float *local_logits, float *out_logits, i
                 check(hipSetDevice(physical[0]));
                 tp_scatter_logits(recv_r, out_logits + size_t(first) * full_vocab, count, local_vocab, full_vocab,
                                   src * local_vocab, compute[0]);
-                check(hipEventRecord(lm_consumed[0][p], compute[0]));
+                record_event(lm_consumed[0][p], 0);
                 lm_recorded[0][p] = true;
                 lm_parity ^= 1;
             }
         }
         check(hipSetDevice(physical[0]));
-        check(hipEventRecord(lm_done[0][0], compute[0]));
+        record_event(lm_done[0][0], 0);
     }
     all_barrier->arrive_and_wait();
     check(hipSetDevice(physical[rank]));
     if (rank > 0)
         check(hipStreamWaitEvent(compute[rank], lm_done[0][0], 0));
 }
+void Residency::broadcast_lm_ids(size_t bytes, int p) {
+    check(hipSetDevice(physical[0]));
+    bool host = false;
+    for (int dst = 1; dst < ranks; ++dst) {
+        auto mode = select_reduce_transport(push, peer[0][dst], peer[dst][0]);
+        if (mode == ReduceTransport::push) {
+            check(hipStreamWaitEvent(compute[0], lm_ready[dst][p], 0));
+            peer_copy(lm_dst_ptr[dst], lm_dst_ptr[0], bytes, compute[0]);
+        } else if (mode == ReduceTransport::host) {
+            host = true;
+        }
+    }
+    if (host)
+        check(hipMemcpyAsync(lm_staging[0], lm_dst_ptr[0], bytes, hipMemcpyDeviceToHost, compute[0]));
+    record_event(lm_done[0][p], 0);
+    if (host)
+        check(hipEventSynchronize(lm_done[0][p]));
+    for (int dst = 1; dst < ranks; ++dst) {
+        auto mode = select_reduce_transport(push, peer[0][dst], peer[dst][0]);
+        check(hipSetDevice(physical[dst]));
+        check(hipStreamWaitEvent(compute[dst], lm_done[0][p], 0));
+        if (mode == ReduceTransport::peer)
+            peer_copy(lm_dst_ptr[dst], lm_dst_ptr[0], bytes, compute[dst]);
+        else if (mode == ReduceTransport::host) {
+            check(hipMemcpyAsync(lm_dst_ptr[dst], lm_staging[0], bytes, hipMemcpyHostToDevice, compute[dst]));
+            check(hipStreamSynchronize(compute[dst]));
+        }
+        record_event(lm_arrived[dst][p], dst);
+        lm_recorded[dst][p] = true;
+        if (mode == ReduceTransport::peer) {
+            check(hipSetDevice(physical[0]));
+            check(hipStreamWaitEvent(compute[0], lm_arrived[dst][p], 0));
+        }
+    }
+    check(hipSetDevice(physical[0]));
+    record_event(lm_arrived[0][p], 0);
+    lm_recorded[0][p] = true;
+    lm_parity ^= 1;
+}
 void Residency::tp_broadcast_ids(int *ids, int rank, int rows) {
     if (!lm_head_tp || tp_size <= 1 || rows <= 0)
         return;
-    const size_t id_bytes = size_t(rows) * sizeof(int);
     const int p = lm_parity;
     check(hipSetDevice(physical[rank]));
     if (lm_recorded[rank][p])
         check(hipEventSynchronize(lm_arrived[rank][p]));
     lm_dst_ptr[rank] = ids;
-    if (rank == 0)
-        check(hipEventRecord(lm_ready[0][p], compute[0]));
+    if (rank != 0)
+        record_event(lm_ready[rank][p], rank);
     all_barrier->arrive_and_wait();
-    if (rank == 0) {
-        check(hipSetDevice(physical[0]));
-        bool bcast_host = false;
-        for (int dst = 1; dst < ranks; ++dst)
-            if (!(push ? peer[0][dst] : peer[dst][0]))
-                bcast_host = true;
-        if (bcast_host) {
-            check(hipMemcpyAsync(lm_staging[0], lm_dst_ptr[0], id_bytes, hipMemcpyDeviceToHost, compute[0]));
-            check(hipEventRecord(lm_done[0][p], compute[0]));
-            check(hipEventSynchronize(lm_done[0][p]));
-        }
-        for (int dst = 1; dst < ranks; ++dst) {
-            auto mode = select_reduce_transport(push, peer[0][dst], peer[dst][0]);
-            if (mode == ReduceTransport::push) {
-                check(hipSetDevice(physical[0]));
-                peer_copy(lm_dst_ptr[dst], lm_dst_ptr[0], id_bytes, compute[0]);
-                check(hipEventRecord(lm_consumed[0][p], compute[0]));
-                check(hipSetDevice(physical[dst]));
-                check(hipStreamWaitEvent(compute[dst], lm_consumed[0][p], 0));
-                check(hipEventRecord(lm_arrived[dst][p], compute[dst]));
-            } else if (mode == ReduceTransport::peer) {
-                check(hipSetDevice(physical[dst]));
-                check(hipStreamWaitEvent(compute[dst], lm_ready[0][p], 0));
-                peer_copy(lm_dst_ptr[dst], lm_dst_ptr[0], id_bytes, compute[dst]);
-                check(hipEventRecord(lm_arrived[dst][p], compute[dst]));
-            } else {
-                check(hipSetDevice(physical[dst]));
-                check(hipMemcpyAsync(lm_dst_ptr[dst], lm_staging[0], id_bytes, hipMemcpyHostToDevice, compute[dst]));
-                check(hipStreamSynchronize(compute[dst]));
-                check(hipEventRecord(lm_arrived[dst][p], compute[dst]));
-            }
-            lm_recorded[dst][p] = true;
-        }
-        check(hipSetDevice(physical[0]));
-        check(hipEventRecord(lm_arrived[0][p], compute[0]));
-        lm_recorded[0][p] = true;
-        lm_parity ^= 1;
-    }
+    if (rank == 0)
+        broadcast_lm_ids(size_t(rows) * sizeof(int), p);
     all_barrier->arrive_and_wait();
     check(hipSetDevice(physical[rank]));
 }
@@ -1158,7 +1130,7 @@ void Residency::shutdown() {
             for (auto &event : (*events)[r])
                 if (event) {
                     collect(hipEventDestroy(event));
-                    event = nullptr;
+                    event = {};
                 }
         if (reduce_staging[r]) {
             collect(hipHostFree(reduce_staging[r]));
@@ -1208,7 +1180,7 @@ void Residency::shutdown() {
                     collect(status);
                     if (status == hipSuccess)
                         collect(hipEventDestroy(event));
-                    event = nullptr;
+                    event = {};
                 }
         for (auto &row : ack[r])
             for (auto &event : row)
@@ -1217,7 +1189,7 @@ void Residency::shutdown() {
                     collect(status);
                     if (status == hipSuccess)
                         collect(hipEventDestroy(event));
-                    event = nullptr;
+                    event = {};
                 }
     }
     for (int dst = 0; dst < ranks; ++dst)

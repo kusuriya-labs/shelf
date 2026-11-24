@@ -40,8 +40,16 @@ void check_peer_collectives() {
         for (auto events : {&gpu.tp_ready, &gpu.tp_done, &gpu.tp_arrived, &gpu.tp_consumed,
                             &gpu.ep_ready, &gpu.ep_done, &gpu.ep_arrived, &gpu.ep_consumed})
             for (auto &event : (*events)[r])
-                checked(hipEventCreateWithFlags(&event, hipEventDisableTiming | hipEventReleaseToSystem));
+                gpu.create_event(event, r);
     }
+    bool rejected = false;
+    try {
+        gpu.record_event(gpu.tp_ready[1][0], 0);
+    } catch (const std::logic_error &) {
+        rejected = true;
+    }
+    if (!rejected)
+        throw std::runtime_error("別の論理 rank での event の記録を検出できませんでした");
     std::array<std::exception_ptr, 4> failures{};
     std::array<std::jthread, 4> workers;
     try {
@@ -116,8 +124,7 @@ void check_lm_head_collectives() {
                 checked(hipStreamCreateWithFlags(&gpu.compute[r], hipStreamNonBlocking));
                 for (int p = 0; p < 2; ++p)
                     for (auto events : {&gpu.lm_ready, &gpu.lm_done, &gpu.lm_arrived, &gpu.lm_consumed})
-                        checked(hipEventCreateWithFlags(&(*events)[r][p],
-                                                        hipEventDisableTiming | hipEventReleaseToSystem));
+                        gpu.create_event((*events)[r][p], r);
             }
             constexpr int rows = 37;
             auto arena_extra = shelf::gpu::GpuArena::create(0, 64ULL << 20);
@@ -266,8 +273,7 @@ void check_lm_head_collectives() {
                     for (auto events : {&gpu.tp_ready, &gpu.tp_done, &gpu.tp_arrived, &gpu.tp_consumed,
                                         &gpu.ep_ready, &gpu.ep_done, &gpu.ep_arrived, &gpu.ep_consumed,
                                         &gpu.lm_ready, &gpu.lm_done, &gpu.lm_arrived, &gpu.lm_consumed})
-                        checked(hipEventCreateWithFlags(&(*events)[r][p],
-                                                        hipEventDisableTiming | hipEventReleaseToSystem));
+                        gpu.create_event((*events)[r][p], r);
             }
             std::array<std::exception_ptr, 4> failures{};
             std::array<std::jthread, 4> workers;
@@ -312,6 +318,13 @@ void check_lm_head_collectives() {
                                 throw std::runtime_error("分離バッファ併用時の TP/EP 合算値が不正です");
                             if (got_ids != expected_ids)
                                 throw std::runtime_error("tp_argmax の結果が一致しません");
+                            gpu.tp_broadcast_ids(ids[r], r, 16);
+                            checked(hipMemcpyAsync(got_ids.data(), ids[r], 16 * sizeof(int), hipMemcpyDeviceToHost,
+                                                   gpu.compute[r]));
+                            checked(hipStreamSynchronize(gpu.compute[r]));
+                            for (int row = 0; row < 16; ++row)
+                                if (got_ids[row] != row)
+                                    throw std::runtime_error("tp_broadcast_ids の結果が一致しません");
                         }
                     } catch (...) {
                         failures[r] = std::current_exception();

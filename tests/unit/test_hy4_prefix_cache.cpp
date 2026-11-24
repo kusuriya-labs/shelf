@@ -1,3 +1,4 @@
+#include "../support/hy4_logical_ranks.h"
 #include <shelf/models/hy4_flash/generate.h>
 #include <shelf/models/hy4_flash/residency.h>
 #include <algorithm>
@@ -96,6 +97,103 @@ void require_equal(const char *label, const std::vector<int> &a, const std::vect
         }
         throw std::runtime_error(std::string("token mismatch: ") + label);
     }
+}
+
+void test_concurrent_cancel(Checkpoint &model, int ranks) {
+    Residency gpu(model, 512, 4);
+    auto st = gpu.reserve();
+    if (!st.ok()) throw std::runtime_error(st.message());
+    gpu.upload();
+    logical_ranks(gpu, ranks);
+    std::array<Hy4Request, 4> requests;
+    for (int i = 0; i < 4; ++i) {
+        const int length = std::array{8, 13, 19, 25}[i];
+        std::vector<int> prompt{120000};
+        for (int j = 0; j < length - 1; ++j)
+            prompt.push_back(100 + j);
+        bool sample = i % 2 == 0;
+        requests[i] = {i + 1, prompt, 8 + i, {64, sample ? 0.7f : 0.f, uint64_t((i + 1) * 17),
+                                               sample ? 20 : 0, sample ? 0.95f : 1.f, true}};
+    }
+    std::array<std::vector<int>, 4> expected;
+    for (bool cached : {false, true}) {
+        int emitted = 0;
+        std::array<std::vector<int>, 4> actual;
+        std::array<std::string, 4> reasons;
+        Hy4BatchSession session(gpu, [&](int id, int) { emitted += id == 1; },
+            [&](int id, const std::vector<int> &ids, const char *reason) {
+                actual[id - 1] = ids;
+                reasons[id - 1] = reason;
+            });
+        session.set_prefix_cache(cached);
+        auto drain = [&] {
+            while (session.active() || session.queued()) session.step();
+        };
+        for (const auto &request : requests) {
+            session.admit(request);
+            drain();
+        }
+        if (!cached) expected = actual;
+        for (const auto &request : requests) session.admit(request);
+        drain();
+        for (int i = 0; i < 4; ++i)
+            require_equal("cancel_warmup", actual[i], expected[i]);
+        for (int trial = 0; trial < (cached ? 5 : 1); ++trial) {
+            emitted = 0;
+            actual = {};
+            reasons = {};
+            for (const auto &request : requests) session.admit(request);
+            while (emitted < 2 && session.active()) session.step();
+            if (session.active() != 4 || emitted != 2)
+                throw std::runtime_error("4 要求の同時実行中にキャンセルできませんでした");
+            session.cancel(1);
+            drain();
+            if (reasons[0] != "cancelled" || actual[0] != std::vector<int>(expected[0].begin(), expected[0].begin() + 2))
+                throw std::runtime_error("キャンセルした要求の結果が一致しません");
+            for (int i = 1; i < 4; ++i) {
+                require_equal("cancel_survivor", actual[i], expected[i]);
+                if (reasons[i] != "length")
+                    throw std::runtime_error("残りの要求の終了理由が一致しません");
+            }
+            fprintf(stderr, "cancel EP=%d prefix=%d trial=%d PASS\n", ranks, cached, trial + 1);
+        }
+        if (cached && (!session.prefix_stats().hits || !session.prefix_stats().evictions))
+            throw std::runtime_error("prefix の再利用または追い出しが発生しませんでした");
+    }
+    auto prompt = make_tokens(260, 61);
+    std::array<std::vector<int>, 4> tails;
+    for (int i = 0; i < 4; ++i) {
+        tails[i] = prompt;
+        tails[i].push_back(2000 + i);
+        expected[i] = run_session_sequence(gpu, false, {tails[i]}, {3}, true)[0].generated;
+    }
+    {
+        std::array<std::vector<int>, 4> actual;
+        Hy4BatchSession session(gpu, {}, [&](int id, const std::vector<int> &ids, const char *) {
+            if (id < 4) actual[id] = ids;
+        });
+        session.admit({4, prompt, 1, {64, 0.f, 0, 0, 1.f, true}});
+        while (session.active()) session.step();
+        for (int i = 0; i < 4; ++i)
+            session.admit({i, tails[i], 3, {64, 0.f, 0, 0, 1.f, true}});
+        const auto tables = gpu.slot_page_tables;
+        const int32_t page = tables.at(0).at(0);
+        for (int i = 0; i < 4; ++i) {
+            if (tables[i].size() != 2 || tables[i][0] != page || gpu.kv_page_refs.at(tables[i][1]) != 1)
+                throw std::runtime_error("完全なページの共有または末尾ページの分離に失敗しました");
+        }
+        auto refs = gpu.kv_page_refs.at(page);
+        session.cancel(0);
+        if (gpu.kv_page_refs.at(page) != refs - 1 || !gpu.slot_page_tables[0].empty() ||
+            !std::equal(tables.begin() + 1, tables.end(), gpu.slot_page_tables.begin() + 1))
+            throw std::runtime_error("キャンセルで他スロットのページ参照が変化しました");
+        while (session.active()) session.step();
+        for (int i = 1; i < 4; ++i)
+            require_equal("cancel_shared_page", actual[i], expected[i]);
+    }
+    if (gpu.free_kv_pages() != gpu.kv_pages_total)
+        throw std::runtime_error("キャンセル後に KV ページが残っています");
+    gpu.shutdown();
 }
 
 void test_session_suite(Checkpoint &model, bool has_draft) {
@@ -535,6 +633,11 @@ int main(int argc, char **argv) {
     }
     const char *engram_dir = argc == 4 ? argv[3] : argv[1];
     try {
+        {
+            Checkpoint model(argv[1], engram_dir, {}, Owners{}, 1, 1);
+            share_expert_weights(model);
+            for (int ranks : {1, 4}) test_concurrent_cancel(model, ranks);
+        }
         Checkpoint model_draft(argv[1], engram_dir, argv[2], Owners{}, 1, 1);
         share_expert_weights(model_draft);
         test_session_suite(model_draft, true);

@@ -1,3 +1,4 @@
+#include "../support/hy4_logical_ranks.h"
 #include <shelf/models/hy4_flash/target.h>
 #include <shelf/models/hy4_flash/generate.h>
 #include <algorithm>
@@ -131,8 +132,7 @@ void logical_lm_head_tp(Residency &gpu, Checkpoint &sharded) {
             checked(hipHostMalloc(&gpu.lm_staging[r], Residency::lm_staging_bytes(), hipHostMallocPortable));
         for (int p = 0; p < 2; ++p)
             for (auto events : {&gpu.lm_ready, &gpu.lm_done, &gpu.lm_arrived, &gpu.lm_consumed})
-                checked(hipEventCreateWithFlags(&(*events)[r][p],
-                                                hipEventDisableTiming | hipEventReleaseToSystem));
+                gpu.create_event((*events)[r][p], r);
         if (r == 0) {
             for (const char *suffix : {"lm_head.suh", "lm_head.svh", "lm_head.trellis"}) {
                 const auto &src_w = sharded.at(suffix, 0);

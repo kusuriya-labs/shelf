@@ -9,10 +9,12 @@ import argparse
 
 ROOT = Path(__file__).resolve().parents[2]
 class Server:
-    def __init__(self, opts, slots, draft=False):
+    def __init__(self, opts, slots, draft=False, prefix_cache=True):
         argv = [opts.compute, 'hy4', 'serve', '--model-dir', opts.model_dir,
                 '--engram-dir', opts.engram_dir, '--placement', opts.placement, '--max-seq-len', '512',
                 '--chunk', '64']
+        if not prefix_cache:
+            argv += ['--prefix-cache', '0']
         if slots != 1:
             argv += ['--max-concurrent-requests', str(slots)]
         if draft:
@@ -93,21 +95,30 @@ def main():
     for option in ('model-dir', 'engram-dir', 'placement', 'dfly-dir'):
         parser.add_argument('--' + option, required=True)
     opts = parser.parse_args()
+    requests = [request(i, n, c) for i, n, c in [(1, 8, 8), (2, 13, 9), (3, 19, 10), (4, 25, 11)]]
+    server = Server(opts, 4, prefix_cache=False)
+    try:
+        baseline = {req['request_id']: run(server, [req])[0][req['request_id']] for req in requests}
+        actual, done, _ = run(server, requests, cancel=1)
+        assert done[1]['finish_reason'] == 'cancelled'
+        assert all(actual[i] == baseline[i] for i in (2, 3, 4))
+    finally:
+        server.close()
     server = Server(opts, 4)
     try:
-        requests = [request(i, n, c) for i, n, c in [(1, 8, 8), (2, 13, 9), (3, 19, 10), (4, 25, 11)]]
-        baseline = {}
         for req in requests:
-            baseline.update(run(server, [req])[0])
+            assert run(server, [req])[0][req['request_id']] == baseline[req['request_id']]
         actual, done, order = run(server, requests)
         assert actual == baseline
         assert len(set(order[:8])) > 1 and len(set(order[4:12])) > 1
         assert all(event['finish_reason'] in ('stop', 'length') for event in done.values())
         print('A PASS', flush=True)
-        actual, done, _ = run(server, requests, cancel=1)
-        assert done[1]['finish_reason'] == 'cancelled'
-        assert all(actual[i] == baseline[i] for i in (2, 3, 4))
-        print('C PASS', flush=True)
+        for trial in range(5):
+            actual, done, _ = run(server, requests, cancel=1)
+            assert done[1]['finish_reason'] == 'cancelled'
+            assert actual[1] == baseline[1][:len(actual[1])]
+            assert all(actual[i] == baseline[i] for i in (2, 3, 4))
+            print(f'C {trial + 1}/5 PASS', flush=True)
     finally:
         server.close()
     server = Server(opts, 2)
@@ -128,8 +139,10 @@ def main():
         stats = server.event()
         before = stats['batch_draft_rounds']
         assert stats['kv']['page_tokens'] == 256
-        assert stats['kv']['total_pages'] == stats['kv']['free_pages'] == 8
-        assert stats['kv']['capacity_tokens'] == stats['kv']['free_tokens'] == 4 * 512
+        kv = stats['kv']
+        assert kv['active_requests'] == 0 and stats['prefix']['entries'] > 0
+        assert kv['total_pages'] == kv['free_pages'] + kv['used_pages'] == 8
+        assert kv['capacity_tokens'] == 4 * 512 and kv['free_tokens'] == kv['free_pages'] * 256
         actual, done, _ = run(server, items, cancel=2, arrival=arrival)
         assert done[2]['finish_reason'] == 'cancelled'
         assert actual[2] == refs[2][:len(actual[2])]

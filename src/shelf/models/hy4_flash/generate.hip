@@ -16,6 +16,7 @@
 #include <cstring>
 #include <exception>
 #include <deque>
+#include <list>
 
 namespace shelf::hy4 {
 namespace {
@@ -1621,7 +1622,7 @@ struct Hy4BatchSession::Impl {
     Emit emit;
     Done done;
     std::vector<std::optional<State>> states;
-    std::vector<Hy4PrefixSlot> prefix_entries;
+    std::list<Hy4PrefixSlot> prefix_entries;
     std::vector<uint64_t> slot_swa_gen;
     std::vector<size_t> slot_reserved_pages;
     std::deque<Hy4Request> waiting;
@@ -1654,8 +1655,9 @@ struct Hy4BatchSession::Impl {
         }
     }
     ~Impl() {
+        if (!gpu.kv_pages_total) return;
         for (size_t s = 0; s < states.size(); ++s) {
-            if (states[s] && gpu.kv_pages_total > 0)
+            if (states[s])
                 gpu.release_slot_pages(int(s));
         }
         for (auto &entry : prefix_entries)
@@ -1734,24 +1736,24 @@ struct Hy4BatchSession::Impl {
             }
             if (free_slot < 0)
                 break;
-            size_t best_idx = SIZE_MAX;
+            auto best = prefix_entries.end();
             size_t best_match = 0;
             bool best_snap = false;
             int best_pref_slot = -1;
             uint64_t best_clock = 0;
             if (prefix.enabled) {
                 const size_t swa_slots = swa_window_slots(gpu);
-                for (size_t i = 0; i < prefix_entries.size(); ++i) {
+                for (auto it = prefix_entries.begin(); it != prefix_entries.end(); ++it) {
                     bool snap = false;
                     int pref_slot = -1;
-                    size_t m = match_prefix_entry(prefix_entries[i], req.input_ids, swa_slots, snap, pref_slot);
-                    if (m > 0 && (best_idx == SIZE_MAX || m > best_match ||
-                                  (m == best_match && prefix_entries[i].last_used > best_clock))) {
-                        best_idx = i;
+                    size_t m = match_prefix_entry(*it, req.input_ids, swa_slots, snap, pref_slot);
+                    if (m > 0 && (best == prefix_entries.end() || m > best_match ||
+                                  (m == best_match && it->last_used > best_clock))) {
+                        best = it;
                         best_match = m;
                         best_snap = snap;
                         best_pref_slot = pref_slot;
-                        best_clock = prefix_entries[i].last_used;
+                        best_clock = it->last_used;
                     }
                 }
             }
@@ -1762,51 +1764,36 @@ struct Hy4BatchSession::Impl {
                 size_t shared_full = best_match / kv_page_tokens;
                 size_t rem = best_match % kv_page_tokens;
                 size_t need_new = total_pages > shared_full ? total_pages - shared_full : 0;
-                const Hy4PrefixSlot *protect = best_idx != SIZE_MAX ? &prefix_entries[best_idx] : nullptr;
                 while (avail_for_new() < need_new) {
-                    if (!evict_one_prefix(protect))
-                        break;
-                    if (protect) {
-                        best_idx = SIZE_MAX;
-                        for (size_t i = 0; i < prefix_entries.size(); ++i) {
-                            if (&prefix_entries[i] == protect) {
-                                best_idx = i;
-                                break;
-                            }
-                        }
-                    }
+                    if (!evict_one_prefix(best == prefix_entries.end() ? nullptr : &*best)) break;
                 }
-                bool steal_best_tail = false;
-                if (avail_for_new() < need_new && best_idx != SIZE_MAX) {
-                    auto &entry = prefix_entries[best_idx];
-                    bool can_steal_tail = (rem > 0 && shared_full < entry.pages.size() &&
-                                           gpu.kv_page_refs[entry.pages[shared_full]] == 1);
-                    size_t extra_trailing = 0;
-                    for (size_t pi = shared_full + (can_steal_tail ? 1 : 0); pi < entry.pages.size(); ++pi) {
-                        if (entry.pages[pi] >= 0 && gpu.kv_page_refs[entry.pages[pi]] == 1)
-                            ++extra_trailing;
-                    }
-                    size_t effective_need = need_new - (can_steal_tail ? 1 : 0);
-                    if (avail_for_new() + extra_trailing >= effective_need) {
-                        steal_best_tail = can_steal_tail;
+                bool steal_tail = false;
+                if (avail_for_new() < need_new && best != prefix_entries.end()) {
+                    const size_t used = shared_full + (rem != 0);
+                    steal_tail = rem && gpu.kv_page_refs[best->pages[shared_full]] == 1;
+                    const size_t reclaimable = std::count_if(best->pages.begin() + used, best->pages.end(),
+                        [&](int32_t p) { return gpu.kv_page_refs[p] == 1; });
+                    if (avail_for_new() + reclaimable + steal_tail >= need_new) {
+                        std::vector<int32_t> trailing(best->pages.begin() + used, best->pages.end());
+                        best->pages.resize(used);
+                        gpu.release_pages(trailing);
+                        best->tokens.resize(best_match);
                     } else {
-                        gpu.release_pages(entry.pages);
-                        prefix_entries.erase(prefix_entries.begin() + ptrdiff_t(best_idx));
+                        gpu.release_pages(best->pages);
+                        prefix_entries.erase(best);
                         ++prefix.evictions;
-                        best_idx = SIZE_MAX;
+                        best = prefix_entries.end();
                         best_match = 0;
-                        best_snap = false;
                         chosen = free_slot;
-                        shared_full = 0;
-                        rem = 0;
                         need_new = total_pages;
+                        steal_tail = false;
                     }
                 }
-                if (avail_for_new() < (need_new - (steal_best_tail ? 1 : 0)))
+                if (avail_for_new() + steal_tail < need_new)
                     break;
                 gpu.release_slot_pages(chosen);
-                if (best_idx != SIZE_MAX && best_match > 0) {
-                    auto &entry = prefix_entries[best_idx];
+                if (best != prefix_entries.end() && best_match > 0) {
+                    auto &entry = *best;
                     if (best_snap && !entry.swa_snap.empty())
                         snap_copy = entry.swa_snap[0];
                     std::vector<int32_t> restored_pages;
@@ -1816,10 +1803,9 @@ struct Hy4BatchSession::Impl {
                     gpu.retain_pages(restored_pages);
                     int32_t tail_src = -1;
                     if (rem > 0) {
-                        if (steal_best_tail) {
-                            int32_t p = entry.pages[shared_full];
-                            entry.pages[shared_full] = -1;
-                            restored_pages.push_back(p);
+                        if (steal_tail) {
+                            restored_pages.push_back(entry.pages.back());
+                            entry.pages.pop_back();
                         } else {
                             tail_src = entry.pages[shared_full];
                             int32_t p = gpu.alloc_single_page();
@@ -1828,23 +1814,22 @@ struct Hy4BatchSession::Impl {
                             restored_pages.push_back(p);
                         }
                     }
-                    const size_t remaining_pages = total_pages > restored_pages.size() ? total_pages - restored_pages.size() : 0;
-                    if (steal_best_tail || avail_for_new() < remaining_pages) {
-                        gpu.release_pages(entry.pages);
-                        prefix_entries.erase(prefix_entries.begin() + ptrdiff_t(best_idx));
-                        ++prefix.evictions;
-                    } else {
-                        entry.last_used = ++use_clock;
-                    }
                     gpu.slot_page_tables[chosen] = std::move(restored_pages);
                     gpu.sync_slot_page_table(chosen);
                     if (tail_src >= 0)
                         copy_dsa_page_prefix(gpu, 0, gpu.slot_page_tables[chosen].back(), tail_src, int(rem), gpu.compute[0]);
+                    if (steal_tail) {
+                        gpu.release_pages(entry.pages);
+                        prefix_entries.erase(best);
+                        ++prefix.evictions;
+                    } else {
+                        entry.last_used = ++use_clock;
+                    }
                 }
                 if (!gpu.allocate_slot_pages(chosen, req.input_ids.size()))
                     throw std::runtime_error("KV ページ割当に失敗しました");
-            } else if (best_idx != SIZE_MAX && best_match > 0 && best_snap && !prefix_entries[best_idx].swa_snap.empty()) {
-                snap_copy = prefix_entries[best_idx].swa_snap[0];
+            } else if (best != prefix_entries.end() && best_match > 0 && best_snap && !best->swa_snap.empty()) {
+                snap_copy = best->swa_snap[0];
             }
             ++slot_swa_gen[chosen];
             slot_reserved_pages[chosen] = total_pages;
@@ -1898,8 +1883,8 @@ struct Hy4BatchSession::Impl {
                     table.resize(keep);
                     gpu.release_pages(extra);
                 }
-                cache.pages = std::move(table);
-                table.clear();
+                cache.pages.swap(table);
+                gpu.sync_slot_page_table(slot);
             }
             while (prefix_entries.size() >= max_prefix_entries) {
                 if (!evict_one_prefix())
@@ -1950,6 +1935,7 @@ struct Hy4BatchSession::Impl {
             auto &request = state.request;
             if (!state.swa_pending.empty()) {
                 restore_swa_snapshot(gpu, s, 0, target->op.stream, state.swa_pending);
+                checked(hipStreamSynchronize(target->op.stream));
                 state.swa_pending.clear();
             }
             auto end = std::min(state.prefetched + size_t(request.options.chunk), request.input_ids.size());

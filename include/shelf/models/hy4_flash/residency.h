@@ -73,6 +73,12 @@ struct Region {
     void *next(size_t length);
 };
 
+struct RankEvent {
+    hipEvent_t handle{};
+    int owner = -1;
+    operator hipEvent_t() const { return handle; }
+};
+
 struct Residency {
     Checkpoint &model;
     size_t tokens;
@@ -142,6 +148,9 @@ struct Residency {
     std::array<hipEvent_t, 4> local_ready{}, local_done{};
     std::array<std::array<void *, 4>, 4> small_staging{};
     void reserve_experts(int rank, Region &buffer);
+    void create_event(RankEvent &event, int rank);
+    void record_event(const RankEvent &event, int rank) const;
+    void sync_record(const RankEvent &event, bool &recorded, int rank) const;
     void collect_route_counts(int rank);
     static constexpr size_t matrix_bytes = 41 * 512 * 3 * sizeof(Hy4ExpertProjection);
     size_t transfer_packet_bytes() const {
@@ -162,7 +171,7 @@ struct Residency {
     GraphInput *graph_input = nullptr;
     BatchGraphInput *batch_input = nullptr;
     uint64_t target_replays = 0, draft_replays = 0;
-    std::array<std::array<std::array<hipEvent_t, 2>, 4>, 4> ready{}, ack{};
+    std::array<std::array<std::array<RankEvent, 2>, 4>, 4> ready{}, ack{};
     std::array<std::array<int, 4>, 4> parity{};
     std::array<void *, 4> tp_recv{};
     std::array<void *, 4> ep_recv{};
@@ -179,12 +188,12 @@ struct Residency {
     std::array<const void *, 4> lm_src_ptr{};
     std::array<void *, 4> lm_dst_ptr{};
     std::array<size_t, 4> lm_xfer_bytes{};
-    std::array<std::array<hipEvent_t, 2>, 4> lm_ready{}, lm_done{}, lm_arrived{}, lm_consumed{};
+    std::array<std::array<RankEvent, 2>, 4> lm_ready{}, lm_done{}, lm_arrived{}, lm_consumed{};
     std::array<std::array<bool, 2>, 4> lm_recorded{};
     std::array<std::array<bool, 2>, 4> lm_ready_rec{}, lm_done_rec{}, lm_arrived_rec{}, lm_consumed_rec{};
     int lm_parity = 0;
-    std::array<std::array<hipEvent_t, 2>, 4> tp_ready{}, tp_done{}, tp_arrived{}, tp_consumed{};
-    std::array<std::array<hipEvent_t, 2>, 4> ep_ready{}, ep_done{}, ep_arrived{}, ep_consumed{};
+    std::array<std::array<RankEvent, 2>, 4> tp_ready{}, tp_done{}, tp_arrived{}, tp_consumed{};
+    std::array<std::array<RankEvent, 2>, 4> ep_ready{}, ep_done{}, ep_arrived{}, ep_consumed{};
     std::array<std::array<bool, 2>, 4> tp_recorded{}, ep_recorded{};
     std::array<int, 4> tp_parity{}, ep_parity{};
     std::array<void *, 4> reduce_staging{};
@@ -203,6 +212,7 @@ struct Residency {
     void tp_argmax(const float *vals, const int *ids, int *out_ids, int rank, int rows);
     void tp_gather_logits(const float *local_logits, float *out_logits, int rank, int rows, int local_vocab,
                           int full_vocab);
+    void broadcast_lm_ids(size_t bytes, int parity);
     void tp_broadcast_ids(int *ids, int rank, int rows);
     void shutdown();
     const void *device(const Weight &w) const;

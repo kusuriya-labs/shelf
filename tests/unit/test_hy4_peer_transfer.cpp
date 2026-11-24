@@ -60,7 +60,7 @@ void check_transfer(int source, int destination) {
         checked(hipStreamCreateWithFlags(&gpu.compute[r], hipStreamNonBlocking));
         auto &events = r == 0 ? gpu.ready[0][1] : gpu.ack[1][0];
         for (auto &event : events)
-            checked(hipEventCreateWithFlags(&event, hipEventDisableTiming | hipEventReleaseToSystem));
+            gpu.create_event(event, r);
     }
     std::vector<uint32_t> expected(passes * words), actual(expected.size());
     for (size_t i = 0; i < expected.size(); ++i)
