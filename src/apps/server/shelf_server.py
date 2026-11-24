@@ -104,6 +104,8 @@ def build_compute_argv(opts) -> list[str]:
     ]
     if opts.prefill_chunk is not None:
         argv += ["--prefill-chunk", str(opts.prefill_chunk)]
+    if opts.prefill_decode_interval is not None:
+        argv += ["--prefill-decode-interval", str(opts.prefill_decode_interval)]
     if opts.dflash2_model_dir:
         argv += [
             "--dflash2-model-dir", opts.dflash2_model_dir,
@@ -436,6 +438,13 @@ async def handle_meta(request: web.Request) -> web.Response:
     return web.json_response(meta)
 
 
+async def handle_readiness(request: web.Request) -> web.Response:
+    compute: AsyncComputeClient = request.app["compute"]
+    if not compute.is_alive():
+        return web.json_response({"ready": False}, status=503)
+    return web.json_response({"ready": True}, status=200)
+
+
 def create_app(service: ChatService, compute: AsyncComputeClient,
                server_meta: dict | None = None) -> web.Application:
     app = web.Application(
@@ -446,6 +455,7 @@ def create_app(service: ChatService, compute: AsyncComputeClient,
     app["compute"] = compute
     app["server_meta"] = dict(server_meta or {})
 
+    app.router.add_get("/readiness", handle_readiness)
     app.router.add_get("/v1/models", handle_models)
     app.router.add_get("/v1/meta", handle_meta)
     app.router.add_post("/v1/chat/completions", handle_chat_completions)
@@ -521,6 +531,9 @@ def parse_args(argv=None):
                              "(default 8192)")
     parser.add_argument("--max-concurrent-requests", type=int, default=4,
                         help="max in-flight requests (default 4)")
+    parser.add_argument("--prefill-decode-interval", type=int, default=None,
+                        help="run a decode step after N consecutive prefill chunks; "
+                             "0 disables the guarantee")
 
     parser.add_argument("--inference-budget-tokens", type=int, default=32768,
                         help="max generated tokens per request (default 32768)")
@@ -639,6 +652,8 @@ def parse_args(argv=None):
         parser.error("--prefill-chunk must be between 16 and 8192")
     if opts.max_concurrent_requests < 1:
         parser.error("--max-concurrent-requests must be >= 1")
+    if opts.prefill_decode_interval is not None and not 0 <= opts.prefill_decode_interval <= 1024:
+        parser.error("--prefill-decode-interval must be between 0 and 1024")
     if opts.inference_budget_tokens < 1:
         parser.error("--inference-budget-tokens must be >= 1")
     if opts.large_context_tokens < 0:

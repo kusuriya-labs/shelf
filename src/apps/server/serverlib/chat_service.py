@@ -359,6 +359,7 @@ class ChatService:
                 prefix_cache_checkpoint_position=0,
                 reasoning_budget_tokens=prepared.reasoning_budget_tokens,
                 reasoning_close_token=prepared.reasoning_close_token,
+                ignore_eos=request.ignore_eos,
             )
         except ComputeInvalidArgument as exc:
             raise OpenAIProtocolError(str(exc), param=None) from exc
@@ -431,6 +432,7 @@ class ChatService:
             prefix_cache_checkpoint_position=0,
             reasoning_budget_tokens=prepared.reasoning_budget_tokens,
             reasoning_close_token=prepared.reasoning_close_token,
+            ignore_eos=request.ignore_eos,
             **kwargs,
         )
 

@@ -183,6 +183,7 @@ struct MtpRequest {
     shelf::runtime::mtp::MtpDraftSnapshot tail_snapshot;
     MtpRequestTiming timing;
     double prefill_ms = 0.0;
+    bool ignore_eos = false;
 };
 
 struct MtpServeContext {
@@ -699,6 +700,7 @@ struct ServeController::Impl {
             slot.num_drafts = mtp.drafts;
             slot.remaining_tokens = request.max_new_tokens - request.generated;
             slot.page_tokens = capture_boundaries ? state.config_.page_tokens : 0u;
+            slot.ignore_eos = request.ignore_eos;
             slots.push_back(slot);
             indices.push_back(i);
         }
@@ -1005,9 +1007,10 @@ struct ServeController::Impl {
         admitted->generated_ids.push_back(prefill.value().pending_token);
         admitted->timing = timing;
         admitted->prefill_ms = prefill_ms;
+        admitted->ignore_eos = request.ignore_eos;
         timing_first_token(admitted->timing);
         push_token(events, external_request_id, prefill.value().pending_token);
-        const bool stop = shelf::qwen_hybrid::is_stop_token(
+        const bool stop = !admitted->ignore_eos && shelf::qwen_hybrid::is_stop_token(
             state.model().hybrid_config().stop_tokens, prefill.value().pending_token);
         if (stop || admitted->generated >= admitted->max_new_tokens) {
             mtp_emit_done(events, *admitted, stop ? "stop" : "length");
@@ -1096,6 +1099,17 @@ struct ServeController::Impl {
             return outcome;
         }
         generation.internal_request_id = submit_result.release();
+        if (request.ignore_eos) {
+            const shelf::Status ignore_eos_status =
+                session.set_ignore_eos(generation.internal_request_id, true);
+            if (!ignore_eos_status.ok()) {
+                (void)session.cancel(generation.internal_request_id);
+                (void)session.retire(generation.internal_request_id);
+                outcome.code = "internal";
+                outcome.message = ignore_eos_status.message();
+                return outcome;
+            }
+        }
         if (request.grammar && config.dflash_enabled) {
             auto st = session.set_structured_dflash(generation.internal_request_id,
                                                     generation.grammar_delayed,

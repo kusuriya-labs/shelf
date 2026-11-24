@@ -304,6 +304,7 @@ bool parse_generate(shelf::engine::ServeController& serve,
             if (key != "op" && key != "request_id" && key != "input_ids" &&
                 key != "max_new_tokens" && key != "temperature" && key != "top_p" &&
                 key != "min_p" && key != "top_k" && key != "seed" &&
+                key != "ignore_eos" &&
                 key != "reasoning_budget_tokens" && key != "reasoning_close_token" &&
                 key != "prefix_cache_checkpoint_position") {
                 emit_error_with_code(request_id, "invalid_argument",
@@ -313,6 +314,7 @@ bool parse_generate(shelf::engine::ServeController& serve,
         } else if (key != "op" && key != "request_id" && key != "input_ids" &&
                    key != "max_new_tokens" && key != "temperature" && key != "top_p" &&
                    key != "min_p" && key != "top_k" && key != "seed" &&
+                   key != "ignore_eos" &&
                    key != "reasoning_budget_tokens" && key != "reasoning_close_token" &&
                    key != "prefix_cache_checkpoint_position" && key != "grammar" &&
                    key != "bitmask" && key != "grammar_after_reasoning") {
@@ -351,6 +353,12 @@ bool parse_generate(shelf::engine::ServeController& serve,
     const uint32_t max_new_tokens =
         static_cast<uint32_t>(request["max_new_tokens"].get<long long>());
 
+    if (request.contains("ignore_eos") && !request["ignore_eos"].is_boolean()) {
+        emit_error_with_code(request_id, "invalid_argument",
+                             "ignore_eos must be a boolean");
+        return false;
+    }
+
     if (request.contains("prefix_cache_checkpoint_position")) {
         if (!request["prefix_cache_checkpoint_position"].is_number_integer()) {
             emit_error_with_code(
@@ -379,6 +387,7 @@ bool parse_generate(shelf::engine::ServeController& serve,
     spec.request_id = external_request_id;
     spec.input_ids = std::move(input_ids);
     spec.max_new_tokens = max_new_tokens;
+    spec.ignore_eos = request.value("ignore_eos", false);
     if (!parse_sampling(request, request_id, spec.sampling)) return false;
     if (!parse_thinking(request, request_id, max_new_tokens, spec.thinking)) return false;
 

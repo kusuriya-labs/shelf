@@ -82,7 +82,7 @@ embedding、prefix checkpoint、offload 用バッファもドライバの GTT �
 | 変数名 | 既定値 | 対象範囲 | 用途 |
 | --- | --- | --- | --- |
 | `SHELF_DFLASH2_PREFILL_ROWS` | モデル依存 | compute / server | TP=1 の DFlash2 prefill context 構築行数（`--dflash2-prefill-rows` と同等。`8` で従来の容量を使う。block size 16 では `16` も同じ容量を選ぶ） |
-| `SHELF_DFLASH2_POLICY_MAX_SESSIONS` | `12` | runtime | `--dflash2-adaptive` で投機を停止する batch 負荷上限 |
+| `SHELF_DFLASH2_POLICY_MAX_SESSIONS` | `32` | runtime | `--dflash2-adaptive` で同時に投機する session 数の上限（超過分は通常 decode） |
 | `SHELF_DFLASH2_RADIX_TOPN` | 自動 | compute / server / runtime | `0` で従来 top-n、`1` で radix top-n（`--dflash2-radix-topn` と同等） |
 | `SHELF_DFLASH2_SERVE_STATS` | `0` | compute (`--serve-stdio`) | `1` で終了時に `DFLASH2_STAGE` / `DFLASH2_POSITION` 等の内訳を stderr へ出力する |
 | `SHELF_DFLASH2_DEVICE_TOKEN_BRIDGE` | `1` | runtime | `0` で legacy host token bridge に戻す |

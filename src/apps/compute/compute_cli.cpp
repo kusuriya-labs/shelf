@@ -95,6 +95,8 @@ void compute_usage(const char* prog) {
     printf("  --prefill-chunk N      prompt tokens per prefill step; also caps the row\n"
            "                         bucket (default 512; serve caps max-num-batched-tokens\n"
            "                         when given)\n");
+    printf("  --prefill-decode-interval N  decode step after N consecutive prefill chunks\n"
+           "                         (default 0; 0 disables the guarantee)\n");
     printf("  --ple-prefetch 0|1      prefetch the next PLE rows during prefill (default 1)\n");
     printf("  --device N|N,M         GPU device(s); count must match pipeline_parallel *\n"
            "                         expert_parallel * tensor_parallel (default 0)\n");
@@ -231,6 +233,7 @@ int parse_compute_options(int argc, char** argv, ComputeOptions& opt) {
         auto& max_num_batched_tokens = opt.max_num_batched_tokens;
         auto& prefill_chunk = opt.prefill_chunk;
         auto& prefill_chunk_set = opt.prefill_chunk_set;
+        auto& prefill_decode_interval = opt.prefill_decode_interval;
 auto& max_concurrent_requests = opt.max_concurrent_requests;
     auto& devices = opt.devices;
     auto& tp = opt.tp;
@@ -307,6 +310,12 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
                 return kComputeParseError;
             }
             prefill_chunk_set = true;
+        } else if (std::strcmp(argv[i], "--prefill-decode-interval") == 0 && i + 1 < argc) {
+            if (!parse_uint(argv[++i], prefill_decode_interval) ||
+                prefill_decode_interval > 1024u) {
+                fprintf(stderr, "bad --prefill-decode-interval (0..1024)\n");
+                return kComputeParseError;
+            }
         } else if (std::strcmp(argv[i], "--device") == 0 && i + 1 < argc) {
             if (!parse_devices(argv[++i], devices)) { fprintf(stderr, "bad --device\n"); return kComputeParseError; }
         } else if (std::strcmp(argv[i], "--tensor-parallel") == 0 && i + 1 < argc) {

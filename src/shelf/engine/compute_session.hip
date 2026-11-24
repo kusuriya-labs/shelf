@@ -540,6 +540,7 @@ Status ComputeSession::initialize(const ComputeConfig& config) {
     batcher_config.max_scheduled_requests = exec_config.max_scheduled_requests;
     batcher_config.max_seq_len = max_seq;
     batcher_config.page_tokens = state.config_.page_tokens;
+    batcher_config.prefill_decode_interval = state.config_.prefill_decode_interval;
     batcher_config.eos_token_ids = text_config.stop_tokens;
 
     state.batcher_ = std::make_unique<runtime::ContinuousBatcher>(
@@ -782,6 +783,7 @@ Status ComputeSession::initialize_pipeline_parallel() {
     batcher_config.max_scheduled_requests = state.config_.max_concurrent_requests;
     batcher_config.max_seq_len = state.config_.max_seq_len;
     batcher_config.page_tokens = state.config_.page_tokens;
+    batcher_config.prefill_decode_interval = state.config_.prefill_decode_interval;
     batcher_config.eos_token_ids = stage0.hybrid_config().stop_tokens;
 
     state.batcher_ = std::make_unique<runtime::ContinuousBatcher>(
@@ -921,6 +923,7 @@ Status ComputeSession::initialize_tensor_parallel() {
     batcher_config.max_scheduled_requests = state.config_.max_concurrent_requests;
     batcher_config.max_seq_len = state.config_.max_seq_len;
     batcher_config.page_tokens = state.config_.page_tokens;
+    batcher_config.prefill_decode_interval = state.config_.prefill_decode_interval;
     batcher_config.eos_token_ids = rank0.hybrid_config().stop_tokens;
 
     state.batcher_ = std::make_unique<runtime::ContinuousBatcher>(
@@ -1103,6 +1106,14 @@ Status ComputeSession::set_external_request_id(uint64_t id,
         return Status::invalid_state("runtime not initialized", __FILE__, __LINE__);
     }
     return state.batcher_->set_external_request_id(id, external_request_id);
+}
+
+Status ComputeSession::set_ignore_eos(uint64_t id, bool ignore_eos) {
+    Impl& state = *impl_;
+    if (state.batcher_ == nullptr) {
+        return Status::invalid_state("runtime not initialized", __FILE__, __LINE__);
+    }
+    return state.batcher_->set_ignore_eos(id, ignore_eos);
 }
 
 Status ComputeSession::cancel_all() {

@@ -64,11 +64,13 @@ GROUPS = OrderedDict([
         "test_server_responses.py",
         "test_server_stream.py",
         "test_server_eos_contract.py",
+        "test_server_ignore_eos_readiness.py",
         "test_plamo3_template.py",
         "test_inference_budget.py",
     ]),
     ("bench", [
         "test_shelf_bench_suite.py",
+        "test_evalscope_agentic.py",
     ]),
     ("commonized-runtime", [
         "test_commonized_runtime_e2e.py",

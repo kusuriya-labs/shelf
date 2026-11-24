@@ -3,6 +3,7 @@
 #include <shelf/runtime/state_types.h>
 #include <shelf/runtime/scheduling_types.h>
 #include <shelf/runtime/dflash2_spec_decoder.h>
+#include <shelf/runtime/dflash2/dflash2_adaptive_state.h>
 #include <shelf/models/common/qwen_hybrid/stop_tokens.h>
 #include <shelf/core/status.h>
 #include <hip/hip_runtime.h>
@@ -37,8 +38,7 @@ struct DFlash2RequestSession {
     uint32_t pool_index = kDFlash2NoSessionSlot;
     DFlash2SpecTiming timing{};
     uint32_t adaptive_rows = 0;
-    uint32_t adaptive_probe_age = 0;
-    double adaptive_accepted_ema = 2.0;
+    DFlash2AdaptiveController adaptive;
     int32_t pending_token = -1;
     bool ready = false;
 };
@@ -98,6 +98,7 @@ struct RuntimeRequest {
 
     bool speculative_decode = false;
     bool dflash_used = false;
+    bool ignore_eos = false;
     std::unique_ptr<DFlash2RequestSession> dflash;
 
     std::string error_message;

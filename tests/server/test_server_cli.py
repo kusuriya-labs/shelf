@@ -56,6 +56,36 @@ def main() -> int:
                   value_of(chunk_argv, "--prefill-chunk") == "1024",
                   repr(value_of(chunk_argv, "--prefill-chunk")))
 
+    interval = shelf_server.parse_args([
+        "--model-dir", "models/unused",
+        "--device", "0",
+        "--prefill-decode-interval", "4",
+    ])
+    checker.check("prefill-decode-interval-forwarded",
+                  value_of(shelf_server.build_compute_argv(interval),
+                           "--prefill-decode-interval") == "4",
+                  repr(value_of(shelf_server.build_compute_argv(interval),
+                                "--prefill-decode-interval")))
+    disabled = shelf_server.parse_args([
+        "--model-dir", "models/unused",
+        "--device", "0",
+        "--prefill-decode-interval", "0",
+    ])
+    checker.check("prefill-decode-interval-zero-forwarded",
+                  value_of(shelf_server.build_compute_argv(disabled),
+                           "--prefill-decode-interval") == "0",
+                  "zero must be forwarded explicitly")
+    for bad in ("-1", "1025"):
+        try:
+            shelf_server.parse_args([
+                "--model-dir", "models/unused",
+                "--device", "0",
+                "--prefill-decode-interval", bad,
+            ])
+            checker.check(f"prefill-decode-interval-reject-{bad}", False, "accepted")
+        except SystemExit:
+            checker.check(f"prefill-decode-interval-reject-{bad}", True)
+
     defaults = shelf_server.parse_args([
         "--model-dir", "models/unused",
         "--device", "0",
@@ -74,8 +104,11 @@ def main() -> int:
                   value_of(default_argv, "--prefix-cache-save-interval") == "16384",
                   repr(value_of(default_argv, "--prefix-cache-save-interval")))
     checker.check("既定の prefill chunk を転送する",
-                  value_of(default_argv, "--prefill-chunk") == "4096",
+                  value_of(default_argv, "--prefill-chunk") == "8192",
                   repr(value_of(default_argv, "--prefill-chunk")))
+    checker.check("既定では decode 割り込みを転送しない",
+                  "--prefill-decode-interval" not in default_argv,
+                  repr(default_argv))
     return checker.done()
 
 

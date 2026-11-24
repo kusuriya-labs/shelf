@@ -73,6 +73,7 @@ int main(int argc, char** argv) {
     config.mtp_sink = static_cast<uint32_t>(opt.mtp_sink);
     config.max_seq_len = static_cast<uint32_t>(opt.max_seq_len);
     config.max_concurrent_requests = static_cast<uint32_t>(opt.max_concurrent_requests);
+    config.prefill_decode_interval = static_cast<uint32_t>(opt.prefill_decode_interval);
     if (opt.arena_gib_auto) {
         config.arena_mode = shelf::engine::ArenaBudgetMode::Auto;
         config.arena_bytes = 0u;

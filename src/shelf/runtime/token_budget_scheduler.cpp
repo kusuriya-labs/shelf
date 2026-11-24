@@ -6,6 +6,22 @@
 namespace shelf {
 namespace runtime {
 
+bool prefill_decode_should_interrupt(std::span<const RuntimeRequest*> active,
+                                     uint32_t interval,
+                                     uint32_t chunks_since_decode) noexcept {
+    if (interval == 0u || chunks_since_decode < interval) {
+        return false;
+    }
+    bool decode = false;
+    bool prefill = false;
+    for (const RuntimeRequest* request : active) {
+        if (request_decode_ready(*request)) decode = true;
+        if (request_prefill_ready(*request)) prefill = true;
+        if (decode && prefill) return true;
+    }
+    return false;
+}
+
 Result<SchedulePlan> schedule_requests(
     std::span<const RuntimeRequest*> active,
     uint32_t max_num_batched_tokens,

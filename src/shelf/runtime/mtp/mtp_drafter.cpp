@@ -2258,8 +2258,9 @@ Status mtp_draft_batch(
     for (std::size_t i = 0u; i < count; ++i) {
         const MtpSpecBatchSlot& slot = slots[i];
         MtpDrafter& drafter = *slot.drafter;
-        if (qwen_hybrid::is_stop_token(context.target->model.config->stop_tokens,
-                                       slot.pending_token)) {
+        if (!slot.ignore_eos && qwen_hybrid::is_stop_token(
+                                   context.target->model.config->stop_tokens,
+                                   slot.pending_token)) {
             stopped[i] = 1;
             plans[i].decode_only = true;
             continue;
@@ -2615,7 +2616,7 @@ Result<MtpSpecBatchOutput> mtp_verify_wavefront(
                     results[i].emitted[results[i].emitted_count++] = sampled[b];
                     results[i].pending_token = sampled[b];
                 }
-                results[i].finished = qwen_hybrid::is_stop_token(
+                results[i].finished = !slots[i].ignore_eos && qwen_hybrid::is_stop_token(
                     context.target->model.config->stop_tokens,
                     results[i].emitted[results[i].emitted_count - 1u]);
                 if (!keep_verifying || results[i].finished ||
