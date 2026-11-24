@@ -278,7 +278,7 @@ CPU 側の `arrive()` が担う。
 - capture は staging pool が warm になった後の run から。`ctx.capturing_graph` を立てる。
 - node が 0 の segment は capture せず eager で実行する。
 - 値が変わり得る入力（row 数 / request 数 / device pointer 群）を key にし、
-  一致しない run は eager に落とす。`SHELF_TP_HIP_GRAPH=0` で無効化できる。
+  一致しない run は eager に落とす。既定は無効で、`SHELF_TP_HIP_GRAPH=1` で有効化する。
 - 対象は `ExecutionRole::Decode` の run。`SHELF_TP_HIP_GRAPH_VERIFY=1` で
   `ExecutionRole::Verify` も対象になる（既定 off）。prefill は常に eager。
 - 実行方針は `TpGraphPolicy` の 3 値。

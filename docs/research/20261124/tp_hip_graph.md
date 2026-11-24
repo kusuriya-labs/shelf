@@ -32,7 +32,8 @@ barrier (`arrive`) は従来どおり CPU 側に残す。
 ## 結果
 
 Qwen3.8-27B-EXL3-INT8-4bpw、TP=2、context 64、8 token、warmup 2、
-interleaved 3 pair（`shelf-bench tg`）:
+interleaved 3 pair（`shelf-bench tg`）。この数値は 2026-11-24 の再起動前の環境で取ったもので、
+`pci=disable_acs_redir` 後の同じ条件では再現しなかった（後述のグリッドを参照）。
 
 | 構成 | wall tok/s | logits (argmax / max / sum) |
 | --- | ---: | --- |
@@ -60,6 +61,26 @@ capture を許可しない。
 
 27B + DFlash2 は 145.5 tok/s（off 145.6）、capture 0 回。27B dense の decode は
 39.3 tok/s（off 26.0）を維持する。
+
+### グリッド再測定（ACS 無効 boot、`tools/bench/tp_graph_grid.sh`）
+
+TP=1/2 × graph=on/off を 3 回ずつ、セルを交互に実行した中央値:
+
+| tp | graph | 中央値 tok/s | min | max |
+| --- | --- | ---: | ---: | ---: |
+| 1 | off | 25.53 | 25.52 | 25.65 |
+| 1 | on | 25.62 | 25.46 | 25.63 |
+| 2 | off | 27.66 | 27.32 | 27.68 |
+| 2 | on | 27.03 | 26.31 | 27.41 |
+
+- TP=1 は `SHELF_TP_HIP_GRAPH` の影響を受けない（TP schedule を持たないため）。差は誤差。
+- TP=2 は graph on が off より 2.3 % 遅い。dispatch 数は変わらないので、この環境では
+  segment graph を既定で有効にする根拠がない。
+- TP=2 off は TP=1 の 1.08 倍にとどまる。
+- 再起動前の graph on 39.5 tok/s は再現しない。同じ条件の単発計測では 20〜27 の間で
+  振れたため、以後はこのグリッドの中央値を正本にする。
+
+`SHELF_TP_HIP_GRAPH` は opt-in に変更した（既定 off）。
 
 ### Verify の segment graph（実装・opt-in）
 

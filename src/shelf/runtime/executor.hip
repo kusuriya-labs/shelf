@@ -421,7 +421,7 @@ bool layer_output_dump_enabled() {
 
 static bool tp_segment_graph_enabled() {
     const char* env = std::getenv("SHELF_TP_HIP_GRAPH");
-    return env == nullptr || env[0] == '\0' || env[0] != '0';
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
 }
 
 static bool tp_segment_graph_verify_enabled() {
