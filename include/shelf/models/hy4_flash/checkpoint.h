@@ -45,6 +45,8 @@ struct Checkpoint {
     std::array<std::array<int, 16>, 4> moduli{};
     std::array<std::array<uint8_t, 512>, 41> expert_bits{};
     bool mixed = false;
+    bool split_lm_head = false;
+    int lm_head_ranks() const { return split_lm_head ? ranks : 1; }
     Owners owners{};
     bool has_draft = false;
     int ep = 1;

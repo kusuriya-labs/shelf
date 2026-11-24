@@ -98,6 +98,64 @@ void logical_ranks(Residency &gpu, int ranks) {
     }
 }
 
+void logical_lm_head_tp(Residency &gpu, Checkpoint &sharded) {
+    if (!sharded.split_lm_head || sharded.ranks != gpu.ranks)
+        throw std::runtime_error("logical_lm_head_tp の前提が不正です");
+    const int ranks = gpu.ranks;
+    gpu.lm_head_tp = true;
+    gpu.model.split_lm_head = true;
+    const auto transport = std::getenv("SHELF_HY4_EP_TRANSPORT");
+    const bool host = transport && std::string_view(transport) == "host";
+    gpu.lm_host_fallback = host;
+    for (int r = 0; r < ranks; ++r) {
+        size_t weight_bytes = 0;
+        for (const char *suffix : {"lm_head.suh", "lm_head.svh", "lm_head.trellis"})
+            weight_bytes += ((sharded.at(suffix, r).bytes + 255) & ~size_t(255));
+        const size_t buf_bytes = 2 * lm_hidden_chunk_bytes + 2 * 4 * lm_argmax_stride +
+                                 (r == 0 ? 2 * lm_logits_chunk_bytes : 0) + (r > 0 ? weight_bytes : 0) + 4096;
+        auto result = gpu::GpuArena::create(0, buf_bytes);
+        if (!result.ok())
+            throw std::runtime_error(result.status().message());
+        gpu.arenas.push_back(result.release());
+        auto alloc = [&](size_t sz) {
+            auto mem = gpu.arenas.back().allocate_aligned(sz, 256);
+            if (!mem.ok())
+                throw std::runtime_error(mem.status().message());
+            return mem.value().data();
+        };
+        gpu.lm_hidden_buf[r] = alloc(2 * lm_hidden_chunk_bytes);
+        gpu.lm_head_recv[r] = alloc(2 * 4 * lm_argmax_stride);
+        if (r == 0)
+            gpu.lm_logits_recv[0] = alloc(2 * lm_logits_chunk_bytes);
+        if (host && !gpu.lm_staging[r])
+            checked(hipHostMalloc(&gpu.lm_staging[r], Residency::lm_staging_bytes(), hipHostMallocPortable));
+        for (int p = 0; p < 2; ++p)
+            for (auto events : {&gpu.lm_ready, &gpu.lm_done, &gpu.lm_arrived, &gpu.lm_consumed})
+                checked(hipEventCreateWithFlags(&(*events)[r][p],
+                                                hipEventDisableTiming | hipEventReleaseToSystem));
+        if (r == 0) {
+            for (const char *suffix : {"lm_head.suh", "lm_head.svh", "lm_head.trellis"}) {
+                const auto &src_w = sharded.at(suffix, 0);
+                auto &dst_w = gpu.model.local[0].at(suffix);
+                dst_w.spec = src_w.spec;
+                dst_w.bytes = src_w.bytes;
+                checked(hipMemcpy(gpu.weight_base[0] + dst_w.offset, src_w.host, src_w.bytes, hipMemcpyHostToDevice));
+            }
+        } else {
+            uint8_t *wbase = static_cast<uint8_t *>(alloc(weight_bytes));
+            gpu.weight_base[r] = wbase;
+            size_t off = 0;
+            for (const char *suffix : {"lm_head.suh", "lm_head.svh", "lm_head.trellis"}) {
+                Weight w = sharded.at(suffix, r);
+                w.offset = off;
+                checked(hipMemcpy(wbase + off, w.host, w.bytes, hipMemcpyHostToDevice));
+                off += (w.bytes + 255) & ~size_t(255);
+                gpu.model.local[r].emplace(suffix, std::move(w));
+            }
+        }
+    }
+}
+
 void reset_history(Residency &gpu) {
     gpu.release_slot_pages(0);
     if (!gpu.allocate_slot_pages(0, gpu.tokens))
@@ -340,7 +398,7 @@ void compare_draft_counts(const Path &body, const Path &draft) {
             setenv("SHELF_HY4_GRAPH", graph ? "1" : "0", 1);
             setenv("SHELF_HY4_DRAFT_GRAPH", graph ? "1" : "0", 1);
             for (int batch : {1, 2, 4, 8, 16}) {
-                Hy4BatchOptions opts{1024, 0.f, 0, 0, 1.f, k};
+                Hy4BatchOptions opts{1024, 0.f, 0, 0, 1.f, false, k};
                 std::vector<std::vector<int>> inputs(batch, prompt_short);
                 auto target_before = gpu.target_replays, draft_before = gpu.draft_replays;
                 auto results = generate_batch(gpu, inputs, std::vector<int>(batch, counts[0]), opts);
@@ -708,6 +766,118 @@ void compare_transports(const Path &body, const Path &draft, int ranks, const Ow
     }
 }
 
+void compare_lm_head_tp(const Path &body, const Path &draft) {
+    setenv("SHELF_HY4_LM_HEAD_TP", "0", 1);
+    Checkpoint model_off(body, body, draft, Owners{}, 4, 1);
+    if (model_off.split_lm_head)
+        throw std::runtime_error("SHELF_HY4_LM_HEAD_TP=0 でも split_lm_head が有効になりました");
+    setenv("SHELF_HY4_LM_HEAD_TP", "1", 1);
+    Checkpoint model_on(body, body, draft, Owners{}, 4, 1);
+    if (!model_on.split_lm_head)
+        throw std::runtime_error("4 rank 時に split_lm_head が有効になりませんでした");
+    Checkpoint model_ep3(body, body, draft, Owners{}, 3, 1);
+    if (model_ep3.split_lm_head)
+        throw std::runtime_error("割り切れない 3 rank で split_lm_head が有効になりました");
+    const size_t saved = model_off.bytes[0] - model_on.bytes[0];
+    if (saved < 200000000)
+        throw std::runtime_error("rank 0 の lm_head 削減量が期待未満です: " + std::to_string(saved));
+    printf("lm_head_tp_rank0_saved_bytes=%zu lm_head_rank0_bytes=%zu\n",
+           saved, model_on.at("lm_head.trellis", 0).bytes + model_on.at("lm_head.suh", 0).bytes +
+                      model_on.at("lm_head.svh", 0).bytes);
+    fflush(stdout);
+
+    const std::vector<int> prompt{802, 8778, 299, 9480, 341, 39144, 13, 360, 46544, 52315, 533,
+                                  10044, 565, 1823, 269, 7370, 587, 269, 10575, 2417};
+    std::vector<float> ref_logits;
+    std::vector<int> ref_greedy, ref_sample;
+    std::vector<std::vector<int>> ref_batch;
+    {
+        Checkpoint base_model(body, body, draft, Owners{}, 1, 1);
+        share_expert_weights(base_model);
+        Residency gpu(base_model, 64, 1);
+        auto st = gpu.reserve();
+        if (!st.ok())
+            throw std::runtime_error(st.message());
+        gpu.upload();
+        logical_ranks(gpu, 4);
+        setenv("SHELF_HY4_GRAPH", "0", 1);
+        setenv("SHELF_HY4_DRAFT_GRAPH", "0", 1);
+        ref_logits = prefill_logits(gpu, prompt, 20);
+        ref_greedy = generate(gpu, prompt, 8, 20, 0.f, 0, {}, 0, 1.f, {}, true, nullptr, nullptr, nullptr, 4);
+        ref_sample = generate(gpu, prompt, 6, 20, 0.8f, 42, {}, 0, 1.f, {}, true, nullptr, nullptr, nullptr, 4);
+        gpu.shutdown();
+    }
+    {
+        Checkpoint base_model(body, body, draft, Owners{}, 1, 1);
+        share_expert_weights(base_model);
+        Residency gpu(base_model, 64, 4);
+        auto st = gpu.reserve();
+        if (!st.ok())
+            throw std::runtime_error(st.message());
+        gpu.upload();
+        logical_ranks(gpu, 4);
+        setenv("SHELF_HY4_GRAPH", "0", 1);
+        setenv("SHELF_HY4_DRAFT_GRAPH", "0", 1);
+        ref_batch = generate_batch(gpu, std::vector<std::vector<int>>(4, prompt), std::vector<int>(4, 6),
+                                   {1024, 0.f, 0, 0, 1.f, true, 4});
+        gpu.shutdown();
+    }
+    for (const char *transport : {"push", "peer", "host"}) {
+        setenv("SHELF_HY4_EP_TRANSPORT", transport, 1);
+        for (int slots : {1, 4}) {
+            Checkpoint base_model(body, body, draft, Owners{}, 1, 1);
+            share_expert_weights(base_model);
+            Residency gpu(base_model, 64, slots);
+            auto st = gpu.reserve();
+            if (!st.ok())
+                throw std::runtime_error(st.message());
+            gpu.upload();
+            logical_ranks(gpu, 4);
+            logical_lm_head_tp(gpu, model_on);
+            if (slots == 1) {
+                auto got_logits = prefill_logits(gpu, prompt, 20);
+                for (size_t i = 0; i < ref_logits.size(); ++i)
+                    if (std::fabs(got_logits[i] - ref_logits[i]) > 1e-4f)
+                        throw std::runtime_error("lm_head TP prefill logits が基準と一致しません");
+                for (bool graphs : {false, true}) {
+                    if (graphs && std::string_view(transport) != "push")
+                        continue;
+                    setenv("SHELF_HY4_GRAPH", graphs ? "1" : "0", 1);
+                    setenv("SHELF_HY4_DRAFT_GRAPH", graphs ? "1" : "0", 1);
+                    for (int k : {2, 4, 5}) {
+                        auto got_g =
+                            generate(gpu, prompt, 8, 20, 0.f, 0, {}, 0, 1.f, {}, true, nullptr, nullptr, nullptr, k);
+                        if (got_g != ref_greedy)
+                            throw std::runtime_error("lm_head TP greedy 生成が基準と一致しません: k=" +
+                                                     std::to_string(k) + " graph=" + std::to_string(graphs));
+                    }
+                    auto got_s =
+                        generate(gpu, prompt, 6, 20, 0.8f, 42, {}, 0, 1.f, {}, true, nullptr, nullptr, nullptr, 4);
+                    if (got_s != ref_sample)
+                        throw std::runtime_error("lm_head TP sample 生成が基準と一致しません");
+                }
+            } else {
+                for (bool graphs : {false, true}) {
+                    if (graphs && std::string_view(transport) != "push")
+                        continue;
+                    setenv("SHELF_HY4_GRAPH", graphs ? "1" : "0", 1);
+                    setenv("SHELF_HY4_DRAFT_GRAPH", graphs ? "1" : "0", 1);
+                    auto got_b = generate_batch(gpu, std::vector<std::vector<int>>(4, prompt), std::vector<int>(4, 6),
+                                                {1024, 0.f, 0, 0, 1.f, true, 4});
+                    if (got_b != ref_batch)
+                        throw std::runtime_error("lm_head TP バッチ生成が基準と一致しません");
+                }
+            }
+            printf("lm_head_tp ep=4 transport=%s slots=%d pass\n", transport, slots);
+            fflush(stdout);
+            gpu.shutdown();
+        }
+    }
+    unsetenv("SHELF_HY4_EP_TRANSPORT");
+    setenv("SHELF_HY4_GRAPH", "1", 1);
+    setenv("SHELF_HY4_DRAFT_GRAPH", "1", 1);
+}
+
 }
 extern "C" hipError_t __real_hipEventRecord(hipEvent_t, hipStream_t);
 extern "C" hipError_t __wrap_hipEventRecord(hipEvent_t event, hipStream_t stream) {
@@ -852,6 +1022,10 @@ int main(int argc, char **argv) {
             compare_draft_counts(argv[1], argv[2]);
             return 0;
         }
+        if (argc == 4 && std::string_view(argv[3]) == "lmhead") {
+            compare_lm_head_tp(argv[1], argv[2]);
+            return 0;
+        }
         if (argc != 3 && (argc != 4 || std::string_view(argv[3]) != "batch"))
             return 2;
         if (argc == 4) {
@@ -859,6 +1033,7 @@ int main(int argc, char **argv) {
         } else {
             for (int ranks : {1, 3, 4}) compare(argv[1], argv[2], ranks);
             compare_draft_counts(argv[1], argv[2]);
+            compare_lm_head_tp(argv[1], argv[2]);
         }
         return 0;
     } catch (const std::exception &e) {

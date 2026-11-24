@@ -449,6 +449,74 @@ void tp_add_bf16(void *dst, const void *src, size_t bytes, hipStream_t stream) {
                                                   static_cast<const uint16_t *>(src), count);
     checked(hipGetLastError());
 }
+struct alignas(8) TpArgmaxPair {
+    float val;
+    int id;
+};
+__global__ void argmax_pack_kernel(const float *vals, const int *ids, TpArgmaxPair *out, int rows) {
+    int r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (r < rows)
+        out[r] = TpArgmaxPair{vals[r], ids[r]};
+}
+__global__ void argmax_reduce_kernel(const TpArgmaxPair *src, int stride_pairs, int tp_size, int rows, int *out_ids) {
+    int r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (r >= rows)
+        return;
+    TpArgmaxPair best = src[r];
+    for (int t = 1; t < tp_size; ++t) {
+        TpArgmaxPair cur = src[size_t(t) * stride_pairs + r];
+        if (cur.val > best.val || (cur.val == best.val && cur.id < best.id))
+            best = cur;
+    }
+    out_ids[r] = best.id;
+}
+__global__ void scatter_logits_kernel(const float *src, float *dst, int rows, int local_vocab, int full_vocab, int offset) {
+    size_t idx = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    size_t total = size_t(rows) * local_vocab;
+    if (idx >= total)
+        return;
+    int r = int(idx / local_vocab);
+    int c = int(idx - size_t(r) * local_vocab);
+    dst[size_t(r) * full_vocab + offset + c] = src[idx];
+}
+__global__ void scatter_logits_vec4_kernel(const float4 *src, float4 *dst, int rows, int local_v4, int full_v4, int off_v4) {
+    size_t idx = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    size_t total = size_t(rows) * local_v4;
+    if (idx >= total)
+        return;
+    int r = int(idx / local_v4);
+    int c = int(idx - size_t(r) * local_v4);
+    dst[size_t(r) * full_v4 + off_v4 + c] = src[idx];
+}
+void tp_argmax_pack(const float *vals, const int *ids, void *out_pairs, int rows, hipStream_t stream) {
+    if (rows <= 0)
+        return;
+    argmax_pack_kernel<<<(rows + 255) / 256, 256, 0, stream>>>(
+        vals, ids, static_cast<TpArgmaxPair *>(out_pairs), rows);
+    checked(hipGetLastError());
+}
+void tp_argmax_reduce(const void *src_pairs, int stride_pairs, int tp_size, int rows, int *out_ids, hipStream_t stream) {
+    if (rows <= 0)
+        return;
+    argmax_reduce_kernel<<<(rows + 255) / 256, 256, 0, stream>>>(
+        static_cast<const TpArgmaxPair *>(src_pairs), stride_pairs, tp_size, rows, out_ids);
+    checked(hipGetLastError());
+}
+void tp_scatter_logits(const float *src, float *dst, int rows, int local_vocab, int full_vocab, int offset, hipStream_t stream) {
+    if (rows <= 0 || local_vocab <= 0)
+        return;
+    if ((local_vocab & 3) == 0 && (full_vocab & 3) == 0 && (offset & 3) == 0) {
+        size_t total = size_t(rows) * (local_vocab / 4);
+        scatter_logits_vec4_kernel<<<(total + 255) / 256, 256, 0, stream>>>(
+            reinterpret_cast<const float4 *>(src), reinterpret_cast<float4 *>(dst),
+            rows, local_vocab / 4, full_vocab / 4, offset / 4);
+    } else {
+        size_t total = size_t(rows) * local_vocab;
+        scatter_logits_kernel<<<(total + 255) / 256, 256, 0, stream>>>(
+            src, dst, rows, local_vocab, full_vocab, offset);
+    }
+    checked(hipGetLastError());
+}
 Mat Ops::mat(int rows, int cols) {
     if (rows < 1 || cols < 1)
         throw std::runtime_error("空の作業行列です");

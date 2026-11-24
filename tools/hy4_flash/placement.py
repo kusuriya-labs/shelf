@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 from pathlib import Path
 
 
@@ -141,6 +142,27 @@ def checkpoint_sizes(directory):
     return fixed, experts
 
 
+def lm_head_size(directory):
+    import struct
+
+    index_path = directory / "model.safetensors.index.json"
+    if not index_path.exists():
+        return 0
+    index = json.loads(index_path.read_bytes())["weight_map"]
+    total = 0
+    for shard in set(index.values()):
+        with (directory / shard).open("rb") as f:
+            header = json.loads(f.read(struct.unpack("<Q", f.read(8))[0]))
+        for name, spec in header.items():
+            if name == "__metadata__" or name not in index or not name.startswith("lm_head."):
+                continue
+            if name.endswith(".mul1"):
+                continue
+            size = spec["data_offsets"][1] - spec["data_offsets"][0]
+            total += (size + 15) & ~15
+    return total
+
+
 def main():
     p = argparse.ArgumentParser(description="原本のヘッダーと校正頻度から EP 配置と容量を試算する")
     p.add_argument("model", type=Path)
@@ -188,12 +210,36 @@ def main():
     graph_bytes = GRAPH_HEADROOM if args.tensor_parallel == 1 else 0
     base = [int(w * GIB) + matrix_bytes + graph_bytes for w in args.workspace]
     routing_bytes = 41 * 512 * 4 + 256
+    physical_ranks = len(args.capacity) * args.tensor_parallel
+    split_lm_head = (
+        physical_ranks > 1
+        and 120832 % (physical_ranks * 128) == 0
+        and os.environ.get("SHELF_HY4_LM_HEAD_TP", "1") != "0"
+    )
+    lm_bytes = lm_head_size(args.model)
+    lm_split_bytes = lm_bytes if split_lm_head and lm_bytes > 0 else 0
+    lm_buf_bytes = (2 * 512 * 3072 * 2 + 2 * 4 * 512 * 8) if lm_split_bytes else 0
+    lm_per_rank = lm_split_bytes // physical_ranks if lm_split_bytes else lm_bytes
+    fixed_body = fixed - lm_split_bytes
     if args.tensor_parallel > 1:
         collective_bytes = 1024 * (3072 + (1536 if len(args.capacity) > 1 else 0)) * 2
-        local = routing_bytes + collective_bytes + fixed // args.tensor_parallel + draft + kv + indexer + folded // args.tensor_parallel
+        local = (
+            routing_bytes
+            + collective_bytes
+            + fixed_body // args.tensor_parallel
+            + draft
+            + kv
+            + indexer
+            + folded // args.tensor_parallel
+        )
+        if lm_split_bytes:
+            local += lm_per_rank + lm_buf_bytes + 2 * (2 << 20)
         base = [value + local for value in base]
     else:
-        base[0] += routing_bytes + fixed + draft + kv + indexer + folded
+        base[0] += routing_bytes + fixed_body + draft + kv + indexer + folded
+        if lm_split_bytes:
+            for r in range(len(base)):
+                base[r] += lm_per_rank + lm_buf_bytes + (2 * (2 << 20) if r == 0 else 0)
     capacities = [int(c * GIB) - used - int(args.safety_gib * GIB)
                   for c, used in zip(args.capacity, base)]
     balance = args.max_concurrent_requests > 1 if args.balance_experts is None else args.balance_experts
@@ -209,7 +255,9 @@ def main():
         ]
         avg_expert_bytes = sum(rank_expert_bytes) // (41 * 512)
     print(json.dumps(dict(fixed_bytes=fixed, draft_bytes=draft, kv_bytes=kv, index_bytes=indexer,
-                          folded_bytes=folded, routing_bytes=routing_bytes, matrix_bytes=matrix_bytes, graph_bytes_per_rank=graph_bytes, safety_gib=args.safety_gib,
+                          folded_bytes=folded, routing_bytes=routing_bytes, matrix_bytes=matrix_bytes,
+                          graph_bytes_per_rank=graph_bytes, safety_gib=args.safety_gib,
+                          lm_head_bytes_per_rank=lm_per_rank,
                           rank_experts=rank_experts, rank_expert_bytes=rank_expert_bytes,
                           expert_bytes=avg_expert_bytes,
                           peak_estimate=[b+rb for b,rb in zip(base, rank_expert_bytes)],

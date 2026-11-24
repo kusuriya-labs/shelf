@@ -285,7 +285,7 @@ Target::Target(Residency &gpu, float temp, uint64_t rng, int k, float p, int ran
     target_graph = topology && graph_enabled("SHELF_HY4_GRAPH");
     bool draft_available = gpu.max_slots == 1 ? gpu.model.has_draft : gpu.batch_draft;
     draft_graph = draft_available && graph_enabled("SHELF_HY4_DRAFT_GRAPH") &&
-        (gpu.max_slots == 1 ? gpu.tp_size == 1 && room : topology);
+        ((gpu.max_slots == 1 && !gpu.lm_head_tp) ? (gpu.tp_size == 1 && room) : topology);
     if ((target_graph || draft_graph) && !gpu.graph_input && !gpu.batch_input) {
         if (gpu.max_slots > 1)
             gpu.batch_input = static_cast<BatchGraphInput *>(op.reserve_persistent(sizeof(BatchGraphInput)));
@@ -299,26 +299,236 @@ Target::Target(Residency &gpu, float temp, uint64_t rng, int k, float p, int ran
     }
 }
 float *Target::head_logits(Mat hidden) {
-    auto codes = static_cast<int8_t *>(op.arena.next(size_t(hidden.rows) * 3072));
-    auto scales = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 24 * 4));
-    auto partial = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 120832 * 4));
-    auto logits = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 120832 * 4));
-    checked(shelf_hy4_head(hidden.p, static_cast<const uint16_t *>(op.param("lm_head.suh").p),
-                           static_cast<const uint16_t *>(op.param("lm_head.svh").p),
-                           static_cast<const uint32_t *>(op.param("lm_head.trellis").p), codes, scales,
-                           partial, logits, hidden.rows, op.stream));
+    if (!op.gpu.lm_head_tp) {
+        auto codes = static_cast<int8_t *>(op.arena.next(size_t(hidden.rows) * 3072));
+        auto scales = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 24 * 4));
+        auto partial = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 120832 * 4));
+        auto logits = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 120832 * 4));
+        checked(shelf_hy4_head(hidden.p, static_cast<const uint16_t *>(op.param("lm_head.suh").p),
+                               static_cast<const uint16_t *>(op.param("lm_head.svh").p),
+                               static_cast<const uint32_t *>(op.param("lm_head.trellis").p), codes, scales,
+                               partial, logits, hidden.rows, op.stream));
+        return logits;
+    }
+    const int n = op.gpu.ranks;
+    const int local_vocab = hy4_vocab_size / n;
+    if (op.gpu.tp_size > 1) {
+        float *logits = op.rank == 0
+            ? static_cast<float *>(op.arena.next(size_t(hidden.rows) * hy4_vocab_size * 4))
+            : nullptr;
+        const size_t work_mark = op.arena.cursor;
+        auto codes = static_cast<int8_t *>(op.arena.next(size_t(hidden.rows) * 3072));
+        auto scales = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 24 * 4));
+        auto partial = static_cast<float *>(op.arena.next(size_t(hidden.rows) * local_vocab * 4));
+        auto local_logits = static_cast<float *>(op.arena.next(size_t(hidden.rows) * local_vocab * 4));
+        checked(shelf_hy4_head(hidden.p, static_cast<const uint16_t *>(op.param("lm_head.suh").p),
+                               static_cast<const uint16_t *>(op.param("lm_head.svh").p),
+                               static_cast<const uint32_t *>(op.param("lm_head.trellis").p), codes, scales,
+                               partial, local_logits, hidden.rows, op.stream, local_vocab));
+        op.gpu.tp_gather_logits(local_logits, logits, op.rank, hidden.rows, local_vocab, hy4_vocab_size);
+        op.arena.cursor = work_mark;
+        return logits;
+    }
+    float *logits = static_cast<float *>(op.arena.next(size_t(hidden.rows) * hy4_vocab_size * 4));
+    if (op.capture) {
+        const size_t work_mark = op.arena.cursor;
+        std::array<void *, 4> hidden_ptrs{};
+        op.gpu.lm_scatter_hidden(hidden.p, size_t(hidden.rows) * lm_hidden_row_bytes, hidden_ptrs, true);
+        std::array<float *, 4> recv_logits{};
+        for (int r = 1; r < n; ++r)
+            recv_logits[r] = static_cast<float *>(op.arena.next(size_t(hidden.rows) * local_vocab * 4));
+        op.capture->plan.head_steps.emplace_back();
+        auto &hs = op.capture->plan.head_steps.back();
+        op.capture->finish(hs.scatter);
+        for (int r = 1; r < n; ++r) {
+            op.capture->begin(r);
+            auto &arena = op.gpu.workspace[r];
+            arena.cursor = 0;
+            auto codes = static_cast<int8_t *>(arena.next(size_t(hidden.rows) * 3072));
+            auto scales = static_cast<float *>(arena.next(size_t(hidden.rows) * 24 * 4));
+            auto partial = static_cast<float *>(arena.next(size_t(hidden.rows) * local_vocab * 4));
+            auto local_logits = static_cast<float *>(arena.next(size_t(hidden.rows) * local_vocab * 4));
+            checked(shelf_hy4_head(static_cast<const uint16_t *>(hidden_ptrs[r]),
+                                   static_cast<const uint16_t *>(op.gpu.device(op.gpu.model.at("lm_head.suh", r))),
+                                   static_cast<const uint16_t *>(op.gpu.device(op.gpu.model.at("lm_head.svh", r))),
+                                   static_cast<const uint32_t *>(op.gpu.device(op.gpu.model.at("lm_head.trellis", r))),
+                                   codes, scales, partial, local_logits, hidden.rows, op.gpu.compute[r], local_vocab));
+            peer_copy(recv_logits[r], local_logits, size_t(hidden.rows) * local_vocab * 4, op.gpu.compute[r]);
+            op.capture->finish(hs.rank_exec[r]);
+        }
+        op.capture->begin(0);
+        auto codes = static_cast<int8_t *>(op.arena.next(size_t(hidden.rows) * 3072));
+        auto scales = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 24 * 4));
+        auto partial = static_cast<float *>(op.arena.next(size_t(hidden.rows) * local_vocab * 4));
+        auto local_logits = static_cast<float *>(op.arena.next(size_t(hidden.rows) * local_vocab * 4));
+        checked(shelf_hy4_head(static_cast<const uint16_t *>(hidden_ptrs[0]),
+                               static_cast<const uint16_t *>(op.gpu.device(op.gpu.model.at("lm_head.suh", 0))),
+                               static_cast<const uint16_t *>(op.gpu.device(op.gpu.model.at("lm_head.svh", 0))),
+                               static_cast<const uint32_t *>(op.gpu.device(op.gpu.model.at("lm_head.trellis", 0))),
+                               codes, scales, partial, local_logits, hidden.rows, op.stream, local_vocab));
+        tp_scatter_logits(local_logits, logits, hidden.rows, local_vocab, hy4_vocab_size, 0, op.stream);
+        op.capture->finish(hs.rank_exec[0]);
+        op.capture->begin(0);
+        for (int r = 1; r < n; ++r)
+            tp_scatter_logits(recv_logits[r], logits, hidden.rows, local_vocab, hy4_vocab_size, r * local_vocab,
+                              op.stream);
+        op.arena.cursor = work_mark;
+        return logits;
+    }
+    const int chunk_rows = 192;
+    for (int first = 0; first < hidden.rows; first += chunk_rows) {
+        const int count = std::min(chunk_rows, hidden.rows - first);
+        const size_t work_mark = op.arena.cursor;
+        std::array<void *, 4> hidden_ptrs{};
+        op.gpu.lm_scatter_hidden(hidden.row(first, count).p, size_t(count) * lm_hidden_row_bytes, hidden_ptrs, false);
+        std::array<const float *, 4> local_logits{};
+        for (int r = 0; r < n; ++r) {
+            checked(hipSetDevice(op.gpu.physical[r]));
+            Region &arena = r == 0 ? op.arena : op.gpu.workspace[r];
+            if (r > 0)
+                arena.cursor = 0;
+            auto codes = static_cast<int8_t *>(arena.next(size_t(count) * 3072));
+            auto scales = static_cast<float *>(arena.next(size_t(count) * 24 * 4));
+            auto partial = static_cast<float *>(arena.next(size_t(count) * local_vocab * 4));
+            auto local = static_cast<float *>(arena.next(size_t(count) * local_vocab * 4));
+            local_logits[r] = local;
+            checked(shelf_hy4_head(static_cast<const uint16_t *>(hidden_ptrs[r]),
+                                   static_cast<const uint16_t *>(op.gpu.device(op.gpu.model.at("lm_head.suh", r))),
+                                   static_cast<const uint16_t *>(op.gpu.device(op.gpu.model.at("lm_head.svh", r))),
+                                   static_cast<const uint32_t *>(op.gpu.device(op.gpu.model.at("lm_head.trellis", r))),
+                                   codes, scales, partial, local, count, op.gpu.compute[r], local_vocab));
+        }
+        checked(hipSetDevice(op.gpu.physical[0]));
+        op.gpu.lm_gather_logits(local_logits, count, local_vocab, hy4_vocab_size,
+                                logits + size_t(first) * hy4_vocab_size);
+        op.arena.cursor = work_mark;
+        for (int r = 1; r < n; ++r)
+            op.gpu.workspace[r].cursor = 0;
+    }
     return logits;
 }
 void Target::head_argmax(Mat hidden, int *tokens) {
-    auto codes = static_cast<int8_t *>(op.arena.next(size_t(hidden.rows) * 3072));
-    auto scales = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 24 * 4));
-    auto partial = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 120832 * 4));
-    auto tile_vals = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 944 * 4));
-    auto tile_ids = static_cast<int *>(op.arena.next(size_t(hidden.rows) * 944 * 4));
-    checked(shelf_hy4_head_argmax(hidden.p, static_cast<const uint16_t *>(op.param("lm_head.suh").p),
-                                  static_cast<const uint16_t *>(op.param("lm_head.svh").p),
-                                  static_cast<const uint32_t *>(op.param("lm_head.trellis").p), codes, scales,
-                                  partial, tile_vals, tile_ids, tokens, hidden.rows, op.stream));
+    if (!op.gpu.lm_head_tp) {
+        auto codes = static_cast<int8_t *>(op.arena.next(size_t(hidden.rows) * 3072));
+        auto scales = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 24 * 4));
+        auto partial = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 120832 * 4));
+        auto tile_vals = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 944 * 4));
+        auto tile_ids = static_cast<int *>(op.arena.next(size_t(hidden.rows) * 944 * 4));
+        checked(shelf_hy4_head_argmax(hidden.p, static_cast<const uint16_t *>(op.param("lm_head.suh").p),
+                                      static_cast<const uint16_t *>(op.param("lm_head.svh").p),
+                                      static_cast<const uint32_t *>(op.param("lm_head.trellis").p), codes, scales,
+                                      partial, tile_vals, tile_ids, tokens, hidden.rows, op.stream));
+        return;
+    }
+    const int n = op.gpu.ranks;
+    const int local_vocab = hy4_vocab_size / n;
+    const int tiles = local_vocab / hy4_lm_head_tile;
+    if (op.gpu.tp_size > 1) {
+        const size_t mark = op.arena.cursor;
+        auto codes = static_cast<int8_t *>(op.arena.next(size_t(hidden.rows) * 3072));
+        auto scales = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 24 * 4));
+        auto partial = static_cast<float *>(op.arena.next(size_t(hidden.rows) * local_vocab * 4));
+        auto tile_vals = static_cast<float *>(op.arena.next(size_t(hidden.rows) * tiles * 4));
+        auto tile_ids = static_cast<int *>(op.arena.next(size_t(hidden.rows) * tiles * 4));
+        auto best_vals = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 4));
+        auto best_ids = static_cast<int *>(op.arena.next(size_t(hidden.rows) * 4));
+        checked(shelf_hy4_head_argmax(hidden.p, static_cast<const uint16_t *>(op.param("lm_head.suh").p),
+                                      static_cast<const uint16_t *>(op.param("lm_head.svh").p),
+                                      static_cast<const uint32_t *>(op.param("lm_head.trellis").p), codes, scales,
+                                      partial, tile_vals, tile_ids, nullptr, hidden.rows, op.stream, local_vocab,
+                                      op.rank * local_vocab, best_vals, best_ids));
+        op.gpu.tp_argmax(best_vals, best_ids, tokens, op.rank, hidden.rows);
+        op.arena.cursor = mark;
+        return;
+    }
+    if (op.capture) {
+        const size_t mark = op.arena.cursor;
+        std::array<void *, 4> hidden_ptrs{};
+        op.gpu.lm_scatter_hidden(hidden.p, size_t(hidden.rows) * lm_hidden_row_bytes, hidden_ptrs, true);
+        op.capture->plan.head_steps.emplace_back();
+        auto &hs = op.capture->plan.head_steps.back();
+        op.capture->finish(hs.scatter);
+        for (int r = 1; r < n; ++r) {
+            op.capture->begin(r);
+            auto &arena = op.gpu.workspace[r];
+            arena.cursor = 0;
+            auto codes = static_cast<int8_t *>(arena.next(size_t(hidden.rows) * 3072));
+            auto scales = static_cast<float *>(arena.next(size_t(hidden.rows) * 24 * 4));
+            auto partial = static_cast<float *>(arena.next(size_t(hidden.rows) * local_vocab * 4));
+            auto tile_vals = static_cast<float *>(arena.next(size_t(hidden.rows) * tiles * 4));
+            auto tile_ids = static_cast<int *>(arena.next(size_t(hidden.rows) * tiles * 4));
+            auto best_vals = static_cast<float *>(arena.next(size_t(hidden.rows) * 4));
+            auto best_ids = static_cast<int *>(arena.next(size_t(hidden.rows) * 4));
+            auto local_pairs = arena.next(size_t(hidden.rows) * 8);
+            checked(shelf_hy4_head_argmax(
+                static_cast<const uint16_t *>(hidden_ptrs[r]),
+                static_cast<const uint16_t *>(op.gpu.device(op.gpu.model.at("lm_head.suh", r))),
+                static_cast<const uint16_t *>(op.gpu.device(op.gpu.model.at("lm_head.svh", r))),
+                static_cast<const uint32_t *>(op.gpu.device(op.gpu.model.at("lm_head.trellis", r))), codes, scales,
+                partial, tile_vals, tile_ids, nullptr, hidden.rows, op.gpu.compute[r], local_vocab,
+                r * local_vocab, best_vals, best_ids));
+            tp_argmax_pack(best_vals, best_ids, local_pairs, hidden.rows, op.gpu.compute[r]);
+            peer_copy(static_cast<char *>(op.gpu.lm_head_recv[0]) + size_t(r) * lm_argmax_stride, local_pairs,
+                      size_t(hidden.rows) * 8, op.gpu.compute[r]);
+            op.capture->finish(hs.rank_exec[r]);
+        }
+        op.capture->begin(0);
+        auto codes = static_cast<int8_t *>(op.arena.next(size_t(hidden.rows) * 3072));
+        auto scales = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 24 * 4));
+        auto partial = static_cast<float *>(op.arena.next(size_t(hidden.rows) * local_vocab * 4));
+        auto tile_vals = static_cast<float *>(op.arena.next(size_t(hidden.rows) * tiles * 4));
+        auto tile_ids = static_cast<int *>(op.arena.next(size_t(hidden.rows) * tiles * 4));
+        auto best_vals = static_cast<float *>(op.arena.next(size_t(hidden.rows) * 4));
+        auto best_ids = static_cast<int *>(op.arena.next(size_t(hidden.rows) * 4));
+        checked(shelf_hy4_head_argmax(
+            static_cast<const uint16_t *>(hidden_ptrs[0]),
+            static_cast<const uint16_t *>(op.gpu.device(op.gpu.model.at("lm_head.suh", 0))),
+            static_cast<const uint16_t *>(op.gpu.device(op.gpu.model.at("lm_head.svh", 0))),
+            static_cast<const uint32_t *>(op.gpu.device(op.gpu.model.at("lm_head.trellis", 0))), codes, scales,
+            partial, tile_vals, tile_ids, nullptr, hidden.rows, op.stream, local_vocab, 0, best_vals, best_ids));
+        tp_argmax_pack(best_vals, best_ids, op.gpu.lm_head_recv[0], hidden.rows, op.stream);
+        op.capture->finish(hs.rank_exec[0]);
+        op.capture->begin(0);
+        tp_argmax_reduce(op.gpu.lm_head_recv[0], lm_argmax_max_rows, n, hidden.rows, tokens, op.stream);
+        op.arena.cursor = mark;
+        return;
+    }
+    const int chunk_rows = 192;
+    for (int first = 0; first < hidden.rows; first += chunk_rows) {
+        const int count = std::min(chunk_rows, hidden.rows - first);
+        const size_t mark = op.arena.cursor;
+        std::array<void *, 4> hidden_ptrs{};
+        op.gpu.lm_scatter_hidden(hidden.row(first, count).p, size_t(count) * lm_hidden_row_bytes, hidden_ptrs, false);
+        std::array<const float *, 4> best_vals{};
+        std::array<const int *, 4> best_ids{};
+        for (int r = 0; r < n; ++r) {
+            checked(hipSetDevice(op.gpu.physical[r]));
+            Region &arena = r == 0 ? op.arena : op.gpu.workspace[r];
+            if (r > 0)
+                arena.cursor = 0;
+            auto codes = static_cast<int8_t *>(arena.next(size_t(count) * 3072));
+            auto scales = static_cast<float *>(arena.next(size_t(count) * 24 * 4));
+            auto partial = static_cast<float *>(arena.next(size_t(count) * local_vocab * 4));
+            auto tile_vals = static_cast<float *>(arena.next(size_t(count) * tiles * 4));
+            auto tile_ids = static_cast<int *>(arena.next(size_t(count) * tiles * 4));
+            auto vals_r = static_cast<float *>(arena.next(size_t(count) * 4));
+            auto ids_r = static_cast<int *>(arena.next(size_t(count) * 4));
+            best_vals[r] = vals_r;
+            best_ids[r] = ids_r;
+            checked(shelf_hy4_head_argmax(
+                static_cast<const uint16_t *>(hidden_ptrs[r]),
+                static_cast<const uint16_t *>(op.gpu.device(op.gpu.model.at("lm_head.suh", r))),
+                static_cast<const uint16_t *>(op.gpu.device(op.gpu.model.at("lm_head.svh", r))),
+                static_cast<const uint32_t *>(op.gpu.device(op.gpu.model.at("lm_head.trellis", r))), codes, scales,
+                partial, tile_vals, tile_ids, nullptr, count, op.gpu.compute[r], local_vocab, r * local_vocab, vals_r,
+                ids_r));
+        }
+        checked(hipSetDevice(op.gpu.physical[0]));
+        op.gpu.lm_gather_argmax(best_vals, best_ids, count, tokens + first);
+        op.arena.cursor = mark;
+        for (int r = 1; r < n; ++r)
+            op.gpu.workspace[r].cursor = 0;
+    }
 }
 std::vector<int> Target::predict(Mat hidden, int position, bool draft, const Path &dump,
                                  float *distribution, float *logits, int *tokens) {
@@ -334,16 +544,20 @@ std::vector<int> Target::predict(Mat hidden, int position, bool draft, const Pat
         } else {
             if (!logits)
                 logits = head_logits(hidden);
-            if (!dump.empty()) {
-                std::vector<float> host(120832);
-                op.copy(host.data(), logits + size_t(hidden.rows - 1) * 120832, host.size() * 4,
-                        hipMemcpyDeviceToHost);
-                std::ofstream file(dump, std::ios::binary);
-                if (!file.write(reinterpret_cast<const char *>(host.data()), host.size() * 4))
-                    throw std::runtime_error("logits を保存できません");
+            if (op.rank == 0 || !op.gpu.lm_head_tp || op.gpu.tp_size == 1) {
+                if (!dump.empty()) {
+                    std::vector<float> host(120832);
+                    op.copy(host.data(), logits + size_t(hidden.rows - 1) * 120832, host.size() * 4,
+                            hipMemcpyDeviceToHost);
+                    std::ofstream file(dump, std::ios::binary);
+                    if (!file.write(reinterpret_cast<const char *>(host.data()), host.size() * 4))
+                        throw std::runtime_error("logits を保存できません");
+                }
+                sample(logits, hidden.rows, position, seed ^ (draft ? 0x735a7ec51b09ull : 0ull), device_ids,
+                       distribution);
             }
-            sample(logits, hidden.rows, position, seed ^ (draft ? 0x735a7ec51b09ull : 0ull), device_ids,
-                   distribution);
+            if (op.gpu.tp_size > 1 && op.gpu.lm_head_tp)
+                op.gpu.tp_broadcast_ids(device_ids, op.rank, hidden.rows);
         }
     }
     std::vector<int> result(hidden.rows);
@@ -570,7 +784,7 @@ std::vector<int> Target::propose(int anchor) {
     params.ids[0] = anchor;
     std::fill_n(params.ids + 1, drafts, 120009);
     checked(hipMemcpyAsync(&gpu.graph_input->step, &params, sizeof(params), hipMemcpyHostToDevice, op.stream));
-    checked(hipGraphLaunch(plan->tail, op.stream));
+    plan->launch(gpu);
     ++gpu.draft_replays;
     std::vector<int> result(drafts);
     op.copy(result.data(), gpu.graph_input->step.ids + 1, drafts * sizeof(int), hipMemcpyDeviceToHost);
@@ -1127,7 +1341,7 @@ std::vector<int> propose_batch(Target &target, const std::vector<BatchLane> &lan
         if (plan) {
             step = batch_step(op, lanes, ids, true);
             checked(hipMemcpyAsync(&gpu.batch_input->step, &step, sizeof(step), hipMemcpyHostToDevice, op.stream));
-            checked(hipGraphLaunch(plan->tail, op.stream));
+            plan->launch(gpu);
             ++gpu.draft_replays;
             device = gpu.batch_input->candidates;
         }

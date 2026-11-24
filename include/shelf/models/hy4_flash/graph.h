@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace shelf::hy4 {
 struct Residency;
@@ -47,9 +48,17 @@ struct GraphLayer {
     std::array<std::array<hipEvent_t, 4>, 2> expert_done{};
 };
 
+struct GraphHeadStep {
+    hipGraphExec_t scatter{};
+    std::array<hipGraphExec_t, 4> rank_exec{};
+    std::array<hipEvent_t, 2> scatter_done{};
+    std::array<std::array<hipEvent_t, 4>, 2> rank_done{};
+};
+
 struct GraphPlan {
     GraphKey key{};
     std::array<GraphLayer, 41> layers{};
+    std::vector<GraphHeadStep> head_steps{};
     hipGraphExec_t entry{}, tail{};
     float *logits{};
     int *tokens{};

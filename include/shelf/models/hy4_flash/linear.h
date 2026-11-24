@@ -45,12 +45,14 @@ hipError_t shelf_hy4_shared_gate_up(const uint16_t *input, Hy4ExpertProjection g
                                     float *partial, uint16_t *output, int rows, hipStream_t stream);
 
 hipError_t shelf_hy4_head(const uint16_t *x, const uint16_t *suh, const uint16_t *svh, const uint32_t *trellis,
-                          int8_t *codes, float *scales, float *partial, float *logits, int rows, hipStream_t stream = nullptr);
+                          int8_t *codes, float *scales, float *partial, float *logits, int rows,
+                          hipStream_t stream = nullptr, int vocab_width = 120832);
 
 hipError_t shelf_hy4_head_argmax(const uint16_t *x, const uint16_t *suh, const uint16_t *svh,
                                  const uint32_t *trellis, int8_t *codes, float *scales, float *partial,
                                  float *tile_vals, int *tile_ids, int *tokens, int rows,
-                                 hipStream_t stream = nullptr);
+                                 hipStream_t stream = nullptr, int vocab_width = 120832, int vocab_offset = 0,
+                                 float *best_vals = nullptr, int *best_ids = nullptr);
 
 hipError_t shelf_hy4_expert_decode(const uint16_t *latent, const Hy4ExpertProjection *matrices,
                                    const Hy4Route *routes, const int *count, int capacity, int intermediate,

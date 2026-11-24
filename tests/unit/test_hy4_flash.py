@@ -178,6 +178,30 @@ class Hy4FlashTests(unittest.TestCase):
                 if slots > 1:
                     self.assertAlmostEqual(result["rank_experts"][0] / max(result["rank_experts"]), 0.9, places=3)
 
+    def test_lm_head_tp_placement(self):
+        experts = {(layer, expert): EXPERT_BYTES for layer in range(1, 42) for expert in range(512)}
+        lm_total = 278609920
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            storage = {f"model.layers.{i}.self_attn.kv_b_proj.weight":
+                       {"original_shape": [512, 14336 if i == 0 or i % 4 == 1 else 28672]} for i in range(42)}
+            (directory / "config.json").write_text(json.dumps({"quantization_config": {"linear_storage": storage}}))
+            results = {}
+            for enabled in ("0", "1"):
+                argv = ["placement.py", tmp, "--draft", tmp, "--tokens", "8192",
+                        "--max-concurrent-requests", "32", "--capacity", "32", "32", "32", "32"]
+                output = io.StringIO()
+                with patch.dict("os.environ", {"SHELF_HY4_LM_HEAD_TP": enabled}), \
+                     patch.object(sys, "argv", argv), \
+                     patch.object(placement, "checkpoint_sizes", side_effect=[(4329651680, experts), (424428112, {})]), \
+                     patch.object(placement, "lm_head_size", return_value=lm_total), \
+                     contextlib.redirect_stdout(output):
+                    placement.main()
+                results[enabled] = json.loads(output.getvalue())
+            self.assertEqual(results["0"]["lm_head_bytes_per_rank"], lm_total)
+            self.assertEqual(results["1"]["lm_head_bytes_per_rank"], lm_total // 4)
+            self.assertLess(results["1"]["peak_estimate"][0], results["0"]["peak_estimate"][0])
+
 
 if __name__ == "__main__":
     torch.set_num_threads(1)

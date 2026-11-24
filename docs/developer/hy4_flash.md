@@ -53,3 +53,9 @@ TP>1 の予約は同時リクエスト数が 1 を超えると `Status::unsuppor
 `test_hy4_graph BODY microbench` は 4 bpw の共有 expert の線形射影と routed expert の 3 射影を測る。`test_hy4_graph BODY moebench` は router、共有 expert、加重和を含む MoE 全体を測る。`test_hy4_graph BODY DRAFT stepbench B [EP]` は指定した論理 EP（既定は 3）で同じ入力に対して Graph 有効・無効の step 時間と生成 ID を照合する。投機なしの計測では DRAFT に `-` を渡す。
 
 `test_hy4_graph BODY prefillbench LENGTH CHUNK EP OUTPUT` は第 1 MoE 層の expert を共有して指定長の prefill を実行し、最終位置の FP32 logits を OUTPUT に保存する。OUTPUT に `moe` を渡すと共有 FFN と MoE 全体、`index` を渡すと Indexer のスコアと選択集合を測定する。`capacity` はすべての経路を 1 rank に集中させ、rank 0 と末尾の peer で出力と経路数を照合する。
+
+## `lm_head` 複数 GPU 語彙分割
+
+`lm_head`（`[120832, 3072]`）は、総物理 rank 数 `ranks = ep * tp > 1` かつ `120832 % (ranks * 128) == 0`（例: `ranks = 2, 4`）で `SHELF_HY4_LM_HEAD_TP` が `0` 以外のとき、TP=1 / TP>1 双方で語彙方向（128 列タイル単位）に全 rank へ均等分割してロード・実行する。端数により割り切れない rank 数（例: `ranks = 3`）および `SHELF_HY4_LM_HEAD_TP=0` では rank 0（TP>1 では各 rank）に全語彙を維持する。
+
+greedy 生成時は各 rank が担当語彙のローカル最大値とグローバル語彙 ID を計算し、`tp_argmax_pack` / `tp_argmax_reduce`（8 B/row）で集約する。sampling / logits 出力時は `tp_scatter_logits` で全語彙 logits へ組み立てる。`lm_hidden_buf` / `lm_head_recv` / `lm_logits_recv` / `lm_staging` と `lm_ready` / `lm_done` / `lm_arrived` / `lm_consumed` は、`tp_recv` / `ep_recv` / `reduce_staging` / `tp_*` / `ep_*` から物理的・論理的に完全に分離し、MoE reduction との WAR ハザードを防止する。HIP Graph 経路では `GraphHeadStep` を介して `scatter` / rank 別 `rank_exec` / reduction をイベント同期で再生する。`test_hy4_graph BODY DRAFT lmhead` は `SHELF_HY4_LM_HEAD_TP=0` と `1` の出力（prefill logits、greedy/sample、K=2..5、batch、Graph ON/OFF、push/peer/host）の一致と rank 0 の重み削減を検証する。

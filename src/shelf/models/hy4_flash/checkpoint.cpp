@@ -38,7 +38,15 @@ std::string base_name(const std::string &key) {
 }
 bool expert_name(const std::string &base) { return base.find(".mlp.experts.") != std::string::npos; }
 bool draft_name(const std::string &base) { return base.starts_with("model.dfly_layers."); }
-Split split_name(const std::string &base) {
+bool lm_head_tp_enabled(int ranks) {
+    if (ranks <= 1 || 120832 % (ranks * 128) != 0)
+        return false;
+    const char *env = std::getenv("SHELF_HY4_LM_HEAD_TP");
+    return !env || !*env || std::string_view(env) != "0";
+}
+Split split_name(const std::string &base, bool split_lm_head) {
+    if (base == "lm_head")
+        return split_lm_head ? Split::N : Split::None;
     if (draft_name(base))
         return Split::None;
     if (expert_name(base)) {
@@ -211,6 +219,7 @@ Checkpoint::Checkpoint(const Path &model, const Path &engram, const Path &draft,
     : owners(layout), has_draft(!draft.empty()), ep(ep_size), tp(tp_size), ranks(ep_size * tp_size) {
     require(ep >= 1 && tp >= 1 && ranks <= 4, "EP / TP の構成が不正です");
     require(tp == 1 || (ep <= 2 && tp <= 2), "TP を使う場合は EP 2 × TP 2 までに対応します");
+    split_lm_head = lm_head_tp_enabled(ranks);
     for (const auto &row : owners)
         for (int owner : row)
             require(owner >= 0 && owner < ep, "配置表の expert owner が EP 数を超えています");
@@ -473,6 +482,7 @@ void Checkpoint::load(const Path &directory, bool draft) {
             if (key.ends_with(".mul1") || key.ends_with(".lookup_table"))
                 continue;
             const auto base = base_name(key);
+            const bool lm_head_slice = split_lm_head && base == "lm_head";
             std::vector<int> targets;
             if (expert_name(base)) {
                 int layer = 0, e = 0;
@@ -485,16 +495,18 @@ void Checkpoint::load(const Path &directory, bool draft) {
                     targets.push_back(group * tp + t);
             } else {
                 for (int r = 0; r < ranks; ++r)
-                    if (tp > 1 || r == 0)
+                    if (tp > 1 || lm_head_slice || r == 0)
                         targets.push_back(r);
             }
-            const Split split = split_name(base);
+            const Split split = split_name(base, split_lm_head);
             const bool quantized = shape.contains(base) || expert_name(base);
             const auto dims = shape.contains(base) ? shape.at(base)
                                                    : (expert_name(base) ? std::array<int, 2>{1536, 1536}
                                                                         : std::array<int, 2>{0, 0});
+            const int slice_parts = lm_head_slice ? ranks : tp;
             for (int r : targets) {
-                Weight view = make_view(*this, key, entry->second, split, r % tp, tp);
+                const int slice_rank = lm_head_slice ? r : (r % tp);
+                Weight view = make_view(*this, key, entry->second, split, slice_rank, slice_parts);
                 view.rank = r;
                 view.offset = (bytes[r] + 15) & ~size_t(15);
                 bytes[r] = view.offset + view.bytes;
@@ -505,9 +517,9 @@ void Checkpoint::load(const Path &directory, bool draft) {
                     auto &logical = local_shape[r][base];
                     logical = dims;
                     if (split == Split::N)
-                        logical[1] /= tp;
+                        logical[1] /= slice_parts;
                     else if (split == Split::K)
-                        logical[0] /= tp;
+                        logical[0] /= slice_parts;
                 }
                 if (split == Split::K)
                     row_split[r].insert(base);

@@ -18,6 +18,17 @@ inline constexpr int max_verify_rows = max_draft_tokens + 1;
 inline constexpr int default_draft_tokens = 4;
 inline constexpr size_t kv_page_tokens = 256;
 inline constexpr size_t kv_page_groups = kv_page_tokens / 4;
+inline constexpr int hy4_vocab_size = 120832;
+inline constexpr int hy4_lm_head_tile = 128;
+inline constexpr int lm_hidden_max_rows = 512;
+inline constexpr size_t lm_hidden_row_bytes = 3072 * 2;
+inline constexpr size_t lm_hidden_chunk_bytes = size_t(lm_hidden_max_rows) * lm_hidden_row_bytes;
+inline constexpr int lm_argmax_max_rows = 512;
+inline constexpr size_t lm_argmax_stride = size_t(lm_argmax_max_rows) * 8;
+inline constexpr size_t lm_logits_chunk_bytes = size_t(2) * 1024 * 1024;
+inline bool lm_head_tp_supported(int ranks) {
+    return ranks > 1 && hy4_vocab_size % (ranks * hy4_lm_head_tile) == 0;
+}
 
 inline bool multi_gpu_vmm_allowed(int ranks, std::string_view vmm) {
     return ranks <= 1 || vmm != "1";
@@ -157,6 +168,21 @@ struct Residency {
     std::array<void *, 4> ep_recv{};
     std::array<void *, 4> tp_ptr{};
     std::array<size_t, 4> tp_bytes{};
+    bool lm_head_tp = false;
+    bool lm_host_fallback = false;
+    int lm_head_ranks() const { return lm_head_tp ? ranks : 1; }
+    static size_t lm_staging_bytes() { return std::max(lm_hidden_chunk_bytes, lm_logits_chunk_bytes); }
+    std::array<void *, 4> lm_hidden_buf{};
+    std::array<void *, 4> lm_head_recv{};
+    std::array<void *, 4> lm_logits_recv{};
+    std::array<void *, 4> lm_staging{};
+    std::array<const void *, 4> lm_src_ptr{};
+    std::array<void *, 4> lm_dst_ptr{};
+    std::array<size_t, 4> lm_xfer_bytes{};
+    std::array<std::array<hipEvent_t, 2>, 4> lm_ready{}, lm_done{}, lm_arrived{}, lm_consumed{};
+    std::array<std::array<bool, 2>, 4> lm_recorded{};
+    std::array<std::array<bool, 2>, 4> lm_ready_rec{}, lm_done_rec{}, lm_arrived_rec{}, lm_consumed_rec{};
+    int lm_parity = 0;
     std::array<std::array<hipEvent_t, 2>, 4> tp_ready{}, tp_done{}, tp_arrived{}, tp_consumed{};
     std::array<std::array<hipEvent_t, 2>, 4> ep_ready{}, ep_done{}, ep_arrived{}, ep_consumed{};
     std::array<std::array<bool, 2>, 4> tp_recorded{}, ep_recorded{};
@@ -169,9 +195,23 @@ struct Residency {
     void reduce_pair(void *data, int rank, size_t bytes, bool ep);
     void tp_sum(void *data, int rank, size_t bytes);
     void ep_reduce(void *data, int rank, size_t bytes);
+    void lm_scatter_hidden(const void *src, size_t bytes, std::array<void *, 4> &dst_out, bool capture = false);
+    void lm_gather_argmax(const std::array<const float *, 4> &vals, const std::array<const int *, 4> &ids, int rows,
+                          int *out_ids);
+    void lm_gather_logits(const std::array<const float *, 4> &local_logits, int rows, int local_vocab, int full_vocab,
+                          float *out_logits);
+    void tp_argmax(const float *vals, const int *ids, int *out_ids, int rank, int rows);
+    void tp_gather_logits(const float *local_logits, float *out_logits, int rank, int rows, int local_vocab,
+                          int full_vocab);
+    void tp_broadcast_ids(int *ids, int rank, int rows);
     void shutdown();
     const void *device(const Weight &w) const;
 };
 void peer_copy(void *dst, const void *src, size_t bytes, hipStream_t stream = nullptr);
 void tp_add_bf16(void *dst, const void *src, size_t bytes, hipStream_t stream = nullptr);
+void tp_argmax_pack(const float *vals, const int *ids, void *out_pairs, int rows, hipStream_t stream = nullptr);
+void tp_argmax_reduce(const void *src_pairs, int stride_pairs, int tp_size, int rows, int *out_ids,
+                      hipStream_t stream = nullptr);
+void tp_scatter_logits(const float *src, float *dst, int rows, int local_vocab, int full_vocab, int offset,
+                       hipStream_t stream = nullptr);
 }

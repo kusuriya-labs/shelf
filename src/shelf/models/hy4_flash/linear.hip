@@ -319,9 +319,9 @@ extern "C" hipError_t shelf_hy4_expert_linear(const uint16_t *x, const Hy4Expert
 }
 
 __global__ void rotate_output_argmax_tiles(const float *partial, const uint16_t *svh, float *tile_vals,
-                                           int *tile_ids) {
+                                           int *tile_ids, int vocab_width, int vocab_offset, int num_tiles) {
     const int base = blockIdx.x * 128 + threadIdx.x * 4;
-    float4 acc = *reinterpret_cast<const float4 *>(partial + size_t(blockIdx.y) * 120832 + base);
+    float4 acc = *reinterpret_cast<const float4 *>(partial + size_t(blockIdx.y) * vocab_width + base);
     float v[4] = {acc.x, acc.y, acc.z, acc.w};
     fwht128(v[0], v[1], v[2], v[3], threadIdx.x);
     const uint2 hs = *reinterpret_cast<const uint2 *>(svh + base);
@@ -336,7 +336,7 @@ __global__ void rotate_output_argmax_tiles(const float *partial, const uint16_t 
     for (int i = 0; i < 4; ++i) {
         if (s[i] > best) {
             best = s[i];
-            id = base + i;
+            id = vocab_offset + base + i;
         }
     }
     for (int mask = 16; mask; mask >>= 1) {
@@ -348,20 +348,21 @@ __global__ void rotate_output_argmax_tiles(const float *partial, const uint16_t 
         }
     }
     if (!threadIdx.x) {
-        const size_t idx = size_t(blockIdx.y) * 944 + blockIdx.x;
+        const size_t idx = size_t(blockIdx.y) * num_tiles + blockIdx.x;
         tile_vals[idx] = best;
         tile_ids[idx] = id;
     }
 }
 
-__global__ void argmax_tiles_reduce(const float *tile_vals, const int *tile_ids, int *tokens) {
+__global__ void argmax_tiles_reduce(const float *tile_vals, const int *tile_ids, int *tokens, int num_tiles,
+                                    float *best_vals, int *best_ids) {
     __shared__ float vals[256];
     __shared__ int ids[256];
     const int tid = threadIdx.x, row = blockIdx.x;
-    const size_t base = size_t(row) * 944;
+    const size_t base = size_t(row) * num_tiles;
     float best = -INFINITY;
     int id = -1;
-    for (int t = tid; t < 944; t += 256) {
+    for (int t = tid; t < num_tiles; t += 256) {
         float v = tile_vals[base + t];
         int i = tile_ids[base + t];
         if (v > best || (v == best && i < id)) {
@@ -379,48 +380,59 @@ __global__ void argmax_tiles_reduce(const float *tile_vals, const int *tile_ids,
         }
         __syncthreads();
     }
-    if (!tid)
-        tokens[row] = ids[0];
+    if (!tid) {
+        if (best_vals && best_ids) {
+            best_vals[row] = vals[0];
+            best_ids[row] = ids[0];
+        } else {
+            tokens[row] = ids[0];
+        }
+    }
 }
 
 hipError_t shelf_hy4_head(const uint16_t *x, const uint16_t *suh, const uint16_t *svh, const uint32_t *trellis,
-                          int8_t *codes, float *scales, float *partial, float *logits, int rows, hipStream_t stream) {
-    if (!x || !suh || !svh || !trellis || !codes || !scales || !partial || !logits || rows < 1 || rows > 192)
+                          int8_t *codes, float *scales, float *partial, float *logits, int rows, hipStream_t stream,
+                          int vocab_width) {
+    if (!x || !suh || !svh || !trellis || !codes || !scales || !partial || !logits || rows < 1 || rows > 192 ||
+        vocab_width < 128 || vocab_width % 128)
         return hipErrorInvalidValue;
     rotate_input<<<dim3(24, rows), 32, 0, stream>>>(x, suh, codes, scales, 3072, 3072);
     auto status = hipGetLastError();
     if (status != hipSuccess)
         return status;
-    status = shelf_hy4_wmma(codes, scales, trellis, partial, rows, 3072, 120832, 6, stream, 1);
+    status = shelf_hy4_wmma(codes, scales, trellis, partial, rows, 3072, vocab_width, 6, stream, 1);
     if (status != hipSuccess)
         return status;
     if (rows >= 4)
-        rotate_output<4><<<dim3(944, (rows + 3) / 4), 128, 0, stream>>>(
-            partial, svh, nullptr, 120832, 120832, nullptr, 0, logits, nullptr, 1, nullptr, rows);
+        rotate_output<4><<<dim3(vocab_width / 128, (rows + 3) / 4), 128, 0, stream>>>(
+            partial, svh, nullptr, vocab_width, vocab_width, nullptr, 0, logits, nullptr, 1, nullptr, rows);
     else
-        rotate_output<1><<<dim3(944, rows), 32, 0, stream>>>(
-            partial, svh, nullptr, 120832, 120832, nullptr, 0, logits, nullptr, 1, nullptr, rows);
+        rotate_output<1><<<dim3(vocab_width / 128, rows), 32, 0, stream>>>(
+            partial, svh, nullptr, vocab_width, vocab_width, nullptr, 0, logits, nullptr, 1, nullptr, rows);
     return hipGetLastError();
 }
 
 hipError_t shelf_hy4_head_argmax(const uint16_t *x, const uint16_t *suh, const uint16_t *svh,
                                  const uint32_t *trellis, int8_t *codes, float *scales, float *partial,
-                                 float *tile_vals, int *tile_ids, int *tokens, int rows, hipStream_t stream) {
-    if (!x || !suh || !svh || !trellis || !codes || !scales || !partial || !tile_vals || !tile_ids || !tokens ||
-        rows < 1 || rows > 192)
+                                 float *tile_vals, int *tile_ids, int *tokens, int rows, hipStream_t stream,
+                                 int vocab_width, int vocab_offset, float *best_vals, int *best_ids) {
+    if (!x || !suh || !svh || !trellis || !codes || !scales || !partial || !tile_vals || !tile_ids ||
+        (!tokens && (!best_vals || !best_ids)) || rows < 1 || rows > 192 || vocab_width < 128 || vocab_width % 128)
         return hipErrorInvalidValue;
+    const int num_tiles = vocab_width / 128;
     rotate_input<<<dim3(24, rows), 32, 0, stream>>>(x, suh, codes, scales, 3072, 3072);
     auto status = hipGetLastError();
     if (status != hipSuccess)
         return status;
-    status = shelf_hy4_wmma(codes, scales, trellis, partial, rows, 3072, 120832, 6, stream, 1);
+    status = shelf_hy4_wmma(codes, scales, trellis, partial, rows, 3072, vocab_width, 6, stream, 1);
     if (status != hipSuccess)
         return status;
-    rotate_output_argmax_tiles<<<dim3(944, rows), 32, 0, stream>>>(partial, svh, tile_vals, tile_ids);
+    rotate_output_argmax_tiles<<<dim3(num_tiles, rows), 32, 0, stream>>>(
+        partial, svh, tile_vals, tile_ids, vocab_width, vocab_offset, num_tiles);
     status = hipGetLastError();
     if (status != hipSuccess)
         return status;
-    argmax_tiles_reduce<<<rows, 256, 0, stream>>>(tile_vals, tile_ids, tokens);
+    argmax_tiles_reduce<<<rows, 256, 0, stream>>>(tile_vals, tile_ids, tokens, num_tiles, best_vals, best_ids);
     return hipGetLastError();
 }
 
