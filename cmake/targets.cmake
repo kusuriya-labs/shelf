@@ -16,6 +16,7 @@ target_include_directories(
 add_library(shelf_gpu STATIC
     src/shelf/core/memory/tensor.cpp
     src/shelf/core/gpu/scoped_device.cpp
+    src/shelf/core/gpu/debug_ring.hip
     src/shelf/core/memory/arena.hip
     src/shelf/core/memory/gpu_memory_manager.hip
 )

@@ -12,6 +12,7 @@
 - [architecture.md](architecture.md) — layer 構成と依存ルール、Server を含む責務境界
 - [runtime.md](runtime.md) — execution path と state ownership
 - [multi-gpu.md](multi-gpu.md) — PP / EP / TP の座標、所有構造、collective、比較条件
+- [debug-ring.md](debug-ring.md) — GPU 側状態を同期なしで観測する診断 ring
 - [qwen35.md](qwen35.md) — Qwen3.5 runtime family の配線（source path / KernelId / execution order）
 - [qwen35moe.md](qwen35moe.md) — Qwen3.5 MoE の config と routed expert weight 集約 contract
 - [qwen35qsa.md](qwen35qsa.md) — Qwen3.5 QSA（`qwen3_5_qsa`）の indexer / block mask contract
