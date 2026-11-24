@@ -73,8 +73,8 @@ Ready.
 | `--port PORT` | listen port (default 8000) |
 | `--compute COMPUTE` | shelf-compute path |
 | `--max-seq-len MAX_SEQ_LEN` | max sequence length (default 32768; PLaMo 3: 2048) |
-| `--max-num-batched-tokens MAX_NUM_BATCHED_TOKENS` | token budget per scheduled step; also sets the executor row bucket (default 8192) |
-| `--prefill-chunk PREFILL_CHUNK` | cap prefill tokens per step and the executor row bucket (default 8192) |
+| `--max-num-batched-tokens MAX_NUM_BATCHED_TOKENS` | 1ステップのトークン数の上限。executor の行数もこの値から決まる（既定 8192） |
+| `--prefill-chunk PREFILL_CHUNK` | 1ステップの prefill トークン数と executor の行数の上限（既定 8192） |
 | `--max-concurrent-requests MAX_CONCURRENT_REQUESTS` | max in-flight requests (default 4) |
 | `--prefill-decode-interval PREFILL_DECODE_INTERVAL` | prefill が N 回連続したら decode を優先する（既定の 0 で無効） |
 | `--inference-budget-tokens INFERENCE_BUDGET_TOKENS` | max generated tokens per request (default 32768) |
@@ -178,8 +178,7 @@ request 1 個あたりの生成予算（推論予算）は `--inference-budget-t
   16 を超える場合は `K` を最大 `4` に制限する。`--dflash2-drafts` が `5` 未満なら
   その値が上限になる。同時接続 32 でも session 数と verify 行数は容量内に収まり、
   超過分の session は通常 decode に戻る。
-- `--prefill-decode-interval N` は長文 prefill が連続する経路でも `N` chunk ごとに
-  decode ステップを優先割り込みさせ、mix 時の ITL 悪化を抑える。既定の `0` は無効。
+- `--prefill-decode-interval N` は prefill が `N` 回続いた時点で、実行可能な decode 要求を次のバッチで優先する。既定の `0` で無効になる。
 - verify は単一 request を含め既定で lossy chunk を使うため、非投機 greedy と
   生成列が一致しない場合がある。verify 経路切替・`--dflash2-adaptive` の上限上書き・
   `SHELF_DFLASH2_PREFILL_ROWS` などの環境変数は [env_vars.md](env_vars.md#5-dflash2-投機デコード) を参照。
