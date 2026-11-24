@@ -1,6 +1,7 @@
 #include <shelf/runtime/tp/tp_transports.h>
 
 #include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/gpu/debug_ring.h>
 #include <shelf/core/gpu/scoped_device.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/kernels/fused/tp_combine.h>
@@ -8,6 +9,7 @@
 #include "tp_transport_internal.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <mutex>
 #include <vector>
@@ -111,7 +113,21 @@ __global__ void tp_add_peers_f32_kernel(const float* own, const float* const* pe
     }
 }
 
-__global__ void tp_copy_bf16_kernel(uint16_t* out, const uint16_t* in, uint64_t count) {
+__global__ void tp_copy_bf16_kernel(uint16_t* out, const uint16_t* in, uint64_t count,
+                                    shelf::gpu::DebugRingDevice ring, uint32_t debug_rank,
+                                    uint32_t debug_parity, uint32_t debug_rows,
+                                    uint32_t debug_stride, uint32_t debug_features) {
+    if (ring.slots != nullptr && blockIdx.x == 0u && threadIdx.x == 0u) {
+        shelf::gpu::DebugRingRecord record{};
+        record.kind = 1u;
+        record.rank = debug_rank;
+        record.stage = debug_parity;
+        record.value0 = debug_rows;
+        record.value1 = debug_stride;
+        record.value2 = debug_features;
+        record.data[0] = count;
+        (void)shelf::gpu::shelf_debug_ring_push(ring, record);
+    }
     const uint64_t stride = static_cast<uint64_t>(blockDim.x) * gridDim.x;
     const uint64_t vectors = count >> 3u;
     for (uint64_t v = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -125,7 +141,21 @@ __global__ void tp_copy_bf16_kernel(uint16_t* out, const uint16_t* in, uint64_t 
     }
 }
 
-__global__ void tp_copy_f32_kernel(float* out, const float* in, uint64_t count) {
+__global__ void tp_copy_f32_kernel(float* out, const float* in, uint64_t count,
+                                   shelf::gpu::DebugRingDevice ring, uint32_t debug_rank,
+                                   uint32_t debug_parity, uint32_t debug_rows,
+                                   uint32_t debug_stride, uint32_t debug_features) {
+    if (ring.slots != nullptr && blockIdx.x == 0u && threadIdx.x == 0u) {
+        shelf::gpu::DebugRingRecord record{};
+        record.kind = 1u;
+        record.rank = debug_rank;
+        record.stage = debug_parity;
+        record.value0 = debug_rows;
+        record.value1 = debug_stride;
+        record.value2 = debug_features;
+        record.data[0] = count;
+        (void)shelf::gpu::shelf_debug_ring_push(ring, record);
+    }
     const uint64_t stride = static_cast<uint64_t>(blockDim.x) * gridDim.x;
     const uint64_t vectors = count >> 2u;
     for (uint64_t v = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -139,6 +169,11 @@ __global__ void tp_copy_f32_kernel(float* out, const float* in, uint64_t count) 
     }
 }
 
+bool tp_debug_ring_enabled() {
+    const char* env = std::getenv("SHELF_TP_DEBUG_RING");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
 bool tp_reduce_legacy() {
     const char* env = std::getenv("SHELF_TP_REDUCE");
     return env != nullptr && std::strcmp(env, "legacy") == 0;
@@ -150,16 +185,24 @@ uint32_t tp_grid_for(uint64_t count) {
     return static_cast<uint32_t>(blocks > 1024u ? 1024u : blocks);
 }
 
-Status launch_copy(void* dst, const void* src, std::size_t bytes, ValueDType dtype,
-                   hipStream_t stream) {
+Status launch_copy(void* dst, const void* src, const TpSumTarget& target,
+                   std::size_t bytes, hipStream_t stream,
+                   const shelf::gpu::DebugRingDevice& ring, uint32_t debug_rank,
+                   uint32_t debug_parity) {
+    const ValueDType dtype = target.dtype;
+    const uint32_t debug_rows = static_cast<uint32_t>(target.rows);
+    const uint32_t debug_stride = target.row_stride;
+    const uint32_t debug_features = target.feature_count;
     if (dtype == ValueDType::F32) {
         const uint64_t count = bytes / sizeof(float);
         tp_copy_f32_kernel<<<tp_grid_for(count), 256, 0, stream>>>(
-            static_cast<float*>(dst), static_cast<const float*>(src), count);
+            static_cast<float*>(dst), static_cast<const float*>(src), count, ring,
+            debug_rank, debug_parity, debug_rows, debug_stride, debug_features);
     } else {
         const uint64_t count = bytes / sizeof(uint16_t);
         tp_copy_bf16_kernel<<<tp_grid_for(count), 256, 0, stream>>>(
-            static_cast<uint16_t*>(dst), static_cast<const uint16_t*>(src), count);
+            static_cast<uint16_t*>(dst), static_cast<const uint16_t*>(src), count, ring,
+            debug_rank, debug_parity, debug_rows, debug_stride, debug_features);
     }
     const hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
@@ -242,6 +285,8 @@ HipPeerTpTransport::HipPeerTpTransport(std::vector<int> devices)
     : devices_(std::move(devices)) {}
 
 HipPeerTpTransport::~HipPeerTpTransport() {
+    report_debug_rings();
+    debug_rings_.clear();
     const std::size_t rank_count = devices_.size();
     for (std::size_t r = 0; r < rank_count; ++r) {
         auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
@@ -366,6 +411,14 @@ Result<std::unique_ptr<HipPeerTpTransport>> HipPeerTpTransport::create(
                                      __LINE__);
         }
     }
+    if (tp_debug_ring_enabled()) {
+        transport->debug_rings_.resize(rank_count);
+        for (std::size_t r = 0; r < rank_count; ++r) {
+            auto ring = shelf::gpu::DebugRing::create(devices[r], 4096);
+            if (!ring.ok()) return ring.status();
+            transport->debug_rings_[r] = ring.release();
+        }
+    }
     return transport;
 }
 
@@ -438,6 +491,49 @@ Status HipPeerTpTransport::ensure_buffers(std::size_t bytes, std::size_t rank_co
     return Status::make_ok();
 }
 
+shelf::gpu::DebugRingDevice HipPeerTpTransport::debug_ring_view(std::size_t rank) const noexcept {
+    if (!verified_ || rank >= debug_rings_.size() || debug_rings_[rank] == nullptr)
+        return shelf::gpu::DebugRingDevice{};
+    return debug_rings_[rank]->device_view();
+}
+
+void HipPeerTpTransport::report_debug_rings() noexcept {
+    for (std::size_t r = 0; r < debug_rings_.size(); ++r) {
+        shelf::gpu::DebugRing* ring = debug_rings_[r].get();
+        if (ring == nullptr) continue;
+        shelf::gpu::DebugRingRecord record{};
+        std::size_t total = 0;
+        std::size_t parity[2] = {0, 0};
+        std::size_t shape_changes = 0;
+        uint64_t first = 0;
+        uint64_t last = 0;
+        uint32_t rows = 0;
+        uint32_t stride = 0;
+        uint32_t features = 0;
+        while (ring->try_pop(record)) {
+            if (total == 0) {
+                first = record.sequence;
+                rows = record.value0;
+                stride = record.value1;
+                features = record.value2;
+            } else if (record.value0 != rows || record.value1 != stride ||
+                       record.value2 != features) {
+                ++shape_changes;
+            }
+            if (record.stage < 2u) ++parity[record.stage];
+            last = record.sequence;
+            ++total;
+        }
+        std::fprintf(stderr,
+                     "[tp-debug-ring] rank=%zu records=%zu lost=%llu seq=%llu..%llu "
+                     "parity0=%zu parity1=%zu rows=%u stride=%u features=%u shapes=%zu\n",
+                     r, total, static_cast<unsigned long long>(ring->lost()),
+                     static_cast<unsigned long long>(first),
+                     static_cast<unsigned long long>(last), parity[0], parity[1], rows,
+                     stride, features, shape_changes);
+    }
+}
+
 Status HipPeerTpTransport::enqueue_sum(const TpSumInvocation& invocation) {
     const std::size_t rank_count = devices_.size();
     const ValueDType dtype = invocation.targets[0].dtype;
@@ -464,8 +560,10 @@ Status HipPeerTpTransport::enqueue_sum(const TpSumInvocation& invocation) {
                                                  __FILE__, __LINE__);
                     }
                 }
-                st = launch_copy(inbox_[q][r][parity], invocation.targets[r].ptr, bytes,
-                                 dtype, invocation.streams[r]);
+                st = launch_copy(inbox_[q][r][parity], invocation.targets[r].ptr,
+                                 invocation.targets[r], bytes, invocation.streams[r],
+                                 debug_ring_view(r), static_cast<uint32_t>(r),
+                                 static_cast<uint32_t>(parity));
                 if (!st.ok()) return st;
                 if (hipEventRecord(sent_[r][q][parity], invocation.streams[r]) != hipSuccess) {
                     return Status::hip_error("hipEventRecord tp send",

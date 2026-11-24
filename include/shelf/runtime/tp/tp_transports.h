@@ -1,5 +1,6 @@
 #pragma once
 
+#include <shelf/core/gpu/debug_ring.h>
 #include <shelf/runtime/tp/tp_execution.h>
 
 #include <array>
@@ -28,6 +29,8 @@ private:
     Status enable_peer_access();
     Status ensure_buffers(std::size_t bytes, std::size_t rank_count);
     Status enqueue_sum(const TpSumInvocation& invocation);
+    shelf::gpu::DebugRingDevice debug_ring_view(std::size_t rank) const noexcept;
+    void report_debug_rings() noexcept;
 
     std::vector<int> devices_;
     std::vector<std::vector<std::array<hipEvent_t, 2>>> sent_;
@@ -42,6 +45,7 @@ private:
     std::vector<hipEvent_t> probe_ready_;
     bool peer_access_enabled_ = false;
     bool verified_ = false;
+    std::vector<std::unique_ptr<shelf::gpu::DebugRing>> debug_rings_;
     std::mutex mutex_;
 };
 

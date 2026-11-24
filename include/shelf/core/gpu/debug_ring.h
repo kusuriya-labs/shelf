@@ -46,6 +46,7 @@ struct DebugRingDevice {
 
 __device__ __forceinline__ bool shelf_debug_ring_push(const DebugRingDevice& ring,
                                                       DebugRingRecord record) {
+#ifdef __HIP_DEVICE_COMPILE__
     if (ring.slots == nullptr || ring.capacity == 0u) return false;
     const uint64_t tail = __hip_atomic_load(ring.tail, __ATOMIC_RELAXED,
                                             __HIP_MEMORY_SCOPE_SYSTEM);
@@ -61,6 +62,11 @@ __device__ __forceinline__ bool shelf_debug_ring_push(const DebugRingDevice& rin
     __hip_atomic_store(ring.tail, tail + 1ull, __ATOMIC_RELEASE,
                        __HIP_MEMORY_SCOPE_SYSTEM);
     return true;
+#else
+    (void)ring;
+    (void)record;
+    return false;
+#endif
 }
 
 class DebugRing {
