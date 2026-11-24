@@ -2,6 +2,7 @@
 #include <rocprim/block/block_scan.hpp>
 #include <shelf/models/hy4_flash/attention.h>
 #include <shelf/models/hy4_flash/absorbed.h>
+#include <shelf/models/hy4_flash/mla_prefill.h>
 #include <shelf/kernels/fused/detail/octave_common.h>
 #include <shelf/kernels/fused/detail/radix_select.h>
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/decode.h>
@@ -12,6 +13,7 @@
 
 namespace shelf::hy4 {
 namespace {
+using namespace shelf::kernel::exl3_detail;
 using namespace shelf::kernel::exl3_detail::mul24;
 using shelf::kernel::detail::octave::sign_of;
 __device__ int step_at(int value, const Hy4StepParams *params) { return params ? params->position : value; }
@@ -114,12 +116,16 @@ template <int Width, int Salt>
 __global__ void unpack(const uint8_t *cache, const uint8_t *fresh, const int *ids, int first, int start, int slots,
                        Mat out, int offset, const Hy4StepParams *params, bool sliding, int row_offset, int chunk_rows,
                        const int *meta) {
-    if (meta && int(blockIdx.y) >= meta[512] + meta[513])
+    int unpack_row = blockIdx.y + blockIdx.z * gridDim.y;
+    if (meta && unpack_row >= meta[512] + meta[513])
         return;
     __shared__ float scratch[Width];
     start = step_at(start, params);
     int base = kv_base(first, row_offset, sliding, params);
-    int c = threadIdx.x, sub = blockIdx.x, row = blockIdx.y, id = ids ? ids[row] : base + row;
+    int c = threadIdx.x, sub = blockIdx.x, row = blockIdx.y + blockIdx.z * gridDim.y;
+    if (row >= out.rows)
+        return;
+    int id = ids ? ids[row] : base + row;
     if (!ids && id >= start + row_offset + chunk_rows) {
         out.p[size_t(row) * out.cols + sub * Width + c] = 0;
         return;
@@ -134,6 +140,39 @@ __global__ void unpack(const uint8_t *cache, const uint8_t *fresh, const int *id
     float scale = __half2float(__ushort_as_half(src[Width / 2] | (src[Width / 2 + 1] << 8)));
     float value = wht(levels[code] * scale, scratch, Width) * sign_of(c, Salt);
     out.p[size_t(row) * out.cols + sub * Width + c] = f32_to_bf16_rne_device(value);
+}
+__global__ void unpack_quant(const uint8_t *cache, const uint8_t *fresh, const int *ids, int start, int slots,
+                             const uint16_t *suh, _Float16 *out, const Hy4StepParams *params, const int *meta) {
+    int row = blockIdx.y + blockIdx.z * gridDim.y, sub = blockIdx.x, c = threadIdx.x;
+    if (row >= meta[512] + meta[513])
+        return;
+    __shared__ float scratch[256];
+    __shared__ uint16_t decoded[256];
+    start = step_at(start, params);
+    int id = ids[row];
+    const uint8_t *rec = id >= start ? fresh + size_t(id - start) * 294 : cache + size_t(id % slots) * 294;
+    const uint8_t *src = rec + sub * 130;
+    int code = (src[c / 2] >> (4 * (c % 2))) & 15;
+    float scale = __half2float(__ushort_as_half(src[128] | (src[129] << 8)));
+    float value = wht(levels[code] * scale, scratch, 256) * sign_of(c, 29);
+    decoded[c] = f32_to_bf16_rne_device(value);
+    __syncthreads();
+    if (c < 64) {
+        int col = sub * 256 + (c / 32) * 128 + (c % 32) * 4;
+        float v[4], peak = 0;
+        for (int i = 0; i < 4; ++i)
+            v[i] = bf16_bits_to_f32(decoded[(c / 32) * 128 + (c % 32) * 4 + i]) * f16_bits_to_f32(suh[col + i]);
+        fwht128(v[0], v[1], v[2], v[3], c % 32);
+        for (float &f : v) {
+            f *= kInvSqrt128;
+            peak = fmaxf(peak, fabsf(f));
+        }
+        for (int mask = 16; mask; mask /= 2)
+            peak = fmaxf(peak, __shfl_xor(peak, mask, 32));
+        float quant_scale = peak / 127;
+        for (int i = 0; i < 4; ++i)
+            out[size_t(row) * 512 + col + i] = quant_scale ? rintf(v[i] / quant_scale) * quant_scale : 0;
+    }
 }
 template <int Width, int Salt>
 __global__ void unpack_batch(const uint8_t *cache, const uint8_t *fresh, const int *slots,
@@ -624,6 +663,14 @@ Mat attention_inner(Ops &op, const std::string &p, int layer, int start, Mat hid
     auto cache = op.gpu.cache[op.rank][layer] + size_t(op.slot) * slots * 294;
     bool contiguous = sliding || (draft ? start <= 2048 : start + hidden.rows <= 2048);
     int begin = std::min(hidden.rows, std::max(0, 2048 - start));
+    bool batched_projection = !contiguous && !draft && start >= 2048 && start + hidden.rows > 4096 && hidden.rows > 16 && hidden.rows <= 1024;
+    _Float16 *batch_query = nullptr, *batch_values = nullptr;
+    if (batched_projection) {
+        size_t bytes = size_t(hidden.rows) * heads * 512 * sizeof(_Float16);
+        batch_query = static_cast<_Float16 *>(op.arena.next(bytes));
+        batch_values = static_cast<_Float16 *>(op.arena.next(bytes));
+        checked(shelf_hy4_mla_project_query(q.p, op.gpu.folded[op.rank].at(p + "kv_b_proj"), batch_query, hidden.rows, heads, op.stream));
+    }
     for (int i = 0; i < hidden.rows;) {
         size_t save = op.arena.cursor;
         bool chunk_contiguous = contiguous;
@@ -633,7 +680,7 @@ Mat attention_inner(Ops &op, const std::string &p, int layer, int start, Mat hid
                 chunk_contiguous = true;
                 n = std::min(n, begin - i);
             } else if (start + hidden.rows > 4096)
-                n = std::min(n, 16);
+                n = std::min(n, 64);
         }
         int stride = 0;
         for (int r = i; r < i + n && !selected.empty(); ++r)
@@ -724,18 +771,34 @@ Mat attention_inner(Ops &op, const std::string &p, int layer, int start, Mat hid
                 groups, rev, offsets_gpu, rows, stride, start, ids_gpu, meta, ids_count, i, op.params);
         }
         checked(hipGetLastError());
-        Mat a = op.mat(ids_count, 512), b = op.mat(ids_count, 64);
-        unpack<256, 29><<<dim3(2, ids_count), 256, 0, op.stream>>>(cache, fresh, ids_gpu, first, start, slots, a, 0,
-                                                                    op.params, sliding, i, n, meta);
+        bool fused = !chunk_contiguous && !draft;
+        Mat a = fused ? Mat{nullptr, ids_count, 512} : op.mat(ids_count, 512);
+        Mat b = op.mat(ids_count, 64);
+        _Float16 *prequant = nullptr;
+        unsigned id_slices = (ids_count + 65534) / 65535;
+        unsigned id_rows = (ids_count + id_slices - 1) / id_slices;
+        if (fused) {
+            prequant = static_cast<_Float16 *>(op.arena.next(size_t(ids_count) * 512 * sizeof(_Float16)));
+            unpack_quant<<<dim3(2, id_rows, id_slices), 256, 0, op.stream>>>(
+                cache, fresh, ids_gpu, start, slots,
+                static_cast<const uint16_t *>(op.param(p + "kv_b_proj.suh").p), prequant, op.params, meta);
+        } else {
+            unpack<256, 29><<<dim3(2, id_rows, id_slices), 256, 0, op.stream>>>(cache, fresh, ids_gpu, first, start, slots, a, 0,
+                                                                        op.params, sliding, i, n, meta);
+        }
         checked(hipGetLastError());
-        unpack<64, 11><<<dim3(1, ids_count), 64, 0, op.stream>>>(cache, fresh, ids_gpu, first, start, slots, b, 260,
+        unpack<64, 11><<<dim3(1, id_rows, id_slices), 64, 0, op.stream>>>(cache, fresh, ids_gpu, first, start, slots, b, 260,
                                                                   op.params, sliding, i, n, meta);
         checked(hipGetLastError());
         attend_absorbed(op, p + "kv_b_proj", a, b, q.row(i, n), gate.row(i, n), offsets_gpu, stride,
-                        sinks, out.row(i, n), chunk_contiguous, sliding, i, n, meta);
+                        sinks, out.row(i, n), chunk_contiguous, sliding, i, n, meta, prequant,
+                        batch_query ? batch_query + size_t(i) * heads * 512 : nullptr,
+                        batch_values ? batch_values + size_t(i) * heads * 512 : nullptr);
         op.arena.cursor = save;
         i += n;
     }
+    if (batched_projection)
+        checked(shelf_hy4_mla_project_value(batch_values, op.gpu.folded[op.rank].at(p + "kv_b_proj"), gate.p, out.p, hidden.rows, heads, op.stream));
     if (!draft) {
         save_records<<<(std::min(hidden.rows, slots) * 294 + 255) / 256, 256, 0, op.stream>>>(
             cache, fresh, hidden.rows, start, slots, op.params);

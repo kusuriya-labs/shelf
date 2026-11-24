@@ -8,5 +8,5 @@ void attend_absorbed_batch(Ops &op, const std::string &projection, Mat latent, M
                            bool sliding);
 void attend_absorbed(Ops &op, const std::string &projection, Mat latent, Mat rotary, Mat q, Mat gate,
                      const int *positions, int stride, Param sinks, Mat output, bool contiguous = true,
-                     bool sliding = false, int row_offset = 0, int chunk_rows = 0, const int *meta = nullptr);
+                     bool sliding = false, int row_offset = 0, int chunk_rows = 0, const int *meta = nullptr, const _Float16 *prequant = nullptr, void *batch_query = nullptr, void *batch_values = nullptr);
 }

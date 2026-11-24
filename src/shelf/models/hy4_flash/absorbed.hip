@@ -55,21 +55,23 @@ void fold_kv_weights(Residency &gpu, int rank) {
 }
 void attend_absorbed(Ops &op, const std::string &projection, Mat latent, Mat rotary, Mat q, Mat gate,
                      const int *positions, int stride, Param sinks, Mat out, bool contiguous, bool sliding,
-                     int row_offset, int chunk_rows, const int *meta) {
+                     int row_offset, int chunk_rows, const int *meta, const _Float16 *prequant, void *batch_query, void *batch_values) {
     auto folded = static_cast<const _Float16 *>(op.gpu.folded[op.rank].at(projection));
     int heads = q.cols / 256, rows = q.rows;
-    auto input = static_cast<_Float16 *>(op.arena.next(size_t(latent.rows) * 512 * 2));
-    auto query = op.arena.next(size_t(rows) * heads * 512 * 2);
-    auto values = op.arena.next(size_t(rows) * heads * 512 * 2);
+    auto input = prequant ? prequant : static_cast<_Float16 *>(op.arena.next(size_t(latent.rows) * 512 * 2));
+    auto query = batch_query ? batch_query : op.arena.next(size_t(rows) * heads * 512 * 2);
+    auto values = batch_values ? batch_values : op.arena.next(size_t(rows) * heads * 512 * 2);
     size_t length = size_t(rows) * heads * ((stride + 15) / 16 * 16);
     auto scores = static_cast<float *>(op.arena.next(length * 4));
     auto probs = static_cast<uint16_t *>(op.arena.next(length * 2));
-    quant_latent<<<dim3(4, latent.rows), 32, 0, op.stream>>>(
-        latent, static_cast<const uint16_t *>(op.param(projection + ".suh").p), input, meta);
-    checked(hipGetLastError());
+    if (!prequant) {
+        quant_latent<<<dim3(4, latent.rows), 32, 0, op.stream>>>(
+            latent, static_cast<const uint16_t *>(op.param(projection + ".suh").p), const_cast<_Float16 *>(input), meta);
+        checked(hipGetLastError());
+    }
     checked(shelf_hy4_mla_absorbed(q.p, folded, rotary.p, gate.p, sinks.p, sinks.type == io::SType::F32,
                                    positions, stride, input, query, values, scores, probs, out.p, rows, heads,
-                                   op.stream, op.params, contiguous, sliding, row_offset, chunk_rows));
+                                   op.stream, op.params, contiguous, sliding, row_offset, chunk_rows, batch_query != nullptr));
 }
 void attend_absorbed_batch(Ops &op, const std::string &projection, Mat latent, Mat rotary, Mat q, Mat gate,
                            const int *indices, int stride, const int *row_positions, Param sinks, Mat out,

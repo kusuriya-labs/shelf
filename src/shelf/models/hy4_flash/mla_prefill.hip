@@ -262,11 +262,12 @@ hipError_t shelf_hy4_mla_absorbed(const uint16_t *q, const void *folded, const u
                                    int stride, const void *input_buffer, void *query_buffer, void *value_buffer,
                                    float *scores, uint16_t *probs, uint16_t *out, int rows, int heads,
                                    hipStream_t stream, const Hy4StepParams *params, bool contiguous, bool sliding,
-                                   int row_offset, int chunk_rows) {
+                                   int row_offset, int chunk_rows, bool projected) {
     auto w = static_cast<const _Float16 *>(folded), input = static_cast<const _Float16 *>(input_buffer);
     auto query = static_cast<_Float16 *>(query_buffer), values = static_cast<_Float16 *>(value_buffer);
     int pitch = (stride + 15) / 16 * 16, rb = (rows + 15) / 16;
-    project_query<<<dim3(8, rb, heads), 128, 0, stream>>>(q, w, query, rows, heads);
+    if (!projected)
+        project_query<<<dim3(8, rb, heads), 128, 0, stream>>>(q, w, query, rows, heads);
     auto rc = hipGetLastError();
     if (rc != hipSuccess)
         return rc;
@@ -286,7 +287,8 @@ hipError_t shelf_hy4_mla_absorbed(const uint16_t *q, const void *folded, const u
     rc = hipGetLastError();
     if (rc != hipSuccess)
         return rc;
-    project_value<<<dim3(4, rb, heads), 128, 0, stream>>>(values, w, gate, heads, rows, out);
+    if (!projected)
+        project_value<<<dim3(4, rb, heads), 128, 0, stream>>>(values, w, gate, heads, rows, out);
     return hipGetLastError();
 }
 
@@ -308,5 +310,14 @@ hipError_t shelf_hy4_mla_absorbed_batch(const uint16_t *q, const void *folded, c
     rc = hipGetLastError();
     if (rc != hipSuccess) return rc;
     project_value<<<dim3(4, rb, heads), 128, 0, stream>>>(values, w, gate, heads, rows, out);
+    return hipGetLastError();
+}
+
+hipError_t shelf_hy4_mla_project_query(const uint16_t *q, const void *folded, void *query, int rows, int heads, hipStream_t stream) {
+    project_query<<<dim3(8, (rows + 15) / 16, heads), 128, 0, stream>>>(q, static_cast<const _Float16 *>(folded), static_cast<_Float16 *>(query), rows, heads);
+    return hipGetLastError();
+}
+hipError_t shelf_hy4_mla_project_value(const void *values, const void *folded, const uint16_t *gate, uint16_t *out, int rows, int heads, hipStream_t stream) {
+    project_value<<<dim3(4, (rows + 15) / 16, heads), 128, 0, stream>>>(static_cast<const _Float16 *>(values), static_cast<const _Float16 *>(folded), gate, heads, rows, out);
     return hipGetLastError();
 }
