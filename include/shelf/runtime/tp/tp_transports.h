@@ -30,7 +30,9 @@ private:
     Status enqueue_sum(const TpSumInvocation& invocation);
 
     std::vector<int> devices_;
-    std::vector<std::vector<hipEvent_t>> sent_;
+    std::vector<std::vector<std::array<hipEvent_t, 2>>> sent_;
+    std::vector<std::vector<std::array<hipEvent_t, 2>>> consumed_;
+    std::vector<std::vector<std::array<char, 2>>> consumed_recorded_;
     std::vector<std::vector<std::array<void*, 2>>> inbox_;
     std::vector<std::array<void*, 2>> inbox_ptrs_dev_;
     std::size_t inbox_bytes_ = 0;

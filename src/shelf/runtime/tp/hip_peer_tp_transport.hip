@@ -263,9 +263,17 @@ HipPeerTpTransport::~HipPeerTpTransport() {
         if (r < sent_.size()) {
             for (std::size_t q = 0; q < rank_count; ++q) {
                 if (q == r) continue;
-                if (sent_[r][q] != nullptr) {
-                    shelf::gpu::discard_cleanup_result(hipEventDestroy(sent_[r][q]));
-                    sent_[r][q] = nullptr;
+                for (hipEvent_t& event : sent_[r][q]) {
+                    if (event != nullptr) {
+                        shelf::gpu::discard_cleanup_result(hipEventDestroy(event));
+                        event = nullptr;
+                    }
+                }
+                for (hipEvent_t& event : consumed_[r][q]) {
+                    if (event != nullptr) {
+                        shelf::gpu::discard_cleanup_result(hipEventDestroy(event));
+                        event = nullptr;
+                    }
                 }
             }
         }
@@ -296,7 +304,15 @@ Result<std::unique_ptr<HipPeerTpTransport>> HipPeerTpTransport::create(
     if (!enable_status.ok()) return enable_status;
 
     const std::size_t rank_count = devices.size();
-    transport->sent_.assign(rank_count, std::vector<hipEvent_t>(rank_count, nullptr));
+    transport->sent_.assign(
+        rank_count,
+        std::vector<std::array<hipEvent_t, 2>>(rank_count, {nullptr, nullptr}));
+    transport->consumed_.assign(
+        rank_count,
+        std::vector<std::array<hipEvent_t, 2>>(rank_count, {nullptr, nullptr}));
+    transport->consumed_recorded_.assign(
+        rank_count,
+        std::vector<std::array<char, 2>>(rank_count, {0, 0}));
     transport->inbox_.assign(rank_count, {});
     transport->inbox_ptrs_dev_.assign(rank_count, {});
     for (std::size_t r = 0; r < rank_count; ++r) {
@@ -312,11 +328,21 @@ Result<std::unique_ptr<HipPeerTpTransport>> HipPeerTpTransport::create(
         if (!scope.ok()) return scope.status();
         for (std::size_t q = 0; q < rank_count; ++q) {
             if (q == r) continue;
-            if (hipEventCreateWithFlags(&transport->sent_[r][q], hipEventDisableTiming) !=
-                hipSuccess) {
-                return Status::hip_error("hipEventCreate tp send",
-                                         hipGetErrorString(hipGetLastError()), __FILE__,
-                                         __LINE__);
+            for (int p = 0; p < 2; ++p) {
+                if (hipEventCreateWithFlags(&transport->sent_[r][q][p],
+                                            hipEventDisableTiming |
+                                                hipEventReleaseToSystem) != hipSuccess) {
+                    return Status::hip_error("hipEventCreate tp send",
+                                             hipGetErrorString(hipGetLastError()), __FILE__,
+                                             __LINE__);
+                }
+                if (hipEventCreateWithFlags(&transport->consumed_[r][q][p],
+                                            hipEventDisableTiming |
+                                                hipEventReleaseToSystem) != hipSuccess) {
+                    return Status::hip_error("hipEventCreate tp consumed",
+                                             hipGetErrorString(hipGetLastError()), __FILE__,
+                                             __LINE__);
+                }
             }
         }
         if (hipMalloc(&transport->probe_buffers_[r], kProbeMaxBytes) != hipSuccess) {
@@ -425,10 +451,18 @@ Status HipPeerTpTransport::enqueue_sum(const TpSumInvocation& invocation) {
             if (!scope.ok()) return scope.status();
             for (std::size_t q = 0; q < rank_count; ++q) {
                 if (q == r) continue;
+                if (consumed_recorded_[q][r][parity] != 0) {
+                    if (hipStreamWaitEvent(invocation.streams[r],
+                                           consumed_[q][r][parity], 0) != hipSuccess) {
+                        return Status::hip_error("hipStreamWaitEvent tp consumed",
+                                                 hipGetErrorString(hipGetLastError()),
+                                                 __FILE__, __LINE__);
+                    }
+                }
                 st = launch_copy(inbox_[q][r][parity], invocation.targets[r].ptr, bytes,
                                  dtype, invocation.streams[r]);
                 if (!st.ok()) return st;
-                if (hipEventRecord(sent_[r][q], invocation.streams[r]) != hipSuccess) {
+                if (hipEventRecord(sent_[r][q][parity], invocation.streams[r]) != hipSuccess) {
                     return Status::hip_error("hipEventRecord tp send",
                                              hipGetErrorString(hipGetLastError()), __FILE__,
                                              __LINE__);
@@ -441,7 +475,7 @@ Status HipPeerTpTransport::enqueue_sum(const TpSumInvocation& invocation) {
             if (!scope.ok()) return scope.status();
             for (std::size_t q = 0; q < rank_count; ++q) {
                 if (q == r) continue;
-                if (hipEventRecord(sent_[r][q], invocation.streams[r]) != hipSuccess) {
+                if (hipEventRecord(sent_[r][q][parity], invocation.streams[r]) != hipSuccess) {
                     return Status::hip_error("hipEventRecord tp send",
                                              hipGetErrorString(hipGetLastError()), __FILE__,
                                              __LINE__);
@@ -454,7 +488,7 @@ Status HipPeerTpTransport::enqueue_sum(const TpSumInvocation& invocation) {
         if (!scope.ok()) return scope.status();
         for (std::size_t q = 0; q < rank_count; ++q) {
             if (q == r) continue;
-            if (hipStreamWaitEvent(invocation.streams[r], sent_[q][r], 0) != hipSuccess) {
+            if (hipStreamWaitEvent(invocation.streams[r], sent_[q][r][parity], 0) != hipSuccess) {
                 return Status::hip_error("hipStreamWaitEvent tp receive",
                                          hipGetErrorString(hipGetLastError()), __FILE__,
                                          __LINE__);
@@ -463,6 +497,15 @@ Status HipPeerTpTransport::enqueue_sum(const TpSumInvocation& invocation) {
         st = launch_add(invocation.targets[r], inbox_ptrs_dev_[r][parity],
                         rank_count - 1, bytes, invocation.streams[r]);
         if (!st.ok()) return st;
+        for (std::size_t q = 0; q < rank_count; ++q) {
+            if (q == r) continue;
+            if (hipEventRecord(consumed_[r][q][parity], invocation.streams[r]) != hipSuccess) {
+                return Status::hip_error("hipEventRecord tp consumed",
+                                         hipGetErrorString(hipGetLastError()), __FILE__,
+                                         __LINE__);
+            }
+            consumed_recorded_[r][q][parity] = 1;
+        }
     }
     parity_ ^= 1u;
     return Status::make_ok();

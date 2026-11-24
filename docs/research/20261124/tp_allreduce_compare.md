@@ -68,8 +68,23 @@ HY4 はペア (a, b) を作り、a が両方向のコピーを起動する。pus
 | push | なし | 40.6 | 34.5 | 1,205 | 976 |
 | peer | なし | 34.7 | 29.2 | 1,200 | 974 |
 
-## 次に shelf へ入れる候補
+## 反映した内容
 
-1. push の前に前回同一 parity の `consumed` event を待つ（HY4 と同じ保護）。
-2. 送受信 event を `hipEventReleaseToSystem` 相当にする。
-3. 方向別の peer probe と host フォールバック（現行は transport 単位）。
+1. push の前に、同じ parity を前回読んだ側の `consumed` event を待つようにした。
+   HY4 は `p ^ 1` を待つが、shelf の parity は barrier ごとに交互なので、同じ parity を
+   2 barrier 前の消費に対応させるのが正しい。
+2. 送受信 event を `hipEventDisableTiming | hipEventReleaseToSystem` で作るようにした。
+3. 方向別 probe と host フォールバックは未着手（現行は transport 単位）。
+
+27B TP=2、context 64、8 token での実測（現 boot）:
+
+| 構成 | 変更前 | 変更後 |
+| --- | ---: | ---: |
+| graph ON | 21.0 / 21.4 | 20.8 / 20.3 |
+| graph OFF | 27.2 | 27.7 |
+| logits | `-888326.250` | `-888326.250` |
+| `test_qwen35_tp_execution` | PASS | PASS |
+
+`consumed` 待ちは誤差の範囲で、graph ON が OFF より遅い状態は変わらない。再起動前の
+graph ON 39.5 tok/s は、この boot では再現しない（原因は未特定。OFF は同等以上なので
+collective 側ではない）。
