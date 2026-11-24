@@ -1512,7 +1512,7 @@ Result<MtpIterationOutput> mtp_decode_only(
     state::PagedSequenceState& sequence,
     int32_t pending_token,
     uint32_t remaining_tokens,
-    hipStream_t stream) {
+    hipStream_t stream, bool ignore_eos = false) {
     (void)remaining_tokens;
     const uint32_t position = sequence.position;
     std::vector<int32_t> tokens{pending_token};
@@ -1533,7 +1533,7 @@ Result<MtpIterationOutput> mtp_decode_only(
     output.emitted[0] = sampled.value();
     output.emitted_count = 1u;
     output.pending_token = sampled.value();
-    output.finished = qwen_hybrid::is_stop_token(target.model.config->stop_tokens,
+    output.finished = !ignore_eos && qwen_hybrid::is_stop_token(target.model.config->stop_tokens,
                                                  sampled.value());
     return output;
 }
@@ -1614,13 +1614,14 @@ Result<MtpIterationOutput> accept_verified(
     std::vector<MtpGdnRankState>& request_ranks,
     const std::vector<MtpGdnRankState>& log_ranks,
     uint32_t row_base,
-    hipStream_t stream) {
+    hipStream_t stream, bool ignore_eos = false) {
+    const auto stop_tokens = ignore_eos ? qwen_hybrid::StopTokens{} : target.model.config->stop_tokens;
     SpecVerifyResult accepted_result;
     Status accepted = spec_greedy_accept(proposals, drafts, sampled, true, accepted_result);
     if (!accepted.ok()) return accepted;
     // Cut at the first stop token before the state commit, so rows past it are not committed.
     const bool stopped = spec_bound_result(accepted_result, remaining_tokens,
-        target.model.config->stop_tokens);
+        stop_tokens);
     const uint32_t accepted_drafts = accepted_result.num_accepted_drafts;
     MtpIterationOutput output;
     output.finished = stopped;
@@ -1720,14 +1721,14 @@ Result<MtpIterationOutput> accept_verified(
     }
 
     for (uint32_t i = 0u; i < output.emitted_count; ++i) {
-        if (qwen_hybrid::is_stop_token(target.model.config->stop_tokens,
+        if (qwen_hybrid::is_stop_token(stop_tokens,
                                        output.emitted[i])) {
             output.emitted_count = i + 1u;
             output.finished = true;
             break;
         }
     }
-    if (qwen_hybrid::is_stop_token(target.model.config->stop_tokens,
+    if (qwen_hybrid::is_stop_token(stop_tokens,
                                    output.pending_token)) {
         output.finished = true;
     }
@@ -2705,7 +2706,7 @@ Result<MtpSpecBatchOutput> mtp_spec_step_batch(
                                                 __FILE__, __LINE__);
             }
             row_begin[i] = total_rows;
-            if (qwen_hybrid::is_stop_token(context.target->model.config->stop_tokens,
+            if (!slot.ignore_eos && qwen_hybrid::is_stop_token(context.target->model.config->stop_tokens,
                                            slot.pending_token)) {
                 stopped_slot[i] = 1;
                 drafts[i].decode_only = true;
@@ -2885,7 +2886,7 @@ Result<MtpSpecBatchOutput> mtp_spec_step_batch(
                 *slot.drafter, *context.target, *slot.sequence, drafts[i].position,
                 drafts[i].proposals.data(), drafts[i].drafts, verify_tokens,
                 sampled.data() + chunk_row_begin[c], slot.remaining_tokens, request_ranks,
-                context.ranks, chunk_row_begin[c], stream);
+                context.ranks, chunk_row_begin[c], stream, slot.ignore_eos);
             if (!accepted.ok()) return accepted.status();
             slot.drafter->sample_index += static_cast<uint64_t>(drafts[i].drafts) + 1u;
             out.slots[i] = accepted.value();
@@ -2896,7 +2897,7 @@ Result<MtpSpecBatchOutput> mtp_spec_step_batch(
         if (!drafts[i].decode_only || stopped_slot[i]) continue;
         const MtpSpecBatchSlot& slot = slots[i];
         auto output = mtp_decode_only(*slot.drafter, *context.target, *slot.sequence,
-                                      slot.pending_token, slot.remaining_tokens, stream);
+                                      slot.pending_token, slot.remaining_tokens, stream, slot.ignore_eos);
         if (!output.ok()) return output.status();
         out.slots[i] = output.value();
     }

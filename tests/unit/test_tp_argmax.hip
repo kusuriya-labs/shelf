@@ -2,6 +2,10 @@
 #include <shelf/core/gpu/scoped_device.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/runtime/tp/tp_argmax.h>
+#include <shelf/runtime/tp/tp_transports.h>
+#include <shelf/runtime/tp/tp_barrier_group.h>
+
+#include <thread>
 
 #include <hip/hip_runtime.h>
 
@@ -18,7 +22,6 @@ using shelf::runtime::launch_tp_sum_f32_4;
 using shelf::runtime::launch_tp_sum_f32_to_bf16_4;
 using shelf::runtime::tp_argmax_pack_host;
 using shelf::runtime::tp_argmax_reduce_host;
-using shelf::runtime::tp_reduce_four_input_shots;
 using shelf::runtime::tp_sum_bf16_4_host;
 using shelf::runtime::tp_sum_f32_4_host;
 
@@ -177,22 +180,22 @@ static void test_kernel_four_input_sum(int device) {
         fail("hipMalloc four input sum");
         return;
     }
-    hipMemcpy(da, a.data(), count * 2u, hipMemcpyHostToDevice);
-    hipMemcpy(db, b.data(), count * 2u, hipMemcpyHostToDevice);
-    hipMemcpy(dc, c.data(), count * 2u, hipMemcpyHostToDevice);
-    hipMemcpy(dd, d.data(), count * 2u, hipMemcpyHostToDevice);
+    check(hipMemcpy(da, a.data(), count * 2u, hipMemcpyHostToDevice) == hipSuccess, "hipMemcpy");
+    check(hipMemcpy(db, b.data(), count * 2u, hipMemcpyHostToDevice) == hipSuccess, "hipMemcpy");
+    check(hipMemcpy(dc, c.data(), count * 2u, hipMemcpyHostToDevice) == hipSuccess, "hipMemcpy");
+    check(hipMemcpy(dd, d.data(), count * 2u, hipMemcpyHostToDevice) == hipSuccess, "hipMemcpy");
     void* fa_dev = nullptr;
     void* fb_dev = nullptr;
     void* fc_dev = nullptr;
     void* fd_dev = nullptr;
-    hipMalloc(&fa_dev, count * 4u);
-    hipMalloc(&fb_dev, count * 4u);
-    hipMalloc(&fc_dev, count * 4u);
-    hipMalloc(&fd_dev, count * 4u);
-    hipMemcpy(fa_dev, fa.data(), count * 4u, hipMemcpyHostToDevice);
-    hipMemcpy(fb_dev, fb.data(), count * 4u, hipMemcpyHostToDevice);
-    hipMemcpy(fc_dev, fc.data(), count * 4u, hipMemcpyHostToDevice);
-    hipMemcpy(fd_dev, fd.data(), count * 4u, hipMemcpyHostToDevice);
+    check(hipMalloc(&fa_dev, count * 4u) == hipSuccess, "hipMalloc");
+    check(hipMalloc(&fb_dev, count * 4u) == hipSuccess, "hipMalloc");
+    check(hipMalloc(&fc_dev, count * 4u) == hipSuccess, "hipMalloc");
+    check(hipMalloc(&fd_dev, count * 4u) == hipSuccess, "hipMalloc");
+    check(hipMemcpy(fa_dev, fa.data(), count * 4u, hipMemcpyHostToDevice) == hipSuccess, "hipMemcpy");
+    check(hipMemcpy(fb_dev, fb.data(), count * 4u, hipMemcpyHostToDevice) == hipSuccess, "hipMemcpy");
+    check(hipMemcpy(fc_dev, fc.data(), count * 4u, hipMemcpyHostToDevice) == hipSuccess, "hipMemcpy");
+    check(hipMemcpy(fd_dev, fd.data(), count * 4u, hipMemcpyHostToDevice) == hipSuccess, "hipMemcpy");
 
     check(launch_tp_sum_bf16_4(static_cast<std::uint16_t*>(o_bf),
                                static_cast<const std::uint16_t*>(da),
@@ -215,10 +218,10 @@ static void test_kernel_four_input_sum(int device) {
                                       stream) == hipSuccess,
           "launch four F32 to BF16 sum");
 
-    hipMemcpy(out_bf.data(), o_bf, count * 2u, hipMemcpyDeviceToHost);
-    hipMemcpy(out_f.data(), o_f, count * 4u, hipMemcpyDeviceToHost);
+    check(hipMemcpy(out_bf.data(), o_bf, count * 2u, hipMemcpyDeviceToHost) == hipSuccess, "hipMemcpy");
+    check(hipMemcpy(out_f.data(), o_f, count * 4u, hipMemcpyDeviceToHost) == hipSuccess, "hipMemcpy");
     std::vector<std::uint16_t> host_bf16(count);
-    hipMemcpy(host_bf16.data(), o_bf16, count * 2u, hipMemcpyDeviceToHost);
+    check(hipMemcpy(host_bf16.data(), o_bf16, count * 2u, hipMemcpyDeviceToHost) == hipSuccess, "hipMemcpy");
 
     std::vector<std::uint16_t> want_bf(count);
     tp_sum_bf16_4_host(want_bf.data(), a.data(), b.data(), c.data(), d.data(), count);
@@ -239,18 +242,17 @@ static void test_kernel_four_input_sum(int device) {
     shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
 }
 
-static void test_two_shot_four_input_sum(int device) {
+static void test_large_four_input_sum(int device) {
     const std::size_t bytes = 2u * 1024u * 1024u + 64u;
     const std::size_t count = bytes / sizeof(std::uint16_t);
-    check(tp_reduce_four_input_shots(bytes) == 2u, "large reduce uses two shots");
     auto scope = shelf::gpu::ScopedDevice::create(device);
     if (!scope.ok()) {
-        fail("scoped device for two shot sum");
+        fail("scoped device for large sum");
         return;
     }
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) {
-        fail("hipStreamCreate two shot sum");
+        fail("hipStreamCreate large sum");
         return;
     }
     std::vector<std::uint16_t> a(count), b(count), c(count), d(count), out(count);
@@ -268,37 +270,119 @@ static void test_two_shot_four_input_sum(int device) {
     if (hipMalloc(&da, bytes) != hipSuccess || hipMalloc(&db, bytes) != hipSuccess ||
         hipMalloc(&dc, bytes) != hipSuccess || hipMalloc(&dd, bytes) != hipSuccess ||
         hipMalloc(&dst, bytes) != hipSuccess) {
-        fail("hipMalloc two shot sum");
+        fail("hipMalloc large sum");
         return;
     }
-    hipMemcpy(da, a.data(), bytes, hipMemcpyHostToDevice);
-    hipMemcpy(db, b.data(), bytes, hipMemcpyHostToDevice);
-    hipMemcpy(dc, c.data(), bytes, hipMemcpyHostToDevice);
-    hipMemcpy(dd, d.data(), bytes, hipMemcpyHostToDevice);
-    const std::size_t chunk = (count + 1u) / 2u;
-    for (int shot = 0; shot < 2; ++shot) {
-        const std::size_t begin = static_cast<std::size_t>(shot) * chunk;
-        if (begin >= count) continue;
-        const std::size_t length = std::min(chunk, count - begin);
-        const hipError_t err = launch_tp_sum_bf16_4(
-            static_cast<std::uint16_t*>(dst) + begin,
-            static_cast<const std::uint16_t*>(da) + begin,
-            static_cast<const std::uint16_t*>(db) + begin,
-            static_cast<const std::uint16_t*>(dc) + begin,
-            static_cast<const std::uint16_t*>(dd) + begin, length, stream);
-        check(err == hipSuccess, "launch two shot chunk");
-    }
+    check(hipMemcpy(da, a.data(), bytes, hipMemcpyHostToDevice) == hipSuccess, "hipMemcpy");
+    check(hipMemcpy(db, b.data(), bytes, hipMemcpyHostToDevice) == hipSuccess, "hipMemcpy");
+    check(hipMemcpy(dc, c.data(), bytes, hipMemcpyHostToDevice) == hipSuccess, "hipMemcpy");
+    check(hipMemcpy(dd, d.data(), bytes, hipMemcpyHostToDevice) == hipSuccess, "hipMemcpy");
+    const auto err = launch_tp_sum_bf16_4(
+        static_cast<uint16_t*>(dst), static_cast<const uint16_t*>(da), static_cast<const uint16_t*>(db),
+        static_cast<const uint16_t*>(dc), static_cast<const uint16_t*>(dd), count, stream);
+    check(err == hipSuccess, "launch large four-rank reduction");
     check(hipMemcpy(out.data(), dst, bytes, hipMemcpyDeviceToHost) == hipSuccess,
-          "download two shot result");
+          "download large result");
     std::vector<std::uint16_t> want(count);
     tp_sum_bf16_4_host(want.data(), a.data(), b.data(), c.data(), d.data(), count);
     std::size_t mismatches = 0u;
     for (std::size_t i = 0u; i < count; ++i) {
         if (out[i] != want[i]) ++mismatches;
     }
-    check(mismatches == 0u, "two shot reduce matches host reference");
+    check(mismatches == 0u, "large reduce matches host reference");
     for (void* ptr : {da, db, dc, dd, dst}) shelf::gpu::discard_cleanup_result(hipFree(ptr));
     shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+}
+
+static void test_staged_collective() {
+    using namespace shelf::runtime;
+    const std::vector<int> devices{0, 0};
+    auto transport = HipPeerTpTransport::create(devices, TpCombineBackend::Event,
+                                               TpPeerLinkMap(2, std::vector<uint8_t>(2, 0)));
+    if (!transport.ok() || !transport.value()->verify().ok()) {
+        fail("staged transport setup");
+        return;
+    }
+    TpBarrierGroup group(2, devices, transport.value().get());
+    if (!group.initialize().ok()) {
+        fail("argmax barrier initialization");
+        return;
+    }
+    auto run = [&](int rank, bool& passed) {
+        hipStream_t stream{};
+        float* logits{};
+        int32_t* ids{};
+        passed = hipSetDevice(0) == hipSuccess && hipStreamCreate(&stream) == hipSuccess &&
+            hipMalloc(&logits, 12 * sizeof(float)) == hipSuccess &&
+            hipMalloc(&ids, 32 * 3 * sizeof(int32_t)) == hipSuccess;
+        const float data[2][12] = {{-2, -1, 0, 0, 9, 1, 0, 0, 4, 8, 0, 0},
+                                   {0, 0, -3, 6, 0, 0, 9, 3, 0, 0, 7, 8}};
+        if (passed) passed = hipMemcpy(logits, data[rank], sizeof(data[rank]), hipMemcpyHostToDevice) == hipSuccess;
+        if (!passed) group.abort(shelf::Status::invalid_state("test setup failed", __FILE__, __LINE__));
+        const int32_t want[3]{3, 0, 1};
+        for (unsigned step = 0; passed && step < 32; ++step) {
+            TpArgmaxInvocation in;
+            in.local_offset = rank * 2u;
+            in.local_logits = logits + in.local_offset;
+            in.local_cols = 2;
+            in.row_stride = in.vocab = 4;
+            in.rows = step % 3 + 1;
+            in.out_ids = ids + step * 3;
+            in.stream = stream;
+            passed = group.argmax_reduce(rank, in).ok();
+            if (!passed) group.abort(shelf::Status::invalid_state("test argmax failed", __FILE__, __LINE__));
+        }
+        int32_t got[32 * 3]{};
+        if (passed) passed = hipMemcpyAsync(got, ids, sizeof(got), hipMemcpyDeviceToHost, stream) == hipSuccess &&
+            hipStreamSynchronize(stream) == hipSuccess;
+        for (unsigned step = 0; passed && step < 32; ++step)
+            passed = std::equal(got + 3 * step, got + 3 * step + step % 3 + 1, want);
+        if (ids) shelf::gpu::discard_cleanup_result(hipFree(ids));
+        if (logits) shelf::gpu::discard_cleanup_result(hipFree(logits));
+        if (stream) shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    };
+    bool first = false, second = false;
+    std::thread a(run, 0, std::ref(first));
+    std::thread b(run, 1, std::ref(second));
+    a.join();
+    b.join();
+    check(first && second, "two staged ranks retain their inputs and agree on sampled IDs");
+}
+
+static void test_four_rank_order() {
+    using namespace shelf::runtime;
+    const std::vector<int> devices(4, 0);
+    auto peer = HipPeerTpTransport::create(devices, TpCombineBackend::Event,
+                                           TpPeerLinkMap(4, std::vector<uint8_t>(4, 0)));
+    if (!peer.ok() || !peer.value()->verify().ok()) {
+        fail("four staged ranks verify");
+        return;
+    }
+    std::vector<TpSumTarget> targets(4);
+    std::vector<hipStream_t> streams(4);
+    std::vector<hipEvent_t> ready(4);
+    const float initial[]{1.0e20f, -1.0e20f, 1.0f, 2.0f};
+    bool valid = true;
+    for (unsigned r = 0; r < 4 && valid; ++r) {
+        auto& t = targets[r];
+        t.rows = t.row_stride = t.feature_count = 1;
+        t.dtype = ValueDType::F32;
+        valid = hipStreamCreate(&streams[r]) == hipSuccess && hipEventCreate(&ready[r]) == hipSuccess &&
+            hipMalloc(&t.ptr, sizeof(float)) == hipSuccess &&
+            hipMemcpyAsync(t.ptr, initial + r, sizeof(float), hipMemcpyHostToDevice, streams[r]) == hipSuccess &&
+            hipEventRecord(ready[r], streams[r]) == hipSuccess;
+    }
+    if (valid) valid = peer.value()->sum_hidden(TpSumInvocation{targets, streams, ready}).ok();
+    for (unsigned r = 0; r < 4; ++r) {
+        float result{};
+        if (valid) valid = hipStreamSynchronize(streams[r]) == hipSuccess &&
+            hipMemcpy(&result, targets[r].ptr, sizeof(result), hipMemcpyDeviceToHost) == hipSuccess &&
+            result == 3.0f;
+        if (targets[r].ptr) shelf::gpu::discard_cleanup_result(hipFree(targets[r].ptr));
+        if (ready[r]) shelf::gpu::discard_cleanup_result(hipEventDestroy(ready[r]));
+        if (streams[r]) shelf::gpu::discard_cleanup_result(hipStreamDestroy(streams[r]));
+    }
+    check(valid, "four ranks sum in the same order under cancellation");
 }
 
 int main() {
@@ -307,9 +391,11 @@ int main() {
         std::printf("SKIP: tp argmax kernels require a GPU\n");
         return 77;
     }
+    test_four_rank_order();
+    test_staged_collective();
     test_kernel_argmax(0);
     test_kernel_four_input_sum(0);
-    test_two_shot_four_input_sum(0);
+    test_large_four_input_sum(0);
     std::printf(g_fail == 0 ? "PASS\n" : "FAIL (%d)\n", g_fail);
     return g_fail == 0 ? 0 : 1;
 }

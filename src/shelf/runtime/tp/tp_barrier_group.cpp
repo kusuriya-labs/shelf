@@ -31,6 +31,7 @@ TpBarrierGroup::TpBarrierGroup(int rank_count, std::vector<int> devices,
       targets_(static_cast<std::size_t>(rank_count)),
       streams_(static_cast<std::size_t>(rank_count), nullptr),
       peer_written_(static_cast<std::size_t>(rank_count), 0),
+      argmax_invocations_(static_cast<std::size_t>(rank_count)),
       abort_status_(Status::make_ok()) {}
 
 TpBarrierGroup::~TpBarrierGroup() {
@@ -186,24 +187,27 @@ Status TpBarrierGroup::argmax_reduce(int rank, const TpArgmaxInvocation& invocat
                                    __LINE__);
     }
     const std::size_t index = static_cast<std::size_t>(rank);
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (aborted_) return abort_status_;
-    }
     std::unique_lock<std::mutex> lock(mutex_);
     if (aborted_) return abort_status_;
-    argmax_invocations_.assign(rank_count_, TpArgmaxInvocation{});
-    argmax_streams_.assign(rank_count_, nullptr);
     argmax_invocations_[index] = invocation;
-    argmax_streams_[index] = invocation.stream;
     const uint64_t seq = open_barrier_;
     ++arrived_;
     if (arrived_ == rank_count_) {
         Status st = Status::make_ok();
         for (int r = 0; r < rank_count_; ++r) {
-            st = transport_->begin_argmax(r, argmax_invocations_[static_cast<std::size_t>(r)]);
-            if (!st.ok()) break;
+            const auto& lane = argmax_invocations_[r];
+            if (lane.rows != invocation.rows || lane.out_ids == nullptr || lane.local_logits == nullptr ||
+                lane.vocab != invocation.vocab || lane.local_cols != invocation.local_cols ||
+                lane.row_stride < lane.vocab || lane.local_offset != static_cast<uint64_t>(r) * lane.local_cols ||
+                static_cast<uint64_t>(lane.local_cols) * rank_count_ != lane.vocab) {
+                st = Status::invalid_argument("inconsistent TP argmax shards", __FILE__, __LINE__);
+                break;
+            }
         }
+        for (int r = 0; st.ok() && r < rank_count_; ++r)
+            st = transport_->begin_argmax(r, argmax_invocations_[r]);
+        for (int r = 0; st.ok() && r < rank_count_; ++r)
+            st = transport_->finish_argmax(r, argmax_invocations_[r]);
         if (!st.ok()) {
             aborted_ = true;
             abort_status_ = st;
@@ -215,11 +219,11 @@ Status TpBarrierGroup::argmax_reduce(int rank, const TpArgmaxInvocation& invocat
         ++open_barrier_;
         completed_barriers_ = open_barrier_;
         cv_.notify_all();
-        return transport_->finish_argmax(rank, invocation);
+        return Status::make_ok();
     }
     cv_.wait(lock, [&] { return completed_barriers_ > seq || aborted_; });
     if (aborted_) return abort_status_;
-    return transport_->finish_argmax(rank, invocation);
+    return Status::make_ok();
 }
 
 Status TpBarrierGroup::reserve(std::size_t bytes) {

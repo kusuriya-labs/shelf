@@ -103,6 +103,7 @@ public:
 
 
 private:
+    Status decode_row_into(std::uint64_t row, bool include_head_bias, std::span<float> out) const;
     struct NgramHead {
         std::unique_ptr<io::SafetensorsReader> reader;
         const std::uint8_t* codes = nullptr;

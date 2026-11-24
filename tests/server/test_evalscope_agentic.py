@@ -179,7 +179,7 @@ class EvalScopeAgenticTests(unittest.TestCase):
                 rows = list(csv.DictReader(fh))
             self.assertEqual([int(r["Conc."]) for r in rows], [1, 2])
             for row in rows:
-                self.assertGreater(float(row["Latency (tps/user)"]), 0.0)
+                self.assertGreater(float(row["Decode throughput (tok/s/user)"]), 0.0)
                 self.assertGreater(float(row["Output Throughput (tok/min/gpu)"]), 0.0)
                 self.assertGreater(float(row["Approx Cache Hit"]), 0.0)
                 self.assertGreater(float(row["TTFT p50 (ms)"]), 0.0)

@@ -679,7 +679,7 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
             (static_cast<uint64_t>(e.output_col_offset) + static_cast<uint64_t>(r0) * dst.row_stride) * out_elem_bytes;
         const auto out_dtype =
             out_bf16 ? ::shelf::kernel::Exl3OutputDType::BF16 : ::shelf::kernel::Exl3OutputDType::F32;
-        bool fused_linear_ok = r0 == 0u && n_rows == rows && out_bf16 && rows <= 16u &&
+        bool fused_linear_ok = !use_dense && r0 == 0u && n_rows == rows && out_bf16 && rows <= 16u &&
             (e.exl3_ka == 3u || e.exl3_ka == 4u) && e.output_col_total == 0u && e.output_col_offset == 0u &&
             in.row_stride % 4u == 0u && dst.row_stride % 4u == 0u && producer == nullptr && gdn_producer == nullptr &&
             attn_producer == nullptr && final_producer == nullptr && deferred == nullptr;
@@ -1140,15 +1140,15 @@ Result<OptimizedLaunchResult> try_launch_exl3_projection(
     if (custom_prefill)
         return miss;
     auto bits_match = [&](uint32_t ka) {
-        return ::shelf::execution::exl3_grouped_projection_bits_match(weight.exl3_ka, ka, rows);
+        return (producer == nullptr && !is_plamo && !use_prefill)
+            ? ::shelf::execution::exl3_grouped_projection_bits_match(weight.exl3_ka, ka, rows)
+            : weight.exl3_ka == ka;
     };
-    uint32_t bpw[3] = {};
     uint32_t count = 0u;
     if (is_plamo) {
         count = weight.rows == 3072u && weight.cols == 2560u ? 3u :
                 weight.rows == 10240u && weight.cols == 2560u ? 2u : 1u;
         if (count > end - first) return miss;
-        for (uint32_t j = 0u; j < count; ++j) bpw[j] = weight.exl3_ka;
     } else {
         while (count < 3u && first + count < end) {
             const auto& b = program.dispatches[first + count];
@@ -1160,7 +1160,6 @@ Result<OptimizedLaunchResult> try_launch_exl3_projection(
                 !bits_match(w.exl3_ka) || w.cols != weight.cols || w.k_padded != w.cols || w.experts != 1u ||
                 w.rows == 0u || w.rows % 128u != 0u || w.output_col_total != 0u || w.output_col_offset != 0u ||
                 w.preshuffled || w.exl3_half || !w.codes || !w.exl3_suh || !w.exl3_svh) break;
-            bpw[count] = w.exl3_ka;
             ++count;
         }
         if (count < 2u) return miss;
@@ -1180,6 +1179,7 @@ Result<OptimizedLaunchResult> try_launch_exl3_projection(
             b.output_count != 1u || b.input_slots[0] != binding.input_slots[0] ||
             b.weight_index >= ctx.weight_count) return miss;
         const auto& w = ctx.weights[b.weight_index];
+        if (w.exl3_ka == 3u) group.three_bit_mask |= 1u << j;
         const uint32_t expected_n = count == 3u && j != 0u ? 512u : weight.rows;
         if (w.plamo_exl3_linear != is_plamo || w.encoding != 4u || w.device_ptr != nullptr ||
             !bits_match(w.exl3_ka) || w.cols != group.k || (is_plamo && w.rows != expected_n) ||
@@ -1235,6 +1235,7 @@ Result<OptimizedLaunchResult> try_launch_exl3_projection(
     }
     uint32_t launch_count = 0u;
     hipError_t err = hipSuccess;
+    if (group.three_bit_mask == (1u << count) - 1u) group.three_bit_mask = 0u;
     if (producer != nullptr && producer->kernel_id == KernelId::SWIGLU) {
         const auto* swiglu = producer;
         if (!is_plamo || rows != 1u || count != 1u || weight.cols != 10240u ||
@@ -1342,27 +1343,9 @@ Result<OptimizedLaunchResult> try_launch_exl3_projection(
             ++launch_count;
         }
     } else {
-        bool mixed = false;
-        for (uint32_t j = 1u; j < count; ++j) mixed = mixed || bpw[j] != bpw[0];
-        if (mixed && producer == nullptr && !use_prefill) {
-            for (uint32_t j = 0u; j < count && err == hipSuccess;) {
-                uint32_t k = j + 1u;
-                while (k < count && bpw[k] == bpw[j]) ++k;
-                ::shelf::kernel::PlamoExl3ProjectionGroup sub = group;
-                const uint32_t sub_count = k - j;
-                sub.count = sub_count;
-                for (uint32_t i = 0u; i < sub_count; ++i) sub.p[i] = group.p[j + i];
-                uint32_t sub_launches = 0u;
-                err = ::shelf::kernel::launch_plamo_exl3_projection(sub, bpw[j], stream, &sub_launches,
-                                                                   false, false);
-                launch_count += sub_launches;
-                j = k;
-            }
-        } else {
-            err = ::shelf::kernel::launch_plamo_exl3_projection(group, weight.exl3_ka, stream, &launch_count,
-                                                                is_plamo, producer != nullptr);
-            if (producer != nullptr) ++launch_count;
-        }
+        err = ::shelf::kernel::launch_plamo_exl3_projection(group, weight.exl3_ka, stream, &launch_count,
+                                                            is_plamo, producer != nullptr);
+        if (producer != nullptr) ++launch_count;
     }
     if (err != hipSuccess)
         return Status::hip_error(is_plamo ? "plamo exl3 projection" : "exl3 grouped projection",

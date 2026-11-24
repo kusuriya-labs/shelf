@@ -27,12 +27,12 @@ __global__ void tp_argmax_pack_kernel(const float* logits, TpArgmaxPair* pairs, 
     if (row >= rows) return;
     const uint32_t tid = threadIdx.x;
     const float* src = logits + static_cast<uint64_t>(row) * row_stride;
-    float best = -FLT_MAX;
+    float best = -3.4e38f;
     int best_id = INT_MAX;
     for (uint32_t c = tid; c < local_cols; c += blockDim.x) {
         const float value = src[c];
         const int id = static_cast<int>(local_offset + c);
-        if (value > best || (value == best && id < best_id)) {
+        if (value > best || (value == best && (best_id < 0 || id < best_id))) {
             best = value;
             best_id = id;
         }
@@ -62,11 +62,11 @@ __global__ void tp_argmax_reduce_kernel(const TpArgmaxPair* pairs, uint32_t pair
                                         uint32_t ranks, uint32_t rows, int32_t* out_ids) {
     const uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row >= rows) return;
-    float best = -FLT_MAX;
+    float best = -3.4e38f;
     int best_id = INT_MAX;
     for (uint32_t r = 0u; r < ranks; ++r) {
         const TpArgmaxPair pair = pairs[static_cast<uint64_t>(r) * pair_stride + row];
-        if (pair.value > best || (pair.value == best && pair.id >= 0 && pair.id < best_id)) {
+        if (pair.id >= 0 && (pair.value > best || (pair.value == best && pair.id < best_id))) {
             best = pair.value;
             best_id = pair.id;
         }
@@ -112,30 +112,22 @@ uint32_t grid_for(std::size_t count, uint32_t threads) {
     return static_cast<uint32_t>(std::min<uint64_t>(blocks, 65535u));
 }
 
-}  // namespace
+}
 
 bool tp_greedy_argmax_eligible(const TpGreedyProbe& probe) noexcept {
     return probe.temperature == 0.0f && probe.top_p == 1.0f && probe.min_p == 0.0f &&
            probe.top_k == 0u && !probe.has_token_bitmask;
 }
 
-uint32_t tp_reduce_shot_count(std::size_t bytes) noexcept {
-    return bytes <= kTpReduceShotThresholdBytes ? 1u : 2u;
-}
-
-uint32_t tp_reduce_four_input_shots(std::size_t bytes) noexcept {
-    return bytes <= kTpReduceShotThresholdBytes ? 1u : 2u;
-}
-
 void tp_argmax_pack_host(const float* logits, uint32_t rows, uint32_t row_stride,
                          uint32_t local_cols, uint32_t local_offset, TpArgmaxPair* pairs) {
     for (uint32_t row = 0u; row < rows; ++row) {
         const float* src = logits + static_cast<uint64_t>(row) * row_stride;
-        float best = -FLT_MAX;
+        float best = -3.4e38f;
         int best_id = -1;
         for (uint32_t c = 0u; c < local_cols; ++c) {
             const int id = static_cast<int>(local_offset + c);
-            if (src[c] > best || (src[c] == best && id < best_id)) {
+            if (src[c] > best || (src[c] == best && (best_id < 0 || id < best_id))) {
                 best = src[c];
                 best_id = id;
             }
@@ -148,12 +140,12 @@ void tp_argmax_pack_host(const float* logits, uint32_t rows, uint32_t row_stride
 void tp_argmax_reduce_host(const TpArgmaxPair* pairs, uint32_t pair_stride, uint32_t ranks,
                            uint32_t rows, int32_t* out_ids) {
     for (uint32_t row = 0u; row < rows; ++row) {
-        float best = -FLT_MAX;
+        float best = -3.4e38f;
         int best_id = -1;
         for (uint32_t r = 0u; r < ranks; ++r) {
             const TpArgmaxPair pair = pairs[static_cast<uint64_t>(r) * pair_stride + row];
             if (pair.id < 0) continue;
-            if (pair.value > best || (pair.value == best && pair.id < best_id)) {
+            if (pair.value > best || (pair.value == best && (best_id < 0 || pair.id < best_id))) {
                 best = pair.value;
                 best_id = pair.id;
             }
@@ -182,7 +174,8 @@ hipError_t launch_tp_argmax_pack(const float* logits, TpArgmaxPair* pairs, uint3
                                  uint32_t row_stride, uint32_t local_cols,
                                  uint32_t local_offset, hipStream_t stream) {
     if (rows == 0u) return hipSuccess;
-    if (logits == nullptr || pairs == nullptr || local_cols == 0u) return hipErrorInvalidValue;
+    if (logits == nullptr || pairs == nullptr || local_cols == 0u || row_stride < local_cols ||
+        static_cast<uint64_t>(local_offset) + local_cols > static_cast<uint64_t>(INT_MAX)) return hipErrorInvalidValue;
     tp_argmax_pack_kernel<<<rows, kPackThreads, 0, stream>>>(
         logits, pairs, rows, row_stride, local_cols, local_offset);
     return hipGetLastError();
@@ -192,7 +185,7 @@ hipError_t launch_tp_argmax_reduce(const TpArgmaxPair* pairs, uint32_t pair_stri
                                    uint32_t ranks, uint32_t rows, int32_t* out_ids,
                                    hipStream_t stream) {
     if (rows == 0u) return hipSuccess;
-    if (pairs == nullptr || out_ids == nullptr || ranks == 0u) return hipErrorInvalidValue;
+    if (pairs == nullptr || out_ids == nullptr || ranks == 0u || pair_stride < rows) return hipErrorInvalidValue;
     const uint32_t threads = 256u;
     const uint32_t blocks = grid_for(rows, threads);
     tp_argmax_reduce_kernel<<<blocks, threads, 0, stream>>>(pairs, pair_stride, ranks, rows,
@@ -235,4 +228,4 @@ hipError_t launch_tp_sum_f32_to_bf16_4(uint16_t* dst, const float* s0, const flo
     return hipGetLastError();
 }
 
-}  // namespace shelf::runtime
+}

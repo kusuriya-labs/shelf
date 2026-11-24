@@ -76,7 +76,7 @@ Ready.
 | `--max-num-batched-tokens MAX_NUM_BATCHED_TOKENS` | token budget per scheduled step; also sets the executor row bucket (default 8192) |
 | `--prefill-chunk PREFILL_CHUNK` | cap prefill tokens per step and the executor row bucket (default 8192) |
 | `--max-concurrent-requests MAX_CONCURRENT_REQUESTS` | max in-flight requests (default 4) |
-| `--prefill-decode-interval PREFILL_DECODE_INTERVAL` | run a decode step after N consecutive prefill chunks; 0 disables the guarantee |
+| `--prefill-decode-interval PREFILL_DECODE_INTERVAL` | prefill が N 回連続したら decode を優先する（既定の 0 で無効） |
 | `--inference-budget-tokens INFERENCE_BUDGET_TOKENS` | max generated tokens per request (default 32768) |
 | `--large-context-tokens LARGE_CONTEXT_TOKENS` | prompt tokens above which the larger inference budget applies (default 262144) |
 | `--large-context-inference-budget-tokens LARGE_CONTEXT_INFERENCE_BUDGET_TOKENS` | max generated tokens for a request whose prompt is longer than --large-context-tokens (default 65536) |
@@ -173,7 +173,7 @@ request 1 個あたりの生成予算（推論予算）は `--inference-budget-t
   KV admission は通常 decode と同じ KV Banker が行うため、不足時は一部の request が
   Queued になり、Active の完了後に admission される。
 - tool calling / sampling / cancel は DFlash2 経路でも利用できる。
-- `--dflash2-adaptive` は受理トークン数の指数移動平均（係数 0.25）から draft 数 `K` を
+- `--dflash2-adaptive` は提案したトークンに対する受理率の指数移動平均（係数 0.25）から draft 数 `K` を
   `2`〜`5` で選ぶ。切替にはヒステリシスと 8 ラウンドの最小間隔を適用し、同時 batch が
   16 を超える場合は `K` を最大 `4` に制限する。`--dflash2-drafts` が `5` 未満なら
   その値が上限になる。同時接続 32 でも session 数と verify 行数は容量内に収まり、

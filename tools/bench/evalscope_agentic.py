@@ -61,12 +61,12 @@ PROFILES: dict[str, dict[str, Any]] = {
 COLUMNS = [
     "config",
     "Conc.",
-    "Latency (tps/user)",
+    "Decode throughput (tok/s/user)",
     "Output Throughput (tok/min/gpu)",
     "TTFT p50 (ms)",
     "TTFT p95 (ms)",
     "Approx Cache Hit",
-    "Decoded Tok/Iter",
+    "Tokens per stream update",
 ]
 
 SYNTHETIC_SNIPPETS = [
@@ -113,12 +113,12 @@ class TokenizersWrapper:
         self._tok = tok_obj
         self._template = None
         if template_str:
-            import jinja2
+            from jinja2.sandbox import ImmutableSandboxedEnvironment
 
             def raise_exception(msg: str) -> None:
                 raise RuntimeError(msg)
 
-            env = jinja2.Environment()
+            env = ImmutableSandboxedEnvironment()
             env.globals["raise_exception"] = raise_exception
             self._template = env.from_string(template_str)
         self._bos = bos_token
@@ -176,7 +176,7 @@ def load_tokenizer(tokenizer_path: str | None, tokenizer_revision: str = "main",
     try:
         from transformers import AutoTokenizer
 
-        return AutoTokenizer.from_pretrained(tokenizer_path, revision=tokenizer_revision, trust_remote_code=True)
+        return AutoTokenizer.from_pretrained(tokenizer_path, revision=tokenizer_revision)
     except Exception:
         if allow_fallback:
             return FallbackTokenizer()
@@ -413,14 +413,16 @@ def _send_turn_sse_sync(
         while True:
             raw_line = resp.readline()
             if not raw_line:
-                break
+                raise RuntimeError("incomplete SSE response")
             line = raw_line.decode("utf-8", errors="replace").strip()
             if not line.startswith("data: "):
                 continue
             data_str = line[6:]
             if data_str == "[DONE]":
-                continue
+                break
             event = json.loads(data_str)
+            if "error" in event:
+                raise RuntimeError(str(event["error"]))
             if "usage" in event and isinstance(event["usage"], dict):
                 usage = event["usage"]
             if "speculative_stats" in event and isinstance(event["speculative_stats"], dict):
@@ -445,7 +447,9 @@ def _send_turn_sse_sync(
         conn.close()
 
     ended = time.perf_counter()
-    ttft_s = (first_token_t - started) if first_token_t is not None else (ended - started)
+    if first_token_t is None or not usage:
+        raise RuntimeError("stream did not report generated text and token usage")
+    ttft_s = first_token_t - started
     prompt_toks = int(usage.get("prompt_tokens", 0))
     completion_toks = int(usage.get("completion_tokens", 0))
     details = usage.get("prompt_tokens_details") or {}
@@ -542,12 +546,10 @@ def _run_concurrency_builtin(
     total_prompt = sum(r["prompt_tokens"] for r in results)
     total_cached = sum(r["cached_tokens"] for r in results)
     total_completion = sum(r["completion_tokens"] for r in results)
-    all_gaps = [g for r in results for g in r["gaps"]]
-    if all_gaps:
-        avg_tpot_ms = (sum(all_gaps) / len(all_gaps)) * 1000.0
-    elif total_completion > len(results) and results:
-        total_decode_s = sum(max(r["elapsed_s"] - r["ttft_s"], 1e-6) for r in results)
-        avg_tpot_ms = (total_decode_s / max(1, total_completion - len(results))) * 1000.0
+    measured = [r for r in results if r["completion_tokens"] > 1]
+    if measured:
+        decode_seconds = sum(r["elapsed_s"] - r["ttft_s"] for r in measured)
+        avg_tpot_ms = decode_seconds * 1000.0 / sum(r["completion_tokens"] - 1 for r in measured)
     else:
         avg_tpot_ms = 0.0
     ttfts_ms = [r["ttft_s"] * 1000.0 for r in results]
@@ -569,10 +571,12 @@ def _run_concurrency_builtin(
         "Wall Time (s)": wall_s,
     }
     (run_dir / "benchmark_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    if failed:
+        raise RuntimeError(f"{failed} request(s) failed in {run_dir}")
     return summary
 
 
-def decoded_tok_per_iter(run_dir: Path) -> float:
+def tokens_per_stream_update(run_dir: Path) -> float:
     db_path = run_dir / "benchmark_data.db"
     if not db_path.is_file():
         return -1.0
@@ -593,7 +597,7 @@ def decoded_tok_per_iter(run_dir: Path) -> float:
     return tokens / iterations if iterations else -1.0
 
 
-def _infer_ttft_percentiles(run_dir: Path, summary: dict[str, Any]) -> tuple[float, float]:
+def _infer_ttft_percentiles(run_dir: Path, summary: dict[str, Any]) -> tuple[float | None, float | None]:
     if "TTFT P50 (ms)" in summary and "TTFT P95 (ms)" in summary:
         return float(summary["TTFT P50 (ms)"]), float(summary["TTFT P95 (ms)"])
     db_path = run_dir / "benchmark_data.db"
@@ -611,12 +615,7 @@ def _infer_ttft_percentiles(run_dir: Path, summary: dict[str, Any]) -> tuple[flo
                     return _percentile(vals, 50.0), _percentile(vals, 95.0)
         finally:
             conn.close()
-    avg_ttft = summary.get("Avg TTFT (s)")
-    if avg_ttft is not None:
-        v = float(avg_ttft) * 1000.0
-        return v, v
-    avg_ttft_ms = summary.get("Avg TTFT (ms)", summary.get("TTFT (ms)", 0.0))
-    return float(avg_ttft_ms), float(avg_ttft_ms)
+    return None, None
 
 
 def collect_sweep(
@@ -674,12 +673,12 @@ def collect_sweep(
             {
                 "config": config_name,
                 "Conc.": concurrency,
-                "Latency (tps/user)": round(1000.0 / tpot_ms, 2),
+                "Decode throughput (tok/s/user)": round(1000.0 / tpot_ms, 2),
                 "Output Throughput (tok/min/gpu)": round(output_throughput * 60.0 / effective_gpus, 2),
-                "TTFT p50 (ms)": round(ttft_p50, 2),
-                "TTFT p95 (ms)": round(ttft_p95, 2),
+                "TTFT p50 (ms)": round(ttft_p50, 2) if ttft_p50 is not None else None,
+                "TTFT p95 (ms)": round(ttft_p95, 2) if ttft_p95 is not None else None,
                 "Approx Cache Hit": round(cache_hit, 2),
-                "Decoded Tok/Iter": round(decoded_tok_per_iter(summary_path.parent), 4),
+                "Tokens per stream update": round(tokens_per_stream_update(summary_path.parent), 4),
             }
         )
     if not rows or seen != set(expected_concurrencies):

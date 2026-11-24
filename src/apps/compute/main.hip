@@ -68,6 +68,7 @@ int main(int argc, char** argv) {
         ? opt.dflash2_model_dir : std::string();
     config.mtp = opt.mtp;
     config.mtp_serve = opt.serve_stdio;
+    config.sampled_ids_only = opt.serve_stdio;
     config.mtp_drafts = static_cast<uint32_t>(opt.mtp_drafts);
     config.mtp_window = static_cast<uint32_t>(opt.mtp_window);
     config.mtp_sink = static_cast<uint32_t>(opt.mtp_sink);

@@ -27,6 +27,7 @@ struct ContinuousBatcherConfig {
     uint32_t max_seq_len = 0;
     uint32_t page_tokens = 0;
     uint32_t prefill_decode_interval = 0;
+    bool sampled_ids_only = false;
     qwen_hybrid::StopTokens eos_token_ids;
     KVAdmissionPolicy admission_policy = KVAdmissionPolicy::BankerSafe;
 };

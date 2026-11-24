@@ -138,54 +138,22 @@ __global__ void tp_add_peers_f32_kernel(const float* own, const float* const* pe
     }
 }
 
-__global__ void tp_add_peers4_bf16_kernel(const uint16_t* own, const uint16_t* const* peers,
-                                          uint16_t* out, uint64_t begin, uint64_t count) {
-    const uint64_t stride = static_cast<uint64_t>(blockDim.x) * gridDim.x;
-    for (uint64_t i = begin + static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-         i < begin + count; i += stride) {
-        const float value = tp_bf16_to_f32(own[i]) + tp_bf16_to_f32(peers[0][i]) +
-                            tp_bf16_to_f32(peers[1][i]) + tp_bf16_to_f32(peers[2][i]);
-        out[i] = tp_f32_to_bf16(value);
+Status launch_add_four(const TpSumTarget& target, const std::array<void*, 4>& inputs,
+                       std::size_t bytes, hipStream_t stream) {
+    hipError_t err;
+    if (target.dtype == ValueDType::F32) {
+        err = launch_tp_sum_f32_4(static_cast<float*>(target.ptr),
+            static_cast<const float*>(inputs[0]), static_cast<const float*>(inputs[1]),
+            static_cast<const float*>(inputs[2]), static_cast<const float*>(inputs[3]),
+            bytes / sizeof(float), stream);
+    } else {
+        err = launch_tp_sum_bf16_4(static_cast<uint16_t*>(target.ptr),
+            static_cast<const uint16_t*>(inputs[0]), static_cast<const uint16_t*>(inputs[1]),
+            static_cast<const uint16_t*>(inputs[2]), static_cast<const uint16_t*>(inputs[3]),
+            bytes / sizeof(uint16_t), stream);
     }
-}
-
-__global__ void tp_add_peers4_f32_kernel(const float* own, const float* const* peers, float* out,
-                                         uint64_t begin, uint64_t count) {
-    const uint64_t stride = static_cast<uint64_t>(blockDim.x) * gridDim.x;
-    for (uint64_t i = begin + static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-         i < begin + count; i += stride) {
-        out[i] = own[i] + peers[0][i] + peers[1][i] + peers[2][i];
-    }
-}
-
-Status launch_add_four(const TpSumTarget& target, const void* peers_device, std::size_t bytes,
-                       hipStream_t stream) {
-    const uint32_t shots = tp_reduce_four_input_shots(bytes);
-    const bool f32 = target.dtype == ValueDType::F32;
-    const uint64_t count = f32 ? bytes / sizeof(float) : bytes / sizeof(uint16_t);
-    const uint64_t chunk = shots == 1u ? count : (count + 1u) / 2u;
-    for (uint64_t shot = 0u; shot < shots; ++shot) {
-        const uint64_t begin = shot * chunk;
-        const uint64_t length = begin < count ? std::min(chunk, count - begin) : 0u;
-        if (length == 0u) continue;
-        const uint32_t blocks = static_cast<uint32_t>((length + 255u) / 256u);
-        if (f32) {
-            tp_add_peers4_f32_kernel<<<blocks, 256, 0, stream>>>(
-                static_cast<const float*>(target.ptr),
-                reinterpret_cast<const float* const*>(peers_device),
-                static_cast<float*>(target.ptr), begin, length);
-        } else {
-            tp_add_peers4_bf16_kernel<<<blocks, 256, 0, stream>>>(
-                static_cast<const uint16_t*>(target.ptr),
-                reinterpret_cast<const uint16_t* const*>(peers_device),
-                static_cast<uint16_t*>(target.ptr), begin, length);
-        }
-    }
-    const hipError_t err = hipGetLastError();
-    if (err != hipSuccess) {
-        return Status::hip_error("tp fused four input launch", hipGetErrorString(err),
-                                  __FILE__, __LINE__);
-    }
+    if (err != hipSuccess)
+        return Status::hip_error("tp four-input reduce", hipGetErrorString(err), __FILE__, __LINE__);
     return Status::make_ok();
 }
 
@@ -352,9 +320,6 @@ Status launch_add(const TpSumTarget& target, const void* peers_device, uint32_t 
         }
         return Status::make_ok();
     }
-    if (npeers == 3u && target.fusion == TpCombineFusion::None) {
-        return launch_add_four(target, peers_device, bytes, stream);
-    }
     if (target.dtype == ValueDType::F32) {
         const uint64_t count = bytes / sizeof(float);
         tp_add_peers_f32_kernel<<<tp_grid_for(count), 256, 0, stream>>>(
@@ -472,8 +437,10 @@ HipPeerTpTransport::~HipPeerTpTransport() {
             if (scope.ok()) shelf::gpu::discard_cleanup_result(hipFree(lm_recv_[r]));
         }
         if (lm_host_[r] != nullptr) shelf::gpu::discard_cleanup_result(hipHostFree(lm_host_[r]));
-        for (hipEvent_t event : lm_sent_[r]) {
-            if (event != nullptr) shelf::gpu::discard_cleanup_result(hipEventDestroy(event));
+        auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
+        if (scope.ok()) {
+            if (lm_sent_[r]) shelf::gpu::discard_cleanup_result(hipEventDestroy(lm_sent_[r]));
+            if (lm_done_[r]) shelf::gpu::discard_cleanup_result(hipEventDestroy(lm_done_[r]));
         }
     }
     lm_recv_.clear();
@@ -617,13 +584,29 @@ Status HipPeerTpTransport::enable_peer_access() {
 }
 
 Status HipPeerTpTransport::ensure_link_staging(std::size_t bytes, std::size_t rank_count) {
-    if (link_staging_bytes_ >= bytes && link_staging_.size() == rank_count)
+    if (link_staging_bytes_ >= bytes && link_staging_.size() == 2u * rank_count * rank_count)
         return Status::make_ok();
-    for (void* buffer : link_staging_) {
-        if (buffer != nullptr) shelf::gpu::discard_cleanup_result(hipHostFree(buffer));
+    for (std::size_t slot = 0; slot < link_staging_.size(); ++slot) {
+        if (!link_staging_[slot]) continue;
+        const auto dst = slot / 2u % rank_count;
+        const auto src = slot / 2u / rank_count;
+        const auto parity = slot % 2u;
+        auto scope = shelf::gpu::ScopedDevice::create(devices_[dst]);
+        if (!scope.ok()) return scope.status();
+        if (consumed_recorded_[dst][src][parity]) {
+            const auto err = hipEventSynchronize(consumed_[dst][src][parity]);
+            if (err != hipSuccess) return Status::hip_error("tp staging drain", hipGetErrorString(err), __FILE__, __LINE__);
+        }
+        const auto err = hipHostFree(link_staging_[slot]);
+        if (err != hipSuccess) return Status::hip_error("tp staging release", hipGetErrorString(err), __FILE__, __LINE__);
+        link_staging_[slot] = nullptr;
     }
-    link_staging_.assign(rank_count, nullptr);
-    for (std::size_t r = 0; r < rank_count; ++r) {
+    link_staging_bytes_ = 0u;
+    link_staging_.assign(2u * rank_count * rank_count, nullptr);
+    for (std::size_t r = 0; r < link_staging_.size(); ++r) {
+        const auto src = r / 2u / rank_count;
+        const auto dst = r / 2u % rank_count;
+        if (src == dst || peer_link_[src][dst]) continue;
         void* buffer = nullptr;
         const hipError_t e = hipHostMalloc(&buffer, bytes, hipHostMallocPortable);
         if (e != hipSuccess) {
@@ -738,7 +721,6 @@ void HipPeerTpTransport::report_debug_rings() noexcept {
 
 Status HipPeerTpTransport::enqueue_sum(const TpSumInvocation& invocation) {
     const std::size_t rank_count = devices_.size();
-    const ValueDType dtype = invocation.targets[0].dtype;
     std::size_t bytes = 0;
     Status st = validate_tp_sum_invocation(invocation, rank_count, bytes);
     if (!st.ok()) return st;
@@ -748,27 +730,14 @@ Status HipPeerTpTransport::enqueue_sum(const TpSumInvocation& invocation) {
         return Status::unsupported("tp inbox is not reserved", __FILE__, __LINE__);
     }
     const std::size_t parity = static_cast<std::size_t>(barrier_seq_[0] & 1u);
-    bool need_link_staging = false;
-    for (std::size_t r = 0; r < rank_count && !need_link_staging; ++r) {
-        for (std::size_t q = 0; q < rank_count; ++q) {
-            if (r != q && peer_link_[r][q] == 0u) {
-                need_link_staging = true;
-                break;
-            }
-        }
-    }
-    if (need_link_staging) {
-        st = ensure_link_staging(bytes, rank_count);
-        if (!st.ok()) return st;
-    }
-
+    const bool need_link_staging = !link_staging_.empty();
     if (!invocation.peer_write_complete) {
         for (std::size_t r = 0; r < rank_count; ++r) {
             auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
             if (!scope.ok()) return scope.status();
             for (std::size_t q = 0; q < rank_count; ++q) {
                 if (q == r) continue;
-                if (!tp_reduce_legacy() && consumed_recorded_[q][r][parity] != 0) {
+                if ((!tp_reduce_legacy() || need_link_staging) && consumed_recorded_[q][r][parity] != 0) {
                     if (hipStreamWaitEvent(invocation.streams[r],
                                            consumed_[q][r][parity], 0) != hipSuccess) {
                         return Status::hip_error("hipStreamWaitEvent tp consumed",
@@ -778,7 +747,7 @@ Status HipPeerTpTransport::enqueue_sum(const TpSumInvocation& invocation) {
                 }
                 if (peer_link_[r][q] == 0u) {
                     const hipError_t e =
-                        hipMemcpyAsync(link_staging_[r], invocation.targets[r].ptr, bytes,
+                        hipMemcpyAsync(link_staging_[2u * (r * rank_count + q) + parity], invocation.targets[r].ptr, bytes,
                                        hipMemcpyDeviceToHost, invocation.streams[r]);
                     if (e != hipSuccess) {
                         return Status::hip_error("tp link D2H staging", hipGetErrorString(e),
@@ -826,7 +795,7 @@ Status HipPeerTpTransport::enqueue_sum(const TpSumInvocation& invocation) {
         if (!invocation.peer_write_complete) {
             for (std::size_t q = 0; q < rank_count; ++q) {
                 if (q == r || peer_link_[q][r] != 0u) continue;
-                const hipError_t e = hipMemcpyAsync(inbox_[r][q][parity], link_staging_[q],
+                const hipError_t e = hipMemcpyAsync(inbox_[r][q][parity], link_staging_[2u * (q * rank_count + r) + parity],
                                                     bytes, hipMemcpyHostToDevice,
                                                     invocation.streams[r]);
                 if (e != hipSuccess) {
@@ -835,8 +804,16 @@ Status HipPeerTpTransport::enqueue_sum(const TpSumInvocation& invocation) {
                 }
             }
         }
-        st = launch_add(invocation.targets[r], inbox_ptrs_dev_[r][parity],
-                        rank_count - 1, bytes, invocation.streams[r]);
+        const auto& target = invocation.targets[r];
+        if (rank_count == 4u && target.fusion == TpCombineFusion::None) {
+            std::array<void*, 4> inputs;
+            for (std::size_t q = 0; q < inputs.size(); ++q)
+                inputs[q] = q == r ? target.ptr : inbox_[r][q][parity];
+            st = launch_add_four(target, inputs, bytes, invocation.streams[r]);
+        } else {
+            st = launch_add(target, inbox_ptrs_dev_[r][parity], rank_count - 1, bytes,
+                            invocation.streams[r]);
+        }
         if (!st.ok()) return st;
         for (std::size_t q = 0; q < rank_count; ++q) {
             if (q == r) continue;
@@ -867,6 +844,10 @@ Status HipPeerTpTransport::reserve(std::size_t bytes) {
     std::lock_guard<std::mutex> lock(mutex_);
     Status st = ensure_buffers(bytes, devices_.size());
     if (!st.ok()) return st;
+    if (!tp_peer_link_map_all(peer_link_)) {
+        st = ensure_link_staging(bytes, devices_.size());
+        if (!st.ok()) return st;
+    }
     if (stream_signal_ready()) return ensure_stream_signal_state();
     return Status::make_ok();
 }
@@ -993,42 +974,43 @@ Status HipPeerTpTransport::sum_hidden_stream_signal(int rank, const TpSumTarget&
 
 Status HipPeerTpTransport::ensure_lm_buffers(std::size_t rows, std::size_t rank_count) {
     if (lm_rows_ >= rows && lm_recv_.size() == rank_count) return Status::make_ok();
-    for (std::size_t r = 0; r < lm_recv_.size(); ++r) {
-        if (lm_recv_[r] != nullptr) {
-            auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
-            if (scope.ok()) shelf::gpu::discard_cleanup_result(hipFree(lm_recv_[r]));
-        }
-        if (lm_host_[r] != nullptr) shelf::gpu::discard_cleanup_result(hipHostFree(lm_host_[r]));
-        for (std::size_t q = 0; q < lm_sent_[r].size(); ++q) {
-            if (lm_sent_[r][q] != nullptr)
-                shelf::gpu::discard_cleanup_result(hipEventDestroy(lm_sent_[r][q]));
-        }
+    if (lm_sent_.empty()) {
+        lm_recv_.resize(rank_count);
+        lm_host_.resize(rank_count);
+        lm_sent_.resize(rank_count);
+        lm_done_.resize(rank_count);
     }
-    lm_recv_.assign(rank_count, nullptr);
-    lm_host_.assign(rank_count, nullptr);
-    lm_sent_.assign(rank_count, std::vector<hipEvent_t>(rank_count, nullptr));
-    const std::size_t bytes = rows * kTpArgmaxPairBytes * rank_count;
+    const std::size_t bytes = rows * sizeof(TpArgmaxPair);
     for (std::size_t r = 0; r < rank_count; ++r) {
         auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
         if (!scope.ok()) return scope.status();
-        if (hipMalloc(&lm_recv_[r], bytes) != hipSuccess) {
-            return Status::hip_error("hipMalloc lm recv", hipGetErrorString(hipGetLastError()),
-                                      __FILE__, __LINE__);
+        if (lm_done_[r]) {
+            const auto err = hipEventSynchronize(lm_done_[r]);
+            if (err != hipSuccess) return Status::hip_error("argmax drain", hipGetErrorString(err), __FILE__, __LINE__);
         }
-        const hipError_t host_err = hipHostMalloc(&lm_host_[r], bytes, hipHostMallocPortable);
-        if (host_err != hipSuccess) {
-            return Status::hip_error("hipHostMalloc lm staging", hipGetErrorString(host_err),
-                                      __FILE__, __LINE__);
+    }
+    lm_rows_ = 0;
+    for (std::size_t r = 0; r < rank_count; ++r) {
+        auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
+        if (!scope.ok()) return scope.status();
+        hipError_t err = hipSuccess;
+        if (lm_recv_[r]) err = hipFree(lm_recv_[r]);
+        if (err == hipSuccess) {
+            lm_recv_[r] = nullptr;
+            err = hipMalloc(&lm_recv_[r], bytes * rank_count);
         }
-        for (std::size_t q = 0; q < rank_count; ++q) {
-            if (q == r) continue;
-            const hipError_t event_err = hipEventCreateWithFlags(
-                &lm_sent_[r][q], hipEventDisableTiming | hipEventReleaseToSystem);
-            if (event_err != hipSuccess) {
-                return Status::hip_error("hipEventCreate lm sent", hipGetErrorString(event_err),
-                                          __FILE__, __LINE__);
-            }
-        }
+        if (err != hipSuccess) return Status::hip_error("argmax device storage", hipGetErrorString(err), __FILE__, __LINE__);
+        if (lm_host_[r]) err = hipHostFree(lm_host_[r]);
+        if (err == hipSuccess) lm_host_[r] = nullptr;
+        bool needs_host = false;
+        for (std::size_t q = 0; q < rank_count; ++q)
+            needs_host |= q != r && peer_link_[r][q] == 0u;
+        if (err == hipSuccess && needs_host)
+            err = hipHostMalloc(&lm_host_[r], bytes, hipHostMallocPortable);
+        const unsigned flags = hipEventDisableTiming | hipEventReleaseToSystem;
+        if (err == hipSuccess && !lm_sent_[r]) err = hipEventCreateWithFlags(&lm_sent_[r], flags);
+        if (err == hipSuccess && !lm_done_[r]) err = hipEventCreateWithFlags(&lm_done_[r], flags);
+        if (err != hipSuccess) return Status::hip_error("argmax communication storage", hipGetErrorString(err), __FILE__, __LINE__);
     }
     lm_rows_ = rows;
     return Status::make_ok();
@@ -1049,6 +1031,11 @@ Status HipPeerTpTransport::begin_argmax(int rank, const TpArgmaxInvocation& invo
     const std::size_t r = static_cast<std::size_t>(rank);
     auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
     if (!scope.ok()) return scope.status();
+    for (std::size_t q = 0; q < rank_count && lm_published_; ++q) {
+        const auto done = lm_done_[q];
+        const auto err = hipStreamWaitEvent(invocation.stream, done, 0);
+        if (err != hipSuccess) return Status::hip_error("argmax reuse", hipGetErrorString(err), __FILE__, __LINE__);
+    }
     auto* own = static_cast<TpArgmaxPair*>(lm_recv_[r]) + r * invocation.rows;
     const hipError_t pack_err =
         launch_tp_argmax_pack(invocation.local_logits, own, invocation.rows,
@@ -1059,29 +1046,18 @@ Status HipPeerTpTransport::begin_argmax(int rank, const TpArgmaxInvocation& invo
                                   __LINE__);
     }
     const std::size_t bytes = static_cast<std::size_t>(invocation.rows) * kTpArgmaxPairBytes;
-    for (std::size_t q = 0; q < rank_count; ++q) {
-        if (q == r) continue;
-        if (peer_link_[r][q] != 0u) {
-            const hipError_t copy_err = launch_tp_peer_probe_copy(
-                static_cast<char*>(lm_recv_[q]) + r * bytes, own, bytes, invocation.stream);
-            if (copy_err != hipSuccess) {
-                return Status::hip_error("argmax peer copy", hipGetErrorString(copy_err),
-                                          __FILE__, __LINE__);
-            }
-        } else {
-            const hipError_t copy_err = hipMemcpyAsync(
-                static_cast<char*>(lm_host_[r]) + r * bytes, own, bytes,
-                hipMemcpyDeviceToHost, invocation.stream);
-            if (copy_err != hipSuccess) {
-                return Status::hip_error("argmax host staging", hipGetErrorString(copy_err),
-                                          __FILE__, __LINE__);
-            }
-        }
-        if (hipEventRecord(lm_sent_[r][q], invocation.stream) != hipSuccess) {
-            return Status::hip_error("hipEventRecord lm sent", hipGetErrorString(hipGetLastError()),
-                                      __FILE__, __LINE__);
-        }
+    if (lm_host_[r]) {
+        const auto err = hipMemcpyAsync(lm_host_[r], own, bytes, hipMemcpyDeviceToHost, invocation.stream);
+        if (err != hipSuccess) return Status::hip_error("argmax staging", hipGetErrorString(err), __FILE__, __LINE__);
     }
+    for (std::size_t q = 0; q < rank_count; ++q) {
+        if (q == r || !peer_link_[r][q]) continue;
+        const auto err = launch_tp_peer_probe_copy(static_cast<char*>(lm_recv_[q]) + r * bytes,
+                                                   own, bytes, invocation.stream);
+        if (err != hipSuccess) return Status::hip_error("argmax peer copy", hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    const auto err = hipEventRecord(lm_sent_[r], invocation.stream);
+    if (err != hipSuccess) return Status::hip_error("argmax publication", hipGetErrorString(err), __FILE__, __LINE__);
     return Status::make_ok();
 }
 
@@ -1097,14 +1073,14 @@ Status HipPeerTpTransport::finish_argmax(int rank, const TpArgmaxInvocation& inv
     const std::size_t bytes = static_cast<std::size_t>(invocation.rows) * kTpArgmaxPairBytes;
     for (std::size_t q = 0; q < rank_count; ++q) {
         if (q == r) continue;
-        if (hipStreamWaitEvent(invocation.stream, lm_sent_[q][r], 0) != hipSuccess) {
+        if (hipStreamWaitEvent(invocation.stream, lm_sent_[q], 0) != hipSuccess) {
             return Status::hip_error("hipStreamWaitEvent lm sent",
                                       hipGetErrorString(hipGetLastError()), __FILE__, __LINE__);
         }
         if (peer_link_[q][r] == 0u) {
             const hipError_t copy_err = hipMemcpyAsync(
                 static_cast<char*>(lm_recv_[r]) + q * bytes,
-                static_cast<const char*>(lm_host_[q]) + q * bytes, bytes,
+                lm_host_[q], bytes,
                 hipMemcpyHostToDevice, invocation.stream);
             if (copy_err != hipSuccess) {
                 return Status::hip_error("argmax host restore", hipGetErrorString(copy_err),
@@ -1120,6 +1096,9 @@ Status HipPeerTpTransport::finish_argmax(int rank, const TpArgmaxInvocation& inv
         return Status::hip_error("argmax reduce launch", hipGetErrorString(reduce_err),
                                   __FILE__, __LINE__);
     }
+    const auto err = hipEventRecord(lm_done_[r], invocation.stream);
+    if (err != hipSuccess) return Status::hip_error("argmax consumed", hipGetErrorString(err), __FILE__, __LINE__);
+    if (r + 1u == rank_count) lm_published_ = true;
     return Status::make_ok();
 }
 
@@ -1141,7 +1120,7 @@ Status HipPeerTpTransport::peer_write_target(int rank, std::size_t bytes, void*&
     }
     if (inbox_bytes_.load(std::memory_order_relaxed) < bytes) return Status::make_ok();
     const std::size_t peer = static_cast<std::size_t>(rank) == 0 ? 1 : 0;
-    if (peer_link_[static_cast<std::size_t>(rank)][peer] == 0u) return Status::make_ok();
+    if (!peer_link_[0][1] || !peer_link_[1][0]) return Status::make_ok();
     peer_out = inbox_[peer][static_cast<std::size_t>(rank)]
                         [static_cast<std::size_t>(barrier_seq_[static_cast<std::size_t>(rank)] & 1u)];
     return Status::make_ok();
@@ -1155,6 +1134,11 @@ Status HipPeerTpTransport::verify() {
     const std::size_t rank_count = devices_.size();
     st = ensure_buffers(kProbeMaxBytes, rank_count);
     if (!st.ok()) return st;
+
+    if (!tp_peer_link_map_all(peer_link_)) {
+        st = ensure_link_staging(kProbeMaxBytes, rank_count);
+        if (!st.ok()) return st;
+    }
 
     for (std::size_t probe_size : kProbeSizes) {
         const std::size_t count = probe_size / sizeof(std::uint16_t);

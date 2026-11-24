@@ -540,6 +540,7 @@ Status ComputeSession::initialize(const ComputeConfig& config) {
     batcher_config.max_scheduled_requests = exec_config.max_scheduled_requests;
     batcher_config.max_seq_len = max_seq;
     batcher_config.page_tokens = state.config_.page_tokens;
+    batcher_config.sampled_ids_only = state.config_.sampled_ids_only;
     batcher_config.prefill_decode_interval = state.config_.prefill_decode_interval;
     batcher_config.eos_token_ids = text_config.stop_tokens;
 
@@ -783,6 +784,7 @@ Status ComputeSession::initialize_pipeline_parallel() {
     batcher_config.max_scheduled_requests = state.config_.max_concurrent_requests;
     batcher_config.max_seq_len = state.config_.max_seq_len;
     batcher_config.page_tokens = state.config_.page_tokens;
+    batcher_config.sampled_ids_only = state.config_.sampled_ids_only;
     batcher_config.prefill_decode_interval = state.config_.prefill_decode_interval;
     batcher_config.eos_token_ids = stage0.hybrid_config().stop_tokens;
 
@@ -923,6 +925,7 @@ Status ComputeSession::initialize_tensor_parallel() {
     batcher_config.max_scheduled_requests = state.config_.max_concurrent_requests;
     batcher_config.max_seq_len = state.config_.max_seq_len;
     batcher_config.page_tokens = state.config_.page_tokens;
+    batcher_config.sampled_ids_only = state.config_.sampled_ids_only;
     batcher_config.prefill_decode_interval = state.config_.prefill_decode_interval;
     batcher_config.eos_token_ids = rank0.hybrid_config().stop_tokens;
 
@@ -1289,6 +1292,8 @@ Status ComputeSession::synchronize() const {
 }
 
 Status ComputeSession::copy_logits(std::vector<float>& out, std::size_t& rows) {
+    if (impl_->config_.sampled_ids_only)
+        return Status::invalid_state("session returns sampled IDs only", __FILE__, __LINE__);
     const auto& logits = impl_->executor().logits;
     const std::size_t vocab = impl_->model().hybrid_config().vocab_size;
     if (logits.ndim() != 2 || logits.dim(1) != vocab ||

@@ -1,9 +1,12 @@
 #include <shelf/models/qwen4exp/weights/ple_table.h>
 
+#include <shelf/quantization/codec/e4m3.h>
 #include <shelf/quantization/exl3/exl3.h>
 #include <shelf/quantization/ngram/ngram.h>
 
 #include <algorithm>
+#include <array>
+#include <charconv>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -31,20 +34,6 @@ namespace shelf {
 namespace qwen4exp {
 
 namespace {
-float e4m3_to_f32(uint8_t x) {
-    const int sign = (x & 0x80u) ? -1 : 1;
-    const int exp = (x >> 3) & 0x0Fu;
-    const int man = x & 0x07u;
-    if (exp == 0x0F) {
-        if (man == 0x07) return std::numeric_limits<float>::quiet_NaN();
-        return sign * 448.0f;
-    }
-    const float value = (exp == 0)
-        ? (static_cast<float>(man) * 0.125f) * std::ldexp(1.0f, -6)
-        : (1.0f + static_cast<float>(man) * 0.125f) * std::ldexp(1.0f, exp - 7);
-    return sign * value;
-}
-
 float bf16_bits_to_f32(std::uint16_t bits) {
     const std::uint32_t wide = static_cast<std::uint32_t>(bits) << 16;
     float value = 0.0f;
@@ -172,11 +161,13 @@ Result<PleTable> PleTable::load_index_shards(const std::string& model_dir,
         }
         const std::string digits =
             name.substr(shard_prefix.size(), name.size() - shard_prefix.size() - 7u);
-        if (digits.empty()) continue;
-        const std::uint32_t id = static_cast<std::uint32_t>(std::stoul(digits));
-        shards.emplace(id, name);
+        std::uint32_t id;
+        const auto parsed = std::from_chars(digits.data(), digits.data() + digits.size(), id);
+        if (parsed.ec != std::errc{} || parsed.ptr != digits.data() + digits.size() ||
+            !shards.emplace(id, name).second)
+            return Status::invalid_argument("invalid PLE shard index", __FILE__, __LINE__);
     }
-    if (shards.size() != config.ple.split_ngram_parts) {
+    if (shards.empty() || shards.size() != config.ple.split_ngram_parts) {
         return Status::invalid_argument("PLE shard count differs from split_ngram_parts",
                                         __FILE__, __LINE__);
     }
@@ -427,10 +418,17 @@ std::size_t PleTable::head_for_row(std::uint64_t row) const noexcept {
 
 Result<std::vector<float>> PleTable::decode_row(std::uint64_t row,
                                                 bool include_head_bias) const {
+    std::vector<float> out(row_width_);
+    auto status = decode_row_into(row, include_head_bias, out);
+    if (!status.ok()) return status;
+    return out;
+}
+
+Status PleTable::decode_row_into(std::uint64_t row, bool include_head_bias, std::span<float> out) const {
     if (ngram_) {
         if (row >= rows_) return Status::out_of_range("PLE row is out of range", __FILE__, __LINE__);
         auto& state = *ngram_;
-        std::lock_guard<std::mutex> lock(state.mutex);
+        std::unique_lock<std::mutex> lock(state.mutex, std::defer_lock);
         const std::size_t h = head_for_row(row);
         const auto& head = state.heads[h];
         const std::size_t local = static_cast<std::size_t>(row - head_offsets_[h]);
@@ -439,6 +437,7 @@ Result<std::vector<float>> PleTable::decode_row(std::uint64_t row,
         const std::uint8_t* codes = head.codes + local * head.width;
         const std::uint8_t* scale = head.scales + local * 2u;
         if (state.capacity != 0u) {
+            lock.lock();
             auto found = state.index.find(key);
             if (found == state.index.end()) {
                 std::size_t slot;
@@ -468,27 +467,29 @@ Result<std::vector<float>> PleTable::decode_row(std::uint64_t row,
         }
         std::uint16_t scale_bits;
         std::memcpy(&scale_bits, scale, sizeof(scale_bits));
-        std::vector<float> output(row_width_);
-        auto status = shelf::quantization::ngram::decode(
-            {codes, head.width}, scale_bits, head.codebook, head.bits, output);
-        if (!status.ok()) return status;
-        return output;
+        return shelf::quantization::ngram::decode(
+            {codes, head.width}, scale_bits, head.codebook, head.bits, out);
     }
     const std::uint8_t* packed = row_ptr(row);
     if (packed == nullptr) {
         return Status::out_of_range("PLE row is out of range", __FILE__, __LINE__);
     }
     if (format_ == TableFormat::Fp8E4M3) {
-        std::vector<float> out(row_width_);
+        static const auto decoded = [] {
+            std::array<float, 256> values;
+            for (unsigned i = 0; i < values.size(); ++i)
+                values[i] = shelf::quantization::codec::e4m3_decode_f32(static_cast<uint8_t>(i));
+            return values;
+        }();
         const std::size_t head = head_for_row(row);
         for (std::uint32_t i = 0; i < row_width_; ++i) {
-            float value = e4m3_to_f32(packed[i]) * fp8_scale_;
+            float value = decoded[packed[i]] * fp8_scale_;
             if (include_head_bias && !head_bias_f16_.empty())
                 value += shelf::quantization::exl3::f32_from_f16_bits(
                     head_bias_f16_[head * row_width_ + i]);
             out[i] = value;
         }
-        return out;
+        return Status::make_ok();
     }
     return Status::unsupported("PLE table format is not supported", __FILE__, __LINE__);
 }
@@ -571,52 +572,31 @@ Result<std::vector<float>> PleTable::gather(const std::vector<std::int32_t>& his
 
 Result<std::vector<bf16_t>> PleTable::gather_bf16(
     const std::vector<std::int32_t>& history, std::size_t out_len) const {
-    auto floats = gather(history, out_len);
-    if (!floats.ok()) return floats.status();
-    std::vector<bf16_t> out(floats.value().size());
-    for (std::size_t i = 0; i < out.size(); ++i)
-        out[i].data = shelf::f32_to_bf16_rne(floats.value()[i]);
+    auto rows = ngram_rows(history, out_len);
+    if (!rows.ok()) return rows.status();
+    std::vector<bf16_t> out(rows.value().size() * row_width_);
+    std::vector<float> decoded(row_width_);
+    auto dst = out.begin();
+    for (const auto row : rows.value()) {
+        auto status = decode_row_into(row, true, decoded);
+        if (!status.ok()) return status;
+        dst = std::transform(decoded.begin(), decoded.end(), dst, [](float value) {
+            return bf16_t{shelf::f32_to_bf16_rne(value)};
+        });
+    }
     return out;
 }
 
 Result<std::vector<bf16_t>> PleTable::gather_bf16_batch(
     const std::vector<std::int32_t>& prefix_tail,
     std::span<const std::int32_t> tokens) const {
-    std::vector<bf16_t> out;
-    if (tokens.empty()) return out;
-    if (ngram_size_ < 2u || heads_per_ngram_ == 0u) {
-        return Status::invalid_argument("PLE hash geometry is invalid", __FILE__, __LINE__);
-    }
-    std::vector<std::int32_t> history(prefix_tail);
-    history.reserve(prefix_tail.size() + tokens.size());
+    if (tokens.empty()) return std::vector<bf16_t>{};
+    const auto tail = std::min<std::size_t>(prefix_tail.size(), ngram_size_ - 1u);
+    std::vector<std::int32_t> history;
+    history.reserve(tail + tokens.size());
+    history.insert(history.end(), prefix_tail.end() - tail, prefix_tail.end());
     history.insert(history.end(), tokens.begin(), tokens.end());
-    auto rows = ngram_rows(history, tokens.size());
-    if (!rows.ok()) return rows.status();
-    const std::size_t ngrams = ngram_size_ - 1u;
-    const std::size_t expected =
-        tokens.size() * ngrams * heads_per_ngram_ * row_width_;
-    out.reserve(expected);
-    for (std::size_t pos = 0u; pos < tokens.size(); ++pos) {
-        for (std::size_t ngram = 0u; ngram < ngrams; ++ngram) {
-            for (std::uint32_t h = 0u; h < heads_per_ngram_; ++h) {
-                const std::uint64_t row =
-                    rows.value()[(ngram * tokens.size() + pos) * heads_per_ngram_ + h];
-                auto decoded = decode_row(row);
-                if (!decoded.ok()) return decoded.status();
-                if (decoded.value().size() != row_width_) {
-                    return Status::invalid_state("PLE batch gather width mismatch", __FILE__,
-                                                 __LINE__);
-                }
-                for (const float value : decoded.value())
-                    out.push_back(bf16_t{shelf::f32_to_bf16_rne(value)});
-            }
-        }
-    }
-    if (out.size() != expected) {
-        return Status::invalid_state("PLE batch gather size is inconsistent", __FILE__,
-                                     __LINE__);
-    }
-    return out;
+    return gather_bf16(history, tokens.size());
 }
 
 Result<std::vector<bf16_t>> PleTable::gather_bf16_stateless(

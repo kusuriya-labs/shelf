@@ -39,7 +39,7 @@ std::vector<shelf::bf16_t> sequential(const shelf::qwen4exp::PleTable& table,
     return out;
 }
 
-}  // namespace
+}
 
 int main() {
     using shelf::qwen4exp::PleTable;
@@ -153,6 +153,40 @@ int main() {
                 wrapper_equal =
                     stateless.value()[i].data == got.value()[i].data;
             check(wrapper_equal, "stateless wrapper matches batch gather");
+        }
+    }
+
+    const auto fp8 = root / "fp8";
+    fs::create_directories(fp8);
+    config.ple.split_ngram_parts = 1u;
+    const auto padded = shelf::qwen4exp::qwen4exp_ple_padded_rows(config, 0u);
+    const std::string prefix = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.";
+    const std::string weight = prefix + "shard_0.weight";
+    const std::string scale = prefix + "weight_scale";
+    check(padded.ok(), "FP8 fixture row count");
+    if (padded.ok()) {
+        std::vector<uint8_t> packed(padded.value() * 160u, 0x78);
+        packed[1] = 0x79;
+        packed[2] = 0xfe;
+        uint16_t scale_bits = 0x3f80;
+        auto writer = shelf::io::SafetensorsWriter::create((fp8 / "weights.safetensors").string());
+        check(writer.ok(), "FP8 fixture writer");
+        if (writer.ok()) {
+            auto& w = writer.value();
+            check(w.plan_tensor(weight, shelf::io::SType::F8_E4M3, {padded.value(), 160u}).ok() &&
+                  w.plan_tensor(scale, shelf::io::SType::BF16, {1u}).ok() && w.write_header().ok() &&
+                  w.write_tensor(weight, packed.data(), packed.size()).ok() &&
+                  w.write_tensor(scale, &scale_bits, sizeof(scale_bits)).ok() && w.finish().ok(), "FP8 fixture");
+            std::ofstream(fp8 / "model.safetensors.index.json")
+                << R"({"weight_map":{")" << weight << R"(":"weights.safetensors",")"
+                << scale << R"(":"weights.safetensors"}})";
+            auto table = PleTable::load(fp8.string(), config);
+            check(table.ok(), "legacy FP8 load");
+            if (table.ok()) {
+                auto row = table.value().decode_row(0);
+                check(row.ok() && row.value()[0] == 256 && row.value()[1] == 288 &&
+                      row.value()[2] == -448, "finite FP8 values in the highest exponent");
+            }
         }
     }
 

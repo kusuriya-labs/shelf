@@ -41,6 +41,7 @@ public:
                                     hipStream_t stream, bool peer_written) override;
     Status reserve(std::size_t bytes) override;
     Status peer_write_target(int rank, std::size_t bytes, void*& peer_out) override;
+    bool has_peer_links() const noexcept { return !tp_peer_link_map_none(peer_link_); }
     bool supports_argmax_reduce() const noexcept override;
     Status begin_argmax(int rank, const TpArgmaxInvocation& invocation) override;
     Status finish_argmax(int rank, const TpArgmaxInvocation& invocation) override;
@@ -79,8 +80,10 @@ private:
     std::size_t link_staging_bytes_ = 0;
     std::vector<void*> lm_recv_;
     std::vector<void*> lm_host_;
-    std::vector<std::vector<hipEvent_t>> lm_sent_;
+    std::vector<hipEvent_t> lm_sent_;
+    std::vector<hipEvent_t> lm_done_;
     std::size_t lm_rows_ = 0;
+    bool lm_published_ = false;
     bool peer_access_enabled_ = false;
     bool verified_ = false;
     std::vector<std::unique_ptr<shelf::gpu::DebugRing>> debug_rings_;

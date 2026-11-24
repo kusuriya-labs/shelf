@@ -555,7 +555,15 @@ Result<StepResult> ContinuousBatcher::step() {
             "banker invariant violated: active KV state is unsafe", __FILE__, __LINE__);
     }
 
+    const bool decode_due = config_.prefill_decode_interval != 0u &&
+        prefill_chunks_since_decode_ >= config_.prefill_decode_interval &&
+        std::any_of(requests_.begin(), requests_.end(), [](const RuntimeRequest& request) {
+            return request_decode_ready(request) ||
+                (request.state == RequestState::Active && request.dflash && request.dflash->ready &&
+                 request.finish_reason == FinishReason::None && !request.waiting_for_token_bitmask);
+        });
     for (auto& request : requests_) {
+        if (decode_due) break;
         if (request.state != RequestState::Queued) {
             continue;
         }
@@ -752,14 +760,6 @@ Result<StepResult> ContinuousBatcher::step() {
                                               active_requests.end());
     const bool decode_interrupt = prefill_decode_should_interrupt(
         active, config_.prefill_decode_interval, prefill_chunks_since_decode_);
-    std::vector<const RuntimeRequest*> scheduling_active = active;
-    if (decode_interrupt) {
-        scheduling_active.clear();
-        for (const RuntimeRequest* request : active) {
-            if (request_decode_ready(*request)) scheduling_active.push_back(request);
-        }
-    }
-
     const auto adaptive_start = dflash_.adaptive ? std::chrono::steady_clock::now()
                                                 : std::chrono::steady_clock::time_point{};
     uint64_t adaptive_before_tokens = 0;
@@ -789,26 +789,21 @@ Result<StepResult> ContinuousBatcher::step() {
     }
     kv_state = build_kv_banker_state();
 
-    auto plan_result = schedule_requests(scheduling_active, config_.max_num_batched_tokens,
+    auto plan_result = schedule_requests(active, config_.max_num_batched_tokens,
                                          config_.max_scheduled_requests, config_.page_tokens,
-                                         &kv_state);
+                                         &kv_state, decode_interrupt);
     if (!plan_result.ok()) {
         return plan_result.status();
     }
     SchedulePlan plan = plan_result.release();
-    uint32_t planned_prefill = 0u;
-    uint32_t planned_decode = 0u;
-    for (const auto& scheduled : plan.scheduled_requests) {
-        if (scheduled.execution_class == ::shelf::runtime::ExecutionClass::PREFILL) {
-            ++planned_prefill;
-        } else if (scheduled.execution_class == ::shelf::runtime::ExecutionClass::DECODE) {
-            ++planned_decode;
-        }
-    }
     if (config_.prefill_decode_interval != 0u) {
-        if (planned_prefill != 0u) prefill_chunks_since_decode_ += planned_prefill;
-        if (planned_decode != 0u) prefill_chunks_since_decode_ = 0u;
-        else if (decode_interrupt) prefill_chunks_since_decode_ = 0u;
+        if (plan.batch.num_decode_requests || dflash_executed)
+            prefill_chunks_since_decode_ = 0u;
+        else if (plan.batch.num_prefill_requests)
+            prefill_chunks_since_decode_ = std::min(config_.prefill_decode_interval,
+                                                   prefill_chunks_since_decode_ + plan.batch.num_prefill_requests);
+        else if (decode_due)
+            prefill_chunks_since_decode_ = 0u;
     }
     if (plan.empty()) {
         record_adaptive_actual();
@@ -850,6 +845,7 @@ Result<StepResult> ContinuousBatcher::step() {
 
     const auto exec_started = std::chrono::steady_clock::now();
     const bool bt_decode = plan.batch.num_tokens == plan.batch.num_requests;
+    plan.batch.sampled_ids_only = config_.sampled_ids_only;
     auto exec_result = tp_batch_hook_ != nullptr
                           ? tp_batch_hook_->on_execute(plan.batch)
                           : execute_batch(executor_, plan.batch, stream_);

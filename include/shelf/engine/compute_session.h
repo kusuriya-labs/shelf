@@ -65,6 +65,7 @@ struct ComputeConfig {
     uint32_t max_num_batched_tokens = 0;
     uint32_t max_concurrent_requests = 4;
     uint32_t prefill_decode_interval = 0;
+    bool sampled_ids_only = false;
     ArenaBudgetMode arena_mode = ArenaBudgetMode::Auto;
     std::size_t arena_bytes = 0;
     std::size_t draft_bytes = 0;

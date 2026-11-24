@@ -15,8 +15,6 @@ using shelf::runtime::TpGreedyProbe;
 using shelf::runtime::tp_argmax_pack_host;
 using shelf::runtime::tp_argmax_reduce_host;
 using shelf::runtime::tp_greedy_argmax_eligible;
-using shelf::runtime::tp_reduce_four_input_shots;
-using shelf::runtime::tp_reduce_shot_count;
 using shelf::runtime::tp_sum_bf16_4_host;
 using shelf::runtime::tp_sum_f32_4_host;
 
@@ -55,14 +53,6 @@ static void test_eligibility() {
     probe.min_p = 0.0f;
     probe.has_token_bitmask = true;
     check(!tp_greedy_argmax_eligible(probe), "grammar bitmask is not eligible");
-}
-
-static void test_shot_count() {
-    check(tp_reduce_shot_count(0u) == 1u, "zero bytes is one shot");
-    check(tp_reduce_shot_count(2u * 1024u * 1024u) == 1u, "2 MiB is one shot");
-    check(tp_reduce_shot_count((2u * 1024u * 1024u) + 1u) == 2u, "above 2 MiB is two shot");
-    check(tp_reduce_four_input_shots(1024u) == 1u, "small four input is one shot");
-    check(tp_reduce_four_input_shots(4u * 1024u * 1024u) == 2u, "large four input is two shot");
 }
 
 static void test_argmax_pair_layout() {
@@ -220,7 +210,6 @@ static void test_schedule_binds_argmax_output() {
 
 int main() {
     test_eligibility();
-    test_shot_count();
     test_argmax_pair_layout();
     test_argmax_aggregation();
     test_war_buffer_separation();

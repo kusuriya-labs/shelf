@@ -39,65 +39,21 @@ static int controller_tests() {
     ctrl.observe(-0.1, 1u);
     check(ctrl.rounds == 0 && ctrl.current_k == 4u, "reject bad observations");
 
-    for (uint32_t batch : {1u, 16u}) {
-        rt::DFlash2AdaptiveController c(4u, 8u, 0.25);
-        for (int r = 0; r < 7; ++r)
-            check(c.observe(0.5, batch) == 4u && c.switches == 0, "before first switch");
-        check(c.observe(0.5, batch) == 2u && c.switches == 1, "drop to K=2");
-        for (int r = 0; r < 7; ++r)
-            check(c.observe(2.5, batch) == 2u && c.switches == 1, "hysteresis holds K=2");
-        int k = c.current_k;
-        for (int r = 0; r < 16 && k != 4; ++r) k = c.observe(2.5, batch);
-        check(k == 4, "recover to K=4");
-        const uint64_t switches_before = c.switches;
-        k = c.current_k;
-        for (int r = 0; r < 24 && k != 5; ++r) k = c.observe(4.0, batch);
-        check(k == 5 && c.switches == switches_before + 1, "raise to K=5");
-        k = c.current_k;
-        for (int r = 0; r < 24 && k != 3; ++r) k = c.observe(1.4, batch);
-        check(k == 3, "drop to K=3");
-        k = c.current_k;
-        for (int r = 0; r < 24 && k != 2; ++r) k = c.observe(0.6, batch);
-        check(k == 2, "drop to K=2 again");
-        check(c.acc_ema > 0.0 && c.acc_ema < 5.0, "EMA stays bounded");
-    }
-
-    {
-        rt::DFlash2AdaptiveController c(4u, 8u, 0.25);
-        for (int r = 0; r < 8; ++r) c.observe(0.8, 32u);
-        check(c.current_k == 2u, "c32 drops to K=2");
-        int k = c.current_k;
-        for (int r = 0; r < 24 && k != 3; ++r) k = c.observe(2.4, 32u);
-        check(k == 3, "c32 raises to K=3");
-        k = c.current_k;
-        for (int r = 0; r < 24 && k != 4; ++r) k = c.observe(4.0, 32u);
-        check(k == 4, "c32 raises to K=4");
-        for (int r = 0; r < 24; ++r)
-            check(c.observe(5.0, 32u) == 4u, "c32 never selects K=5");
-    }
-
-    struct BandCase {
-        uint32_t start_k;
-        uint32_t batch;
-        double low;
-        double high;
-    };
-    const std::vector<BandCase> bands{
-        {2u, 1u, 1.10, 1.20}, {3u, 1u, 1.10, 1.20},
-        {3u, 1u, 1.70, 1.90}, {4u, 1u, 1.70, 1.90},
-        {4u, 16u, 3.10, 3.30}, {5u, 16u, 3.10, 3.30},
-        {2u, 32u, 1.70, 1.90}, {3u, 32u, 1.70, 1.90},
-        {3u, 32u, 3.10, 3.30}, {4u, 32u, 3.10, 3.30},
-    };
-    for (const auto& band : bands) {
-        rt::DFlash2AdaptiveController c(band.start_k, 8u, 0.25);
-        for (int r = 0; r < 64; ++r) {
-            const uint32_t got = c.observe((r % 2) ? band.low : band.high, band.batch);
-            if (got != band.start_k || c.switches != 0) {
-                check(false, "hysteresis band");
-                break;
-            }
-        }
+    for (uint32_t batch : {1u, 16u, 32u}) {
+        rt::DFlash2AdaptiveController c(4u);
+        for (int r = 0; r < 16; ++r) c.observe(0.0, batch);
+        check(c.current_k == 2u, "low acceptance reaches K=2");
+        const auto switches = c.switches;
+        for (int r = 0; r < 7; ++r) c.observe(2.0, batch);
+        check(c.switches == switches, "minimum switch interval");
+        rt::DFlash2AdaptiveController half(2u);
+        for (int r = 0; r < 8; ++r) half.observe(1.0, batch);
+        check(half.current_k == 3u, "one accepted draft out of two promotes K");
+        for (int r = 0; r < 40; ++r) c.observe(c.current_k, batch);
+        check(c.current_k == (batch > 16u ? 4u : 5u), "full acceptance recovers from K=2");
+        for (int r = 0; r < 64; ++r) c.observe(0.48 * c.current_k, batch);
+        check(c.current_k == (batch > 16u ? 4u : 5u), "hysteresis holds K");
+        check(c.acc_ema >= 0.0 && c.acc_ema <= 1.0, "normalized EMA");
     }
     return g_failures;
 }

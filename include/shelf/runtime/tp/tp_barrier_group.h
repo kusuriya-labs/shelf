@@ -39,7 +39,6 @@ private:
     std::vector<hipStream_t> streams_;
     std::vector<char> peer_written_;
     std::vector<TpArgmaxInvocation> argmax_invocations_;
-    std::vector<hipStream_t> argmax_streams_;
 
     mutable std::mutex mutex_;
     std::condition_variable cv_;

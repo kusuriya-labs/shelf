@@ -15,7 +15,7 @@
 #include <vector>
 
 #define HIP_OK(x) do { hipError_t e_ = (x); if (e_ != hipSuccess) { \
-    std::printf("HIP error %d at %s:%d\n", static_cast<int>(e_), __FILE__, __LINE__); return false; } } while (0)
+    std::printf("HIP error %d at %s:%d\n", static_cast<int>(e_), __FILE__, __LINE__); ++g_failures; return false; } } while (0)
 
 namespace {
 
@@ -113,24 +113,17 @@ struct Fixture {
 };
 
 bool compare_bf16(const char* name, const std::vector<uint16_t>& a, const std::vector<uint16_t>& b) {
-    if (a.size() != b.size()) return false;
-    double worst = 0.0, norm = 1e-6;
-    for (size_t i = 0; i < a.size(); ++i) {
-        const double ea = std::fabs(bf16_to_f32(a[i]) - bf16_to_f32(b[i]));
-        worst = std::max(worst, ea);
-        norm = std::max(norm, static_cast<double>(std::fabs(bf16_to_f32(b[i]))));
-    }
-    const bool ok = worst / norm < 2e-2;
-    std::printf("  %s: max_abs=%.3g norm=%.3g %s\n", name, worst, norm, ok ? "PASS" : "FAIL");
-    if (!ok) ++g_failures;
+    const bool ok = a == b;
+    check(name, ok);
     return ok;
 }
 
 bool compare_f32(const char* name, const std::vector<float>& a, const std::vector<float>& b, double tol) {
-    if (a.size() != b.size()) return false;
+    if (a.size() != b.size()) { check(name, false); return false; }
     double worst = 0.0;
     for (size_t i = 0; i < a.size(); ++i) {
         const double e = std::fabs(static_cast<double>(a[i]) - static_cast<double>(b[i]));
+        if (!std::isfinite(e)) { check(name, false); return false; }
         worst = std::max(worst, e / std::max(1.0, std::fabs(static_cast<double>(b[i]))));
     }
     const bool ok = worst < tol;
@@ -246,19 +239,10 @@ bool test_grouped_mixed() {
     };
     fill(group.p[0], f3, c3.p, s3.p, y3.p, g3.p);
     fill(group.p[1], f4, c4.p, s4.p, y4.p, g4.p);
-    const uint32_t bpw[2] = {3u, 4u};
-    uint32_t launches = 0u;
-    hipError_t err = hipSuccess;
-    for (uint32_t j = 0u; j < 2u; ++j) {
-        shelf::kernel::PlamoExl3ProjectionGroup sub = group;
-        sub.count = 1u;
-        sub.p[0] = group.p[j];
-        uint32_t sub_launches = 0u;
-        err = shelf::kernel::launch_plamo_exl3_projection(sub, bpw[j], nullptr, &sub_launches, false, false);
-        launches += sub_launches;
-        if (err != hipSuccess) break;
-    }
-    check("mixed grouped launches", err == hipSuccess && launches == 6u);
+    group.three_bit_mask = 1u;
+    uint32_t launches = 0;
+    const auto err = shelf::kernel::launch_plamo_exl3_projection(group, 3u, nullptr, &launches, false, false);
+    check("mixed grouped launches", err == hipSuccess && launches == 3u);
     auto baseline = [&](Fixture& f, int8_t* codes, float* scales, float* yprime, uint16_t* out, uint32_t bits) {
         HIP_OK(shelf::kernel::launch_exl3_mul24_rotate_quantize(
             reinterpret_cast<const shelf::bf16_t*>(f.d_x.p), k, f.d_suh.p, codes, scales, rows, k, k,
@@ -267,6 +251,7 @@ bool test_grouped_mixed() {
             codes, scales, k, k / 128u * 4u, f.d_resident.p, bits, yprime, rows, n, k, 1u, nullptr));
         HIP_OK(shelf::kernel::launch_exl3_mul24_rotate_out(
             yprime, f.d_svh.p, out, shelf::kernel::Exl3OutputDType::BF16, rows, n, n, 1u, nullptr));
+        return true;
     };
     baseline(f3, c3.p, s3.p, y3.p, b3.p, 3u);
     baseline(f4, c4.p, s4.p, y4.p, b4.p, 4u);
@@ -317,7 +302,7 @@ bool test_group_body(int mt) {
     return true;
 }
 
-}  // namespace
+}
 
 int main() {
     int device = 0;

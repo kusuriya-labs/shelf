@@ -17,7 +17,6 @@ struct alignas(8) TpArgmaxPair {
 static_assert(sizeof(TpArgmaxPair) == 8);
 
 constexpr std::size_t kTpArgmaxPairBytes = 8u;
-constexpr std::size_t kTpReduceShotThresholdBytes = 2u * 1024u * 1024u;
 constexpr std::size_t kTpPeerProbeBytes = 4096u;
 
 struct TpGreedyProbe {
@@ -41,8 +40,6 @@ struct TpArgmaxInvocation {
 };
 
 bool tp_greedy_argmax_eligible(const TpGreedyProbe& probe) noexcept;
-uint32_t tp_reduce_shot_count(std::size_t bytes) noexcept;
-uint32_t tp_reduce_four_input_shots(std::size_t bytes) noexcept;
 
 void tp_argmax_pack_host(const float* logits, uint32_t rows, uint32_t row_stride,
                          uint32_t local_cols, uint32_t local_offset,
@@ -69,4 +66,4 @@ hipError_t launch_tp_sum_f32_to_bf16_4(uint16_t* dst, const float* s0, const flo
                                        const float* s2, const float* s3, std::size_t count,
                                        hipStream_t stream);
 
-}  // namespace shelf::runtime
+}

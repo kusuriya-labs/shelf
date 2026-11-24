@@ -532,8 +532,7 @@ def parse_args(argv=None):
     parser.add_argument("--max-concurrent-requests", type=int, default=4,
                         help="max in-flight requests (default 4)")
     parser.add_argument("--prefill-decode-interval", type=int, default=None,
-                        help="run a decode step after N consecutive prefill chunks; "
-                             "0 disables the guarantee")
+                        help="prefill が N 回連続したら decode を優先する（既定の 0 で無効）")
 
     parser.add_argument("--inference-budget-tokens", type=int, default=32768,
                         help="max generated tokens per request (default 32768)")

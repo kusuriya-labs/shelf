@@ -425,13 +425,8 @@ __global__ __launch_bounds__(kQsaThreads, 2) void qsa_score_slices_kernel(
 }
 
 __device__ __forceinline__ uint32_t qsa_radix_key(float value) {
-    const uint32_t bits = __float_as_uint(value);
+    const uint32_t bits = value == 0.0f ? 0u : __float_as_uint(value);
     return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
-}
-
-__device__ __forceinline__ float qsa_radix_value(uint32_t key) {
-    const uint32_t bits = (key & 0x80000000u) ? (key & 0x7FFFFFFFu) : ~key;
-    return __uint_as_float(bits);
 }
 
 constexpr uint32_t kQsaRadixWaves = 8u;
@@ -644,6 +639,7 @@ __device__ void qsa_union_select(const float* values, const std::int32_t* block_
     }
     __syncthreads();
     const uint32_t valid = s->state[3];
+    __syncthreads();
     if (k >= valid) {
         if (t == 0u) s->state[3] = 0u;
         __syncthreads();
@@ -693,7 +689,7 @@ __device__ void qsa_union_select(const float* values, const std::int32_t* block_
         rank = s->state[2];
         __syncthreads();
     }
-    const float threshold = qsa_radix_value(prefix);
+
     uint32_t need = k - above;
     uint32_t index_prefix = 0u;
     for (uint32_t pass = 0u; pass < 4u && need != 0u; ++pass) {
@@ -707,7 +703,7 @@ __device__ void qsa_union_select(const float* values, const std::int32_t* block_
         }
         __syncthreads();
         for (uint32_t i = t; i < count; i += stride) {
-            if (block_index[i] < 0 || values[i] != threshold) continue;
+            if (block_index[i] < 0 || qsa_radix_key(values[i]) != prefix) continue;
             const uint32_t index = static_cast<uint32_t>(block_index[i]);
             if (pass != 0u && (index >> (shift + 8u)) != (index_prefix >> (shift + 8u)))
                 continue;
@@ -734,8 +730,8 @@ __device__ void qsa_union_select(const float* values, const std::int32_t* block_
         const std::int32_t index = block_index[i];
         if (index < 0) continue;
         const float value = values[i];
-        if (value > threshold ||
-            (value == threshold && static_cast<uint32_t>(index) <= index_prefix)) {
+        if (qsa_radix_key(value) > prefix ||
+            (qsa_radix_key(value) == prefix && static_cast<uint32_t>(index) <= index_prefix)) {
             const uint32_t pos = atomicAdd(&s->state[3], 1u);
             if (pos < k) {
                 out_values[pos] = value;
@@ -838,18 +834,22 @@ __global__ __launch_bounds__(kQsaTopkMaxThreads) void qsa_topk_kernel(QsaTopkArg
         ? args.selected + static_cast<uint64_t>(row) * args.selected_row_stride
         : nullptr;
     if (out != nullptr) {
-        if (t == 0u) {
-            for (uint32_t i = 1u; i < block_max; ++i) {
-                const int32_t value = indices[i];
-                uint32_t j = i;
-                while (j > 0u && indices[j - 1u] > value) {
-                    indices[j] = indices[j - 1u];
-                    --j;
+        uint32_t width = 1u;
+        while (width < block_max) width <<= 1u;
+        for (uint32_t i = block_max + t; i < width; i += blockDim.x) indices[i] = INT32_MAX;
+        __syncthreads();
+        for (uint32_t size = 2u; size <= width; size <<= 1u) {
+            for (uint32_t distance = size >> 1u; distance; distance >>= 1u) {
+                for (uint32_t pair = t; pair < width / 2u; pair += blockDim.x) {
+                    const uint32_t i = (pair / distance) * (distance * 2u) + pair % distance;
+                    const int32_t x = indices[i], y = indices[i + distance];
+                    const bool ascending = (i & size) == 0u;
+                    indices[i] = ascending ? min(x, y) : max(x, y);
+                    indices[i + distance] = ascending ? max(x, y) : min(x, y);
                 }
-                indices[j] = value;
+                __syncthreads();
             }
         }
-        __syncthreads();
         for (uint32_t i = t; i < args.top_k; i += blockDim.x)
             out[i] = i < block_max ? indices[i] : -1;
     }
@@ -892,7 +892,8 @@ __global__ __launch_bounds__(kQsaHeadDim) void qsa_rope_kernel(QsaRopeArgs args)
         s_sin[j] = sinf(angle) * args.attention_factor;
     }
     __syncthreads();
-    const uint32_t chunks = half / 8u;
+    const bool aligned = (reinterpret_cast<uintptr_t>(args.x) & 15u) == 0u && half % 8u == 0u;
+    const uint32_t chunks = aligned ? half / 8u : 0u;
     for (uint32_t head = 0; head < args.heads; ++head) {
         shelf::bf16_t* base =
             args.x + (static_cast<std::uint64_t>(row) * args.heads + head) * args.head_dim;
@@ -925,20 +926,19 @@ __global__ __launch_bounds__(kQsaHeadDim) void qsa_rope_kernel(QsaRopeArgs args)
             *reinterpret_cast<uint4*>(base + half + offset) =
                 uint4{hi[0], hi[1], hi[2], hi[3]};
         }
-        if (threadIdx.x == 0u) {
-            for (uint32_t j = chunks * 8u; j < half; ++j) {
-                const float x0 = bf16_value(base + j);
-                const float x1 = bf16_value(base + j + half);
-                base[j] = bf16_from(x0 * s_cos[j] - x1 * s_sin[j]);
-                base[j + half] = bf16_from(x1 * s_cos[j] + x0 * s_sin[j]);
-            }
+        for (uint32_t j = chunks * 8u + threadIdx.x; j < half; j += blockDim.x) {
+            const float x0 = bf16_value(base + j);
+            const float x1 = bf16_value(base + j + half);
+            base[j] = bf16_from(x0 * s_cos[j] - x1 * s_sin[j]);
+            base[j + half] = bf16_from(x1 * s_cos[j] + x0 * s_sin[j]);
         }
     }
 }
 
 }  // namespace
 
-hipError_t launch_qsa_pool(const QsaPoolArgs& args, hipStream_t stream) {    if (args.raw_keys == nullptr || args.norm_weight == nullptr || args.pooled == nullptr) {
+hipError_t launch_qsa_pool(const QsaPoolArgs& args, hipStream_t stream) {
+    if (args.raw_keys == nullptr || args.norm_weight == nullptr || args.pooled == nullptr) {
         return hipErrorInvalidValue;
     }
     if (args.rows == 0u || args.blocks == 0u || args.head_dim != kQsaHeadDim ||
@@ -1003,9 +1003,12 @@ hipError_t launch_qsa_topk(const QsaTopkArgs& args, hipStream_t stream) {
     if (args.scores == nullptr || args.state_scores == nullptr ||
         args.state_indices == nullptr || args.block_mask == nullptr ||
         args.positions == nullptr || args.rows == 0u ||
-        args.top_k == 0u || args.compress_ratio == 0u ||
+        args.top_k == 0u || args.top_k > kQsaSelectMaxTopK ||
+        args.block_begin > args.blocks || args.block_count > args.blocks - args.block_begin ||
+        args.compress_ratio == 0u || (args.mask_row_bytes & 3u) != 0u ||
+        (reinterpret_cast<uintptr_t>(args.block_mask) & 3u) != 0u ||
         args.score_row_stride < args.block_count ||
-        args.mask_row_bytes < ((args.blocks + 31u) / 32u) * 4u) {
+        args.mask_row_bytes < ((static_cast<uint64_t>(args.blocks) + 31u) / 32u) * 4u) {
         return hipErrorInvalidValue;
     }
     if (args.selected != nullptr && args.selected_row_stride < args.top_k) {

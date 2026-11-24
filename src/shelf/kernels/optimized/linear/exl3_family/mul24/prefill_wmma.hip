@@ -183,7 +183,7 @@ hipError_t launch_exl3_mul24_prefill_wmma(
     const int8_t* dense_weights, float* yprime,
     uint32_t rows, uint32_t n, uint32_t k, hipStream_t stream, uint32_t splits) {
     if (rows == 0u) return hipSuccess;
-    if (splits == 0u || (k / 128u) % splits != 0u || !codes || !scales || !dense_weights || !yprime ||
+    if (n == 0u || k == 0u || splits == 0u || splits > 65535u || (k / 128u) % splits != 0u || !codes || !scales || !dense_weights || !yprime ||
         (n % 64u) != 0u || (k % 128u) != 0u ||
         (scale_stride_bytes % sizeof(float)) != 0u ||
         code_stride < k || scale_stride_bytes < (k / 128u) * sizeof(float))

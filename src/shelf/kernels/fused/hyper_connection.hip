@@ -12,7 +12,6 @@ namespace shelf::kernel {
 namespace {
 
 constexpr uint32_t kBlock = 256u;
-constexpr uint32_t kHyperExactRows = 16u;
 
 __device__ __forceinline__ float bf16_load(const shelf::bf16_t* p) {
     return __uint_as_float(static_cast<std::uint32_t>(p->data) << 16);
@@ -198,32 +197,6 @@ __global__ __launch_bounds__(kBlock) void hyper_apply_kernel(HyperApplyArgs args
     }
 }
 
-template <uint32_t kRowsTile>
-__global__ __launch_bounds__(kBlock) void hyper_mix_rows_kernel(HyperMixArgs args) {
-    const uint32_t row0 = blockIdx.x * kRowsTile;
-    if (row0 >= args.rows) return;
-    const uint32_t rows = min(kRowsTile, args.rows - row0);
-    for (uint32_t i = threadIdx.x; i < args.hidden; i += blockDim.x) {
-        for (uint32_t r = 0u; r < rows; ++r) {
-            const uint32_t row = row0 + r;
-            const shelf::bf16_t* gate = static_cast<const shelf::bf16_t*>(args.gate) +
-                                        static_cast<std::uint64_t>(row) * args.gate_stride;
-            const shelf::bf16_t* normed = static_cast<const shelf::bf16_t*>(args.normed) +
-                                          static_cast<std::uint64_t>(row) * args.normed_stride;
-            shelf::bf16_t* output = static_cast<shelf::bf16_t*>(args.output) +
-                                    static_cast<std::uint64_t>(row) * args.output_stride;
-            float acc = 0.0f;
-            for (uint32_t h = 0u; h < args.hc; ++h) {
-                const std::uint32_t offset = h * args.hidden + i;
-                float g = bf16_load(gate + offset);
-                if (args.sigmoid_gate != 0u) g = 1.0f / (1.0f + __expf(-g));
-                acc += g * bf16_load(normed + offset);
-            }
-            output[i] = bf16_store(acc / static_cast<float>(args.hc));
-        }
-    }
-}
-
 __device__ __forceinline__ float hc_bits_load(uint32_t bits) {
     return __uint_as_float(bits << 16u);
 }
@@ -307,13 +280,7 @@ hipError_t launch_hyper_mix(const HyperMixArgs& args, hipStream_t stream) {
         args.output_stride < args.hidden) {
         return hipErrorInvalidValue;
     }
-    if (args.rows > kHyperExactRows) {
-        constexpr uint32_t kRowsTile = 4u;
-        const dim3 grid((args.rows + kRowsTile - 1u) / kRowsTile);
-        hyper_mix_rows_kernel<kRowsTile><<<grid, kBlock, 0, stream>>>(args);
-    } else {
-        hyper_mix_kernel<<<args.rows, kBlock, 0, stream>>>(args);
-    }
+    hyper_mix_kernel<<<args.rows, kBlock, 0, stream>>>(args);
     return hipGetLastError();
 }
 

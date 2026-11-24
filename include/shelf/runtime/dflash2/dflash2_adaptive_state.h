@@ -43,31 +43,26 @@ struct DFlash2AdaptiveController {
     }
 
     static uint32_t select_k(uint32_t current, double ema, uint32_t batch_size, uint32_t max_k) {
-        uint32_t candidate = 0u;
-        if (batch_size > 16u) {
-            const double thr23 = current <= 2u ? 1.95 : 1.65;
-            const double thr34 = current <= 3u ? 3.35 : 3.05;
-            candidate = ema < thr23 ? 2u : (ema < thr34 ? 3u : 4u);
-        } else {
-            const double thr23 = current <= 2u ? 1.25 : 1.05;
-            const double thr34 = current <= 3u ? 1.95 : 1.65;
-            const double thr45 = current <= 4u ? 3.35 : 3.05;
-            candidate = ema < thr23 ? 2u
-                      : (ema < thr34 ? 3u : (ema < thr45 ? 4u : 5u));
-        }
-        return std::min(candidate, max_k);
+        const bool large_batch = batch_size > 16u;
+        const uint32_t ceiling = std::min(max_k, large_batch ? 4u : 5u);
+        const double promote = current <= 2u ? 0.45 : (large_batch ? 0.65 : 0.50);
+        const double demote = large_batch ? 0.45 : 0.30;
+        if (ema >= promote) return std::min(current + 1u, ceiling);
+        if (ema < demote && current > 2u) return std::min(current - 1u, ceiling);
+        return std::min(current, ceiling);
     }
 
     uint32_t observe(double accepted_per_lane, uint32_t batch_size,
                      uint32_t max_k = kDFlash2AdaptiveMaxK) {
-        if (batch_size == 0u || !std::isfinite(accepted_per_lane) || accepted_per_lane < 0.0) {
+        if (batch_size == 0u || !std::isfinite(accepted_per_lane) || current_k == 0u || accepted_per_lane < 0.0 || accepted_per_lane > current_k) {
             return current_k;
         }
+        const double rate = accepted_per_lane / current_k;
         if (!has_sample) {
-            acc_ema = accepted_per_lane;
+            acc_ema = rate;
             has_sample = true;
         } else {
-            acc_ema = (1.0 - ema_alpha) * acc_ema + ema_alpha * accepted_per_lane;
+            acc_ema = (1.0 - ema_alpha) * acc_ema + ema_alpha * rate;
         }
         ++rounds;
         ++rounds_since_switch;

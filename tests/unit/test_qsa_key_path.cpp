@@ -114,10 +114,9 @@ int main() {
         (void)hipFree(d_pooled);
     }
 
-    {
+    for (const std::uint32_t kRotary : {18u, 32u}) {
         constexpr std::uint32_t kRows = 3;
         constexpr std::uint32_t kHeads = 4;
-        constexpr std::uint32_t kRotary = 32;
         constexpr float kTheta = 10000000.0f;
         const std::uint32_t positions[kRows] = {0u, 5u, 100u};
         auto x = random_bf16(kRows * kHeads * kHeadDim, rng);
@@ -143,17 +142,18 @@ int main() {
         }
         void* d_x = nullptr;
         void* d_positions = nullptr;
-        check(hipMalloc(&d_x, x.size() * sizeof(shelf::bf16_t)) == hipSuccess,
+        check(hipMalloc(&d_x, (x.size() + 1u) * sizeof(shelf::bf16_t)) == hipSuccess,
               "hipMalloc rope x");
         check(hipMalloc(&d_positions, sizeof(positions)) == hipSuccess,
               "hipMalloc rope positions");
-        check(hipMemcpy(d_x, x.data(), x.size() * sizeof(shelf::bf16_t),
+        auto* x_ptr = static_cast<shelf::bf16_t*>(d_x) + (kRotary == 18u);
+        check(hipMemcpy(x_ptr, x.data(), x.size() * sizeof(shelf::bf16_t),
                         hipMemcpyHostToDevice) == hipSuccess, "h2d d_x");
         check(hipMemcpy(d_positions, positions, sizeof(positions), hipMemcpyHostToDevice) ==
                   hipSuccess,
               "h2d d_positions");
         shelf::kernel::QsaRopeArgs args;
-        args.x = static_cast<shelf::bf16_t*>(d_x);
+        args.x = x_ptr;
         args.positions = static_cast<const std::uint32_t*>(d_positions);
         args.rows = kRows;
         args.heads = kHeads;
@@ -165,7 +165,7 @@ int main() {
               "qsa rope launch");
         check(hipDeviceSynchronize() == hipSuccess, "qsa rope sync");
         std::vector<shelf::bf16_t> got(x.size());
-        check(hipMemcpy(got.data(), d_x, got.size() * sizeof(shelf::bf16_t),
+        check(hipMemcpy(got.data(), x_ptr, got.size() * sizeof(shelf::bf16_t),
               hipMemcpyDeviceToHost) == hipSuccess, "d2h got.data()");
         double max_error = 0.0;
         for (std::size_t i = 0; i < got.size(); ++i) {

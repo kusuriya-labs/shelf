@@ -426,6 +426,9 @@ hipError_t launch_exl3_mul24_fused_linear(
     if (rows == 0u) return hipSuccess;
     if (!input || !suh || !svh || !trellis || !out || rows > 16u || n == 0u ||
         (n % 128u) != 0u || k == 0u || (k % kBlock) != 0u ||
+        out_row_stride < n || (reinterpret_cast<uintptr_t>(input) & 7u) != 0u ||
+        (reinterpret_cast<uintptr_t>(suh) & 7u) != 0u || (reinterpret_cast<uintptr_t>(svh) & 7u) != 0u ||
+        (reinterpret_cast<uintptr_t>(trellis) & 3u) != 0u || (reinterpret_cast<uintptr_t>(out) & 7u) != 0u ||
         input_row_stride < k || (input_row_stride % 4u) != 0u || (out_row_stride % 4u) != 0u ||
         (bits != 3u && bits != 4u))
         return hipErrorInvalidValue;

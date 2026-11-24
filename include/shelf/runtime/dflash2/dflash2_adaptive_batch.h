@@ -102,4 +102,4 @@ inline uint32_t observe_dflash2_adaptive(DFlash2RequestSession& session,
     return session.adaptive.observe(static_cast<double>(accepted), batch_size, capped_k);
 }
 
-}  // namespace shelf::runtime
+}

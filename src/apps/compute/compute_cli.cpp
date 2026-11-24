@@ -95,8 +95,7 @@ void compute_usage(const char* prog) {
     printf("  --prefill-chunk N      prompt tokens per prefill step; also caps the row\n"
            "                         bucket (default 512; serve caps max-num-batched-tokens\n"
            "                         when given)\n");
-    printf("  --prefill-decode-interval N  decode step after N consecutive prefill chunks\n"
-           "                         (default 0; 0 disables the guarantee)\n");
+    printf("  --prefill-decode-interval N  prefill が N 回連続したら decode を優先する（既定の 0 で無効）\n");
     printf("  --ple-prefetch 0|1      prefetch the next PLE rows during prefill (default 1)\n");
     printf("  --device N|N,M         GPU device(s); count must match pipeline_parallel *\n"
            "                         expert_parallel * tensor_parallel (default 0)\n");

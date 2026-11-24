@@ -993,6 +993,7 @@ Result<PendingBatch> submit_co_batch(
     const uint32_t dispatch_count =
         static_cast<uint32_t>(program->dispatches.size());
 
+    ctx.sampled_ids_only = batch.sampled_ids_only;
     BatchExecutionOutput output;
     output.num_outputs = prep.num_outputs;
     output.num_token_rows = N;
@@ -1015,12 +1016,14 @@ Result<PendingBatch> submit_co_batch(
     if (last_stage && prep.num_outputs > 0) {
         auto hidden_slice = executor.output_hidden.slice(0, 0, prep.num_outputs);
         if (!hidden_slice.ok()) return on_error(Status::invalid_argument("final_hidden slice", __FILE__, __LINE__));
-        auto logits_slice = executor.logits.slice(0, 0, prep.num_outputs);
-        if (!logits_slice.ok()) return on_error(Status::invalid_argument("logits slice", __FILE__, __LINE__));
+        if (!batch.sampled_ids_only) {
+            auto logits_slice = executor.logits.slice(0, 0, prep.num_outputs);
+            if (!logits_slice.ok()) return on_error(Status::invalid_argument("logits slice", __FILE__, __LINE__));
+            output.logits = logits_slice.release();
+        }
         auto sampled_slice = executor.sampled_tokens.slice(0, 0, prep.num_outputs);
         if (!sampled_slice.ok()) return on_error(Status::invalid_argument("sampled_tokens slice", __FILE__, __LINE__));
         output.final_hidden = hidden_slice.release();
-        output.logits = logits_slice.release();
         output.sampled_tokens = sampled_slice.release();
     }
 
