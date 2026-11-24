@@ -5,6 +5,7 @@
 #include <shelf/models/model_policy.h>
 #include <shelf/runtime/dflash2_config.h>
 #include <shelf/runtime/decode_backend.h>
+#include <shelf/runtime/online_ngram.h>
 #include <shelf/runtime/rope_profile.h>
 #include <shelf/runtime/scheduling_types.h>
 #include <shelf/runtime/state_types.h>
@@ -61,6 +62,7 @@ struct ComputeConfig {
     uint32_t mtp_drafts = 7;
     uint32_t mtp_window = 4096;
     uint32_t mtp_sink = 64;
+    runtime::OnlineNgramConfig ngram{};
     uint32_t max_seq_len = 512;
     uint32_t max_num_batched_tokens = 0;
     uint32_t max_concurrent_requests = 4;
@@ -194,6 +196,7 @@ class ComputeSession {
     bool dflash2_host_token_ids() const noexcept;
     bool dflash2_batcher_active() const noexcept;
     bool prefix_cache_active() const noexcept;
+    runtime::OnlineNgramStats ngram_stats() const noexcept;
     std::string prefix_cache_error() const;
     runtime::KVCapacitySnapshot kv_capacity_snapshot() const;
     std::size_t queued_request_count() const noexcept;

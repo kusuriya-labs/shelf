@@ -414,7 +414,7 @@ struct Executor {
     DispatchStagingPool staging_pool;
     std::vector<ProgramStagingMeta> program_staging_meta;
     std::array<GraphCacheSlot, ::shelf::runtime::ProgramSet::kRowBucketCount> graph_cache{};
-    std::array<GraphCacheSlot, 6> dflash_verify_graph_cache{};
+    std::array<GraphCacheSlot, 8> dflash_verify_graph_cache{};
     uint32_t* graph_token_bitmask_staging = nullptr;
     void* host_token_graph_staging = nullptr;
     size_t host_token_graph_staging_bytes = 0;
@@ -523,6 +523,7 @@ struct ExecuteBatchOptions {
     const bf16_t* prepared_external_input = nullptr;
     uint32_t prepared_external_input_rows = 0u;
     bool tp_graph_replay_only = false;
+    bool use_verify_graph = false;
 };
 
 struct QsaSpecReplayRequest {

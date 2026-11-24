@@ -295,7 +295,8 @@ Result<MtpIterationOutput> mtp_spec_step(
     Executor& target,
     state::PagedSequenceState& target_sequence,
     int32_t pending_token,
-    uint32_t remaining_tokens);
+    uint32_t remaining_tokens,
+    const int32_t* precomputed_drafts = nullptr);
 
 // The draft phase of one MTP round: it advances the drafter's own 1-layer state over the
 // tokens the target committed last round, samples the draft proposals, and snapshots the
@@ -312,7 +313,8 @@ Result<MtpDraftResult> mtp_draft(
     Executor& target,
     state::PagedSequenceState& target_sequence,
     int32_t pending_token,
-    uint32_t remaining_tokens);
+    uint32_t remaining_tokens,
+    const int32_t* precomputed_drafts = nullptr);
 
 struct MtpDraftSnapshot;
 
@@ -336,6 +338,7 @@ struct MtpSpecBatchSlot {
     uint32_t remaining_tokens = 0u;
     uint32_t page_tokens = 0u;
     MtpBoundaryCapture* boundary_capture = nullptr;
+    const int32_t* precomputed_drafts = nullptr;
 };
 
 struct MtpSpecBatchOutput {

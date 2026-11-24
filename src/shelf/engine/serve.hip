@@ -183,6 +183,8 @@ struct MtpRequest {
     shelf::runtime::mtp::MtpDraftSnapshot tail_snapshot;
     MtpRequestTiming timing;
     double prefill_ms = 0.0;
+    bool stochastic = false;
+    runtime::OnlineNgramMatcher ngram{};
 };
 
 struct MtpServeContext {
@@ -202,6 +204,7 @@ struct MtpServeContext {
     double round_ms = 0.0;
     std::deque<uint64_t> snapshot_order;
     std::unordered_map<uint64_t, shelf::runtime::mtp::MtpDraftSnapshot> snapshots;
+    runtime::OnlineNgramStats completed_ngram_stats{};
 };
 
 struct MtpSnapshotSaveContext {
@@ -596,6 +599,9 @@ struct ServeController::Impl {
 
     void mtp_release(MtpServeContext& context, std::size_t index) {
         MtpRequest& request = *context.active[index];
+        if (state.config_.ngram.enabled) {
+            context.completed_ngram_stats += request.ngram.stats();
+        }
         if (request.prefix_capture != 0u) {
             if (state.prefix_cache_.has_value())
                 (void)state.prefix_cache_->cancel_capture(request.prefix_capture);
@@ -686,8 +692,10 @@ struct ServeController::Impl {
         if (mtp.active.empty()) return;
         std::vector<shelf::runtime::mtp::MtpSpecBatchSlot> slots;
         std::vector<std::size_t> indices;
+        std::vector<runtime::OnlineNgramProposal> ngram_proposals;
         slots.reserve(mtp.active.size());
         indices.reserve(mtp.active.size());
+        ngram_proposals.reserve(mtp.active.size());
         const bool capture_boundaries = state.prefix_cache_.has_value();
         for (std::size_t i = 0u; i < mtp.active.size(); ++i) {
             MtpRequest& request = *mtp.active[i];
@@ -699,6 +707,23 @@ struct ServeController::Impl {
             slot.num_drafts = mtp.drafts;
             slot.remaining_tokens = request.max_new_tokens - request.generated;
             slot.page_tokens = capture_boundaries ? state.config_.page_tokens : 0u;
+            runtime::OnlineNgramProposal prop{};
+            if (state.config_.ngram.enabled && slot.remaining_tokens > 1u &&
+                slot.sequence->position + 2u <= slot.sequence->max_seq_len) {
+                const uint32_t room = slot.sequence->max_seq_len - slot.sequence->position;
+                const uint32_t eff_k =
+                    std::min({mtp.drafts, slot.remaining_tokens - 1u, room - 1u});
+                if (eff_k > 0u) {
+                    prop = request.ngram.propose(eff_k, request.stochastic);
+                    if (prop.hit) {
+                        request.ngram.note_drafter_skipped();
+                    }
+                }
+            }
+            ngram_proposals.push_back(prop);
+            if (prop.hit) {
+                slot.precomputed_drafts = ngram_proposals.back().tokens.data();
+            }
             slots.push_back(slot);
             indices.push_back(i);
         }
@@ -750,9 +775,15 @@ struct ServeController::Impl {
         for (std::size_t j = 0u; j < slots.size(); ++j) {
             MtpRequest& request = *mtp.active[indices[j]];
             const auto& out = result.slots[j];
+            if (ngram_proposals[j].hit) {
+                request.ngram.record_outcome(out.num_accepted);
+            }
             for (uint32_t t = 0u; t < out.emitted_count; ++t) {
                 push_token(events, request.external_id, out.emitted[t]);
                 request.generated_ids.push_back(out.emitted[t]);
+                if (state.config_.ngram.enabled) {
+                    request.ngram.ingest_timed(out.emitted[t]);
+                }
                 request.generated += 1u;
             }
             request.pending_token = out.pending_token;
@@ -1005,6 +1036,12 @@ struct ServeController::Impl {
         admitted->generated_ids.push_back(prefill.value().pending_token);
         admitted->timing = timing;
         admitted->prefill_ms = prefill_ms;
+        admitted->stochastic = request.sampling.temperature != 0.0f;
+        if (state.config_.ngram.enabled) {
+            admitted->ngram.configure(state.config_.ngram);
+            admitted->ngram.ingest_span(admitted->input_tokens);
+            admitted->ngram.ingest_timed(admitted->pending_token);
+        }
         timing_first_token(admitted->timing);
         push_token(events, external_request_id, prefill.value().pending_token);
         const bool stop = shelf::qwen_hybrid::is_stop_token(
@@ -1692,6 +1729,30 @@ ServeStats ServeController::stats() const {
 
 void ServeController::write_final_stats() {
     const char* serve_stats_env = std::getenv("SHELF_DFLASH2_SERVE_STATS");
+    const bool show_ngram =
+        impl_->state.config_.ngram.enabled &&
+        (impl_->state.config_.ngram.stats ||
+         (serve_stats_env != nullptr && serve_stats_env[0] != '\0' &&
+          serve_stats_env[0] != '0'));
+    if (show_ngram) {
+        runtime::OnlineNgramStats ng = impl_->mtp.enabled
+            ? impl_->mtp.completed_ngram_stats
+            : impl_->session.ngram_stats();
+        if (impl_->mtp.enabled) {
+            for (const auto& active_req : impl_->mtp.active) {
+                ng += active_req->ngram.stats();
+            }
+        }
+        fprintf(stderr, "NGRAM_ROUNDS=%llu\n", static_cast<unsigned long long>(ng.rounds));
+        fprintf(stderr, "NGRAM_HITS=%llu\n", static_cast<unsigned long long>(ng.hits));
+        fprintf(stderr, "NGRAM_ACCEPTED_DRAFTS=%llu\n",
+                static_cast<unsigned long long>(ng.accepted_drafts));
+        fprintf(stderr, "NGRAM_MEAN_ACCEPTED=%.3f\n", ng.mean_accepted());
+        fprintf(stderr, "NGRAM_DFLASH_SKIPPED=%llu\n",
+                static_cast<unsigned long long>(ng.dflash_skipped));
+        fprintf(stderr, "NGRAM_CPU_US_PER_ROUND=%.3f\n", ng.cpu_us_per_round());
+        fflush(stderr);
+    }
     if (!impl_->config.dflash_enabled ||
         !(impl_->config.dflash_adaptive ||
           (serve_stats_env != nullptr && serve_stats_env[0] != '\0' &&

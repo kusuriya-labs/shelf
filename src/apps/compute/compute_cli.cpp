@@ -150,6 +150,15 @@ void compute_usage(const char* prog) {
     printf("  --mtp-drafts N         speculative draft tokens per round (default 7,\n");
     printf("                         max %u)\n", shelf::models::max_mtp_drafts());
     printf("  --mtp-stats 0|1        print MTP speculative decode statistics (default 1)\n");
+    printf("  --ngram                enable online n-gram / suffix speculative decoding\n");
+    printf("                         (standalone verify when no drafter, or pre-gate hybrid\n");
+    printf("                         with --dflash2-model-dir / --mtp)\n");
+    printf("  --ngram-drafts N       n-gram draft tokens per round (default 7; standalone\n");
+    printf("                         supports 3, 7, or 15 with HIP Graph verify)\n");
+    printf("  --ngram-min-match N    minimum suffix match length (0 = auto: 4 greedy,\n");
+    printf("                         6 stochastic; default 0)\n");
+    printf("  --ngram-max-match N    maximum suffix match length (default 32)\n");
+    printf("  --ngram-stats 0|1      print online n-gram statistics (default 1)\n");
     printf("  --prefix-cache 0|1     enable prefix cache (default 1)\n");
     printf("  --working-set-reserve-gib N    arena headroom kept free for the working set\n");
     printf("                                 (executor workspace allocated after the\n");
@@ -251,6 +260,11 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
     auto& mtp = opt.mtp;
     auto& mtp_drafts = opt.mtp_drafts;
     auto& mtp_stats = opt.mtp_stats;
+    auto& ngram = opt.ngram;
+    auto& ngram_drafts = opt.ngram_drafts;
+    auto& ngram_min_match = opt.ngram_min_match;
+    auto& ngram_max_match = opt.ngram_max_match;
+    auto& ngram_stats = opt.ngram_stats;
     auto& prefix_cache_enabled = opt.prefix_cache_enabled;
     auto& prefix_cache_checkpoints = opt.prefix_cache_checkpoints;
     auto& prefix_cache_strategy = opt.prefix_cache_strategy;
@@ -432,6 +446,34 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
             if (mtp_stats != 0 && mtp_stats != 1) {
                 fprintf(stderr, "bad --mtp-stats (expected 0 or 1)\n");
                 return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--ngram") == 0) {
+            ngram = true;
+        } else if (std::strcmp(argv[i], "--ngram-drafts") == 0 && i + 1 < argc) {
+            if (!parse_uint(argv[++i], ngram_drafts) || ngram_drafts == 0 ||
+                ngram_drafts > 64) {
+                fprintf(stderr, "bad --ngram-drafts (expected 1..64)\n");
+                return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--ngram-min-match") == 0 && i + 1 < argc) {
+            if (!parse_uint(argv[++i], ngram_min_match) ||
+                (ngram_min_match != 0 && ngram_min_match < 2) ||
+                ngram_min_match > 32768) {
+                fprintf(stderr, "bad --ngram-min-match (expected 0 or 2..32768)\n");
+                return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--ngram-max-match") == 0 && i + 1 < argc) {
+            if (!parse_uint(argv[++i], ngram_max_match) || ngram_max_match < 2 ||
+                ngram_max_match > 32768) {
+                fprintf(stderr, "bad --ngram-max-match (expected 2..32768)\n");
+                return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--ngram-stats") == 0) {
+            if (i + 1 < argc && (std::strcmp(argv[i + 1], "0") == 0 ||
+                                 std::strcmp(argv[i + 1], "1") == 0)) {
+                ngram_stats = std::atoi(argv[++i]);
+            } else {
+                ngram_stats = 1;
             }
         } else if (std::strcmp(argv[i], "--prefix-cache") == 0 && i + 1 < argc) {
             prefix_cache_enabled = std::atoi(argv[++i]);
@@ -725,6 +767,17 @@ int validate_compute_options(const ComputeOptions& opt) {
         }
     }
 
+
+    if (opt.ngram) {
+        if (opt.ngram_min_match != 0 && opt.ngram_max_match < opt.ngram_min_match) {
+            fprintf(stderr, "--ngram-max-match must be >= --ngram-min-match\n");
+            return kComputeParseError;
+        }
+        if (pipeline_parallel != 1) {
+            fprintf(stderr, "--ngram currently requires --pipeline-parallel 1\n");
+            return kComputeParseError;
+        }
+    }
 
     {
         const shelf::Status sampling_status =

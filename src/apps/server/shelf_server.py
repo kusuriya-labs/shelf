@@ -120,6 +120,14 @@ def build_compute_argv(opts) -> list[str]:
             argv += ["--dflash2-radix-topn", str(opts.dflash2_radix_topn)]
     if opts.mtp:
         argv += ["--mtp", "--mtp-drafts", str(opts.mtp_drafts)]
+    if opts.ngram:
+        argv += ["--ngram", "--ngram-drafts", str(opts.ngram_drafts)]
+        if opts.ngram_min_match is not None:
+            argv += ["--ngram-min-match", str(opts.ngram_min_match)]
+        if opts.ngram_max_match is not None:
+            argv += ["--ngram-max-match", str(opts.ngram_max_match)]
+        if opts.ngram_stats is not None:
+            argv += ["--ngram-stats", str(opts.ngram_stats)]
     if opts.tensor_parallel > 1:
         argv += ["--tensor-parallel", str(opts.tensor_parallel)]
     if opts.expert_parallel > 1:
@@ -594,6 +602,16 @@ def parse_args(argv=None):
                              "（複数 request を同時に処理する）")
     parser.add_argument("--mtp-drafts", type=int, default=4,
                         help="MTP の draft tokens per round（default 4）")
+    parser.add_argument("--ngram", action="store_true",
+                        help="online n-gram / suffix 投機的デコードを有効にする")
+    parser.add_argument("--ngram-drafts", type=int, default=7,
+                        help="n-gram の draft tokens per round（default 7、単独時は 3/7/15）")
+    parser.add_argument("--ngram-min-match", type=int, default=None,
+                        help="最小一致長（未指定時は自動: greedy 4 / stochastic 6）")
+    parser.add_argument("--ngram-max-match", type=int, default=None,
+                        help="最大一致長（default 32）")
+    parser.add_argument("--ngram-stats", type=int, default=None, choices=(0, 1),
+                        help="online n-gram 統計出力の有効化 0|1（default 1）")
 
     parser.add_argument("--moe-host-experts", type=int, default=None,
                         help="層あたり host に退避する routed expert 数（default 0）")
@@ -672,6 +690,17 @@ def parse_args(argv=None):
         parser.error("--mtp-drafts must be >= 1")
     if opts.mtp and opts.dflash2_model_dir:
         parser.error("--mtp and --dflash2-model-dir are mutually exclusive")
+    if not 1 <= opts.ngram_drafts <= 64:
+        parser.error("--ngram-drafts must be between 1 and 64")
+    if opts.ngram_min_match is not None and (opts.ngram_min_match < 2 or opts.ngram_min_match > 32768):
+        parser.error("--ngram-min-match must be between 2 and 32768")
+    if opts.ngram_max_match is not None and (opts.ngram_max_match < 2 or opts.ngram_max_match > 32768):
+        parser.error("--ngram-max-match must be between 2 and 32768")
+    if (opts.ngram_min_match is not None and opts.ngram_max_match is not None and
+            opts.ngram_max_match < opts.ngram_min_match):
+        parser.error("--ngram-max-match must be >= --ngram-min-match")
+    if opts.ngram and opts.pipeline_parallel > 1:
+        parser.error("--ngram requires --pipeline-parallel 1")
     return opts
 
 

@@ -74,8 +74,32 @@ def main() -> int:
                   value_of(default_argv, "--prefix-cache-save-interval") == "16384",
                   repr(value_of(default_argv, "--prefix-cache-save-interval")))
     checker.check("既定の prefill chunk を転送する",
-                  value_of(default_argv, "--prefill-chunk") == "4096",
+                  value_of(default_argv, "--prefill-chunk") == "8192",
                   repr(value_of(default_argv, "--prefill-chunk")))
+
+    ngram_opts = shelf_server.parse_args([
+        "--model-dir", "models/unused",
+        "--device", "0",
+        "--ngram",
+        "--ngram-drafts", "15",
+        "--ngram-min-match", "6",
+        "--ngram-max-match", "32",
+        "--ngram-stats", "1",
+    ])
+    ngram_argv = shelf_server.build_compute_argv(ngram_opts)
+    checker.check("ngram-flag-forwarded", "--ngram" in ngram_argv, repr(ngram_argv))
+    checker.check("ngram-drafts-forwarded",
+                  value_of(ngram_argv, "--ngram-drafts") == "15",
+                  repr(value_of(ngram_argv, "--ngram-drafts")))
+    checker.check("ngram-min-match-forwarded",
+                  value_of(ngram_argv, "--ngram-min-match") == "6",
+                  repr(value_of(ngram_argv, "--ngram-min-match")))
+    checker.check("ngram-max-match-forwarded",
+                  value_of(ngram_argv, "--ngram-max-match") == "32",
+                  repr(value_of(ngram_argv, "--ngram-max-match")))
+    checker.check("ngram-stats-forwarded",
+                  value_of(ngram_argv, "--ngram-stats") == "1",
+                  repr(value_of(ngram_argv, "--ngram-stats")))
     return checker.done()
 
 

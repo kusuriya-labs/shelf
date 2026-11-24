@@ -71,6 +71,11 @@ int main(int argc, char** argv) {
     config.mtp_drafts = static_cast<uint32_t>(opt.mtp_drafts);
     config.mtp_window = static_cast<uint32_t>(opt.mtp_window);
     config.mtp_sink = static_cast<uint32_t>(opt.mtp_sink);
+    config.ngram.enabled = opt.ngram;
+    config.ngram.num_drafts = static_cast<uint32_t>(opt.ngram_drafts);
+    config.ngram.min_match = static_cast<uint32_t>(opt.ngram_min_match);
+    config.ngram.max_match = static_cast<uint32_t>(opt.ngram_max_match);
+    config.ngram.stats = opt.ngram_stats != 0;
     config.max_seq_len = static_cast<uint32_t>(opt.max_seq_len);
     config.max_concurrent_requests = static_cast<uint32_t>(opt.max_concurrent_requests);
     if (opt.arena_gib_auto) {
@@ -206,6 +211,13 @@ int main(int argc, char** argv) {
                 config.max_num_batched_tokens = batch_rows;
             }
             config.max_scheduled_output_rows = batch_rows;
+        } else if (opt.ngram && !shelf::app::compute_dflash_enabled(opt)) {
+            const uint32_t verify_rows = static_cast<uint32_t>(opt.ngram_drafts) + 1u;
+            const uint32_t batch_rows = config.max_concurrent_requests * verify_rows;
+            if (config.max_num_batched_tokens < batch_rows) {
+                config.max_num_batched_tokens = batch_rows;
+            }
+            config.max_scheduled_output_rows = batch_rows;
         }
         if (shelf::app::compute_dflash_enabled(opt)) {
             const uint32_t batch_rows = config.dflash2_sessions() *
@@ -266,11 +278,13 @@ int main(int argc, char** argv) {
             rows = std::max<unsigned long>(rows, 16UL);
             if (opt.mtp) {
                 rows = std::max<unsigned long>(rows, opt.mtp_drafts + 1UL);
+            } else if (opt.ngram) {
+                rows = std::max<unsigned long>(rows, opt.ngram_drafts + 1UL);
             }
             config.max_num_batched_tokens = static_cast<uint32_t>(rows);
             config.max_scheduled_output_rows = opt.mtp
                 ? static_cast<uint32_t>(opt.mtp_drafts) + 1u
-                : 0u;
+                : (opt.ngram ? static_cast<uint32_t>(opt.ngram_drafts) + 1u : 0u);
         }
     }
 

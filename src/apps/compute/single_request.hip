@@ -239,8 +239,11 @@ void dump_tap_hidden(shelf::engine::ComputeSession& runtime, const char* tag,
     }
 }
 
-void print_speculation_stats(const std::vector<shelf::engine::SpeculationMetric>& stats) {
+void print_speculation_stats(const std::vector<shelf::engine::SpeculationMetric>& stats,
+                           bool include_spec = true, bool include_ngram = true) {
     for (const auto& metric : stats) {
+        const bool is_ngram = metric.key.rfind("NGRAM_", 0) == 0;
+        if (is_ngram ? !include_ngram : !include_spec) continue;
         const bool space = metric.key == "DFLASH2_ADAPTIVE" ||
                            metric.key == "DFLASH2_ADAPTIVE_K";
         if (space) {
@@ -391,6 +394,7 @@ int run_single_shot(shelf::engine::ComputeSession& runtime,
     dump_hidden_debug(runtime, "prefill");
     dump_tap_hidden(runtime, "prefill", prompt_ids.size());
     auto t_prefill_end = std::chrono::steady_clock::now();
+    const std::size_t prefill_emitted = runtime.request(request_id).generated_size;
 
     auto t_decode_start = std::chrono::steady_clock::now();
     uint32_t decode_tokens = 0;
@@ -448,6 +452,10 @@ int run_single_shot(shelf::engine::ComputeSession& runtime,
         return 1;
     }
     std::vector<int32_t> generated(request.generated, request.generated + request.generated_size);
+    if (runtime.config().ngram.enabled) {
+        decode_tokens = static_cast<uint32_t>(
+            generated.size() > prefill_emitted ? generated.size() - prefill_emitted : 0u);
+    }
 
     const auto prefill_ms =
         std::chrono::duration<double, std::milli>(t_prefill_end - t_prefill_start).count();
@@ -472,6 +480,17 @@ int run_single_shot(shelf::engine::ComputeSession& runtime,
     printf("KV_CACHE_DTYPE=%s\n", kv_cache_dtype.c_str());
     printf("KV_POOL_RESERVED_BYTES=%llu\n",
            static_cast<unsigned long long>(usage.kv_reserved_bytes));
+    if (runtime.config().ngram.enabled && runtime.config().ngram.stats) {
+        const shelf::runtime::OnlineNgramStats ng = runtime.ngram_stats();
+        printf("NGRAM_ROUNDS=%llu\n", static_cast<unsigned long long>(ng.rounds));
+        printf("NGRAM_HITS=%llu\n", static_cast<unsigned long long>(ng.hits));
+        printf("NGRAM_ACCEPTED_DRAFTS=%llu\n",
+               static_cast<unsigned long long>(ng.accepted_drafts));
+        printf("NGRAM_MEAN_ACCEPTED=%.3f\n", ng.mean_accepted());
+        printf("NGRAM_DFLASH_SKIPPED=%llu\n",
+               static_cast<unsigned long long>(ng.dflash_skipped));
+        printf("NGRAM_CPU_US_PER_ROUND=%.3f\n", ng.cpu_us_per_round());
+    }
 
     print_generated_ids(generated);
     dumper.finish();
@@ -504,7 +523,10 @@ int run_mtp_shot(shelf::engine::ComputeSession& runtime,
         fprintf(stderr, "mtp failed: %s\n", result.status().message().c_str());
         return 1;
     }
-    if (mtp_stats != 0) print_speculation_stats(result.value().stats);
+    const bool show_ngram = runtime.config().ngram.enabled && runtime.config().ngram.stats;
+    if (mtp_stats != 0 || show_ngram) {
+        print_speculation_stats(result.value().stats, mtp_stats != 0, show_ngram);
+    }
     print_common_tail(runtime, info, prompt_ids.size(), result.value().generated_ids,
                       result.value().decode_tokens, result.value().prefill_ms,
                       result.value().decode_ms, kv_cache_dtype, false);
@@ -543,9 +565,11 @@ int run_dflash2_shot(shelf::engine::ComputeSession& runtime,
         fprintf(stderr, "dflash2 failed: %s\n", result.status().message().c_str());
         return 1;
     }
-    if (dflash2_stats != 0) {
-        print_speculation_stats(result.value().stats);
-    } else {
+    const bool show_ngram = runtime.config().ngram.enabled && runtime.config().ngram.stats;
+    if (dflash2_stats != 0 || show_ngram) {
+        print_speculation_stats(result.value().stats, dflash2_stats != 0, show_ngram);
+    }
+    if (dflash2_stats == 0) {
         print_adaptive_stats(result.value().stats);
     }
     print_common_tail(runtime, info, prompt_ids.size(), result.value().generated_ids,

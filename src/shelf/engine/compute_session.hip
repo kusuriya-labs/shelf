@@ -17,6 +17,7 @@
 #include <shelf/runtime/executor.h>
 #include <shelf/runtime/gdn_state_layout.h>
 #include <shelf/runtime/prefix_cache.h>
+#include <shelf/runtime/spec_decode.h>
 #include <shelf/runtime/tp/pipeline_parallel.h>
 #include <shelf/runtime/tp/tensor_parallel.h>
 
@@ -541,10 +542,15 @@ Status ComputeSession::initialize(const ComputeConfig& config) {
     batcher_config.max_seq_len = max_seq;
     batcher_config.page_tokens = state.config_.page_tokens;
     batcher_config.eos_token_ids = text_config.stop_tokens;
+    batcher_config.ngram = state.config_.ngram;
 
     state.batcher_ = std::make_unique<runtime::ContinuousBatcher>(
         state.executor_, *state.slot_pool_, *state.gdn_pool_, *state.kv_pool_, batcher_config,
         state.stream_);
+    if (state.config_.ngram.enabled && !state.config_.draft_config_ready && !state.config_.mtp) {
+        const Status ngram_bind = state.batcher_->set_ngram_verify(state.arena_);
+        if (!ngram_bind.ok()) return ngram_bind;
+    }
 
     if (state.config_.prefix_cache) {
         auto bindings_res = runtime::make_prefix_state_bindings(state.executor_);
@@ -608,6 +614,17 @@ std::size_t ComputeSession::drafter_reserve_bytes(
             mtp_batch_requests(mtp_request.num_drafts));
     }
     if (!state.config_.draft_config_ready) {
+        if (state.config_.ngram.enabled && pool.num_gdn_states() > 0u &&
+            pool.device_view().recurrent_base != nullptr) {
+            const uint32_t max_reqs = std::max(1u, state.config_.max_concurrent_requests);
+            const uint32_t ngram_k =
+                state.config_.ngram.num_drafts != 0u ? state.config_.ngram.num_drafts : 7u;
+            const uint32_t rows = max_reqs * (ngram_k + 1u);
+            return static_cast<std::size_t>(rows) *
+                (runtime::spec_gdn_conv_bytes(pool) +
+                 runtime::spec_gdn_recurrent_bytes(pool)) +
+                4096u;
+        }
         return 0u;
     }
     runtime::DFlash2SpecDecoderConfig spec_config;
@@ -783,6 +800,7 @@ Status ComputeSession::initialize_pipeline_parallel() {
     batcher_config.max_seq_len = state.config_.max_seq_len;
     batcher_config.page_tokens = state.config_.page_tokens;
     batcher_config.eos_token_ids = stage0.hybrid_config().stop_tokens;
+    batcher_config.ngram = state.config_.ngram;
 
     state.batcher_ = std::make_unique<runtime::ContinuousBatcher>(
         stage0.executor(), stage0.sequence_pool(), stage0.gdn_pool(), stage0.kv_pool(),
@@ -922,11 +940,23 @@ Status ComputeSession::initialize_tensor_parallel() {
     batcher_config.max_seq_len = state.config_.max_seq_len;
     batcher_config.page_tokens = state.config_.page_tokens;
     batcher_config.eos_token_ids = rank0.hybrid_config().stop_tokens;
+    batcher_config.ngram = state.config_.ngram;
 
     state.batcher_ = std::make_unique<runtime::ContinuousBatcher>(
         *state.tp_executor_, *state.tp_slots_, *state.tp_gdn_, *state.tp_kv_, batcher_config,
         state.tp_stream_);
     state.batcher_->set_tp_batch_hook(state.tp_coordinator_);
+    if (state.config_.ngram.enabled && !state.config_.draft_config_ready && !state.config_.mtp) {
+        std::vector<runtime::NgramVerifyRankBinding> rank_bindings;
+        rank_bindings.reserve(static_cast<std::size_t>(state.tp_coordinator_->tp_size()));
+        for (int r = 0; r < state.tp_coordinator_->tp_size(); ++r) {
+            auto& rank = state.tp_coordinator_->rank(static_cast<std::size_t>(r));
+            rank_bindings.push_back(runtime::NgramVerifyRankBinding{
+                &rank.gdn_pool(), &rank.arena(), rank.stream(), rank.device_id()});
+        }
+        const Status ngram_bind = state.batcher_->set_ngram_verify(&state.arena(), &rank_bindings);
+        if (!ngram_bind.ok()) return ngram_bind;
+    }
 
     if (state.config_.prefix_cache) {
         runtime::PrefixCacheConfig prefix_config;
@@ -1196,6 +1226,13 @@ bool ComputeSession::dflash2_batcher_active() const noexcept {
 
 bool ComputeSession::prefix_cache_active() const noexcept {
     return impl_->prefix_cache_.has_value();
+}
+
+runtime::OnlineNgramStats ComputeSession::ngram_stats() const noexcept {
+    if (impl_ == nullptr || impl_->batcher_ == nullptr) {
+        return runtime::OnlineNgramStats{};
+    }
+    return impl_->batcher_->ngram_stats();
 }
 
 std::string ComputeSession::prefix_cache_error() const {

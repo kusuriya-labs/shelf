@@ -3,6 +3,8 @@
 #include <shelf/runtime/runtime_request.h>
 #include <shelf/runtime/scheduling_types.h>
 #include <shelf/runtime/dflash2/dflash2_session_pool.h>
+#include <shelf/runtime/gdn_spec_history.h>
+#include <shelf/runtime/online_ngram.h>
 #include <shelf/runtime/token_budget_scheduler.h>
 #include <shelf/runtime/executor.h>
 #include <shelf/runtime/tp/tp_batch_hook.h>
@@ -28,6 +30,14 @@ struct ContinuousBatcherConfig {
     uint32_t page_tokens = 0;
     qwen_hybrid::StopTokens eos_token_ids;
     KVAdmissionPolicy admission_policy = KVAdmissionPolicy::BankerSafe;
+    OnlineNgramConfig ngram{};
+};
+
+struct NgramVerifyRankBinding {
+    GdnStatePool* pool = nullptr;
+    gpu::GpuArena* arena = nullptr;
+    hipStream_t stream = nullptr;
+    int device = 0;
 };
 
 
@@ -95,6 +105,7 @@ class ContinuousBatcher {
         PagedKVPool& kv_pool,
         ContinuousBatcherConfig config,
         hipStream_t stream);
+    ~ContinuousBatcher() noexcept;
 
     ContinuousBatcher(const ContinuousBatcher&) = delete;
     ContinuousBatcher& operator=(const ContinuousBatcher&) = delete;
@@ -165,6 +176,11 @@ class ContinuousBatcher {
 
     bool dflash2_available() const noexcept { return dflash_.batch != nullptr; }
 
+    Status set_ngram_verify(gpu::GpuArena* arena,
+                            const std::vector<NgramVerifyRankBinding>* rank_bindings = nullptr);
+
+    OnlineNgramStats ngram_stats() const noexcept;
+
     KVCapacitySnapshot kv_capacity_snapshot() const;
 
  private:
@@ -186,6 +202,11 @@ class ContinuousBatcher {
     Status run_dflash2_round(std::vector<RuntimeRequest*>& active, bool& executed,
                              uint32_t& tokens, uint32_t& requests);
 
+    Status ensure_ngram_verify_initialized(uint32_t num_drafts);
+    void shutdown_ngram_verify() noexcept;
+    Status run_ngram_round(std::vector<RuntimeRequest*>& active, bool& executed,
+                           uint32_t& tokens, uint32_t& requests);
+
     KVBankerState build_kv_banker_state() const;
 
     Executor& executor_;
@@ -200,6 +221,22 @@ class ContinuousBatcher {
     PrefixCache* prefix_cache_ = nullptr;
     DFlash2BatcherBinding dflash_{};
     uint64_t adaptive_round_ = 0;
+
+    struct NgramVerifyRankState {
+        GdnStatePool* pool = nullptr;
+        gpu::GpuArena* arena = nullptr;
+        hipStream_t stream = nullptr;
+        int device = 0;
+        GdnSpecHistory history{};
+    };
+    struct NgramVerifyState {
+        gpu::GpuArena* arena = nullptr;
+        std::vector<NgramVerifyRankBinding> bindings{};
+        std::vector<NgramVerifyRankState> ranks{};
+        uint32_t max_rows = 0u;
+        bool initialized = false;
+    } ngram_verify_{};
+    OnlineNgramStats completed_ngram_stats_{};
 
     uint64_t next_id_ = 0;
 

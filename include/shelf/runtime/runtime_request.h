@@ -3,6 +3,7 @@
 #include <shelf/runtime/state_types.h>
 #include <shelf/runtime/scheduling_types.h>
 #include <shelf/runtime/dflash2_spec_decoder.h>
+#include <shelf/runtime/online_ngram.h>
 #include <shelf/models/common/qwen_hybrid/stop_tokens.h>
 #include <shelf/core/status.h>
 #include <hip/hip_runtime.h>
@@ -99,6 +100,10 @@ struct RuntimeRequest {
     bool speculative_decode = false;
     bool dflash_used = false;
     std::unique_ptr<DFlash2RequestSession> dflash;
+    OnlineNgramMatcher ngram{};
+    OnlineNgramProposal pending_ngram_proposal{};
+    bool ngram_round_active = false;
+    bool ngram_stats_committed = false;
 
     std::string error_message;
 };

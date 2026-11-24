@@ -1194,7 +1194,8 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
     DFlash2SpecDecoder& decoder,
     int32_t pending_token,
     uint32_t remaining_tokens,
-    uint32_t proposal_drafts) {
+    uint32_t proposal_drafts,
+    const int32_t* precomputed_drafts) {
     if (!decoder.initialized) {
         return Status::invalid_state("dflash2_spec_step: not initialized", __FILE__, __LINE__);
     }
@@ -1252,52 +1253,68 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
 
     {
         ScopedTimer t(want_timing ? &tm->draft_ms : nullptr);
-        if (bridge) {
-            const hipError_t anchor_err = hipMemcpyAsync(
-                decoder.verify_token_ids_device, &pending_token, sizeof(int32_t),
-                hipMemcpyHostToDevice, decoder.stream);
-            if (anchor_err != hipSuccess) {
-                return Status::hip_error("dflash2 anchor upload",
-                                         hipGetErrorString(anchor_err), __FILE__, __LINE__);
+        if (precomputed_drafts != nullptr) {
+            std::copy_n(precomputed_drafts, dflash_k, drafts.begin());
+            if (bridge) {
+                verify_host[0] = pending_token;
+                std::copy_n(precomputed_drafts, dflash_k, verify_host.data() + 1u);
+                const hipError_t upload_err = hipMemcpyAsync(
+                    decoder.verify_token_ids_device, verify_host.data(),
+                    static_cast<std::size_t>(dflash_k + 1u) * sizeof(int32_t),
+                    hipMemcpyHostToDevice, decoder.stream);
+                if (upload_err != hipSuccess) {
+                    return Status::hip_error("dflash2 precomputed upload",
+                                             hipGetErrorString(upload_err), __FILE__, __LINE__);
+                }
             }
-        }
-        if (want_timing) {
-            const hipError_t start_err =
-                hipEventRecord(decoder.draft_start_event, decoder.stream);
-            if (start_err != hipSuccess) {
-                return Status::hip_error("dflash2 draft start event",
-                                         hipGetErrorString(start_err), __FILE__, __LINE__);
+        } else {
+            if (bridge) {
+                const hipError_t anchor_err = hipMemcpyAsync(
+                    decoder.verify_token_ids_device, &pending_token, sizeof(int32_t),
+                    hipMemcpyHostToDevice, decoder.stream);
+                if (anchor_err != hipSuccess) {
+                    return Status::hip_error("dflash2 anchor upload",
+                                             hipGetErrorString(anchor_err), __FILE__, __LINE__);
+                }
             }
-            draft_events_recorded = true;
-        }
-        Status st = dflash2::dflash2_propose_cached(
-            *decoder.draft, *decoder.context, pending_token,
-            std::max(dflash_k, std::min(proposal_drafts, room_max)), proposal_device,
-            decoder.stream);
-        if (!st.ok()) return st;
-        if (bridge) {
-            const hipError_t relay_err = hipMemcpyAsync(
-                decoder.verify_token_ids_device + 1, proposal_device,
-                static_cast<std::size_t>(dflash_k) * sizeof(int32_t),
-                hipMemcpyDeviceToDevice, decoder.stream);
-            if (relay_err != hipSuccess) {
-                return Status::hip_error("dflash2 draft relay",
-                                         hipGetErrorString(relay_err), __FILE__, __LINE__);
+            if (want_timing) {
+                const hipError_t start_err =
+                    hipEventRecord(decoder.draft_start_event, decoder.stream);
+                if (start_err != hipSuccess) {
+                    return Status::hip_error("dflash2 draft start event",
+                                             hipGetErrorString(start_err), __FILE__, __LINE__);
+                }
+                draft_events_recorded = true;
             }
-        }
-        if (want_timing) {
-            const hipError_t stop_err =
-                hipEventRecord(decoder.draft_stop_event, decoder.stream);
-            if (stop_err != hipSuccess) {
-                return Status::hip_error("dflash2 draft stop event",
-                                         hipGetErrorString(stop_err), __FILE__, __LINE__);
+            Status st = dflash2::dflash2_propose_cached(
+                *decoder.draft, *decoder.context, pending_token,
+                std::max(dflash_k, std::min(proposal_drafts, room_max)), proposal_device,
+                decoder.stream);
+            if (!st.ok()) return st;
+            if (bridge) {
+                const hipError_t relay_err = hipMemcpyAsync(
+                    decoder.verify_token_ids_device + 1, proposal_device,
+                    static_cast<std::size_t>(dflash_k) * sizeof(int32_t),
+                    hipMemcpyDeviceToDevice, decoder.stream);
+                if (relay_err != hipSuccess) {
+                    return Status::hip_error("dflash2 draft relay",
+                                             hipGetErrorString(relay_err), __FILE__, __LINE__);
+                }
+            }
+            if (want_timing) {
+                const hipError_t stop_err =
+                    hipEventRecord(decoder.draft_stop_event, decoder.stream);
+                if (stop_err != hipSuccess) {
+                    return Status::hip_error("dflash2 draft stop event",
+                                             hipGetErrorString(stop_err), __FILE__, __LINE__);
+                }
             }
         }
     }
 
     const int32_t* sampled_device_ptr = nullptr;
     const bool need_host_seed = decoder.host_proposal_visibility || decoder.config.tree;
-    if (!bridge || need_host_seed) {
+    if (precomputed_drafts == nullptr && (!bridge || need_host_seed)) {
         ScopedTimer t(want_timing ? &tm->draft_d2h_ms : nullptr);
         {
             ScopedTimer tw(want_timing ? &tm->proposal_wait_ms : nullptr);
@@ -1542,8 +1559,11 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
         sampled_device_ptr = pending.output.sampled_tokens.data<int32_t>();
         if (bridge) {
             const int32_t* sampled_device = sampled_device_ptr;
+            const int32_t* relay_draft_src = precomputed_drafts != nullptr
+                ? (decoder.verify_token_ids_device + 1)
+                : proposal_device;
             hipError_t d_err = hipMemcpyAsync(
-                decoder.decision_staging_device, proposal_device,
+                decoder.decision_staging_device, relay_draft_src,
                 static_cast<std::size_t>(dflash_k) * sizeof(int32_t),
                 hipMemcpyDeviceToDevice, decoder.stream);
             if (d_err != hipSuccess) {
@@ -1939,15 +1959,16 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
 
 Result<DFlash2SpecIterationOutput> dflash2_spec_step(
     DFlash2SpecDecoder& decoder, int32_t pending_token, uint32_t remaining_tokens,
-    uint32_t proposal_drafts) {
+    uint32_t proposal_drafts, const int32_t* precomputed_drafts) {
     if (decoder.config.tree) return Status::invalid_state("chain step with tree workspace", __FILE__, __LINE__);
-    return dflash2_spec_step_impl(decoder, pending_token, remaining_tokens, proposal_drafts);
+    return dflash2_spec_step_impl(decoder, pending_token, remaining_tokens, proposal_drafts,
+                                  precomputed_drafts);
 }
 
 Result<DFlash2SpecIterationOutput> dflash2_spec_step_tree(
     DFlash2SpecDecoder& decoder, int32_t pending_token, uint32_t remaining_tokens) {
     if (!decoder.config.tree) return Status::invalid_state("tree step without tree workspace", __FILE__, __LINE__);
-    return dflash2_spec_step_impl(decoder, pending_token, remaining_tokens, 0u);
+    return dflash2_spec_step_impl(decoder, pending_token, remaining_tokens, 0u, nullptr);
 }
 
 namespace {
@@ -2188,11 +2209,14 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
     }
     bool bridge = !tree_mode && context.verify_token_ids_device != nullptr &&
                   context.decision_staging_device != nullptr;
+    bool has_precomputed = false;
     if (bridge) {
         for (const SlotPlan& plan : plans) {
             if (!plan.batched) continue;
-            if (!plan.decoder->device_token_bridge || plan.slot->precomputed_drafts != nullptr ||
-                plan.slot->token_bitmask != nullptr) {
+            if (plan.slot->precomputed_drafts != nullptr) {
+                has_precomputed = true;
+            }
+            if (!plan.decoder->device_token_bridge || plan.slot->token_bitmask != nullptr) {
                 bridge = false;
                 break;
             }
@@ -2201,6 +2225,10 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
     mark(setup_ms);
     const auto round_t0 = std::chrono::steady_clock::now();
     bool verify_events_recorded = false;
+    std::vector<int32_t> precomputed_upload_host;
+    if (bridge && has_precomputed) {
+        precomputed_upload_host.resize(plans.size() * kDFlash2SpecMaxVerifyRows);
+    }
     std::vector<dflash2::DFlash2ProposeRequest> propose_requests;
     std::vector<int32_t*> propose_outputs;
     dflash2::DFlash2Executor* propose_executor = nullptr;
@@ -2211,6 +2239,20 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         if (!plan.batched) continue;
         if (plan.slot->precomputed_drafts != nullptr) {
             std::copy_n(plan.slot->precomputed_drafts, plan.drafts, drafts[i].begin());
+            if (bridge) {
+                int32_t* dst_host =
+                    precomputed_upload_host.data() + i * kDFlash2SpecMaxVerifyRows;
+                dst_host[0] = plan.anchor;
+                std::copy_n(plan.slot->precomputed_drafts, plan.drafts, dst_host + 1u);
+                const hipError_t upload_err = hipMemcpyAsync(
+                    context.verify_token_ids_device + plan.row_begin, dst_host,
+                    static_cast<std::size_t>(1u + plan.drafts) * sizeof(int32_t),
+                    hipMemcpyHostToDevice, plan.decoder->stream);
+                if (upload_err != hipSuccess) {
+                    return Status::hip_error("batch precomputed upload",
+                                             hipGetErrorString(upload_err), __FILE__, __LINE__);
+                }
+            }
             continue;
         }
         DFlash2SpecDecoder& decoder = *plan.decoder;

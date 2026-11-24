@@ -172,6 +172,7 @@ set_tests_properties(test_dflash2_adaptive PROPERTIES ENVIRONMENT "SHELF_DFLASH2
 add_test(NAME test_dflash2_adaptive_cap_override COMMAND test_dflash2_adaptive --check-cap-override)
 set_tests_properties(test_dflash2_adaptive_cap_override PROPERTIES LABELS "cpu;required" TIMEOUT 30 ENVIRONMENT "SHELF_DFLASH2_POLICY_MAX_SESSIONS=4")
 shelf_add_test(NAME test_dflash2_tree SOURCE unit/test_dflash2_tree.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_core)
+shelf_add_test(NAME test_online_ngram SOURCE unit/test_online_ngram.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
 shelf_add_test(NAME test_kv_pages SOURCE unit/test_kv_pages.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_core)
 add_test(NAME test_gdn_tree_chunk_reference COMMAND python3 "${CMAKE_SOURCE_DIR}/tests/unit/test_gdn_tree_chunk_reference.py")
 set_tests_properties(test_gdn_tree_chunk_reference PROPERTIES LABELS "cpu;required" TIMEOUT 30)
@@ -649,6 +650,35 @@ add_test(NAME test_compute_rope_cap_4x_over
 set_tests_properties(test_compute_rope_cap_4x_over PROPERTIES
                      LABELS "cpu;required"
                      PASS_REGULAR_EXPRESSION "exceeds the rope factor limit 1048576")
+
+add_test(NAME test_compute_ngram_rejects_pp2
+         COMMAND $<TARGET_FILE:shelf-compute>
+             --model-dir placeholder --ngram --pipeline-parallel 2 --device 0,1)
+set_tests_properties(test_compute_ngram_rejects_pp2 PROPERTIES
+                     LABELS "cpu;required"
+                     PASS_REGULAR_EXPRESSION "requires --pipeline-parallel 1")
+
+add_test(NAME test_compute_ngram_rejects_max_below_min
+         COMMAND $<TARGET_FILE:shelf-compute>
+             --model-dir placeholder --ngram --ngram-min-match 8 --ngram-max-match 4)
+set_tests_properties(test_compute_ngram_rejects_max_below_min PROPERTIES
+                     LABELS "cpu;required"
+                     PASS_REGULAR_EXPRESSION "--ngram-max-match must be >= --ngram-min-match")
+
+add_test(NAME test_compute_ngram_accepts_hybrid_dflash2
+         COMMAND $<TARGET_FILE:shelf-compute>
+             --model-dir placeholder --dflash2-model-dir placeholder
+             --ngram --ngram-drafts 7 --ngram-min-match 4 --ngram-max-match 32 --ngram-stats 1)
+set_tests_properties(test_compute_ngram_accepts_hybrid_dflash2 PROPERTIES
+                     LABELS "cpu;required"
+                     PASS_REGULAR_EXPRESSION "cannot open config.json")
+
+add_test(NAME test_compute_ngram_accepts_hybrid_mtp
+         COMMAND $<TARGET_FILE:shelf-compute>
+             --model-dir placeholder --mtp --mtp-drafts 4 --ngram --ngram-stats)
+set_tests_properties(test_compute_ngram_accepts_hybrid_mtp PROPERTIES
+                     LABELS "cpu;required"
+                     PASS_REGULAR_EXPRESSION "cannot open config.json")
 
 
 add_test(NAME test_quality_gate_selftest

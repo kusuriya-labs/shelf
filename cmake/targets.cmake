@@ -168,6 +168,7 @@ add_library(shelf_runtime STATIC
     src/shelf/runtime/batch/device_batch_context.hip
     src/shelf/runtime/decode_backend.cpp
     src/shelf/runtime/dflash2_config.cpp
+    src/shelf/runtime/online_ngram.cpp
     src/shelf/runtime/executor.hip
     src/shelf/runtime/executor_footprint.cpp
     src/shelf/runtime/gdn_spec_history.hip

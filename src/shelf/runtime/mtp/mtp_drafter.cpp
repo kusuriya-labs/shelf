@@ -1741,7 +1741,8 @@ Result<MtpDraftResult> mtp_draft(
     Executor& target,
     state::PagedSequenceState& target_sequence,
     int32_t pending_token,
-    uint32_t remaining_tokens) {
+    uint32_t remaining_tokens,
+    const int32_t* precomputed_drafts) {
     (void)target;
     if (!drafter.initialized) {
         return Status::invalid_state("mtp_draft: drafter is not initialized", __FILE__,
@@ -1792,26 +1793,33 @@ Result<MtpDraftResult> mtp_draft(
     Status copy = copy_hidden_to_all(drafter, drafter.hidden_cache, 0u, prefix_rows,
                                        stream);
     if (!copy.ok()) return copy;
-    auto first = run_mtp_forward(drafter, first_pass, drafter.last_position, true,
-                                 stream);
-    if (!first.ok()) return first.status();
-    auto first_sampled = copy_sampled_token(first.value().sampled_tokens, stream);
-    if (!first_sampled.ok()) return first_sampled.status();
+    if (precomputed_drafts != nullptr) {
+        auto first = run_mtp_forward(drafter, first_pass, drafter.last_position, false,
+                                     stream);
+        if (!first.ok()) return first.status();
+        std::copy_n(precomputed_drafts, drafts, result.proposals.begin());
+    } else {
+        auto first = run_mtp_forward(drafter, first_pass, drafter.last_position, true,
+                                     stream);
+        if (!first.ok()) return first.status();
+        auto first_sampled = copy_sampled_token(first.value().sampled_tokens, stream);
+        if (!first_sampled.ok()) return first_sampled.status();
 
-    result.proposals[0] = first_sampled.value();
-    copy = copy_hidden_to_all(drafter, drafter_hidden_output(drafter), 0u, 1u, stream);
-    if (!copy.ok()) return copy;
-    for (uint32_t i = 1u; i < drafts; ++i) {
-        std::vector<int32_t> step_tokens{result.proposals[i - 1u]};
-        auto step = run_mtp_forward(drafter, step_tokens, position + i - 1u, true,
-                                    stream);
-        if (!step.ok()) return step.status();
-        auto sampled = copy_sampled_token(step.value().sampled_tokens, stream);
-        if (!sampled.ok()) return sampled.status();
-        result.proposals[i] = sampled.value();
-        copy = copy_hidden_to_all(drafter, drafter_hidden_output(drafter), 0u, 1u,
-                                    stream);
+        result.proposals[0] = first_sampled.value();
+        copy = copy_hidden_to_all(drafter, drafter_hidden_output(drafter), 0u, 1u, stream);
         if (!copy.ok()) return copy;
+        for (uint32_t i = 1u; i < drafts; ++i) {
+            std::vector<int32_t> step_tokens{result.proposals[i - 1u]};
+            auto step = run_mtp_forward(drafter, step_tokens, position + i - 1u, true,
+                                        stream);
+            if (!step.ok()) return step.status();
+            auto sampled = copy_sampled_token(step.value().sampled_tokens, stream);
+            if (!sampled.ok()) return sampled.status();
+            result.proposals[i] = sampled.value();
+            copy = copy_hidden_to_all(drafter, drafter_hidden_output(drafter), 0u, 1u,
+                                        stream);
+            if (!copy.ok()) return copy;
+        }
     }
 
     if (!drafter.serial_verify) {
@@ -1834,9 +1842,9 @@ Result<MtpIterationOutput> mtp_spec_step(
     Executor& target,
     state::PagedSequenceState& target_sequence,
     int32_t pending_token,
-    uint32_t remaining_tokens) {
+    uint32_t remaining_tokens,
+    const int32_t* precomputed_drafts) {
     if (qwen_hybrid::is_stop_token(target.model.config->stop_tokens, pending_token)) {
-        // The stop token was already emitted by the caller; do not draft past it.
         MtpIterationOutput stopped;
         stopped.pending_token = pending_token;
         stopped.finished = true;
@@ -1844,7 +1852,7 @@ Result<MtpIterationOutput> mtp_spec_step(
     }
     const auto started = std::chrono::steady_clock::now();
     auto draft = mtp_draft(drafter, target, target_sequence, pending_token,
-                           remaining_tokens);
+                           remaining_tokens, precomputed_drafts);
     if (!draft.ok()) return draft.status();
     const MtpDraftResult& plan = draft.value();
     const hipStream_t stream = drafter.target_stream;
@@ -2314,7 +2322,8 @@ Status mtp_draft_batch(
                              const std::vector<int32_t>& tokens,
                              const std::vector<uint32_t>& row_counts,
                              const std::vector<uint32_t>& prefixes,
-                             bool force_prefill)
+                             bool force_prefill,
+                             bool compute_logits = true)
         -> Result<std::vector<int32_t>> {
         std::vector<ScheduledRequest> requests;
         requests.reserve(active.size());
@@ -2330,8 +2339,8 @@ Status mtp_draft_batch(
             req.token_begin = token_begin;
             req.num_tokens = row_counts[b];
             req.prefix_tokens = prefixes[b];
-            req.compute_logits = true;
-            req.sample = true;
+            req.compute_logits = compute_logits;
+            req.sample = compute_logits;
             req.num_output_rows = 1u;
             requests.push_back(req);
             token_begin += row_counts[b];
@@ -2384,6 +2393,9 @@ Status mtp_draft_batch(
         }
         if (!output.ok()) return output.status();
         std::vector<int32_t> sampled(active.size(), -1);
+        if (!compute_logits) {
+            return sampled;
+        }
         const hipError_t copy = hipMemcpy(
             sampled.data(), output.value().sampled_tokens.data<int32_t>(),
             sampled.size() * sizeof(int32_t), hipMemcpyDeviceToHost);
@@ -2398,19 +2410,25 @@ Status mtp_draft_batch(
     std::vector<int32_t> tokens;
     std::vector<uint32_t> row_counts;
     std::vector<uint32_t> prefixes;
+    bool all_precomputed = true;
     for (std::size_t i = 0u; i < count; ++i) {
         if (plans[i].decode_only) continue;
+        if (slots[i].precomputed_drafts == nullptr) all_precomputed = false;
         active.push_back(i);
         tokens.insert(tokens.end(), first_tokens[i].begin(), first_tokens[i].end());
         row_counts.push_back(prefix_rows[i]);
         prefixes.push_back(first_prefix[i]);
     }
     if (active.empty()) return Status::make_ok();
-    auto first = execute_depth(active, tokens, row_counts, prefixes, true);
+    auto first = execute_depth(active, tokens, row_counts, prefixes, true, !all_precomputed);
     if (!first.ok()) return first.status();
     ++draft_forwards;
     for (std::size_t b = 0u; b < active.size(); ++b) {
         const std::size_t i = active[b];
+        if (slots[i].precomputed_drafts != nullptr) {
+            std::copy_n(slots[i].precomputed_drafts, plans[i].drafts, plans[i].proposals.begin());
+            continue;
+        }
         plans[i].proposals[0] = first.value()[b];
         const uint32_t source_row = row_begin[i] + prefix_rows[i] - 1u;
         Status copy = copy_hidden_to_all(
@@ -2437,7 +2455,10 @@ Status mtp_draft_batch(
         row_counts.clear();
         prefixes.clear();
         for (std::size_t i = 0u; i < count; ++i) {
-            if (plans[i].decode_only || depth >= plans[i].drafts) continue;
+            if (plans[i].decode_only || slots[i].precomputed_drafts != nullptr ||
+                depth >= plans[i].drafts) {
+                continue;
+            }
             active.push_back(i);
             tokens.push_back(plans[i].proposals[depth - 1u]);
             row_counts.push_back(1u);
@@ -2713,7 +2734,8 @@ Result<MtpSpecBatchOutput> mtp_spec_step_batch(
                 continue;
             }
             auto draft = mtp_draft(*slot.drafter, *context.target, *slot.sequence,
-                                   slot.pending_token, slot.remaining_tokens);
+                                   slot.pending_token, slot.remaining_tokens,
+                                   slot.precomputed_drafts);
             if (!draft.ok()) return draft.status();
             drafts[i] = draft.value();
             if (!drafts[i].decode_only) total_rows += drafts[i].drafts + 1u;

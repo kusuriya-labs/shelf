@@ -53,6 +53,11 @@ struct ComputeOptions {
     unsigned long mtp_window = 4096;
     unsigned long mtp_sink = 64;
     int mtp_stats = 1;
+    bool ngram = false;
+    unsigned long ngram_drafts = 7;
+    unsigned long ngram_min_match = 0;
+    unsigned long ngram_max_match = 32;
+    int ngram_stats = 1;
     int prefix_cache_enabled = 1;
     unsigned long prefix_cache_checkpoints = 16;
     int prefix_cache_strategy = 0;

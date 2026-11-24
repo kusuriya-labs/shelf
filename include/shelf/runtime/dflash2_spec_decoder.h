@@ -254,7 +254,8 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
     DFlash2SpecDecoder& decoder,
     int32_t pending_token,
     uint32_t remaining_tokens,
-    uint32_t proposal_drafts = 0u);
+    uint32_t proposal_drafts = 0u,
+    const int32_t* precomputed_drafts = nullptr);
 
 Result<DFlash2SpecIterationOutput> dflash2_spec_step_tree(
     DFlash2SpecDecoder& decoder, int32_t pending_token, uint32_t remaining_tokens);

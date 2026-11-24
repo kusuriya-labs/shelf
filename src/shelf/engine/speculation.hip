@@ -12,6 +12,7 @@
 #include <shelf/runtime/dflash2_spec_decoder.h>
 #include <shelf/runtime/decode_backend.h>
 #include <shelf/runtime/executor.h>
+#include <shelf/runtime/online_ngram.h>
 #include <shelf/runtime/runtime_request.h>
 #include <shelf/runtime/state_types.h>
 
@@ -42,6 +43,18 @@ void add_d(SpeculationResult& result, const char* key, double value, int precisi
 double elapsed_ms(std::chrono::steady_clock::time_point begin,
                   std::chrono::steady_clock::time_point end) {
     return std::chrono::duration<double, std::milli>(end - begin).count();
+}
+
+void append_ngram_metrics(SpeculationResult& result,
+                          const runtime::OnlineNgramMatcher& matcher) {
+    if (!matcher.config().enabled) return;
+    const runtime::OnlineNgramStats& s = matcher.stats();
+    add_u(result, "NGRAM_ROUNDS", s.rounds);
+    add_u(result, "NGRAM_HITS", s.hits);
+    add_u(result, "NGRAM_ACCEPTED_DRAFTS", s.accepted_drafts);
+    add_d(result, "NGRAM_MEAN_ACCEPTED", s.mean_accepted(), 3);
+    add_u(result, "NGRAM_DFLASH_SKIPPED", s.dflash_skipped);
+    add_d(result, "NGRAM_CPU_US_PER_ROUND", s.cpu_us_per_round(), 3);
 }
 
 }  // namespace
@@ -168,23 +181,49 @@ Result<SpeculationResult> SpeculationRunner::run_mtp(
     int32_t pending = prefill_result.value().pending_token;
     SpeculationResult result;
     result.generated_ids.push_back(pending);
+    runtime::OnlineNgramMatcher ngram(impl.config_.ngram);
+    if (impl.config_.ngram.enabled) {
+        ngram.ingest_span(prompt_ids);
+        ngram.ingest_timed(pending);
+    }
     uint32_t decode_tokens = 0u;
     const auto t_prefill_end = std::chrono::steady_clock::now();
 
     const auto t_decode_start = std::chrono::steady_clock::now();
+    const bool stochastic = sampling.temperature != 0.0f;
     bool finished = shelf::qwen_hybrid::is_stop_token(text_config.stop_tokens, pending);
     while (!finished && result.generated_ids.size() < max_new_tokens) {
         const uint32_t remaining =
             static_cast<uint32_t>(max_new_tokens - result.generated_ids.size());
+        runtime::OnlineNgramProposal prop{};
+        if (impl.config_.ngram.enabled && remaining > 1u &&
+            sequence.position + 2u <= drafter->max_seq_len) {
+            const uint32_t room = drafter->max_seq_len - sequence.position;
+            const uint32_t eff_k =
+                std::min({drafter->num_drafts, remaining - 1u, room - 1u});
+            if (eff_k > 0u) {
+                prop = ngram.propose(eff_k, stochastic);
+                if (prop.hit) {
+                    ngram.note_drafter_skipped();
+                }
+            }
+        }
         auto step_result = shelf::runtime::mtp::mtp_spec_step(
-            *drafter, executor, sequence, pending, remaining);
+            *drafter, executor, sequence, pending, remaining,
+            prop.hit ? prop.tokens.data() : nullptr);
         if (!step_result.ok()) {
             cleanup();
             return step_result.status();
         }
         auto step = step_result.release();
+        if (prop.hit) {
+            ngram.record_outcome(step.num_accepted);
+        }
         for (uint32_t i = 0u; i < step.emitted_count; ++i) {
             result.generated_ids.push_back(step.emitted[i]);
+            if (impl.config_.ngram.enabled) {
+                ngram.ingest_timed(step.emitted[i]);
+            }
             ++decode_tokens;
         }
         pending = step.pending_token;
@@ -223,6 +262,7 @@ Result<SpeculationResult> SpeculationRunner::run_mtp(
     add_d(result, "MTP_GDN_RESTORE_MS", timing.gdn_restore_ms, 2);
     add_d(result, "MTP_COMPACT_REPLAY_MS", timing.compact_replay_ms, 2);
     add_d(result, "MTP_ROUND_MS", timing.round_ms, 2);
+    append_ngram_metrics(result, ngram);
 
     cleanup();
 
@@ -450,9 +490,15 @@ Result<SpeculationResult> SpeculationRunner::run_dflash2(
     }
     int32_t pending = prefill_result.value().pending_token;
     result.generated_ids.push_back(pending);
+    runtime::OnlineNgramMatcher ngram(impl.config_.ngram);
+    if (impl.config_.ngram.enabled) {
+        ngram.ingest_span(prompt_ids);
+        ngram.ingest_timed(pending);
+    }
     const auto t_prefill_end = std::chrono::steady_clock::now();
 
     const auto t_decode_start = std::chrono::steady_clock::now();
+    const bool stochastic = sampling.temperature != 0.0f;
     double accepted_ema = 2.0;
     uint32_t probe_age = 0;
     std::vector<uint64_t> adaptive_counts(decoder_config.num_drafts + 1u);
@@ -471,11 +517,29 @@ Result<SpeculationResult> SpeculationRunner::run_dflash2(
             if (probe) probe_age = 0;
             ++adaptive_counts[decoder.config.num_drafts];
         }
+        runtime::OnlineNgramProposal prop{};
+        if (impl.config_.ngram.enabled && !dflash2_tree && remaining > 1u &&
+            decoder.sequence->position + 2u <= decoder.sequence->max_seq_len) {
+            const uint32_t room = decoder.sequence->max_seq_len - decoder.sequence->position;
+            const uint32_t target_k =
+                adaptive ? decoder_config.num_drafts : decoder.config.num_drafts;
+            const uint32_t eff_k = std::min({target_k, remaining - 1u, room - 1u});
+            if (eff_k > 0u) {
+                prop = ngram.propose(eff_k, stochastic);
+                if (prop.hit) {
+                    if (adaptive) {
+                        decoder.config.num_drafts = decoder_config.num_drafts;
+                    }
+                    ngram.note_drafter_skipped();
+                }
+            }
+        }
         auto step_result =
             dflash2_tree
                 ? runtime::dflash2_spec_step_tree(decoder, pending, remaining)
                 : runtime::dflash2_spec_step(
-                      decoder, pending, remaining, adaptive ? decoder_config.num_drafts : 0u);
+                      decoder, pending, remaining, adaptive ? decoder_config.num_drafts : 0u,
+                      prop.hit ? prop.tokens.data() : nullptr);
         if (!step_result.ok()) {
             (void)runtime::dflash2_spec_decoder_shutdown(decoder);
             (void)runtime::dflash2::dflash2_context_shutdown(context);
@@ -484,11 +548,17 @@ Result<SpeculationResult> SpeculationRunner::run_dflash2(
             return step_result.status();
         }
         auto step = step_result.release();
+        if (prop.hit) {
+            ngram.record_outcome(step.num_accepted);
+        }
         if (adaptive && step.num_drafts == decoder_config.num_drafts) {
             accepted_ema += 0.03 * (static_cast<double>(step.num_accepted) - accepted_ema);
         }
         for (uint32_t i = 0; i < step.emitted_count; ++i) {
             result.generated_ids.push_back(step.emitted[i]);
+            if (impl.config_.ngram.enabled) {
+                ngram.ingest_timed(step.emitted[i]);
+            }
             ++decode_tokens;
         }
         pending = step.pending_token;
@@ -572,6 +642,7 @@ Result<SpeculationResult> SpeculationRunner::run_dflash2(
     add_d(result, "DFLASH2_GDN_RESTORE_MS", timing.gdn_restore_ms, 2);
     add_d(result, "DFLASH2_COMMIT_MS", timing.dflash_commit_ms, 2);
     add_d(result, "DFLASH2_ROUND_MS", timing.round_ms, 2);
+    append_ngram_metrics(result, ngram);
 
     (void)runtime::dflash2_spec_decoder_shutdown(decoder);
     (void)runtime::dflash2::dflash2_context_shutdown(context);
