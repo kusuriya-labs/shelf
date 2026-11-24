@@ -46,6 +46,16 @@ Flash-Next-EP2 + DFlash2（conc 4、max_new 64、生成列の hash 一致）で�
 123.71 / 124.49 / 124.44 / 124.40 tok/s で有意差なし。DFlash2 の verify（62 行、
 `ExecutionRole::Verify`）は graph 対象外で、decode 区間だけでは支配的でないため。
 
+Qwen3.8-27B + DFlash2（TP=2、conc 4、max_new 64）では graph on 123.63 / 124.19、
+off 145.63 / 145.62 tok/s で **on が 15 % 遅い**。生成列は一致。原因は capture 費用で、
+131 segment の BeginCapture / Instantiate が約 1 回分（200 ms 程度）かかる一方、
+spec decode は target の decode run が少なく償却できない。verify が支配的な flow なので
+decode 区間の短縮も小さい。
+
+そこで Executor が `ExecutionRole::Verify` を 1 度でも実行したら segment graph を止め、
+cache を解放する方式にした。27B + DFlash2 は 145.0 tok/s（off と同等）、27B dense の
+decode は 39.6 tok/s（off 26.0）を維持する。
+
 rocprofv3 の kernel dispatch 数は graph on / off で同一（25,984 / 2 agent）。
 graph は GPU の kernel 数を減らすのではなく、host 側の投入待ちで生じる GPU idle を
 消している。trace の kernel busy 合計はどちらも約 137 ms で一致する。

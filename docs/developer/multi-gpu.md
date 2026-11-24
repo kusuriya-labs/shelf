@@ -279,7 +279,10 @@ CPU 側の `arrive()` が担う。
 - node が 0 の segment は capture せず eager で実行する。
 - 値が変わり得る入力（row 数 / request 数 / device pointer 群）を key にし、
   一致しない run は eager に落とす。`SHELF_TP_HIP_GRAPH=0` で無効化できる。
-- 対象は `ExecutionRole::Decode` かつ output を計算する run。verify / prefill は eager のまま。
+- 対象は `ExecutionRole::Decode` の run のみ。verify / prefill は eager のまま。
+- Executor が一度でも `ExecutionRole::Verify` を実行したら、その Executor では segment graph を
+  恒久的に止めて cache を解放する。speculative decode は target の decode run が少なく、
+  131 segment の capture 費用を償却できないため。`SHELF_TP_HIP_GRAPH=0` でも無効化できる。
 - collective（`tp_copy` / `tp_sum_*`）と zero fill は graph の外に残る。graph 内へ
   閉じ込めるには cross-device 同期を kernel で表現する必要があり、現行 transport では
   可視性を保証できない（`docs/research/20261124/tp_hip_graph.md`）。
