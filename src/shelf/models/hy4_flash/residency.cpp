@@ -940,12 +940,12 @@ void Residency::reduce_pair(void *data, int rank, size_t bytes, bool ep, GraphCa
     auto &ptr = ep ? ep_ptr : tp_ptr;
     auto &src_ptr = ep ? ep_src_ptr : tp_src_ptr;
     auto &pair_bytes = ep ? ep_bytes : tp_bytes;
-    auto sum2 = [&](int destination) {
+    auto sum2 = [&](int destination, const void *received) {
         if (f32_src)
             tp_add_f32_to_bf16(ptr[destination], static_cast<const float *>(src_ptr[destination]),
-                               static_cast<const float *>(recv[destination]), bytes / 2u, compute[destination]);
+                               static_cast<const float *>(received), bytes / 2u, compute[destination]);
         else
-            tp_add_bf16(ptr[destination], recv[destination], bytes, compute[destination]);
+            tp_add_bf16(ptr[destination], received, bytes, compute[destination]);
     };
     if (capture) {
         if (src_bytes > max_bytes)
@@ -959,9 +959,17 @@ void Residency::reduce_pair(void *data, int rank, size_t bytes, bool ep, GraphCa
         barrier->arrive_and_wait();
         if (mismatch)
             throw std::runtime_error("collective の転送サイズが一致しません");
-        peer_copy(recv[other], src_ptr[rank], src_bytes, compute[rank]);
-        capture->step(ep_size > 1 && tp_size > 1 ? 2 : (ep ? 1 : 0));
-        sum2(rank);
+        const uint8_t group = ep_size > 1 && tp_size > 1 ? 2 : (ep ? 1 : 0);
+        const size_t half = max_bytes / 2;
+        const bool full_buffer = src_bytes > half;
+        if (full_buffer)
+            capture->step(group);
+        const size_t offset = full_buffer ? 0 : (capture->plan.tp_captured[rank].size() & 1u) * half;
+        peer_copy(static_cast<uint8_t *>(recv[other]) + offset, src_ptr[rank], src_bytes, compute[rank]);
+        capture->step(group);
+        sum2(rank, static_cast<uint8_t *>(recv[rank]) + offset);
+        if (full_buffer)
+            capture->step(group);
         return;
     }
     auto &ready_events = ep ? ep_ready : tp_ready;
@@ -1014,7 +1022,7 @@ void Residency::reduce_pair(void *data, int rank, size_t bytes, bool ep, GraphCa
             check(hipSetDevice(physical[destination]));
             check(hipStreamWaitEvent(compute[destination], arrived_events[a][p], 0));
             check(hipStreamWaitEvent(compute[destination], arrived_events[b][p], 0));
-            sum2(destination);
+            sum2(destination, recv[destination]);
             record_event(consumed_events[destination][p], destination);
         }
         recorded[a][p] = recorded[b][p] = true;
