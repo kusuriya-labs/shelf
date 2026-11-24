@@ -18,15 +18,15 @@ build/shelf-compute hy4 reserve --model-dir /path/to/model --engram-dir /path/to
 
 ## Prefill のチャンク長
 
-EP で長い入力を処理する場合、compute では `--chunk 2048` または `--chunk 4096`、server では `--prefill-chunk 2048` または `--prefill-chunk 4096` を指定できる。Hy4 server の既定値は 1024 で、指定できる範囲は 1〜4096 である。チャンク長だけを変更する場合は同じ配置表を使える。TP を併用すると、実行時に最大 1024 行ずつ処理する。
+EP や TP で長い入力を処理する場合、compute では `--chunk 2048` または `--chunk 4096`、server では `--prefill-chunk 2048` または `--prefill-chunk 4096` を指定できる。Hy4 server の既定値は 1024 で、指定できる範囲は 1〜4096 である。チャンク長だけを変更する場合は同じ配置表を使える。TP 時のチャンク上限は 4096 行である。
 
 長文の Indexer を従来の scalar 演算と照合する場合は `SHELF_HY4_INDEX_WMMA=0` を指定する。
 
 ## HIP Graph の切り替え
 
-TP=1、EP=1〜4 で push 転送を使用し、すべての GPU 間で peer access が有効な場合、バッチ decode と verify に層ごとの HIP Graph を使用する。DFly2 は `--dfly-drafts`（または環境変数 `SHELF_HY4_DFLY_DRAFTS`）で 1 ラウンドあたりの候補数 `K` を `2, 3, 4, 5` から指定でき、既定は `4` である。バッチ実行時は最大 32 スロットの候補を 1 回の Graph 起動で生成し、Target がスロットごとに `K + 1` 行（最大 6 行）を検証する。初回のバッチ形状では Graph を作成し、同じ形状と対応するコンテキスト長では再利用する。Target は `SHELF_HY4_GRAPH=0`、DFly2 は `SHELF_HY4_DRAFT_GRAPH=0` で個別に eager 実行へ切り替えられる。
+TP=1（EP=1〜4）、TP=2（EP=1〜2）、または TP=4（EP=1）で push 転送を使用し、すべての GPU 間で peer access が有効な場合、バッチ decode と verify に層ごと・段階ごとの HIP Graph を使用する。DFly2 は `--dfly-drafts`（または環境変数 `SHELF_HY4_DFLY_DRAFTS`）で 1 ラウンドあたりの候補数 `K` を `2, 3, 4, 5` から指定でき、既定は `4` である。バッチ実行時は TP=1 で最大 32 スロット、TP>1 で最大 16 スロットの候補を 1 回の Graph 起動で生成し、Target がスロットごとに `K + 1` 行（最大 6 行）を検証する。初回のバッチ形状では Graph を作成し、同じ形状と対応するコンテキスト長では再利用する。Target は `SHELF_HY4_GRAPH=0`、DFly2 は `SHELF_HY4_DRAFT_GRAPH=0` で個別に eager 実行へ切り替えられる。
 
-`placement.py` は TP=1 の各 rank の `peak_estimate` に Graph 用の 256 MiB を含める。実行時は、重み、KV、作業域の予約後にこの余裕を確保できる場合に Graph を有効にする。余裕不足、capture 失敗、EP のプロファイル取得時は eager 実行を使用する。単一スロットの DFly2 は `lm_head` 語彙分割が無効な場合は rank 0 で完結し peer / host 転送時にも Graph を使用できるが、`lm_head` 語彙分割が有効な複数 GPU 実行（例: 2 台または 4 台、既定有効、`SHELF_HY4_LM_HEAD_TP=0` で無効化）では全 rank で `lm_head` を並列実行するため push かつ全 peer access 時に Graph を使用する。
+`placement.py` は各 rank の `peak_estimate` に Graph 用の 256 MiB を含める。実行時は、重み、KV、作業域の予約後にこの余裕を確保できる場合に Graph を有効にする。余裕不足、capture 失敗、EP のプロファイル取得時は eager 実行を使用する。単一スロットの DFly2 は TP=1 かつ `lm_head` 語彙分割が無効な場合は rank 0 で完結し peer / host 転送時にも Graph を使用できるが、`lm_head` 語彙分割が有効な複数 GPU 実行（既定有効、`SHELF_HY4_LM_HEAD_TP=0` で無効化）や TP>1 構成では全 rank で `lm_head` を並列実行するため push かつ全 peer access 時に段階 Graph で実行する。
 
 ## EP=2 × TP=2 の例
 
@@ -54,7 +54,24 @@ build/shelf-compute hy4 generate --model-dir /path/to/model --engram-dir /path/t
   --input-ids-file prompt.ids --max-new-tokens 256 --chunk 1024 --temperature 0
 ```
 
-TP の all-reduce は bf16 で行うため、EP のみの構成と token 列が完全一致するとは限らない。数値の比較は logits の相対誤差で行う。`generate` は Engram の行を先読みする。無効化する場合は `SHELF_HY4_ENGRAM_PREFETCH=0` を指定する。Engram を先に populate する場合は `SHELF_HY4_ENGRAM_POPULATE=1` を指定する。複数台の R9700 による実機の長時間運用は未検証である。
+TP の all-reduce により加算順が変わるため、EP のみの構成と出力は数値比較で確認する。
+
+## EP=1 × TP=4 の例
+
+R9700 × 4 で Attention / Layer 0 MLP / LM head / DFly2 を 4 分割し、`shared_experts` を全 rank に複製、routed expert を 4 GPU へ均等分散する（`attn_tp=4, moe_ep=4`）。配置表は `--tensor-parallel 4` を指定して生成する。
+
+```bash
+python3 tools/hy4_flash/placement.py /path/to/model --draft /path/to/dfly \
+  --capacity 32 32 32 32 --tensor-parallel 4 \
+  --tokens 32768 --max-concurrent-requests 16 --output owners-tp4.json
+export ROCR_VISIBLE_DEVICES=GPU-UUID0,GPU-UUID1,GPU-UUID2,GPU-UUID3
+build/shelf-compute hy4 generate --model-dir /path/to/model --engram-dir /path/to/engram \
+  --dfly-dir /path/to/dfly --placement owners-tp4.json \
+  --expert-parallel 1 --tensor-parallel 4 --max-seq-len 32768 --batch-size 4 \
+  --input-ids-file prompt.ids --max-new-tokens 128 --chunk 1024 --temperature 0
+```
+
+`generate` は Engram の行を先読みする。無効化する場合は `SHELF_HY4_ENGRAM_PREFETCH=0` を指定する。Engram を先に populate する場合は `SHELF_HY4_ENGRAM_POPULATE=1` を指定する。複数台の R9700 による実機の長時間運用は未検証である。
 
 ## Engram の起動時読み込み
 
@@ -71,7 +88,7 @@ export SHELF_HY4_ENGRAM_MLOCK=1
 
 ## バッチ生成と Continuous Batching
 
-`shelf-server --max-concurrent-requests N` は TP=1、EP=1〜4 で 1〜32 件を同時に保持する。既定値は 4 件である。compute を直接起動する場合は `shelf-compute hy4 serve --max-concurrent-requests N` を使う。こちらの既定値は 1 件である。`--max-seq-len` は各リクエストの最大長を表す。DSA 12 層の KV と圧縮 index は 256 token 単位の共有ページプールから動的に割り当てられ、SWA 30 層のみ固定長のリングバッファをスロットごとに保持する。
+`shelf-server --max-concurrent-requests N` は TP=1（EP=1〜4）で 1〜32 件、TP=2（EP=1〜2）または TP=4（EP=1）で 1〜16 件を同時に保持する。既定値は 4 件である。compute を直接起動する場合は `shelf-compute hy4 serve --max-concurrent-requests N` を使う。こちらの既定値は 1 件である。`--max-seq-len` は各リクエストの最大長を表す。DSA 12 層の KV と圧縮 index は 256 token 単位の共有ページプールから動的に割り当てられ、SWA 30 層のみ固定長のリングバッファをスロットごとに保持する。
 
 共有 KV ページプールの総容量を明示する場合は `--kv-pool-tokens N`（または環境変数 `SHELF_HY4_KV_POOL_TOKENS`）を指定する。未指定時は残余 VRAM から自動算出する。空きページが不足すると、未使用の Prefix Cache エントリを LRU 順に解放し、それでも不足する場合は新規リクエストを `waiting` 状態に留めて Admission Control を行う。
 

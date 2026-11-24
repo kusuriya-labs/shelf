@@ -87,7 +87,7 @@ Ready.
 | `--large-context-inference-budget-tokens LARGE_CONTEXT_INFERENCE_BUDGET_TOKENS` | max generated tokens for a request whose prompt is longer than --large-context-tokens (default 65536) |
 | `--arena-gib N\|auto\|-N` | arena GiB: N - 0.3 (N > 0.3); -N = total VRAM minus (N + 0.3); auto = free VRAM minus 0.8 GiB (default auto) |
 | `--device DEVICE` | comma separated GPU devices, one per rank; count must match pipeline_parallel * expert_parallel * tensor_parallel (default 0) |
-| `--tensor-parallel {1,2}` | tensor parallel size forwarded to compute (default 1) |
+| `--tensor-parallel {1,2,4}` | tensor parallel size forwarded to compute (default 1) |
 | `--expert-parallel {1,2,3,4}` | expert parallel size forwarded to compute (default 1) |
 | `--pipeline-parallel {1,2,4}` | pipeline parallel size forwarded to compute (default 1) |
 | `--kv-cache-dtype KV_CACHE_DTYPE` | KV cache dtype (default bf16) |
