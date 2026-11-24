@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools/hy4_flash"))
 from convert_engram import convert
 from octave import Cache, selected_tokens
 import placement
-from placement import EXPERT_BYTES, assign
+from placement import EXPERT_BYTES, EXPERT_BYTES_3BIT, assign
 
 
 class Hy4FlashTests(unittest.TestCase):
@@ -151,6 +151,32 @@ class Hy4FlashTests(unittest.TestCase):
                 self.assertEqual(row[511], 0)
             with self.assertRaises(MemoryError):
                 assign([0, 0, 0], [2, 1, 1], [[1] * 512], balance_experts=balance)
+
+    def test_mixed_35bpw_capacity_and_c32(self):
+        experts = {
+            (layer, expert): EXPERT_BYTES_3BIT if (layer + expert) % 2 == 0 else EXPERT_BYTES
+            for layer in range(1, 42) for expert in range(512)
+        }
+        expected_total = sum(experts.values())
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            storage = {f"model.layers.{i}.self_attn.kv_b_proj.weight":
+                       {"original_shape": [512, 14336 if i == 0 or i % 4 == 1 else 28672]} for i in range(42)}
+            (directory / "config.json").write_text(json.dumps({"quantization_config": {"linear_storage": storage}}))
+            for ranks, tokens, slots in ((3, 8192, 32), (4, 4096, 32), (3, 2097152, 1)):
+                argv = ["placement.py", tmp, "--draft", tmp, "--tokens", str(tokens),
+                        "--max-concurrent-requests", str(slots), "--capacity", *(["32"] * ranks)]
+                output = io.StringIO()
+                with patch.object(sys, "argv", argv), patch.object(placement, "checkpoint_sizes",
+                        side_effect=[(4329651680, experts), (424428112, {})]), contextlib.redirect_stdout(output):
+                    placement.main()
+                result = json.loads(output.getvalue())
+                self.assertEqual(sum(result["rank_experts"]), 41 * 512)
+                self.assertEqual(sum(result["rank_expert_bytes"]), expected_total)
+                self.assertGreaterEqual(min(result["free_after"]), 0)
+                self.assertLessEqual(max(result["peak_estimate"]), (32 << 30) - (512 << 20))
+                if slots > 1:
+                    self.assertAlmostEqual(result["rank_experts"][0] / max(result["rank_experts"]), 0.9, places=3)
 
 
 if __name__ == "__main__":

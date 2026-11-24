@@ -36,7 +36,7 @@ struct GraphKey {
     int batch = 0;
     int draft_tokens = 0;
     const uint16_t *state = nullptr;
-    std::array<BatchGraphLane, 16> lanes{};
+    std::array<BatchGraphLane, 32> lanes{};
     bool operator==(const GraphKey &) const = default;
 };
 

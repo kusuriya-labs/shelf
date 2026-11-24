@@ -133,16 +133,18 @@ __device__ __forceinline__ void bf8_to_half8(uint4 raw, _Float16 *dst) {
         dst[i * 2 + 1] = static_cast<_Float16>(bf16_bits_to_f32(uint16_t(w[i] >> 16)));
     }
 }
-__global__ void project_query(const uint16_t *q, const _Float16 *w, _Float16 *query, int rows, int heads) {
+__global__ void project_query(const uint16_t *q, const _Float16 *w, _Float16 *query, int rows, int heads,
+                              const int *block_map = nullptr, int block_rows = 1) {
     int lane = threadIdx.x % 32, lo = lane % 16, hi = lane / 16, h = blockIdx.z;
     int col = blockIdx.x * 64 + (threadIdx.x / 32) * 16, r = blockIdx.y * 16 + lo;
+    int q_row = r < rows && block_map ? block_map[r / block_rows] * block_rows + r % block_rows : r;
     F8 acc{};
     for (int k = 0; k < 192; k += 16) {
         H8 a{}, b{};
         for (int j = 0; j < 8; ++j)
             a[j] = w[(size_t(h) * 448 + k + hi * 4 + j % 4 + 8 * (j / 4)) * 512 + col + lo];
         if (r < rows)
-            b = half_from_bf(q + (size_t(r) * heads + h) * 256 + k + hi * 4);
+            b = half_from_bf(q + (size_t(q_row) * heads + h) * 256 + k + hi * 4);
         acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, acc);
     }
     if (r < rows)
@@ -435,9 +437,10 @@ __global__ void recall_values(const _Float16 *input, const uint16_t *probs, cons
         values[(size_t(r) * heads + h) * 512 + cb + hi * 8 + j] = static_cast<_Float16>(acc[j]);
 }
 __global__ void project_value(const _Float16 *values, const _Float16 *w, const uint16_t *gate, int heads,
-                              int rows, uint16_t *out) {
+                              int rows, uint16_t *out, const int *block_map = nullptr, int block_rows = 1) {
     int lane = threadIdx.x % 32, lo = lane % 16, hi = lane / 16, h = blockIdx.z;
     int cb = blockIdx.x * 64 + (threadIdx.x / 32) * 16, r = blockIdx.y * 16 + lo;
+    int out_row = r < rows && block_map ? block_map[r / block_rows] * block_rows + r % block_rows : r;
     F8 acc{};
     for (int k = 0; k < 512; k += 16) {
         H8 a = half_frag(w + (size_t(h) * 448 + 192 + cb + lo) * 512 + k + hi * 4);
@@ -448,7 +451,7 @@ __global__ void project_value(const _Float16 *values, const _Float16 *w, const u
     }
     if (r < rows)
         for (int j = 0; j < 8; ++j) {
-            size_t i = (size_t(r) * heads + h) * 256 + cb + hi * 8 + j;
+            size_t i = (size_t(out_row) * heads + h) * 256 + cb + hi * 8 + j;
             out[i] = f32_to_bf16_rne_device(round_bf16(acc[j]) *
                                             round_bf16(1.f / (1.f + expf(-bf16_bits_to_f32(gate[i])))));
         }
@@ -597,6 +600,98 @@ __global__ void recall_fused_batch(const _Float16 *input, const _Float16 *query,
     }
 }
 
+__device__ int sparse_eff_stride(int stride, int block_rows, const int *row_positions, int r, bool draft) {
+    if (draft) {
+        int pos0 = row_positions[(r / block_rows) * block_rows];
+        return min(stride, 2045 + ((pos0 - 1) & 3) + block_rows);
+    }
+    int pos = row_positions[r];
+    return min(stride, pos >= 2048 ? 2045 + (pos & 3) : pos + 1);
+}
+__global__ void recall_scores_sparse(const _Float16 *input, const _Float16 *query, const uint16_t *rotary,
+                                     const uint16_t *q, const int *ids, int heads, int stride, int id_stride,
+                                     int pitch, float *scores, const int *row_positions, const int *block_map,
+                                     int block_rows, bool draft) {
+    int r = blockIdx.z;
+    int eff_stride = sparse_eff_stride(stride, block_rows, row_positions, r, draft);
+    int lane = threadIdx.x % 32, lo = lane % 16, hi = lane / 16;
+    int kb = blockIdx.x * 64 + (threadIdx.x / 32) * 16, h = blockIdx.y * 16 + lo;
+    if (kb >= eff_stride)
+        return;
+    int k_lane = r / block_rows;
+    int q_row = block_map ? block_map[k_lane] * block_rows + r % block_rows : r;
+    const _Float16 *lane_input = input + size_t(k_lane) * id_stride * 512;
+    const uint16_t *lane_rotary = rotary + size_t(k_lane) * id_stride * 64;
+    int token = kb + lo < eff_stride ? ids[r * stride + kb + lo] : -1;
+    F8 acc{};
+    for (int k = 0; k < 512; k += 16) {
+        H8 a{};
+        if (token >= 0)
+            a = half_frag(lane_input + size_t(token) * 512 + k + hi * 4);
+        H8 b = half_frag(query + (size_t(r) * heads + h) * 512 + k + hi * 4);
+        acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, acc);
+    }
+    for (int k = 0; k < 64; k += 16) {
+        H8 a{};
+        if (token >= 0)
+            a = half_from_bf(lane_rotary + size_t(token) * 64 + k + hi * 4);
+        H8 b = half_from_bf(q + (size_t(q_row) * heads + h) * 256 + 192 + k + hi * 4);
+        acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, acc);
+    }
+    for (int j = 0; j < 8; ++j) {
+        int col = kb + hi * 8 + j;
+        scores[(size_t(r) * heads + h) * pitch + col] =
+            col < eff_stride && ids[r * stride + col] >= 0 ? round_bf16(acc[j]) * 0.0625f : -INFINITY;
+    }
+}
+__global__ void normalize_sparse(float *scores, uint16_t *probs, const void *sinks, bool fp32, int pitch, int stride,
+                                 const int *row_positions, int block_rows, bool draft) {
+    __shared__ float parts[8];
+    int h = blockIdx.x, r = blockIdx.y, t = threadIdx.x;
+    int limit = sparse_eff_stride(stride, block_rows, row_positions, r, draft);
+    limit = (limit + 15) / 16 * 16;
+    size_t base = (size_t(r) * gridDim.x + h) * pitch;
+    float sink =
+        fp32 ? static_cast<const float *>(sinks)[h] : bf16_bits_to_f32(static_cast<const uint16_t *>(sinks)[h]);
+    float peak = sink;
+    for (int i = t; i < limit; i += 256)
+        peak = fmaxf(peak, scores[base + i]);
+    peak = reduce<true>(peak, parts);
+    float sum = t ? 0.f : expf(sink - peak);
+    for (int i = t; i < limit; i += 256) {
+        float e = expf(scores[base + i] - peak);
+        scores[base + i] = e;
+        sum += e;
+    }
+    sum = reduce<false>(sum, parts);
+    for (int i = t; i < limit; i += 256)
+        probs[base + i] = f32_to_bf16_rne_device(scores[base + i] / sum);
+}
+__global__ void recall_values_sparse(const _Float16 *input, const uint16_t *probs, const int *ids, int heads,
+                                     int stride, int id_stride, int pitch, _Float16 *values,
+                                     const int *row_positions, int block_rows, bool draft) {
+    int r = blockIdx.z;
+    int eff_stride = sparse_eff_stride(stride, block_rows, row_positions, r, draft);
+    int limit = (eff_stride + 15) / 16 * 16;
+    int lane = threadIdx.x % 32, lo = lane % 16, hi = lane / 16;
+    int cb = blockIdx.x * 64 + (threadIdx.x / 32) * 16, h = blockIdx.y * 16 + lo;
+    const _Float16 *lane_input = input + size_t(r / block_rows) * id_stride * 512;
+    F8 acc{};
+    for (int k = 0; k < limit; k += 16) {
+        H8 a{};
+        for (int j = 0; j < 8; ++j) {
+            int pos = k + hi * 4 + j % 4 + 8 * (j / 4);
+            int token = pos < eff_stride ? ids[r * stride + pos] : -1;
+            if (token >= 0)
+                a[j] = lane_input[size_t(token) * 512 + cb + lo];
+        }
+        H8 b = half_from_bf(probs + (size_t(r) * heads + h) * pitch + k + hi * 4);
+        acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, acc);
+    }
+    for (int j = 0; j < 8; ++j)
+        values[(size_t(r) * heads + h) * 512 + cb + hi * 8 + j] = static_cast<_Float16>(acc[j]);
+}
+
 }
 hipError_t shelf_hy4_mla_absorbed(const uint16_t *q, const void *folded, const uint16_t *rotary,
                                    const uint16_t *gate, const void *sinks, bool sink_fp32, const int *indices,
@@ -681,6 +776,37 @@ hipError_t shelf_hy4_mla_absorbed_batch(const uint16_t *q, const void *folded, c
         project_value_tiled<<<dim3(2, (rows + 127) / 128, heads), 256, 0, stream>>>(values, w, gate, heads, rows, out);
     else
         project_value<<<dim3(4, rb, heads), 128, 0, stream>>>(values, w, gate, heads, rows, out);
+    return hipGetLastError();
+}
+
+hipError_t shelf_hy4_mla_absorbed_sparse_batch(const uint16_t *q, const void *folded, const uint16_t *rotary,
+                                                const uint16_t *gate, const void *sinks, bool sink_fp32,
+                                                const int *indices, int stride, int id_stride,
+                                                const void *input_buffer, void *query_buffer, void *value_buffer,
+                                                float *scores, uint16_t *probs, uint16_t *out, int sparse_blocks,
+                                                int block_rows, int heads, hipStream_t stream,
+                                                const int *row_positions, const int *block_map, bool draft) {
+    auto w = static_cast<const _Float16 *>(folded), input = static_cast<const _Float16 *>(input_buffer);
+    auto query = static_cast<_Float16 *>(query_buffer), values = static_cast<_Float16 *>(value_buffer);
+    int rows = sparse_blocks * block_rows;
+    int pitch = (stride + 15) / 16 * 16, rb = (rows + 15) / 16;
+    project_query<<<dim3(8, rb, heads), 128, 0, stream>>>(q, w, query, rows, heads, block_map, block_rows);
+    auto rc = hipGetLastError();
+    if (rc != hipSuccess) return rc;
+    recall_scores_sparse<<<dim3((pitch + 63) / 64, heads / 16, rows), 128, 0, stream>>>(
+        input, query, rotary, q, indices, heads, stride, id_stride, pitch, scores, row_positions, block_map,
+        block_rows, draft);
+    rc = hipGetLastError();
+    if (rc != hipSuccess) return rc;
+    normalize_sparse<<<dim3(heads, rows), 256, 0, stream>>>(scores, probs, sinks, sink_fp32, pitch, stride,
+                                                            row_positions, block_rows, draft);
+    rc = hipGetLastError();
+    if (rc != hipSuccess) return rc;
+    recall_values_sparse<<<dim3(8, heads / 16, rows), 128, 0, stream>>>(
+        input, probs, indices, heads, stride, id_stride, pitch, values, row_positions, block_rows, draft);
+    rc = hipGetLastError();
+    if (rc != hipSuccess) return rc;
+    project_value<<<dim3(4, rb, heads), 128, 0, stream>>>(values, w, gate, heads, rows, out, block_map, block_rows);
     return hipGetLastError();
 }
 

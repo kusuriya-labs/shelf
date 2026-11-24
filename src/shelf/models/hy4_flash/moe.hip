@@ -406,7 +406,7 @@ __global__ void make_grouped_plans(const Hy4Route *picks, Mat latent, const int 
                                    size_t stride, uint64_t *totals) {
     using Scan = rocprim::block_scan<unsigned, 512>;
     __shared__ typename Scan::storage_type scan;
-    __shared__ unsigned masks[3][512];
+    __shared__ unsigned masks[6][512];
     __shared__ int starts[512], row_counts[Hy4GroupedPlan::max_rows];
     const int t = threadIdx.x, group = blockIdx.x, rows = latent.rows;
     auto plan = reinterpret_cast<Hy4GroupedPlan *>(packets + group * stride);
@@ -710,21 +710,22 @@ void peer_prefill_packet(void *dst, const void *src, int rows, int group, hipStr
     checked(hipGetLastError());
 }
 Mat feedforward(Ops &op, const std::string &p, Mat x, bool clip) {
-    if (!clip && op.gpu.tp_size == 1 && !op.gpu.model.mixed && x.rows <= 16 && x.cols == 3072 &&
+    if (!clip && op.gpu.tp_size == 1 && x.rows <= 16 && x.cols == 3072 &&
         p.ends_with(".shared_experts")) {
         auto projection = [&](const std::string &name) {
             const auto *w = op.gpu.model.find(name + ".trellis", op.rank);
             const auto *shape = op.gpu.model.shape_of(name, op.rank);
             if (!w || !shape || *shape != std::array<int, 2>{3072, 1536} ||
                 w->spec.shape.size() != 3 || w->spec.shape[0] != 192 ||
-                w->spec.shape[1] != 96 || w->spec.shape[2] != 64)
+                w->spec.shape[1] != 96 || (w->spec.shape[2] != 48 && w->spec.shape[2] != 64))
                 return Hy4ExpertProjection{};
             return Hy4ExpertProjection{static_cast<const uint16_t *>(op.param(name + ".suh").p),
                                        static_cast<const uint16_t *>(op.param(name + ".svh").p),
-                                       static_cast<const uint32_t *>(op.gpu.device(*w)), 4, 3072, 1536};
+                                       static_cast<const uint32_t *>(op.gpu.device(*w)),
+                                       uint64_t(w->spec.shape[2] / 16), 3072, 1536};
         };
         auto gate = projection(p + ".gate_proj"), up = projection(p + ".up_proj");
-        if (gate.trellis && up.trellis) {
+        if (gate.trellis && up.trellis && gate.bits == up.bits) {
             Mat activation = op.mat(x.rows, 1536);
             size_t mark = op.arena.cursor;
             auto partial = static_cast<float *>(op.arena.next(size_t(2 * 8 * x.rows * 1536) * sizeof(float)));

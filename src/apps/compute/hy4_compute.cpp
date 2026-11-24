@@ -268,7 +268,7 @@ int compute(int argc, char **argv) {
             throw std::runtime_error("未知の動作です");
         if (model.empty() || engram.empty() || placement.empty())
             throw std::runtime_error("重みと配置表が必要です");
-        if (batch_size > 16 || max_concurrent > 16 || (max_concurrent != 1 && mode != "serve" && mode != "reserve"))
+        if (batch_size > 32 || max_concurrent > 32 || (max_concurrent != 1 && mode != "serve" && mode != "reserve"))
             throw std::invalid_argument("スロット数または動作の指定が不正です");
         dfly_drafts = Residency::resolve_draft_tokens(dfly_drafts);
         const int slots = mode == "generate" ? batch_size : max_concurrent;
@@ -313,7 +313,7 @@ int compute(int argc, char **argv) {
                 if (batch_size != 1 && size_t(batch_size) != prompts.size())
                     throw std::invalid_argument("バッチサイズと入力ファイル数が一致しません");
                 batch_size = int(prompts.size());
-                if (batch_size > 16) throw std::invalid_argument("バッチの上限は 16 です");
+                if (batch_size > 32) throw std::invalid_argument("バッチの上限は 32 です");
             } else {
                 prompts.assign(batch_size, io::read_input_ids(input.string()));
             }

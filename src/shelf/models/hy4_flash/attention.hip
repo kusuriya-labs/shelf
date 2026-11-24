@@ -169,16 +169,26 @@ __global__ void unpack(const uint8_t *cache, const uint8_t *fresh, const int *id
     float value = wht(levels[code] * scale, scratch, Width) * sign_of(c, Salt);
     out.p[size_t(row) * out.cols + sub * Width + c] = f32_to_bf16_rne_device(value);
 }
-__global__ void unpack_quant(const uint8_t *cache, const uint8_t *fresh, const int *ids, int start, int slots,
-                             const uint16_t *suh, _Float16 *out, const Hy4StepParams *params, const int *meta) {
+__global__ void unpack_quant(const uint8_t *cache, const uint8_t *fresh, const int *ids, int first, int start,
+                             int slots, const uint16_t *suh, _Float16 *out, const Hy4StepParams *params,
+                             bool sliding, int row_offset, int chunk_rows, const int *meta, int max_rows) {
     int row = blockIdx.y + blockIdx.z * gridDim.y, sub = blockIdx.x, c = threadIdx.x;
-    if (row >= meta[512] + meta[513])
+    if ((meta && row >= meta[512] + meta[513]) || row >= max_rows)
         return;
     __shared__ float scratch[256];
     __shared__ uint16_t decoded[256];
     __shared__ uint8_t s_src[128];
     start = step_at(start, params);
-    int id = ids[row];
+    int base = kv_base(first, row_offset, sliding, params);
+    int id = ids ? ids[row] : base + row;
+    if ((!ids && id >= start + row_offset + chunk_rows) || id < 0) {
+        if (c < 64) {
+            int col = sub * 256 + (c / 32) * 128 + (c % 32) * 4;
+            for (int i = 0; i < 4; ++i)
+                out[size_t(row) * 512 + col + i] = 0;
+        }
+        return;
+    }
     const uint8_t *rec = id >= start ? fresh + size_t(id - start) * 294 : cache + size_t(id % slots) * 294;
     const uint8_t *src = rec + sub * 130;
     if (c < 32)
@@ -234,6 +244,48 @@ __global__ void unpack_batch(const uint8_t *cache, const uint8_t *fresh, const i
     float scale = __half2float(__ushort_as_half(src[Width / 2] | (src[Width / 2 + 1] << 8)));
     float value = wht(levels[code] * scale, scratch, Width) * sign_of(c, Salt);
     out.p[(size_t(block) * stride + t) * out.cols + sub * Width + c] = f32_to_bf16_rne_device(value);
+}
+__global__ void unpack_batch_quant(const uint8_t *cache, const uint8_t *fresh, const int *slots,
+                                   const int *positions, int cache_slots, int stride, const uint16_t *suh,
+                                   _Float16 *out, bool sliding, int block_rows) {
+    __shared__ float scratch[256];
+    __shared__ uint16_t decoded[256];
+    int c = threadIdx.x, sub = blockIdx.x, t = blockIdx.y, block = blockIdx.z;
+    int row = block * block_rows, start = positions[row];
+    int first = sliding ? max(0, start - 511) : 0;
+    int id = first + t;
+    if (id >= start + block_rows) {
+        if (c < 64) {
+            int col = sub * 256 + (c / 32) * 128 + (c % 32) * 4;
+            for (int i = 0; i < 4; ++i)
+                out[(size_t(block) * stride + t) * 512 + col + i] = 0;
+        }
+        return;
+    }
+    const uint8_t *rec = id >= start ? fresh + size_t(row + id - start) * 294
+        : cache + (size_t(slots[row]) * cache_slots + id % cache_slots) * 294;
+    const uint8_t *src = rec + sub * 130;
+    int code = (src[c / 2] >> (4 * (c % 2))) & 15;
+    float scale = __half2float(__ushort_as_half(src[128] | (src[129] << 8)));
+    float value = wht(levels[code] * scale, scratch, 256) * sign_of(c, 29);
+    decoded[c] = f32_to_bf16_rne_device(value);
+    __syncthreads();
+    if (c < 64) {
+        int col = sub * 256 + (c / 32) * 128 + (c % 32) * 4;
+        float v[4], peak = 0;
+        for (int i = 0; i < 4; ++i)
+            v[i] = bf16_bits_to_f32(decoded[(c / 32) * 128 + (c % 32) * 4 + i]) * f16_bits_to_f32(suh[col + i]);
+        fwht128(v[0], v[1], v[2], v[3], c % 32);
+        for (float &f : v) {
+            f *= kInvSqrt128;
+            peak = fmaxf(peak, fabsf(f));
+        }
+        for (int mask = 16; mask; mask /= 2)
+            peak = fmaxf(peak, __shfl_xor(peak, mask, 32));
+        float quant_scale = peak / 127;
+        for (int i = 0; i < 4; ++i)
+            out[(size_t(block) * stride + t) * 512 + col + i] = quant_scale ? rintf(v[i] / quant_scale) * quant_scale : 0;
+    }
 }
 __global__ void batch_offsets(int *offsets, const int *positions, int stride, bool sliding, int block_rows) {
     int row = blockIdx.y, t = blockIdx.x * blockDim.x + threadIdx.x;
@@ -857,6 +909,342 @@ __global__ void draft_offsets(int *offsets, int rows, int stride, int base_len, 
         return;
     offsets[r * stride + t] = t < base_len + r + 1 ? t : -1;
 }
+struct SparseLaneArgs {
+    int block[32];
+    int slot[32];
+    int draft_last[32];
+};
+__global__ void collect_sparse_meta(const int *slots, const int *positions, int block_rows, int num_blocks,
+                                    bool draft, int *sparse_blocks, int *sparse_slots, int *sparse_positions) {
+    int t = threadIdx.x;
+    bool active = t < num_blocks;
+    int pos0 = active ? positions[t * block_rows] : 0;
+    bool is_sparse = active && (draft ? pos0 > 2048 : pos0 + block_rows > 2048);
+    unsigned mask = __ballot(is_sparse);
+    if (is_sparse) {
+        int k = __popc(mask & ((1u << t) - 1u));
+        sparse_blocks[k] = t;
+        sparse_slots[k] = slots[t * block_rows];
+        for (int r = 0; r < block_rows; ++r)
+            sparse_positions[k * block_rows + r] = pos0 + r;
+    }
+}
+__global__ void gather_sparse_inputs(Mat hidden, Mat sparse_hidden, Mat qres, Mat sparse_qres,
+                                     const int *block_map, int block_rows) {
+    int out_r = blockIdx.y, col = blockIdx.x * 256 + threadIdx.x;
+    int src_r = block_map[out_r / block_rows] * block_rows + out_r % block_rows;
+    if (col < hidden.cols)
+        sparse_hidden.p[size_t(out_r) * hidden.cols + col] = hidden.p[size_t(src_r) * hidden.cols + col];
+    if (col < qres.cols)
+        sparse_qres.p[size_t(out_r) * qres.cols + col] = qres.p[size_t(src_r) * qres.cols + col];
+}
+__global__ void index_scores_sparse_batch(Mat q, Mat weights, const uint16_t *all_groups, size_t group_slot_stride,
+                                          int stride, float *scores, const int *sparse_slots,
+                                          const int *sparse_positions, SparseLaneArgs args, int block_rows) {
+    int r = blockIdx.y, pos = sparse_positions[r];
+    int count = min(stride, pos / 4);
+    int group = blockIdx.x * 4 + threadIdx.x / 32, lane = threadIdx.x % 32;
+    if (pos < 2048 || group >= count)
+        return;
+    int slot = sparse_slots ? sparse_slots[r / block_rows] : args.slot[r / block_rows];
+    const uint16_t *groups = all_groups + size_t(slot) * group_slot_stride;
+    float sum = 0;
+    for (int h = 0; h < 16; ++h) {
+        float dot = 0;
+        for (int j = lane; j < 128; j += 32)
+            dot += bv(q, r, h * 128 + j) * bf16_bits_to_f32(groups[size_t(group) * 128 + j]);
+        for (int dist = 16; dist; dist /= 2)
+            dot += __shfl_down(dot, dist, 32);
+        sum += fmaxf(dot, 0) * bv(weights, r, h);
+    }
+    if (!lane)
+        scores[size_t(r) * stride + group] = sum;
+}
+__global__ void index_topk_sparse_batch(const float *scores, int stride, int *selected_buf, int *top_slot_base,
+                                        const int *sparse_slots, const int *sparse_positions,
+                                        SparseLaneArgs args, int block_rows) {
+    __shared__ uint32_t histogram[256], state[4];
+    int r = blockIdx.x, pos = sparse_positions[r];
+    if (pos < 2048)
+        return;
+    unsigned count = min(unsigned(stride), unsigned(pos / 4));
+    int *dst = selected_buf ? selected_buf + size_t(r) * 511
+                            : top_slot_base + (size_t(sparse_slots ? sparse_slots[r / block_rows] : args.slot[r / block_rows]) * 6 +
+                                               r % block_rows) * 511;
+    ::shelf::kernel::detail::radix_select<3>(scores + size_t(r) * stride, count, 511, histogram, state, dst, nullptr, 0);
+}
+__device__ void bitonic_sort_512(int *g, int t) {
+    for (int k = 2; k <= 512; k <<= 1) {
+        for (int j = k >> 1; j > 0; j >>= 1) {
+            __syncthreads();
+            int other = g[t ^ j], v = g[t];
+            bool lower = (t & j) == 0;
+            bool gt = lower ? v > other : other > v;
+            bool lt = lower ? v < other : other < v;
+            bool swap = (t & k) == 0 ? gt : lt;
+            __syncthreads();
+            g[t] = swap ? other : v;
+        }
+    }
+    __syncthreads();
+}
+__global__ void build_sparse_indices_batch(const int *top_slot_base, const int *selected_buf,
+                                           const int *sparse_slots, const int *sparse_positions,
+                                           SparseLaneArgs args, const BatchGraphInput *batch_input,
+                                           int *all_ids, int *id_counts, int *all_offsets, int block_rows,
+                                           int id_stride, int stride, bool draft) {
+    using Scan = rocprim::block_scan<int, 512>;
+    __shared__ typename Scan::storage_type scan;
+    __shared__ int g[6][512];
+    __shared__ int all_g[4096];
+    __shared__ int uniq[3072];
+    __shared__ int uniq_count;
+    __shared__ int tail_map[12];
+    int k = blockIdx.x, t = threadIdx.x;
+    int slot = sparse_slots ? sparse_slots[k] : args.slot[k];
+    int pos0 = sparse_positions[k * block_rows];
+    int *ids = all_ids + size_t(k) * id_stride;
+    int *offsets = all_offsets + size_t(k * block_rows) * stride;
+    if (draft) {
+        int last = batch_input ? batch_input->step.lanes[args.block[k]].draft_last : args.draft_last[k];
+        const int *top = top_slot_base + (size_t(slot) * 6 + last) * 511;
+        g[0][t] = t < 511 ? top[t] : INT_MAX;
+        __syncthreads();
+        bitonic_sort_512(g[0], t);
+        for (int i = t; i < 2044; i += 512)
+            ids[i] = 4 * g[0][i >> 2] + (i & 3);
+        int pos = pos0 - 1;
+        int tail_len = (pos & 3) + 1;
+        int base_len = 2044 + tail_len;
+        if (t < tail_len)
+            ids[2044 + t] = (pos & ~3) + t;
+        if (t < block_rows)
+            ids[base_len + t] = pos0 + t;
+        if (!t)
+            id_counts[k] = base_len + block_rows;
+        for (int idx = t; idx < block_rows * stride; idx += 512) {
+            int r = idx / stride, col = idx % stride;
+            offsets[idx] = col < base_len + r + 1 ? col : -1;
+        }
+        return;
+    }
+    auto top_of = [&](int r) {
+        return top_slot_base ? top_slot_base + (size_t(slot) * 6 + r) * 511
+                             : selected_buf + size_t(k * block_rows + r) * 511;
+    };
+    if (block_rows == 1) {
+        const int *top = top_of(0);
+        g[0][t] = t < 511 ? top[t] : INT_MAX;
+        __syncthreads();
+        bitonic_sort_512(g[0], t);
+        for (int i = t; i < 2044; i += 512)
+            ids[i] = 4 * g[0][i >> 2] + (i & 3);
+        int tail_len = (pos0 & 3) + 1;
+        if (t < tail_len)
+            ids[2044 + t] = (pos0 & ~3) + t;
+        if (!t)
+            id_counts[k] = 2044 + tail_len;
+        for (int col = t; col < stride; col += 512)
+            offsets[col] = col < 2044 + tail_len ? col : -1;
+        return;
+    }
+    if (pos0 < 2048) {
+        int total_ids = pos0 + block_rows;
+        for (int i = t; i < total_ids; i += 512)
+            ids[i] = i;
+        if (!t)
+            id_counts[k] = total_ids;
+        for (int r = 0; r < block_rows; ++r) {
+            if (pos0 + r >= 2048) {
+                const int *top = top_of(r);
+                g[r][t] = t < 511 ? top[t] : INT_MAX;
+                __syncthreads();
+                bitonic_sort_512(g[r], t);
+            }
+        }
+        for (int idx = t; idx < block_rows * stride; idx += 512) {
+            int r = idx / stride, col = idx % stride, pos_r = pos0 + r;
+            if (pos_r < 2048) {
+                offsets[idx] = col <= pos_r ? col : -1;
+            } else if (col < 2044) {
+                offsets[idx] = 4 * g[r][col >> 2] + (col & 3);
+            } else {
+                int tok = (pos_r & ~3) + (col - 2044);
+                offsets[idx] = tok <= pos_r ? tok : -1;
+            }
+        }
+        return;
+    }
+    for (int r = 0; r < block_rows; ++r) {
+        const int *top = top_of(r);
+        g[r][t] = t < 511 ? top[t] : INT_MAX;
+        __syncthreads();
+        bitonic_sort_512(g[r], t);
+    }
+    for (int idx = t; idx < 4096; idx += 512) {
+        int r = idx / 511, c = idx % 511;
+        all_g[idx] = r < block_rows ? g[r][c] : INT_MAX;
+    }
+    __syncthreads();
+    for (int len = 2; len <= 4096; len <<= 1) {
+        for (int j = len >> 1; j > 0; j >>= 1) {
+            for (int p = t; p < 2048; p += 512) {
+                int a = ((p & ~(j - 1)) << 1) | (p & (j - 1));
+                int b = a | j;
+                int va = all_g[a], vb = all_g[b];
+                if ((va > vb) == ((a & len) == 0)) {
+                    all_g[a] = vb;
+                    all_g[b] = va;
+                }
+            }
+            __syncthreads();
+        }
+    }
+    const int total_raw = block_rows * 511;
+    int my_cnt = 0;
+    bool keep[8]{};
+    for (int i = 0; i < 8; ++i) {
+        int idx = t * 8 + i;
+        if (idx < total_raw) {
+            keep[i] = idx == 0 || all_g[idx] != all_g[idx - 1];
+            if (keep[i])
+                ++my_cnt;
+        }
+    }
+    int prefix;
+    Scan().exclusive_scan(my_cnt, prefix, 0, scan);
+    for (int i = 0; i < 8; ++i)
+        if (keep[i])
+            uniq[prefix++] = all_g[t * 8 + i];
+    if (t == 511)
+        uniq_count = prefix;
+    __syncthreads();
+    int U = uniq_count;
+    for (int i = t; i < U; i += 512) {
+        int grp = uniq[i];
+        for (int c = 0; c < 4; ++c)
+            ids[i * 4 + c] = 4 * grp + c;
+    }
+    int tail_lo = pos0 & ~3, tail_count = pos0 + block_rows - tail_lo;
+    if (!t) {
+        int next_id = 4 * U;
+        for (int j = 0; j < tail_count; ++j) {
+            int tok = tail_lo + j, grp = tok >> 2;
+            int lo = 0, hi = U - 1, found = -1;
+            while (lo <= hi) {
+                int mid = (lo + hi) >> 1;
+                if (uniq[mid] == grp) {
+                    found = mid;
+                    break;
+                }
+                if (uniq[mid] < grp)
+                    lo = mid + 1;
+                else
+                    hi = mid - 1;
+            }
+            if (found >= 0) {
+                tail_map[j] = found * 4 + (tok & 3);
+            } else {
+                ids[next_id] = tok;
+                tail_map[j] = next_id++;
+            }
+        }
+        id_counts[k] = next_id;
+    }
+    __syncthreads();
+    for (int idx = t; idx < block_rows * stride; idx += 512) {
+        int r = idx / stride, col = idx % stride;
+        if (col < 2044) {
+            int grp = g[r][col >> 2];
+            int lo = 0, hi = U - 1;
+            while (lo < hi) {
+                int mid = (lo + hi) >> 1;
+                if (uniq[mid] < grp)
+                    lo = mid + 1;
+                else
+                    hi = mid;
+            }
+            offsets[idx] = lo * 4 + (col & 3);
+        } else {
+            int pos_r = pos0 + r;
+            int tok = (pos_r & ~3) + (col - 2044);
+            offsets[idx] = tok <= pos_r ? tail_map[tok - tail_lo] : -1;
+        }
+    }
+}
+__global__ void unpack_quant_sparse_batch(const uint8_t *cache, const uint8_t *fresh, const int *all_ids,
+                                          const int *id_counts, const int *sparse_slots,
+                                          const int *sparse_positions, const int *sparse_blocks,
+                                          SparseLaneArgs args, int cache_slots, int block_rows, int id_stride,
+                                          const uint16_t *suh, _Float16 *all_out) {
+    __shared__ float scratch[256];
+    __shared__ uint16_t decoded[256];
+    int sub = blockIdx.x, t = blockIdx.y, k = blockIdx.z, c = threadIdx.x;
+    if (t >= id_counts[k])
+        return;
+    int slot = sparse_slots ? sparse_slots[k] : args.slot[k];
+    int orig_block = sparse_blocks ? sparse_blocks[k] : k;
+    int start = sparse_positions[k * block_rows];
+    int id = all_ids[size_t(k) * id_stride + t];
+    if (id < 0) {
+        if (c < 64) {
+            int col = sub * 256 + (c / 32) * 128 + (c % 32) * 4;
+            for (int i = 0; i < 4; ++i)
+                all_out[(size_t(k) * id_stride + t) * 512 + col + i] = 0;
+        }
+        return;
+    }
+    const uint8_t *rec = id >= start ? fresh + size_t(orig_block * block_rows + (id - start)) * 294
+                                     : cache + (size_t(slot) * cache_slots + size_t(id % cache_slots)) * 294;
+    const uint8_t *src = rec + sub * 130;
+    int code = (src[c / 2] >> (4 * (c % 2))) & 15;
+    float scale = __half2float(__ushort_as_half(src[128] | (src[129] << 8)));
+    float value = wht(levels[code] * scale, scratch, 256) * sign_of(c, 29);
+    decoded[c] = f32_to_bf16_rne_device(value);
+    __syncthreads();
+    if (c < 64) {
+        int col = sub * 256 + (c / 32) * 128 + (c % 32) * 4;
+        float v[4], peak = 0;
+        for (int i = 0; i < 4; ++i)
+            v[i] = bf16_bits_to_f32(decoded[(c / 32) * 128 + (c % 32) * 4 + i]) * f16_bits_to_f32(suh[col + i]);
+        fwht128(v[0], v[1], v[2], v[3], c % 32);
+        for (float &f : v) {
+            f *= kInvSqrt128;
+            peak = fmaxf(peak, fabsf(f));
+        }
+        for (int mask = 16; mask; mask /= 2)
+            peak = fmaxf(peak, __shfl_xor(peak, mask, 32));
+        float quant_scale = peak / 127;
+        for (int i = 0; i < 4; ++i)
+            all_out[(size_t(k) * id_stride + t) * 512 + col + i] =
+                quant_scale ? rintf(v[i] / quant_scale) * quant_scale : 0;
+    }
+}
+__global__ void unpack_rot_sparse_batch(const uint8_t *cache, const uint8_t *fresh, const int *all_ids,
+                                        const int *id_counts, const int *sparse_slots,
+                                        const int *sparse_positions, const int *sparse_blocks,
+                                        SparseLaneArgs args, int cache_slots, int block_rows, int id_stride,
+                                        uint16_t *all_out) {
+    __shared__ float scratch[64];
+    int t = blockIdx.y, k = blockIdx.z, c = threadIdx.x;
+    if (t >= id_counts[k])
+        return;
+    int slot = sparse_slots ? sparse_slots[k] : args.slot[k];
+    int orig_block = sparse_blocks ? sparse_blocks[k] : k;
+    int start = sparse_positions[k * block_rows];
+    int id = all_ids[size_t(k) * id_stride + t];
+    if (id < 0) {
+        all_out[(size_t(k) * id_stride + t) * 64 + c] = 0;
+        return;
+    }
+    const uint8_t *rec = id >= start ? fresh + size_t(orig_block * block_rows + (id - start)) * 294
+                                     : cache + (size_t(slot) * cache_slots + size_t(id % cache_slots)) * 294;
+    const uint8_t *src = rec + 260;
+    int code = (src[c / 2] >> (4 * (c % 2))) & 15;
+    float scale = __half2float(__ushort_as_half(src[32] | (src[33] << 8)));
+    float value = wht(levels[code] * scale, scratch, 64) * sign_of(c, 11);
+    all_out[(size_t(k) * id_stride + t) * 64 + c] = f32_to_bf16_rne_device(value);
+}
 Selection select(Ops &op, const std::string &p, int layer, int start, Mat x, Mat qres, bool index_ready) {
     int end = start + x.rows;
     int bucket = op.max_kv_len > 0 ? op.max_kv_len : std::max(2048, (end + 63) / 64 * 64);
@@ -1066,21 +1454,16 @@ Mat attention_inner(Ops &op, const std::string &p, int layer, int start, Mat hid
                 groups, rev, offsets_gpu, rows, stride, start, ids_gpu, meta, ids_count, i, op.params);
         }
         checked(hipGetLastError());
-        bool fused = !chunk_contiguous && !draft;
-        Mat a = fused ? Mat{nullptr, ids_count, 512} : op.mat(ids_count, 512);
+        bool fused = true;
+        Mat a{nullptr, ids_count, 512};
         Mat b = op.mat(ids_count, 64);
-        _Float16 *prequant = nullptr;
+        _Float16 *prequant = static_cast<_Float16 *>(op.arena.next(size_t(ids_count) * 512 * sizeof(_Float16)));
         unsigned id_slices = (ids_count + 65534) / 65535;
         unsigned id_rows = (ids_count + id_slices - 1) / id_slices;
-        if (fused) {
-            prequant = static_cast<_Float16 *>(op.arena.next(size_t(ids_count) * 512 * sizeof(_Float16)));
-            unpack_quant<<<dim3(2, id_rows, id_slices), 256, 0, op.stream>>>(
-                cache, fresh, ids_gpu, start, slots,
-                static_cast<const uint16_t *>(op.param(p + "kv_b_proj.suh").p), prequant, op.params, meta);
-        } else {
-            unpack<256, 29><<<dim3(2, id_rows, id_slices), 256, 0, op.stream>>>(cache, fresh, ids_gpu, first, start, slots, a, 0,
-                                                                        op.params, sliding, i, n, meta);
-        }
+        unpack_quant<<<dim3(2, id_rows, id_slices), 256, 0, op.stream>>>(
+            cache, fresh, ids_gpu, first, start, slots,
+            static_cast<const uint16_t *>(op.param(p + "kv_b_proj.suh").p), prequant, op.params, sliding, i, n,
+            meta, ids_count);
         checked(hipGetLastError());
         unpack<64, 11><<<dim3(1, id_rows, id_slices), 64, 0, op.stream>>>(cache, fresh, ids_gpu, first, start, slots, b, 260,
                                                                   op.params, sliding, i, n, meta);
@@ -1151,25 +1534,15 @@ Mat attention_batch(Ops &op, const std::string &prefix, int layer, const std::ve
     Mat out = op.mat(hidden.rows, heads * 256);
     size_t mark = op.arena.cursor;
     int cache_slots = sliding ? std::min(op.gpu.tokens, size_t(518)) : op.gpu.tokens;
+    auto sparse = [&](int row) {
+        return !sliding && (draft ? positions[row] > 2048 : positions[row] + block_rows > 2048);
+    };
+    std::vector<int> sparse_block_list;
+    for (int first = 0, b = 0; first < hidden.rows; first += block_rows, ++b)
+        if (sparse(first))
+            sparse_block_list.push_back(b);
     for (int first = 0; first < hidden.rows;) {
-        auto sparse = [&](int row) {
-            return !sliding && (draft ? positions[row] > 2048 : positions[row] + block_rows > 2048);
-        };
         if (sparse(first)) {
-            op.slot = slots[first];
-            if (op.capture) op.params = &op.gpu.batch_input->step.lanes[first / block_rows];
-            Selection selected;
-            Mat row = attention_inner(op, p, layer, positions[first], hidden.row(first, block_rows),
-                                      qres.row(first, block_rows), q.row(first, block_rows), lat.row(first, block_rows),
-                                      rot.row(first, block_rows), gate.row(first, block_rows), selected, draft, heads,
-                                      false, true);
-            checked(hipMemcpyAsync(out.row(first).p, row.p, row.bytes(), hipMemcpyDeviceToDevice, op.stream));
-            if (!draft && op.gpu.batch_draft && layer >= 25) {
-                checked(hipMemcpyAsync(op.gpu.sparse_top_slot(layer, op.slot), op.gpu.sparse_top[op.rank][layer],
-                                       size_t(block_rows) * 511 * sizeof(int), hipMemcpyDeviceToDevice, op.stream));
-            }
-            op.params = nullptr;
-            op.arena.cursor = mark;
             first += block_rows;
             continue;
         }
@@ -1180,10 +1553,13 @@ Mat attention_batch(Ops &op, const std::string &prefix, int layer, const std::ve
         if (op.capture) stride = std::min(op.max_kv_len, 2048 + block_rows);
         if (sliding) stride = std::min(stride, 511 + block_rows);
         int blocks = rows / block_rows;
-        Mat a = op.mat(blocks * stride, 512), b = op.mat(blocks * stride, 64);
-        unpack_batch<256, 29><<<dim3(2, stride, blocks), 256, 0, op.stream>>>(
+        Mat a{nullptr, blocks * stride, 512};
+        Mat b = op.mat(blocks * stride, 64);
+        auto prequant = static_cast<_Float16 *>(op.arena.next(size_t(blocks) * stride * 512 * sizeof(_Float16)));
+        unpack_batch_quant<<<dim3(2, stride, blocks), 256, 0, op.stream>>>(
             op.gpu.cache[op.rank][layer], fresh + size_t(first) * 294, device_slots + first, device_positions + first,
-            cache_slots, stride, a, 0, sliding, block_rows);
+            cache_slots, stride, static_cast<const uint16_t *>(op.param(p + "kv_b_proj.suh").p), prequant,
+            sliding, block_rows);
         checked(hipGetLastError());
         unpack_batch<64, 11><<<dim3(1, stride, blocks), 64, 0, op.stream>>>(
             op.gpu.cache[op.rank][layer], fresh + size_t(first) * 294, device_slots + first, device_positions + first,
@@ -1195,13 +1571,106 @@ Mat attention_batch(Ops &op, const std::string &prefix, int layer, const std::ve
         checked(hipGetLastError());
         if (block_rows > 1)
             attend_absorbed(op, p + "kv_b_proj", a, b, q.row(first, rows), gate.row(first, rows), offsets, stride,
-                            op.param(p + "learnable_sink_param"), out.row(first, rows));
+                            op.param(p + "learnable_sink_param"), out.row(first, rows), true, sliding, 0, 0,
+                            nullptr, prequant);
         else
             attend_absorbed_batch(op, p + "kv_b_proj", a, b, q.row(first, rows), gate.row(first, rows), offsets,
                                   stride, device_positions + first, op.param(p + "learnable_sink_param"),
-                                  out.row(first, rows), sliding);
+                                  out.row(first, rows), sliding, prequant);
         op.arena.cursor = mark;
         first = last;
+    }
+    if (!sparse_block_list.empty()) {
+        int K = int(sparse_block_list.size()), num_blocks = hidden.rows / block_rows;
+        bool all_sparse = K == num_blocks;
+        int sparse_rows = K * block_rows;
+        SparseLaneArgs args{};
+        int max_end = 0;
+        for (int k = 0; k < K; ++k) {
+            int b = sparse_block_list[k], row = b * block_rows;
+            args.block[k] = b;
+            args.slot[k] = slots[row];
+            args.draft_last[k] = draft ? op.gpu.sparse_last[slots[row]][layer] : -1;
+            max_end = std::max(max_end, positions[row] + block_rows);
+        }
+        int bucket = op.max_kv_len > 0 ? op.max_kv_len : std::max(2048, (max_end + 63) / 64 * 64);
+        int *sparse_blocks_dev = nullptr, *sparse_slots_dev = nullptr;
+        const int *sparse_positions_dev = device_positions;
+        if (!all_sparse) {
+            sparse_blocks_dev = static_cast<int *>(op.arena.next(size_t(K * 2 + sparse_rows) * sizeof(int)));
+            sparse_slots_dev = sparse_blocks_dev + K;
+            int *sparse_positions_mut = sparse_slots_dev + K;
+            collect_sparse_meta<<<1, 32, 0, op.stream>>>(
+                device_slots, device_positions, block_rows, num_blocks, draft,
+                sparse_blocks_dev, sparse_slots_dev, sparse_positions_mut);
+            checked(hipGetLastError());
+            sparse_positions_dev = sparse_positions_mut;
+        }
+        if (((!draft && op.gpu.batch_draft && layer >= 25) || draft) && !op.gpu.sparse_top[op.rank][layer]) {
+            size_t total_rows = op.gpu.prefill_rows() + (op.gpu.batch_draft ? 6 * op.gpu.max_slots : 0);
+            op.gpu.sparse_top[op.rank][layer] = static_cast<int *>(op.reserve_persistent(total_rows * 511 * sizeof(int)));
+        }
+        int *top_slot_base_write =
+            !draft && op.gpu.batch_draft && layer >= 25
+                ? op.gpu.sparse_top[op.rank][layer] + op.gpu.prefill_rows() * 511
+                : nullptr;
+        const int *top_slot_base_read =
+            draft || (!draft && op.gpu.batch_draft && layer >= 25)
+                ? op.gpu.sparse_top[op.rank][layer] + op.gpu.prefill_rows() * 511
+                : nullptr;
+        int *selected_buf = nullptr;
+        if (!draft) {
+            Mat sparse_hidden = hidden, sparse_qres = qres;
+            if (!all_sparse) {
+                sparse_hidden = op.mat(sparse_rows, hidden.cols);
+                sparse_qres = op.mat(sparse_rows, qres.cols);
+                gather_sparse_inputs<<<dim3(hidden.cols / 256, sparse_rows), 256, 0, op.stream>>>(
+                    hidden, sparse_hidden, qres, sparse_qres, sparse_blocks_dev, block_rows);
+                checked(hipGetLastError());
+            }
+            std::string ip = p + "compressed_indexer.";
+            Mat q_idx = op.rope_batch(op.linear(ip + "query_projection", sparse_qres), 16, 1e7f, sparse_positions_dev);
+            Mat w_idx = op.linear(ip + "head_weight_projection", sparse_hidden);
+            int idx_stride = std::max(512, (bucket - 1) / 4);
+            auto idx_scores = static_cast<float *>(op.arena.next(size_t(sparse_rows) * idx_stride * sizeof(float)));
+            if (!top_slot_base_write)
+                selected_buf = static_cast<int *>(op.arena.next(size_t(sparse_rows) * 511 * sizeof(int)));
+            size_t group_slot_stride = (op.gpu.tokens / 4 + 12) * 128;
+            index_scores_sparse_batch<<<dim3((idx_stride + 3) / 4, sparse_rows), 128, 0, op.stream>>>(
+                q_idx, w_idx, op.gpu.index_keys[op.rank][layer], group_slot_stride, idx_stride, idx_scores,
+                sparse_slots_dev, sparse_positions_dev, args, block_rows);
+            checked(hipGetLastError());
+            index_topk_sparse_batch<<<sparse_rows, 256, 0, op.stream>>>(
+                idx_scores, idx_stride, selected_buf, top_slot_base_write, sparse_slots_dev, sparse_positions_dev,
+                args, block_rows);
+            checked(hipGetLastError());
+        }
+        int attn_stride = 2048 + (draft ? block_rows : 0);
+        int id_stride = draft ? (2048 + block_rows + 8)
+                              : (block_rows == 1 ? 2056 : std::min(4 * (bucket / 4 + 8), 2044 * block_rows) + 4 * block_rows + 8);
+        auto all_ids = static_cast<int *>(op.arena.next(size_t(K) * id_stride * sizeof(int)));
+        auto id_counts = static_cast<int *>(op.arena.next(size_t(K) * sizeof(int)));
+        auto all_offsets = static_cast<int *>(op.arena.next(size_t(sparse_rows) * attn_stride * sizeof(int)));
+        build_sparse_indices_batch<<<K, 512, 0, op.stream>>>(
+            top_slot_base_read, selected_buf, sparse_slots_dev, sparse_positions_dev, args,
+            op.capture ? op.gpu.batch_input : nullptr, all_ids, id_counts, all_offsets, block_rows, id_stride,
+            attn_stride, draft);
+        checked(hipGetLastError());
+        auto prequant_sparse = static_cast<_Float16 *>(op.arena.next(size_t(K) * id_stride * 512 * sizeof(_Float16)));
+        auto rotary_sparse = static_cast<uint16_t *>(op.arena.next(size_t(K) * id_stride * 64 * sizeof(uint16_t)));
+        unpack_quant_sparse_batch<<<dim3(2, id_stride, K), 256, 0, op.stream>>>(
+            op.gpu.cache[op.rank][layer], fresh, all_ids, id_counts, sparse_slots_dev, sparse_positions_dev,
+            sparse_blocks_dev, args, cache_slots, block_rows, id_stride,
+            static_cast<const uint16_t *>(op.param(p + "kv_b_proj.suh").p), prequant_sparse);
+        checked(hipGetLastError());
+        unpack_rot_sparse_batch<<<dim3(1, id_stride, K), 64, 0, op.stream>>>(
+            op.gpu.cache[op.rank][layer], fresh, all_ids, id_counts, sparse_slots_dev, sparse_positions_dev,
+            sparse_blocks_dev, args, cache_slots, block_rows, id_stride, rotary_sparse);
+        checked(hipGetLastError());
+        attend_absorbed_sparse_batch(op, p + "kv_b_proj", prequant_sparse, rotary_sparse, q, gate, all_offsets,
+                                     attn_stride, id_stride, sparse_positions_dev, sparse_blocks_dev,
+                                     op.param(p + "learnable_sink_param"), out, K, block_rows, draft);
+        op.arena.cursor = mark;
     }
     if (!draft) {
         save_records_batch<<<(hidden.rows * 294 + 255) / 256, 256, 0, op.stream>>>(

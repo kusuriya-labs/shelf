@@ -4,6 +4,7 @@ from pathlib import Path
 
 
 EXPERT_BYTES = 3 * (1536 * 1536 // 2 + 2 * 1536 * 2)
+EXPERT_BYTES_3BIT = 3 * (1536 * 1536 * 3 // 8 + 2 * 1536 * 2)
 GIB = 1 << 30
 GRAPH_HEADROOM = 256 << 20
 
@@ -36,36 +37,79 @@ def assign(capacity, speed, counts, base=None, expert_bytes=EXPERT_BYTES, balanc
     base = base if base is not None else [0] * len(capacity)
     if len(base) != len(capacity) or min(base) < 0:
         raise ValueError("rank ごとの固定使用量が不正です")
-    slots = [value // expert_bytes for value in capacity]
-    total = len(counts) * 512
-    if sum(slots) < total:
-        raise MemoryError(f"expert 用の枠が不足しています: {sum(slots)} / {total}")
-    quota = [0] * len(capacity)
+    if isinstance(expert_bytes, int):
+        slots = [value // expert_bytes for value in capacity]
+        total = len(counts) * 512
+        if sum(slots) < total:
+            raise MemoryError(f"expert 用の枠が不足しています: {sum(slots)} / {total}")
+        quota = [0] * len(capacity)
+        quota_weights = [9 * speed[0], *(10 * value for value in speed[1:])]
+        for _ in range(total):
+            rank = min((r for r in range(len(capacity)) if quota[r] < slots[r]),
+                       key=lambda r: (quota[r] + 1) / quota_weights[r] if balance_experts
+                       else base[r] + (quota[r] + 1) * expert_bytes)
+            quota[rank] += 1
+        result = []
+        for layer, histogram in enumerate(counts):
+            left = len(counts) - layer
+            limits = [q // left for q in quota]
+            remainder_order = sorted(range(len(capacity)), key=lambda r: quota[r] % left, reverse=True)
+            for r in remainder_order[:512-sum(limits)]:
+                limits[r] += 1
+            if len(histogram) != 512 or min(histogram) < 0 or sum(limits) != 512:
+                raise ValueError("expert の頻度または層別の配置枠が不正です")
+            assigned = [-1] * 512
+            load = [0] * len(capacity)
+            for expert in sorted(range(512), key=lambda i: -histogram[i]):
+                cost = max(histogram[expert], 1)
+                rank = min((r for r in range(len(capacity)) if limits[r]),
+                           key=lambda r: (load[r] + cost) / speed[r])
+                assigned[expert] = rank
+                load[rank] += cost
+                limits[rank] -= 1
+                quota[rank] -= 1
+            result.append(assigned)
+        return result
+    sizes = [list(row) for row in expert_bytes]
+    if len(sizes) != len(counts) or any(len(row) != 512 or min(row) <= 0 for row in sizes):
+        raise ValueError("expert ごとのサイズ表が不正です")
+    total_bytes = sum(sum(row) for row in sizes)
+    if sum(capacity) < total_bytes:
+        raise MemoryError(f"expert 用の容量が不足しています: {sum(capacity)} / {total_bytes}")
+    cap_left = list(capacity)
+    used_bytes = [0] * len(capacity)
+    used_counts = [0] * len(capacity)
     quota_weights = [9 * speed[0], *(10 * value for value in speed[1:])]
-    for _ in range(total):
-        rank = min((r for r in range(len(capacity)) if quota[r] < slots[r]),
-                   key=lambda r: (quota[r] + 1) / quota_weights[r] if balance_experts
-                   else base[r] + (quota[r] + 1) * expert_bytes)
-        quota[rank] += 1
+    limits = [{} for _ in range(len(counts))]
+    items = sorted(((sizes[layer][expert], layer) for layer in range(len(counts)) for expert in range(512)),
+                   key=lambda item: (-item[0], item[1]))
+    for sz, layer in items:
+        candidates = [r for r in range(len(capacity)) if cap_left[r] >= sz]
+        if not candidates:
+            raise MemoryError("expert 用の枠が不足しています")
+        rank = min(candidates,
+                   key=lambda r: ((used_counts[r] + 1) / quota_weights[r], base[r] + used_bytes[r] + sz)
+                   if balance_experts else (base[r] + used_bytes[r] + sz))
+        cap_left[rank] -= sz
+        used_bytes[rank] += sz
+        used_counts[rank] += 1
+        bucket = limits[layer].setdefault(sz, [0] * len(capacity))
+        bucket[rank] += 1
     result = []
     for layer, histogram in enumerate(counts):
-        left = len(counts) - layer
-        limits = [q // left for q in quota]
-        remainder_order = sorted(range(len(capacity)), key=lambda r: quota[r] % left, reverse=True)
-        for r in remainder_order[:512-sum(limits)]:
-            limits[r] += 1
-        if len(histogram) != 512 or min(histogram) < 0 or sum(limits) != 512:
+        if len(histogram) != 512 or min(histogram) < 0:
             raise ValueError("expert の頻度または層別の配置枠が不正です")
         assigned = [-1] * 512
         load = [0] * len(capacity)
+        layer_limits = limits[layer]
         for expert in sorted(range(512), key=lambda i: -histogram[i]):
+            sz = sizes[layer][expert]
             cost = max(histogram[expert], 1)
-            rank = min((r for r in range(len(capacity)) if limits[r]),
+            rank = min((r for r in range(len(capacity)) if layer_limits[sz][r]),
                        key=lambda r: (load[r] + cost) / speed[r])
             assigned[expert] = rank
             load[rank] += cost
-            limits[rank] -= 1
-            quota[rank] -= 1
+            layer_limits[sz][rank] -= 1
         result.append(assigned)
     return result
 
@@ -116,15 +160,15 @@ def main():
         raise ValueError("KV の予約長が範囲外です")
     if not 1 <= args.tensor_parallel <= 4:
         raise ValueError("TP の値が範囲外です")
-    if not 1 <= args.max_concurrent_requests <= 16 or (args.tensor_parallel > 1 and args.max_concurrent_requests != 1):
-        raise ValueError("スロット数は TP=1 で 1〜16、TP 実行では 1 です")
+    if not 1 <= args.max_concurrent_requests <= 32 or (args.tensor_parallel > 1 and args.max_concurrent_requests != 1):
+        raise ValueError("スロット数は TP=1 で 1〜32、TP 実行では 1 です")
     if args.workspace is None:
         args.workspace = [1] * len(args.capacity) if args.tensor_parallel > 1 else [2] + [0.5] * (len(args.capacity) - 1)
     if len(args.workspace) != len(args.capacity):
         raise ValueError("作業域と GPU の台数が一致しません")
     fixed, experts = checkpoint_sizes(args.model)
-    if len(experts) != 41 * 512 or any(size != EXPERT_BYTES for size in experts.values()):
-        raise ValueError("4 bpw expert の数または tensor サイズが不正です")
+    if len(experts) != 41 * 512 or any(size not in (EXPERT_BYTES_3BIT, EXPERT_BYTES) for size in experts.values()):
+        raise ValueError("3/4 bpw expert の数または tensor サイズが不正です")
     draft = checkpoint_sizes(args.draft)[0] if args.draft else 0
     kv, indexer = cache_bytes(args.tokens, args.max_concurrent_requests)
     if args.safety_gib < 0:
@@ -134,7 +178,13 @@ def main():
     folded = sum(meta["original_shape"][1] * 512 * 2 for name, meta in storage.items()
                  if name.endswith(".self_attn.kv_b_proj.weight"))
     matrix_bytes = 41 * 512 * 3 * 40
-    expert_bytes = EXPERT_BYTES // args.tensor_parallel
+    unique_sizes = set(experts.values())
+    if len(unique_sizes) == 1:
+        expert_arg = next(iter(unique_sizes)) // args.tensor_parallel
+        per_layer_sizes = None
+    else:
+        per_layer_sizes = [[experts[(layer + 1, e)] // args.tensor_parallel for e in range(512)] for layer in range(41)]
+        expert_arg = per_layer_sizes
     graph_bytes = GRAPH_HEADROOM if args.tensor_parallel == 1 else 0
     base = [int(w * GIB) + matrix_bytes + graph_bytes for w in args.workspace]
     routing_bytes = 41 * 512 * 4 + 256
@@ -147,13 +197,23 @@ def main():
     capacities = [int(c * GIB) - used - int(args.safety_gib * GIB)
                   for c, used in zip(args.capacity, base)]
     balance = args.max_concurrent_requests > 1 if args.balance_experts is None else args.balance_experts
-    owners = assign(capacities, [1] * len(capacities), routing_counts(args.work), base, expert_bytes, balance)
+    owners = assign(capacities, [1] * len(capacities), routing_counts(args.work), base, expert_arg, balance)
     rank_experts = [sum(row.count(r) for row in owners) for r in range(len(capacities))]
+    if per_layer_sizes is None:
+        rank_expert_bytes = [count * expert_arg for count in rank_experts]
+        avg_expert_bytes = expert_arg
+    else:
+        rank_expert_bytes = [
+            sum(per_layer_sizes[layer][e] for layer, row in enumerate(owners) for e, r in enumerate(row) if r == rank)
+            for rank in range(len(capacities))
+        ]
+        avg_expert_bytes = sum(rank_expert_bytes) // (41 * 512)
     print(json.dumps(dict(fixed_bytes=fixed, draft_bytes=draft, kv_bytes=kv, index_bytes=indexer,
                           folded_bytes=folded, routing_bytes=routing_bytes, matrix_bytes=matrix_bytes, graph_bytes_per_rank=graph_bytes, safety_gib=args.safety_gib,
-                          rank_experts=rank_experts, expert_bytes=expert_bytes,
-                          peak_estimate=[b+count*expert_bytes for b,count in zip(base, rank_experts)],
-                          free_after=[b-count*expert_bytes for b,count in zip(capacities, rank_experts)])))
+                          rank_experts=rank_experts, rank_expert_bytes=rank_expert_bytes,
+                          expert_bytes=avg_expert_bytes,
+                          peak_estimate=[b+rb for b,rb in zip(base, rank_expert_bytes)],
+                          free_after=[c-rb for c,rb in zip(capacities, rank_expert_bytes)])))
     if args.output:
         with args.output.open("x") as f:
             json.dump(owners, f)

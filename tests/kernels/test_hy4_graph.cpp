@@ -27,8 +27,8 @@ int remaining_instantiations = 0;
 using namespace shelf;
 using namespace shelf::hy4;
 
-void share_expert_weights(Checkpoint &model) {
-    if (model.mixed)
+void share_expert_weights(Checkpoint &model, bool allow_mixed = false) {
+    if (model.mixed && !allow_mixed)
         throw std::invalid_argument("expert 領域を共有する試験には 4 bpw checkpoint が必要です");
     model.bytes[0] = 0;
     model.upload_order[0].clear();
@@ -42,8 +42,12 @@ void share_expert_weights(Checkpoint &model) {
     }
     for (auto &[key, weight] : model.local[0]) {
         auto pos = key.find(".mlp.experts.");
-        if (pos != std::string::npos)
-            weight.offset = model.local[0].at("model.layers.1" + key.substr(pos)).offset;
+        if (pos != std::string::npos) {
+            const auto &src = model.local[0].at("model.layers.1" + key.substr(pos));
+            weight.offset = src.offset;
+            weight.bytes = src.bytes;
+            weight.spec.shape = src.spec.shape;
+        }
     }
 }
 
@@ -381,7 +385,7 @@ void compare_batches(const Path &body, const Path &draft, int ranks) {
     share_expert_weights(model);
     const std::vector<std::vector<int>> prompts{{802, 15063}, {12286, 859, 444}, {401, 82, 44, 276}, {120000}};
     constexpr int count = 4;
-    for (auto [speculate, slots] : {std::pair{false, 16}, std::pair{true, 16}, std::pair{true, 4}}) {
+    for (auto [speculate, slots] : {std::pair{false, 32}, std::pair{true, 32}, std::pair{true, 4}}) {
         for (auto &owners : model.owners)
             owners.fill(0);
         setenv("SHELF_HY4_BATCH_DFLY", speculate ? "1" : "0", 1);
@@ -396,8 +400,9 @@ void compare_batches(const Path &body, const Path &draft, int ranks) {
         for (const auto &prompt : prompts)
             baseline.push_back(generate_batch(gpu, {prompt}, {count}, {}).front());
         model.has_draft = true;
-        for (int batch = 2; slots == 16 && batch <= 16; ++batch) {
-            if (ranks != 1 && batch != 2 && batch != 4 && batch != 8 && batch != 16) continue;
+        for (int batch = 2; slots == 32 && batch <= 32; ++batch) {
+            if (batch > 16 && batch != 24 && batch != 32) continue;
+            if (ranks != 1 && batch != 2 && batch != 4 && batch != 8 && batch != 16 && batch != 32) continue;
             std::vector<std::vector<int>> inputs;
             for (int i = 0; i < batch; ++i)
                 inputs.push_back(prompts[i % prompts.size()]);
@@ -525,6 +530,50 @@ void compare_batches(const Path &body, const Path &draft, int ranks) {
             throw std::runtime_error("疎な attention でバッチ Graph が起動しませんでした");
     }
     gpu.shutdown();
+    if (ranks == 1) {
+        auto make_prompt = [](int len, int salt) {
+            std::vector<int> p(len);
+            for (int i = 0; i < len; ++i) p[i] = 100 + (i + salt) % 13;
+            return p;
+        };
+        std::vector<std::vector<int>> mix_prompts{
+            make_prompt(128, 0), make_prompt(2045, 3), make_prompt(2099, 5), make_prompt(50, 7)};
+        std::vector<std::vector<int>> sparse32(32, make_prompt(2099, 11));
+        for (bool speculate : {false, true}) {
+            setenv("SHELF_HY4_BATCH_DFLY", speculate ? "1" : "0", 1);
+            for (auto &owners : model.owners) owners.fill(0);
+            Residency mix_gpu(model, 2120, 32);
+            auto mix_status = mix_gpu.reserve();
+            if (!mix_status.ok()) throw std::runtime_error(mix_status.message());
+            mix_gpu.upload();
+            model.has_draft = speculate;
+            std::vector<std::vector<int>> mix_ref;
+            for (const auto &p : mix_prompts)
+                mix_ref.push_back(generate_batch(mix_gpu, {p}, {16}, {1024, 0, 0, 0, 1}).front());
+            std::vector<int> s32_ref = generate_batch(mix_gpu, {sparse32[0]}, {8}, {1024, 0, 0, 0, 1}).front();
+            model.has_draft = true;
+            for (bool graph : {false, true}) {
+                setenv("SHELF_HY4_GRAPH", graph ? "1" : "0", 1);
+                setenv("SHELF_HY4_DRAFT_GRAPH", graph ? "1" : "0", 1);
+                auto got_mix = generate_batch(mix_gpu, mix_prompts, std::vector<int>(4, 16), {1024, 0, 0, 0, 1});
+                for (size_t i = 0; i < mix_prompts.size(); ++i)
+                    if (got_mix[i] != mix_ref[i])
+                        throw std::runtime_error("長短混在バッチ生成が単独実行と異なります: draft=" +
+                                                 std::to_string(speculate) + " graph=" + std::to_string(graph) +
+                                                 " slot=" + std::to_string(i));
+                auto got_32 = generate_batch(mix_gpu, sparse32, std::vector<int>(32, 8), {1024, 0, 0, 0, 1});
+                for (int i = 0; i < 32; ++i)
+                    if (got_32[i] != s32_ref)
+                        throw std::runtime_error("c=32 長文バッチ生成が単独実行と異なります: draft=" +
+                                                 std::to_string(speculate) + " graph=" + std::to_string(graph) +
+                                                 " slot=" + std::to_string(i));
+            }
+            printf("mixed_sparse=pass c32_sparse=pass draft=%d\n", speculate);
+            fflush(stdout);
+            mix_gpu.shutdown();
+        }
+        setenv("SHELF_HY4_BATCH_DFLY", "1", 1);
+    }
 }
 
 std::vector<float> prefill_logits(Residency &gpu, const std::vector<int> &prompt, int chunk) {
@@ -654,8 +703,10 @@ int main(int argc, char **argv) {
     try {
         bool micro = argc == 3 && std::string_view(argv[2]) == "microbench";
         bool moe = argc == 3 && std::string_view(argv[2]) == "moebench";
+        bool bits3 = argc == 3 && std::string_view(argv[2]) == "bits3bench";
         bool router_b = argc == 3 && std::string_view(argv[2]) == "routerbench";
         bool steps = (argc == 5 || argc == 6) && std::string_view(argv[3]) == "stepbench";
+        bool ctx_b = (argc == 6 || argc == 7) && std::string_view(argv[3]) == "ctxbench";
         if (argc == 7 && std::string_view(argv[2]) == "prefillbench") {
             int length = std::stoi(argv[3]), chunk = std::stoi(argv[4]), ranks = std::stoi(argv[5]);
             if (length < 1 || length > 131072 || chunk < 1 || chunk > max_prefill_chunk || ranks < 1 || ranks > 4)
@@ -681,19 +732,29 @@ int main(int argc, char **argv) {
             gpu.shutdown();
             return 0;
         }
-        if (micro || moe || router_b || steps) {
-            Path draft = steps && std::string_view(argv[2]) != "-" ? Path(argv[2]) : Path{};
+        if (micro || moe || bits3 || router_b || steps || ctx_b) {
+            Path draft = (steps || ctx_b) && std::string_view(argv[2]) != "-" ? Path(argv[2]) : Path{};
             Checkpoint model(argv[1], argv[1], draft, Owners{}, 1, 1);
-            share_expert_weights(model);
-            Residency gpu(model, 128, steps ? std::stoi(argv[4]) : 1);
+            share_expert_weights(model, bits3 || moe || steps || ctx_b);
+            int slots = (steps || ctx_b) ? std::stoi(argv[4]) : 1;
+            int ctx = ctx_b ? std::stoi(argv[5]) : 128;
+            size_t reserve_tokens = ctx_b ? size_t(ctx + 128) : size_t(128);
+            Residency gpu(model, reserve_tokens, slots);
             auto status = gpu.reserve();
             if (!status.ok()) throw std::runtime_error(status.message());
             gpu.upload();
-            if (steps) {
+            if (ctx_b) {
+                int ranks = argc == 7 ? std::stoi(argv[6]) : 1;
+                if (ranks < 1 || ranks > 4) throw std::invalid_argument("論理 EP は 1〜4 です");
+                logical_ranks(gpu, ranks);
+                benchmark_hy4_ctx(gpu, ctx);
+            } else if (steps) {
                 int ranks = argc == 6 ? std::stoi(argv[5]) : 3;
                 if (ranks < 1 || ranks > 4) throw std::invalid_argument("論理 EP は 1〜4 です");
                 logical_ranks(gpu, ranks);
                 benchmark_hy4_steps(gpu);
+            } else if (bits3) {
+                benchmark_hy4_bits3(gpu);
             } else if (moe) {
                 benchmark_hy4_moe(gpu);
             } else if (router_b) {

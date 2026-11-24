@@ -232,12 +232,13 @@ hipError_t shelf_hy4_linear_workspace(const uint16_t *input, const uint16_t *suh
                                        int splits, int8_t *expanded) {
     if (!input || !suh || !svh || !trellis || !codes || !scales || !partial || !output || rows < 1 ||
         rows > 65535 || input_width < 1 || output_width < 1 || padded_input < input_width ||
-        padded_output < output_width || padded_input % 128 || padded_output % 128 || (bits != 4 && bits != 6))
+        padded_output < output_width || padded_input % 128 || padded_output % 128 ||
+        (bits != 3 && bits != 4 && bits != 6))
         return hipErrorInvalidValue;
     if (splits < 1 || splits > padded_input / 128)
         return hipErrorInvalidValue;
     auto status = hipSuccess;
-    const bool use_fused = (rows <= 16 && (bits == 4 || bits == 6)) &&
+    const bool use_fused = (rows <= 16 && (bits == 3 || bits == 4 || bits == 6)) &&
                            ((splits == 1 && output_width == padded_output) ||
                             (rows <= 6 && (rows == 1 || padded_input <= 3072) &&
                              size_t(rows) * ((padded_input / 128 + splits - 1) / splits) * 132 <= 48u * 1024u));
@@ -384,7 +385,7 @@ __global__ void argmax_tiles_reduce(const float *tile_vals, const int *tile_ids,
 
 hipError_t shelf_hy4_head(const uint16_t *x, const uint16_t *suh, const uint16_t *svh, const uint32_t *trellis,
                           int8_t *codes, float *scales, float *partial, float *logits, int rows, hipStream_t stream) {
-    if (!x || !suh || !svh || !trellis || !codes || !scales || !partial || !logits || rows < 1 || rows > 96)
+    if (!x || !suh || !svh || !trellis || !codes || !scales || !partial || !logits || rows < 1 || rows > 192)
         return hipErrorInvalidValue;
     rotate_input<<<dim3(24, rows), 32, 0, stream>>>(x, suh, codes, scales, 3072, 3072);
     auto status = hipGetLastError();
@@ -406,7 +407,7 @@ hipError_t shelf_hy4_head_argmax(const uint16_t *x, const uint16_t *suh, const u
                                  const uint32_t *trellis, int8_t *codes, float *scales, float *partial,
                                  float *tile_vals, int *tile_ids, int *tokens, int rows, hipStream_t stream) {
     if (!x || !suh || !svh || !trellis || !codes || !scales || !partial || !tile_vals || !tile_ids || !tokens ||
-        rows < 1 || rows > 96)
+        rows < 1 || rows > 192)
         return hipErrorInvalidValue;
     rotate_input<<<dim3(24, rows), 32, 0, stream>>>(x, suh, codes, scales, 3072, 3072);
     auto status = hipGetLastError();

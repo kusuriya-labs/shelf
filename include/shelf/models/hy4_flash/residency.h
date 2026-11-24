@@ -43,14 +43,14 @@ struct GraphInput {
 };
 
 struct BatchGraphParams {
-    Hy4StepParams lanes[16];
-    int ids[16 * max_verify_rows], anchors[16];
+    Hy4StepParams lanes[32];
+    int ids[32 * max_verify_rows], anchors[32];
 };
 
 struct BatchGraphInput {
     BatchGraphParams step;
-    int candidates[16 * max_draft_tokens];
-    uint8_t engram[16 * max_verify_rows * 4 * 16 * 98];
+    int candidates[32 * max_draft_tokens];
+    uint8_t engram[32 * max_verify_rows * 4 * 16 * 98];
 };
 
 struct Region {

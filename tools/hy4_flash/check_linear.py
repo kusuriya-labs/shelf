@@ -44,7 +44,7 @@ def main():
             batches = torch.tensor([[first, min(16, args.rows - first)] for first in range(0, args.rows, 16)],
                                    device="cuda", dtype=torch.int32)
             group = ops.library.shelf_hy4_expert_linear
-            group.argtypes = [ctypes.c_void_p]*2+[ctypes.c_int]+[ctypes.c_void_p]*4+[ctypes.c_int,ctypes.c_void_p,ctypes.c_void_p,ctypes.c_int,ctypes.c_int]
+            group.argtypes = [ctypes.c_void_p]*2+[ctypes.c_int]+[ctypes.c_void_p]*4+[ctypes.c_int,ctypes.c_void_p,ctypes.c_void_p,ctypes.c_int,ctypes.c_int,ctypes.c_int,ctypes.c_int]
             group.restype = ctypes.c_int
             codes = torch.empty_like(gpu_input,dtype=torch.int8)
             scales = torch.empty(args.rows,12,device="cuda",dtype=torch.float32)
@@ -53,7 +53,7 @@ def main():
             def launch():
                 status = group(gpu_input.data_ptr(),proj.data_ptr(),3,codes.data_ptr(),scales.data_ptr(),
                                partial.data_ptr(),output.data_ptr(),args.rows,routes.data_ptr(),batches.data_ptr(),
-                               batches.size(0),int(weight.bits==3))
+                               batches.size(0),int(weight.bits==3),1536,1536)
                 if status:
                     raise RuntimeError(f"grouped HIP 線形の起動失敗: {status}")
                 return output

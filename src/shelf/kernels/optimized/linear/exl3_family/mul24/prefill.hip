@@ -195,7 +195,9 @@ hipError_t launch_exl3_mul24_recon_wmma(const uint16_t* trellis, uint32_t bits, 
         if ((n % 16u) || (k % 128u)) return hipErrorInvalidValue;
         const dim3 grid(k / 128u, n / 16u);
         auto words = reinterpret_cast<const uint32_t *>(trellis);
-        if (bits == 4)
+        if (bits == 3)
+            exl3_mul24_recon_kernel<3, true, true><<<grid, 256, 0, stream>>>(words, dense, k);
+        else if (bits == 4)
             exl3_mul24_recon_kernel<4, true, true><<<grid, 256, 0, stream>>>(words, dense, k);
         else if (bits == 6)
             exl3_mul24_recon_kernel<6, true, true><<<grid, 256, 0, stream>>>(words, dense, k);

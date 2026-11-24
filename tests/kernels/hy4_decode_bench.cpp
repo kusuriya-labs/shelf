@@ -1,6 +1,7 @@
 #include <shelf/models/hy4_flash/generate.h>
 #include <shelf/models/hy4_flash/target.h>
 #include <shelf/models/hy4_flash/decoder.h>
+#include <shelf/quantization/exl3/exl3_int8.h>
 
 #include <algorithm>
 #include <bit>
@@ -233,7 +234,7 @@ void print_f32_hash(Ops &op, const float *p, int rows, int cols) {
 
 void benchmark_hy4_decode(Residency &gpu) {
     Ops op(gpu);
-    for (int rows : {1, 3, 4, 5, 6, 16, 80, 96}) {
+    for (int rows : {1, 3, 4, 5, 6, 16, 32, 80, 96, 192}) {
         op.arena.cursor = 0;
         Mat x = input(op, rows, 3072);
         Mat qx = input(op, rows, 1024);
@@ -302,7 +303,7 @@ void benchmark_hy4_decode(Residency &gpu) {
         }
         printf("argmax_match=%d/%d\n", rows, rows);
     }
-    for (int rows : {1, 4, 8, 16, 6, 24, 48, 96}) {
+    for (int rows : {1, 4, 8, 16, 32, 6, 24, 48, 96, 192}) {
         op.arena.cursor = 0;
         expert_projections(op, rows);
     }
@@ -310,7 +311,7 @@ void benchmark_hy4_decode(Residency &gpu) {
 
 void benchmark_hy4_moe(Residency &gpu) {
     Ops op(gpu);
-    for (int rows : {1, 4, 8, 16, 6, 24, 48, 96}) {
+    for (int rows : {1, 4, 8, 16, 32, 6, 24, 48, 96, 192}) {
         op.arena.cursor = 0;
         op.batch_decode = rows != 1 && rows != 6;
         Mat x = input(op, rows, 3072), output{};
@@ -438,5 +439,241 @@ void benchmark_hy4_steps(Residency &gpu) {
             fflush(stdout);
         }
     }
+}
+
+void benchmark_hy4_ctx(Residency &gpu, int ctx) {
+    using Clock = std::chrono::steady_clock;
+    const int batch = gpu.max_slots;
+    std::vector<int> prompt(ctx);
+    for (int i = 0; i < ctx; ++i)
+        prompt[i] = 100 + (i * 37) % 128;
+    if (batch == 1) {
+        std::vector<int> expected;
+        for (int trial = 0; trial < 3; ++trial) {
+            for (int side = 0; side < 2; ++side) {
+                bool graph = (trial + side) % 2;
+                setenv("SHELF_HY4_GRAPH", graph ? "1" : "0", 1);
+                setenv("SHELF_HY4_DRAFT_GRAPH", graph ? "1" : "0", 1);
+                Target target(gpu, 0, 0, 0, 1);
+                int anchor = 0;
+                for (int first = 0; first < ctx; first += 1024) {
+                    int end = std::min(first + 1024, ctx);
+                    auto out = target.forward({prompt.begin() + first, prompt.begin() + end}, false, end == ctx);
+                    if (!out.empty()) anchor = out.back();
+                }
+                std::vector<int> generated;
+                std::vector<double> times;
+                auto target_before = gpu.target_replays, draft_before = gpu.draft_replays;
+                for (int i = 0; i < 12; ++i) {
+                    auto start = Clock::now();
+                    std::vector<int> ids{anchor};
+                    if (gpu.model.has_draft) {
+                        auto candidates = target.propose(anchor);
+                        ids.insert(ids.end(), candidates.begin(), candidates.end());
+                    }
+                    auto actual = target.forward(ids, gpu.model.has_draft);
+                    int keep = 1;
+                    while (keep < int(ids.size()) && actual[keep - 1] == ids[keep]) ++keep;
+                    if (gpu.model.has_draft) target.accept(keep, ids.size());
+                    auto elapsed = std::chrono::duration<double, std::milli>(Clock::now() - start);
+                    if (i >= 3) times.push_back(elapsed.count());
+                    generated.insert(generated.end(), actual.begin(), actual.begin() + keep);
+                    anchor = actual[keep - 1];
+                }
+                if (expected.empty()) expected = generated;
+                if (generated != expected || (gpu.target_replays > target_before) != graph ||
+                    (gpu.draft_replays > draft_before) != (graph && gpu.model.has_draft))
+                    throw std::runtime_error("ctxbench の生成 ID または Graph の起動条件が異なります");
+                std::sort(times.begin(), times.end());
+                printf("CTX=%d B=1 draft=%d graph=%d trial=%d step_ms=%.5f\n",
+                       ctx, gpu.model.has_draft, graph, trial, times[times.size() / 2]);
+                fflush(stdout);
+            }
+        }
+        return;
+    }
+    std::vector<std::vector<int>> expected;
+    for (bool graph : {false, true}) {
+        setenv("SHELF_HY4_GRAPH", graph ? "1" : "0", 1);
+        setenv("SHELF_HY4_DRAFT_GRAPH", graph ? "1" : "0", 1);
+        std::vector<std::vector<int>> prompts(batch, prompt);
+        std::vector<int> counts(batch, 32);
+        auto target_before = gpu.target_replays, draft_before = gpu.draft_replays;
+        auto t0 = Clock::now();
+        auto out = generate_batch(gpu, prompts, counts, {1024, 0, 0, 0, 1});
+        double total_s = std::chrono::duration<double>(Clock::now() - t0).count();
+        for (int s = 1; s < batch; ++s)
+            if (out[s] != out[0])
+                throw std::runtime_error("ctxbench バッチ内でスロット間の生成 ID が一致しません");
+        if (expected.empty()) expected = out;
+        else if (out != expected)
+            throw std::runtime_error("ctxbench の Graph 有効・無効で生成 ID が一致しません");
+        if ((gpu.target_replays > target_before) != graph ||
+            (gpu.draft_replays > draft_before) != (graph && gpu.model.has_draft))
+            throw std::runtime_error("ctxbench の Graph 起動条件が異なります");
+        printf("CTX=%d B=%d draft=%d graph=%d total_s=%.3f\n",
+               ctx, batch, gpu.model.has_draft, graph, total_s);
+        fflush(stdout);
+    }
+}
+
+namespace {
+float f16_to_f32(uint16_t h) {
+    uint32_t s = uint32_t(h >> 15) << 31;
+    uint32_t e = (h >> 10) & 31u;
+    uint32_t m = h & 1023u;
+    if (e == 0) {
+        if (!m) return std::bit_cast<float>(s);
+        float v = std::ldexp(float(m), -24);
+        return s ? -v : v;
+    }
+    if (e == 31) return std::bit_cast<float>(s | 0x7f800000u | (m << 13));
+    return std::bit_cast<float>(s | ((e + 112u) << 23) | (m << 13));
+}
+float bf16_to_f32(uint16_t b) { return std::bit_cast<float>(uint32_t(b) << 16); }
+void fwht128_host(float *v) {
+    for (int step = 1; step < 128; step *= 2)
+        for (int i = 0; i < 128; i += 2 * step)
+            for (int j = 0; j < step; ++j) {
+                float a = v[i + j], b = v[i + j + step];
+                v[i + j] = a + b;
+                v[i + j + step] = a - b;
+            }
+    float inv = 1.f / std::sqrt(128.f);
+    for (int i = 0; i < 128; ++i) v[i] *= inv;
+}
+std::vector<float> ref_exl3_mul24(const std::vector<uint16_t> &x, const Checkpoint &model,
+                                  const std::string &stem, int rows, int k, int n) {
+    const auto &tw = model.at(stem + ".trellis", -1);
+    const auto &suhw = model.at(stem + ".suh", -1);
+    const auto &svhw = model.at(stem + ".svh", -1);
+    int bits = int(tw.spec.shape.at(2) / 16);
+    const auto *words = static_cast<const uint32_t *>(tw.host);
+    const auto *suh = static_cast<const uint16_t *>(suhw.host);
+    const auto *svh = static_cast<const uint16_t *>(svhw.host);
+    std::vector<float> rotated(size_t(rows) * k);
+    for (int r = 0; r < rows; ++r)
+        for (int g = 0; g < k / 128; ++g) {
+            float buf[128];
+            for (int i = 0; i < 128; ++i)
+                buf[i] = bf16_to_f32(x[size_t(r) * k + g * 128 + i]) * f16_to_f32(suh[g * 128 + i]);
+            fwht128_host(buf);
+            float peak = 0;
+            for (float v : buf) peak = std::max(peak, std::abs(v));
+            float sc = peak / 127.f;
+            for (int i = 0; i < 128; ++i)
+                rotated[size_t(r) * k + g * 128 + i] = sc ? std::nearbyint(buf[i] / sc) * sc : 0.f;
+        }
+    std::vector<float> w_mat(size_t(n) * k);
+    int kwords = 8 * bits, kbits = 256 * bits, nt_count = n / 16, kt_count = k / 16;
+    for (int nt = 0; nt < nt_count; ++nt)
+        for (int kt = 0; kt < kt_count; ++kt) {
+            const uint32_t *tile = words + (size_t(kt) * nt_count + nt) * kwords;
+            for (int lane = 0; lane < 32; ++lane) {
+                int col = lane % 16, row0 = (lane / 16) * 8;
+                uint32_t base_bit = (lane * 8u * bits + bits + kbits - 16u) % kbits;
+                uint32_t off = base_bit & 31u;
+                uint32_t i0 = base_bit >> 5u;
+                uint32_t w0 = tile[i0], w1 = tile[(i0 + 1u) % kwords], w2 = tile[(i0 + 2u) % kwords];
+                for (int i = 0; i < 8; ++i) {
+                    uint32_t e = off + i * bits + 16u;
+                    uint32_t wl = (e - 1u) >> 5u;
+                    uint32_t r = 32u - (e - 32u * wl);
+                    uint32_t lo = wl == 0u ? w0 : (wl == 1u ? w1 : w2);
+                    uint32_t hi = wl == 0u ? 0u : (wl == 1u ? w0 : w1);
+                    uint32_t state = uint32_t((((uint64_t(hi) << 32) | lo) >> r) & 0xFFFFu);
+                    uint32_t prod = state * shelf::quantization::exl3::kExl3Mul24Multiplier;
+                    int bsum = ((prod) & 255) + ((prod >> 8) & 255) + ((prod >> 16) & 255) + ((prod >> 24) & 255);
+                    float wv = float((bsum - 509) >> 2) * shelf::quantization::exl3::kExl3Int8GridStep;
+                    w_mat[size_t(nt * 16 + col) * k + kt * 16 + row0 + i] = wv;
+                }
+            }
+        }
+    std::vector<float> out(size_t(rows) * n);
+    for (int r = 0; r < rows; ++r) {
+        std::vector<float> acc(n, 0.f);
+        for (int o = 0; o < n; ++o) {
+            double sum = 0;
+            for (int c = 0; c < k; ++c) sum += double(rotated[size_t(r) * k + c]) * double(w_mat[size_t(o) * k + c]);
+            acc[o] = float(sum);
+        }
+        for (int g = 0; g < n / 128; ++g)
+            fwht128_host(acc.data() + g * 128);
+        for (int o = 0; o < n; ++o)
+            out[size_t(r) * n + o] = acc[o] * f16_to_f32(svh[o]);
+    }
+    return out;
+}
+double rel_l2(const std::vector<uint16_t> &got, const std::vector<float> &ref) {
+    double err = 0, norm = 0;
+    for (size_t i = 0; i < ref.size(); ++i) {
+        double d = double(bf16_to_f32(got[i])) - double(ref[i]);
+        err += d * d;
+        norm += double(ref[i]) * double(ref[i]);
+    }
+    return std::sqrt(err / std::max(norm, 1e-12));
+}
+}
+
+void benchmark_hy4_bits3(Residency &gpu) {
+    int e3 = -1, e4 = -1;
+    for (int e = 0; e < 512; ++e) {
+        if (e3 < 0 && gpu.model.expert_bits[0][e] == 3) e3 = e;
+        if (e4 < 0 && gpu.model.expert_bits[0][e] == 4) e4 = e;
+    }
+    if (e3 < 0 || e4 < 0)
+        throw std::runtime_error("3-bit / 4-bit mixed expert が見つかりません");
+    Ops op(gpu);
+    std::string stem3 = "model.layers.1.mlp.experts." + std::to_string(e3) + ".gate_proj";
+    auto suh3 = static_cast<const uint16_t *>(op.param(stem3 + ".suh").p);
+    auto svh3 = static_cast<const uint16_t *>(op.param(stem3 + ".svh").p);
+    auto tw3 = static_cast<const uint32_t *>(op.param(stem3 + ".trellis").p);
+    for (int rows : {1, 6, 16, 32, 96, 192, 256}) {
+        op.arena.cursor = 0;
+        Mat x = input(op, rows, 1536);
+        std::vector<uint16_t> hx(size_t(rows) * 1536);
+        op.copy(hx.data(), x.p, x.bytes(), hipMemcpyDeviceToHost);
+        auto ref = ref_exl3_mul24(hx, gpu.model, stem3, rows, 1536, 1536);
+        Mat y = op.mat(rows, 1536);
+        auto codes = static_cast<int8_t *>(op.arena.next(size_t(rows) * 1536));
+        auto scales = static_cast<float *>(op.arena.next(size_t(rows) * 12 * 4));
+        auto partial = static_cast<float *>(op.arena.next(size_t(rows) * 1536 * 4));
+        auto expanded = rows >= 256 ? static_cast<int8_t *>(op.arena.next(1536ull * 1536)) : nullptr;
+        checked(shelf_hy4_linear_workspace(x.p, suh3, svh3, tw3, codes, scales, partial, y.p,
+                                           rows, 1536, 1536, 1536, 1536, 3, op.stream, 1, expanded));
+        std::vector<uint16_t> hy(size_t(rows) * 1536);
+        op.copy(hy.data(), y.p, y.bytes(), hipMemcpyDeviceToHost);
+        double err = rel_l2(hy, ref);
+        if (!(err < 0.002))
+            throw std::runtime_error("3-bit linear の相対誤差が上限を超えました: rows=" + std::to_string(rows));
+        size_t wbytes = 1536ull * 1536 * 3 / 8 + 2 * 1536 * sizeof(uint16_t);
+        if (rows <= 192) {
+            measure("bits3_linear", rows, wbytes, 5, [&](int) {
+                checked(shelf_hy4_linear_workspace(x.p, suh3, svh3, tw3, codes, scales, partial, y.p,
+                                                   rows, 1536, 1536, 1536, 1536, 3, op.stream, 1, nullptr));
+            });
+        }
+        printf("bits3_linear rows=%d rel_l2=%.6f pass=1\n", rows, err);
+        fflush(stdout);
+    }
+    for (int rows : {1, 6, 16}) {
+        op.arena.cursor = 0;
+        Mat x = input(op, rows, 3072);
+        std::string sp = "model.layers.1.mlp.shared_experts";
+        Mat fused = feedforward(op, sp, x);
+        Mat unfused = op.linear(sp + ".down_proj",
+                                op.swiglu(op.linear(sp + ".gate_proj", x), op.linear(sp + ".up_proj", x), false));
+        std::vector<uint16_t> a(size_t(rows) * 3072), b(size_t(rows) * 3072);
+        op.copy(a.data(), fused.p, fused.bytes(), hipMemcpyDeviceToHost);
+        op.copy(b.data(), unfused.p, unfused.bytes(), hipMemcpyDeviceToHost);
+        std::vector<float> bf(a.size());
+        for (size_t i = 0; i < bf.size(); ++i) bf[i] = bf16_to_f32(b[i]);
+        double err = rel_l2(a, bf);
+        if (!(err < 0.002))
+            throw std::runtime_error("mixed shared_experts fast path が非融合出力と一致しません");
+        printf("mixed_shared_gate_up rows=%d rel_l2=%.6f pass=1\n", rows, err);
+        fflush(stdout);
+    }
+    benchmark_hy4_moe(gpu);
 }
 }

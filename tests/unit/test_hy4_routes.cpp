@@ -30,11 +30,11 @@ int main() {
             peer[ranks - 1][ranks - 2] = false;
             check(!graph_topology(ranks, 1, true, true, peer), "peer access 不足時の Graph が有効です");
         }
-        for (int rows : {1, 6, 12, 16, 32, 48, 64, 96}) {
+        for (int rows : {1, 6, 12, 16, 32, 48, 64, 96, 192}) {
             std::array<int, 512> owners;
             for (int e = 0; e < 512; ++e) owners[e] = e % ranks;
             std::vector<Hy4Route> picks;
-            unsigned masks[3][512]{};
+            unsigned masks[6][512]{};
             for (int row = 0; row < rows; ++row)
                 for (int j = 15; j >= 0; --j) {
                     int e = (row % 5 + j) % 512;

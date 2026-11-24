@@ -40,7 +40,7 @@ struct alignas(16) Hy4MoePlan {
     }
 };
 struct alignas(16) Hy4GroupedPlan {
-    static constexpr int max_rows = 96;
+    static constexpr int max_rows = 192;
     Hy4Route routes[max_rows * 16];
     int inverse[max_rows * 16];
     Hy4ExpertBatch batches[512 + max_rows];
@@ -48,7 +48,7 @@ struct alignas(16) Hy4GroupedPlan {
     int count, num_batches;
 
     __host__ __device__ void place(Hy4Route route, const Hy4Route *row_picks, const int *owners,
-                                   const unsigned masks[3][512], int first) {
+                                   const unsigned masks[6][512], int first) {
         const int row = route.row, expert = route.expert;
         for (int w = 0; w < row / 32; ++w)
             first += __builtin_popcount(masks[w][expert]);
