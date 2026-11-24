@@ -33,7 +33,35 @@ __device__ float read(Param p, size_t i) {
 __device__ float bv(Mat x, int row, int col) { return bf16_bits_to_f32(x.p[size_t(row) * x.cols + col]); }
 __device__ float wht(float v, float *scratch, int width) {
     int c = threadIdx.x;
-    for (int step = 1; step < width; step *= 2) {
+    for (int step = 1; step < 32 && step < width; step *= 2) {
+        float other = __shfl_xor(v, step, 32);
+        v = (c & step) ? other - v : v + other;
+    }
+    if (width == 64) {
+        scratch[c] = v;
+        __syncthreads();
+        float other = scratch[c ^ 32];
+        v = (c & 32) ? other - v : v + other;
+        return v * rsqrtf(64.f);
+    }
+    if (width == 256) {
+        scratch[c] = v;
+        __syncthreads();
+        int lane = c & 31, wave = c >> 5;
+        float u[8];
+#pragma unroll
+        for (int w = 0; w < 8; ++w)
+            u[w] = scratch[w * 32 + lane];
+        float a0 = u[0] + u[1], a1 = u[0] - u[1];
+        float a2 = u[2] + u[3], a3 = u[2] - u[3];
+        float a4 = u[4] + u[5], a5 = u[4] - u[5];
+        float a6 = u[6] + u[7], a7 = u[6] - u[7];
+        float b0 = a0 + a2, b1 = a1 + a3, b2 = a0 - a2, b3 = a1 - a3;
+        float b4 = a4 + a6, b5 = a5 + a7, b6 = a4 - a6, b7 = a5 - a7;
+        float out[8] = {b0 + b4, b1 + b5, b2 + b6, b3 + b7, b0 - b4, b1 - b5, b2 - b6, b3 - b7};
+        return out[wave] * rsqrtf(256.f);
+    }
+    for (int step = 32; step < width; step *= 2) {
         scratch[c] = v;
         __syncthreads();
         float other = scratch[c ^ step];
@@ -148,21 +176,32 @@ __global__ void unpack_quant(const uint8_t *cache, const uint8_t *fresh, const i
         return;
     __shared__ float scratch[256];
     __shared__ uint16_t decoded[256];
+    __shared__ uint8_t s_src[128];
     start = step_at(start, params);
     int id = ids[row];
     const uint8_t *rec = id >= start ? fresh + size_t(id - start) * 294 : cache + size_t(id % slots) * 294;
     const uint8_t *src = rec + sub * 130;
-    int code = (src[c / 2] >> (4 * (c % 2))) & 15;
+    if (c < 32)
+        *reinterpret_cast<uint32_t *>(s_src + c * 4) = *reinterpret_cast<const uint32_t *>(src + c * 4);
     float scale = __half2float(__ushort_as_half(src[128] | (src[129] << 8)));
+    __syncthreads();
+    int code = (s_src[c >> 1] >> (4 * (c & 1))) & 15;
     float value = wht(levels[code] * scale, scratch, 256) * sign_of(c, 29);
     decoded[c] = f32_to_bf16_rne_device(value);
     __syncthreads();
     if (c < 64) {
-        int col = sub * 256 + (c / 32) * 128 + (c % 32) * 4;
-        float v[4], peak = 0;
-        for (int i = 0; i < 4; ++i)
-            v[i] = bf16_bits_to_f32(decoded[(c / 32) * 128 + (c % 32) * 4 + i]) * f16_bits_to_f32(suh[col + i]);
+        int local_off = (c / 32) * 128 + (c % 32) * 4;
+        int col = sub * 256 + local_off;
+        const uint2 d_raw = *reinterpret_cast<const uint2 *>(decoded + local_off);
+        const uint2 s_raw = *reinterpret_cast<const uint2 *>(suh + col);
+        float v[4] = {
+            bf16_bits_to_f32(uint16_t(d_raw.x & 0xffffu)) * f16_bits_to_f32(uint16_t(s_raw.x & 0xffffu)),
+            bf16_bits_to_f32(uint16_t(d_raw.x >> 16)) * f16_bits_to_f32(uint16_t(s_raw.x >> 16)),
+            bf16_bits_to_f32(uint16_t(d_raw.y & 0xffffu)) * f16_bits_to_f32(uint16_t(s_raw.y & 0xffffu)),
+            bf16_bits_to_f32(uint16_t(d_raw.y >> 16)) * f16_bits_to_f32(uint16_t(s_raw.y >> 16)),
+        };
         fwht128(v[0], v[1], v[2], v[3], c % 32);
+        float peak = 0;
         for (float &f : v) {
             f *= kInvSqrt128;
             peak = fmaxf(peak, fabsf(f));
@@ -170,8 +209,10 @@ __global__ void unpack_quant(const uint8_t *cache, const uint8_t *fresh, const i
         for (int mask = 16; mask; mask /= 2)
             peak = fmaxf(peak, __shfl_xor(peak, mask, 32));
         float quant_scale = peak / 127;
+        _Float16 qh[4];
         for (int i = 0; i < 4; ++i)
-            out[size_t(row) * 512 + col + i] = quant_scale ? rintf(v[i] / quant_scale) * quant_scale : 0;
+            qh[i] = quant_scale ? rintf(v[i] / quant_scale) * quant_scale : 0;
+        *reinterpret_cast<uint2 *>(out + size_t(row) * 512 + col) = *reinterpret_cast<const uint2 *>(qh);
     }
 }
 template <int Width, int Salt>
@@ -386,26 +427,269 @@ __global__ void index_key_peak(const uint16_t *keys, unsigned *peak, int element
         atomicMax(peak, bits);
     }
 }
-__global__ void index_topk(const float *scores, int first, int start, int stride, int *selected,
-                           const Hy4StepParams *params) {
-    __shared__ uint32_t histogram[256], state[4];
-    start = step_at(start, params);
-    int row = blockIdx.x;
-    unsigned count = (start + first + row) / 4;
-    count = min(count, (unsigned)stride);
-    ::shelf::kernel::detail::radix_select<3>(scores + size_t(row) * stride, count, 511, histogram, state,
-                                             selected + row * 511, nullptr, 0);
+__global__ void __launch_bounds__(256) index_scores_refine(Mat q, Mat weights, const uint16_t *groups,
+                                                             int first, int start, int stride, float *scores,
+                                                             const float *bounds) {
+    __shared__ int cand[256];
+    __shared__ int cand_count;
+    int t = threadIdx.x, row = first + blockIdx.y;
+    int count = min(stride, (start + row) / 4);
+    int g0 = blockIdx.x * 256;
+    if (!t)
+        cand_count = 0;
+    __syncthreads();
+    int g = g0 + t;
+    if (g < count) {
+        float s = scores[size_t(blockIdx.y) * stride + g];
+        if (s >= bounds[2 * blockIdx.y] && s <= bounds[2 * blockIdx.y + 1])
+            cand[atomicAdd(&cand_count, 1)] = g;
+    }
+    __syncthreads();
+    int total = cand_count;
+    if (!total)
+        return;
+    int wave = t >> 5, lane = t & 31;
+    float w_head[16];
+    for (int h = 0; h < 16; ++h)
+        w_head[h] = bv(weights, row, h);
+    for (int idx = wave; idx < total; idx += 8) {
+        int group = cand[idx];
+        const uint16_t *gp = groups + size_t(group) * 128;
+        float kg[4] = {
+            bf16_bits_to_f32(gp[lane]),
+            bf16_bits_to_f32(gp[lane + 32]),
+            bf16_bits_to_f32(gp[lane + 64]),
+            bf16_bits_to_f32(gp[lane + 96]),
+        };
+        float sum = 0;
+        for (int h = 0; h < 16; ++h) {
+            const uint16_t *qp = q.p + size_t(row) * q.cols + h * 128;
+            float dot = bf16_bits_to_f32(qp[lane]) * kg[0] +
+                        bf16_bits_to_f32(qp[lane + 32]) * kg[1] +
+                        bf16_bits_to_f32(qp[lane + 64]) * kg[2] +
+                        bf16_bits_to_f32(qp[lane + 96]) * kg[3];
+            for (int dist = 16; dist; dist /= 2)
+                dot += __shfl_down(dot, dist, 32);
+            sum += fmaxf(dot, 0.f) * w_head[h];
+        }
+        if (!lane)
+            scores[size_t(blockIdx.y) * stride + group] = sum;
+    }
 }
-__global__ void index_bounds(Mat q, Mat w, const float *scores, int first, int start, int stride, float *bounds, const unsigned *key_peak) {
-    __shared__ uint32_t histogram[256], state[4];
+
+__device__ __forceinline__ uint32_t hy4_radix_key(float value) {
+    const uint32_t bits = value == 0.f ? 0u : __float_as_uint(value);
+    return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
+}
+
+__device__ __forceinline__ void hy4_scan_256(uint32_t val, uint32_t *wave_sums, uint32_t &exc, uint32_t &total) {
+    int t = threadIdx.x, lane = t & 31, wave = t >> 5;
+    uint32_t x = val;
+    for (int d = 1; d < 32; d <<= 1) {
+        uint32_t other = __shfl_up(x, d, 32);
+        if (lane >= d)
+            x += other;
+    }
+    if (lane == 31)
+        wave_sums[wave] = x;
+    __syncthreads();
+    if (wave == 0) {
+        uint32_t w = t < 8 ? wave_sums[t] : 0u;
+        for (int d = 1; d < 8; d <<= 1) {
+            uint32_t other = __shfl_up(w, d, 32);
+            if (lane >= d)
+                w += other;
+        }
+        if (t < 8)
+            wave_sums[t] = w;
+    }
+    __syncthreads();
+    uint32_t w_exc = wave > 0 ? wave_sums[wave - 1] : 0u;
+    total = wave_sums[7];
+    exc = w_exc + x - val;
+}
+
+__global__ void __launch_bounds__(256) index_topk(const float *scores, int first, int start, int stride, int *selected,
+                                                  const Hy4StepParams *params) {
+    __shared__ uint32_t wave_hist[8][256];
+    __shared__ uint32_t cand_keys[2048];
+    __shared__ int32_t cand_idx[2048];
+    __shared__ uint32_t state[8], wave_sums[8];
+    start = step_at(start, params);
+    int row = blockIdx.x, t = threadIdx.x, wave = t >> 5;
+    unsigned count = min(unsigned((start + first + row) / 4), unsigned(stride));
+    const float *row_scores = scores + size_t(row) * stride;
+    int *out = selected + row * 511;
+    uint32_t rank = 511u, prefix = 0u, out_pos = 0u;
+    bool in_lds = false;
+    uint32_t cand_cnt = 0u;
+    int pass = 0;
+    for (; pass < 4; ++pass) {
+        uint32_t shift = 24u - 8u * pass;
+        for (int w = 0; w < 8; ++w)
+            wave_hist[w][t] = 0u;
+        __syncthreads();
+        if (!in_lds) {
+            for (uint32_t i = t; i < count; i += 256u) {
+                uint32_t key = hy4_radix_key(row_scores[i]);
+                if (pass == 0 || (key >> (shift + 8u)) == (prefix >> (shift + 8u)))
+                    atomicAdd(&wave_hist[wave][(key >> shift) & 0xffu], 1u);
+            }
+        } else {
+            for (uint32_t j = t; j < cand_cnt; j += 256u) {
+                uint32_t key = cand_keys[j];
+                if ((key >> (shift + 8u)) == (prefix >> (shift + 8u)))
+                    atomicAdd(&wave_hist[wave][(key >> shift) & 0xffu], 1u);
+            }
+        }
+        __syncthreads();
+        uint32_t b_cnt = 0u;
+        for (int w = 0; w < 8; ++w)
+            b_cnt += wave_hist[w][255 - t];
+        uint32_t exc, total_dummy;
+        hy4_scan_256(b_cnt, wave_sums, exc, total_dummy);
+        if (exc < rank && exc + b_cnt >= rank) {
+            state[0] = uint32_t(255 - t);
+            state[1] = rank - exc;
+            state[2] = b_cnt;
+        }
+        __syncthreads();
+        prefix |= state[0] << shift;
+        rank = state[1];
+        uint32_t bucket_cnt = state[2];
+        if (!in_lds && bucket_cnt <= 2048u) {
+            if (!t) {
+                state[3] = out_pos;
+                state[4] = 0u;
+            }
+            __syncthreads();
+            uint32_t ptop = prefix >> shift;
+            for (uint32_t i = t; i < count; i += 256u) {
+                uint32_t key = hy4_radix_key(row_scores[i]);
+                uint32_t top = key >> shift;
+                if (top > ptop) {
+                    uint32_t pos = atomicAdd(&state[3], 1u);
+                    out[pos] = int(i);
+                } else if (top == ptop) {
+                    uint32_t cpos = atomicAdd(&state[4], 1u);
+                    cand_keys[cpos] = key;
+                    cand_idx[cpos] = int(i);
+                }
+            }
+            __syncthreads();
+            out_pos = state[3];
+            cand_cnt = state[4];
+            in_lds = true;
+            if (rank == bucket_cnt) {
+                for (uint32_t j = t; j < cand_cnt; j += 256u)
+                    out[out_pos + j] = cand_idx[j];
+                return;
+            }
+        } else {
+            __syncthreads();
+        }
+    }
+    uint32_t need = rank, index_prefix = 0u;
+    for (int ip = 0; ip < 3 && need != 0u; ++ip) {
+        uint32_t shift = 8u * (2 - ip);
+        for (int w = 0; w < 8; ++w)
+            wave_hist[w][t] = 0u;
+        __syncthreads();
+        if (in_lds) {
+            for (uint32_t j = t; j < cand_cnt; j += 256u) {
+                if (cand_keys[j] != prefix)
+                    continue;
+                uint32_t idx = uint32_t(cand_idx[j]);
+                if (ip != 0 && (idx >> (shift + 8u)) != (index_prefix >> (shift + 8u)))
+                    continue;
+                atomicAdd(&wave_hist[wave][(idx >> shift) & 0xffu], 1u);
+            }
+        } else {
+            for (uint32_t i = t; i < count; i += 256u) {
+                if (hy4_radix_key(row_scores[i]) != prefix)
+                    continue;
+                if (ip != 0 && (i >> (shift + 8u)) != (index_prefix >> (shift + 8u)))
+                    continue;
+                atomicAdd(&wave_hist[wave][(i >> shift) & 0xffu], 1u);
+            }
+        }
+        __syncthreads();
+        uint32_t b_cnt = 0u;
+        for (int w = 0; w < 8; ++w)
+            b_cnt += wave_hist[w][t];
+        uint32_t exc, total_dummy;
+        hy4_scan_256(b_cnt, wave_sums, exc, total_dummy);
+        if (exc < need && exc + b_cnt >= need) {
+            state[0] = uint32_t(t);
+            state[1] = need - exc;
+        }
+        __syncthreads();
+        index_prefix |= state[0] << shift;
+        need = state[1];
+        __syncthreads();
+    }
+    if (!t)
+        state[3] = out_pos;
+    __syncthreads();
+    if (in_lds) {
+        for (uint32_t j = t; j < cand_cnt; j += 256u) {
+            uint32_t key = cand_keys[j];
+            uint32_t idx = uint32_t(cand_idx[j]);
+            if (key > prefix || (key == prefix && idx <= index_prefix))
+                out[atomicAdd(&state[3], 1u)] = int(idx);
+        }
+    } else {
+        for (uint32_t i = t; i < count; i += 256u) {
+            uint32_t key = hy4_radix_key(row_scores[i]);
+            if (key > prefix || (key == prefix && i <= index_prefix))
+                out[atomicAdd(&state[3], 1u)] = int(i);
+        }
+    }
+}
+__global__ void __launch_bounds__(256) index_bounds(Mat q, Mat w, const float *scores, int first, int start,
+                                                    int stride, float *bounds, const unsigned *key_peak) {
+    __shared__ uint32_t wave_hist[8][256];
+    __shared__ uint32_t state[4], wave_sums[8];
     unsigned rank = 511;
-    int row = blockIdx.x, count = min(stride, (start + first + row) / 4);
-    auto prefix = ::shelf::kernel::detail::radix_score_prefix<2>(scores + size_t(row) * stride, count, rank, histogram, state);
+    int row = blockIdx.x, t = threadIdx.x, wave = t >> 5;
+    int count = min(stride, (start + first + row) / 4);
+    const float *row_scores = scores + size_t(row) * stride;
+    uint32_t prefix = 0u;
+    for (int pass = 0; pass < 2; ++pass) {
+        uint32_t shift = 24u - 8u * pass;
+        for (int wi = 0; wi < 8; ++wi)
+            wave_hist[wi][t] = 0u;
+        __syncthreads();
+        for (int i = t; i < count; i += 256) {
+            uint32_t key = hy4_radix_key(row_scores[i]);
+            if (pass == 0 || (key >> (shift + 8u)) == (prefix >> (shift + 8u)))
+                atomicAdd(&wave_hist[wave][(key >> shift) & 0xffu], 1u);
+        }
+        __syncthreads();
+        uint32_t b_cnt = 0u;
+        for (int wi = 0; wi < 8; ++wi)
+            b_cnt += wave_hist[wi][255 - t];
+        uint32_t exc, total_dummy;
+        hy4_scan_256(b_cnt, wave_sums, exc, total_dummy);
+        if (exc < rank && exc + b_cnt >= rank) {
+            state[0] = uint32_t(255 - t);
+            state[1] = rank - exc;
+        }
+        __syncthreads();
+        prefix |= state[0] << shift;
+        rank = state[1];
+        __syncthreads();
+    }
+    uint4 qv = *reinterpret_cast<const uint4 *>(q.p + size_t(first + row) * q.cols + t * 8);
+    uint32_t qw[4] = {qv.x, qv.y, qv.z, qv.w};
     float peak = 0;
-    for (int i = threadIdx.x; i < 2048; i += 256)
-        peak = fmaxf(peak, fabsf(bv(q, first + row, i)));
-    peak = reduce<true>(peak, reinterpret_cast<float *>(histogram), 256);
-    if (!threadIdx.x) {
+#pragma unroll
+    for (int p = 0; p < 4; ++p) {
+        peak = fmaxf(peak, fabsf(bf16_bits_to_f32(uint16_t(qw[p] & 0xffffu))));
+        peak = fmaxf(peak, fabsf(bf16_bits_to_f32(uint16_t(qw[p] >> 16))));
+    }
+    peak = reduce<true>(peak, reinterpret_cast<float *>(wave_sums), 256);
+    if (!t) {
         float weight = 0;
         for (int h = 0; h < 16; ++h)
             weight += fabsf(bv(w, first + row, h));
@@ -644,8 +928,8 @@ void index_select(Mat q, Mat weights, const uint16_t *groups, int first, int row
         }
         index_scores_wmma<<<dim3((stride + 63) / 64, rows), 128, 0, stream>>>(q, weights, groups, first, start, stride, scores);
         index_bounds<<<rows, 256, 0, stream>>>(q, weights, scores, first, start, stride, bounds, peak);
-        index_scores<true><<<dim3((stride + 3) / 4, rows), 128, 0, stream>>>(
-            q, weights, groups, first, start, stride, scores, nullptr, bounds);
+        index_scores_refine<<<dim3((stride + 255) / 256, rows), 256, 0, stream>>>(
+            q, weights, groups, first, start, stride, scores, bounds);
     } else {
         index_scores<<<dim3((stride + 3) / 4, rows), 128, 0, stream>>>(
             q, weights, groups, first, start, stride, scores, params);
