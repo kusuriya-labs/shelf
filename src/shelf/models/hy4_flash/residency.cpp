@@ -223,28 +223,69 @@ void Residency::upload_experts(int r, int layer) {
     check(hipMemcpy(matrices[r] + (layer - 1) * 1536, table.data(), table.size() * sizeof(table[0]),
                     hipMemcpyHostToDevice));
 }
-void Residency::upload() {
-    const auto vmm = std::getenv("SHELF_ARENA_VMM");
-    if (!multi_gpu_vmm_allowed(ranks, vmm ? vmm : ""))
-        throw std::runtime_error("Hy4 の複数 GPU 実行では SHELF_ARENA_VMM=1 を使用できません");
-    auto profile = std::getenv("SHELF_HY4_PROFILE_EP");
+namespace {
+bool probe_peer_direction(const Residency &gpu, int src, int dst, Residency::PeerProbe probe) {
+    constexpr size_t probe_bytes = 4096;
+    constexpr size_t words = probe_bytes / sizeof(uint32_t);
+    if (gpu.workspace[src].size < probe_bytes || gpu.workspace[dst].size < probe_bytes || !gpu.compute[src] ||
+        !gpu.compute[dst])
+        return false;
+    void *src_buf = gpu.workspace[src].base;
+    void *dst_buf = gpu.workspace[dst].base;
+    std::array<uint32_t, words> expected{}, actual{};
+    for (size_t i = 0; i < words; ++i)
+        expected[i] = uint32_t(i + 1) * 0x9e3779b9u ^ uint32_t(src * 17 + dst * 31 + 1);
+    const int initiator = gpu.push ? src : dst;
+    try {
+        check(hipSetDevice(gpu.physical[src]));
+        check(hipMemcpyAsync(src_buf, expected.data(), probe_bytes, hipMemcpyHostToDevice, gpu.compute[src]));
+        check(hipStreamSynchronize(gpu.compute[src]));
+        check(hipSetDevice(gpu.physical[dst]));
+        check(hipMemsetAsync(dst_buf, 0, probe_bytes, gpu.compute[dst]));
+        check(hipStreamSynchronize(gpu.compute[dst]));
+        check(hipSetDevice(gpu.physical[initiator]));
+        bool ok = true;
+        if (probe)
+            ok = probe(dst_buf, dst, src_buf, src, probe_bytes, gpu.compute[initiator], gpu.push);
+        else
+            peer_copy(dst_buf, src_buf, probe_bytes, gpu.compute[initiator]);
+        check(hipStreamSynchronize(gpu.compute[initiator]));
+        if (!ok)
+            return false;
+        check(hipSetDevice(gpu.physical[dst]));
+        check(hipMemcpyAsync(actual.data(), dst_buf, probe_bytes, hipMemcpyDeviceToHost, gpu.compute[dst]));
+        check(hipStreamSynchronize(gpu.compute[dst]));
+        return actual == expected;
+    } catch (...) {
+        (void)hipGetLastError();
+        return false;
+    }
+}
+}
+bool Residency::configure_transports(PeerProbe probe) {
     auto transport = std::getenv("SHELF_HY4_EP_TRANSPORT");
     const std::string_view mode = transport ? transport : "";
     const bool force_host = mode == "host";
     bool host_reduce = false;
     push = mode.empty() || mode == "push";
+    peer = {};
     for (int dst = 0; dst < ranks; ++dst)
         for (int src = 0; src < ranks; ++src) {
             if (src == dst)
                 continue;
+            if (physical[dst] == physical[src]) {
+                peer[dst][src] = !force_host;
+                continue;
+            }
             int accessible = 0;
             check(hipSetDevice(physical[dst]));
             check(hipDeviceCanAccessPeer(&accessible, physical[dst], physical[src]));
             if (accessible && !force_host) {
                 auto status = hipDeviceEnablePeerAccess(physical[src], 0);
                 peer[dst][src] = status == hipSuccess || status == hipErrorPeerAccessAlreadyEnabled;
-                owns_peer[dst][src] = status == hipSuccess;
-                if (status != hipSuccess)
+                if (status == hipSuccess)
+                    owns_peer[dst][src] = true;
+                else if (status != hipErrorPeerAccessAlreadyEnabled)
                     (void)hipGetLastError();
             }
         }
@@ -252,23 +293,44 @@ void Residency::upload() {
         for (int src = 0; src < ranks; ++src) {
             if (src == dst)
                 continue;
-            const bool available = push ? peer[src][dst] : peer[dst][src];
-            if (!available && tp_size == 1)
+            bool &direction = push ? peer[src][dst] : peer[dst][src];
+            if (direction && !probe_peer_direction(*this, src, dst, probe)) {
+                (void)hipGetLastError();
+                fprintf(stderr, "P2P プローブ失敗のため host 転送へフォールバックします: %d->%d (%s)\n",
+                        src, dst, push ? "push" : "peer");
+                direction = false;
+            }
+            const bool available = direction;
+            if (!available && tp_size == 1 && !small_staging[src][dst])
                 check(hipHostMalloc(&small_staging[src][dst], transfer_packet_bytes(),
                                     hipHostMallocPortable));
             if (available || small_staging[src][dst]) {
                 for (int q = 0; q < 2; ++q) {
-                    check(hipSetDevice(physical[src]));
-                    check(hipEventCreateWithFlags(&ready[src][dst][q],
-                                                  hipEventDisableTiming | hipEventReleaseToSystem));
-                    check(hipSetDevice(physical[dst]));
-                    check(hipEventCreateWithFlags(&ack[dst][src][q], hipEventDisableTiming | hipEventReleaseToSystem));
+                    if (!ready[src][dst][q]) {
+                        check(hipSetDevice(physical[src]));
+                        check(hipEventCreateWithFlags(&ready[src][dst][q],
+                                                      hipEventDisableTiming | hipEventReleaseToSystem));
+                    }
+                    if (!ack[dst][src][q]) {
+                        check(hipSetDevice(physical[dst]));
+                        check(hipEventCreateWithFlags(&ack[dst][src][q],
+                                                      hipEventDisableTiming | hipEventReleaseToSystem));
+                    }
                 }
             }
             host_reduce |= !available && tp_size > 1;
             fprintf(stderr, "transfer=%d->%d method=%s\n", src, dst,
                     available ? (push ? "push" : "peer") : "host");
         }
+    check(hipSetDevice(physical[0]));
+    return host_reduce;
+}
+void Residency::upload() {
+    const auto vmm = std::getenv("SHELF_ARENA_VMM");
+    if (!multi_gpu_vmm_allowed(ranks, vmm ? vmm : ""))
+        throw std::runtime_error("Hy4 の複数 GPU 実行では SHELF_ARENA_VMM=1 を使用できません");
+    auto profile = std::getenv("SHELF_HY4_PROFILE_EP");
+    const bool host_reduce = configure_transports();
     const auto begin = std::chrono::steady_clock::now();
     constexpr size_t chunk = 16ull << 20;
     void *buffer = nullptr;

@@ -90,6 +90,9 @@ struct Residency {
     double attention_ms = 0, ffn_ms = 0, transfer_ms = 0;
     static Status check_batch_topology(int tp_size, int slots);
     Status reserve();
+    using PeerProbe = bool (*)(void *dst, int dst_rank, const void *src, int src_rank, size_t bytes,
+                               hipStream_t stream, bool push);
+    bool configure_transports(PeerProbe probe = nullptr);
     void upload();
     void upload_experts(int rank, int layer);
     std::array<Hy4ExpertProjection *, 4> matrices{};

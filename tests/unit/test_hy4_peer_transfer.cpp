@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -87,6 +88,83 @@ void check_transfer(int source, int destination) {
         throw std::runtime_error("peer 転送の内容が一致しません");
     }
 }
+void check_probe_fallback(int source, int destination) {
+    constexpr int passes = 8;
+    constexpr size_t probe_bytes = 4096;
+    constexpr size_t bytes = Hy4MoePlan::packet_bytes(1);
+    constexpr size_t words = bytes / sizeof(uint32_t);
+    for (const char *mode : {"push", "peer"}) {
+        for (bool corrupt : {false, true}) {
+            setenv("SHELF_HY4_EP_TRANSPORT", mode, 1);
+            Checkpoint model;
+            Residency gpu(model, 64);
+            gpu.ranks = 2;
+            gpu.physical[0] = source;
+            gpu.physical[1] = destination;
+            std::array<uint32_t *, 2> history{}, packet{};
+            for (int r = 0; r < 2; ++r) {
+                checked(hipSetDevice(gpu.physical[r]));
+                const size_t total = probe_bytes + (passes + 1) * bytes;
+                auto arena = shelf::gpu::GpuArena::create(gpu.physical[r], total);
+                if (!arena.ok())
+                    throw std::runtime_error(arena.status().message());
+                gpu.arenas.push_back(arena.release());
+                auto memory = gpu.arenas.back().allocate_aligned(total, 256);
+                if (!memory.ok())
+                    throw std::runtime_error(memory.status().message());
+                auto *base = static_cast<uint8_t *>(memory.value().data());
+                gpu.workspace[r] = {base, probe_bytes};
+                history[r] = reinterpret_cast<uint32_t *>(base + probe_bytes);
+                packet[r] = history[r] + passes * words;
+                checked(hipStreamCreateWithFlags(&gpu.compute[r], hipStreamNonBlocking));
+            }
+            const bool host_reduce = gpu.configure_transports(
+                corrupt ? static_cast<Residency::PeerProbe>(
+                              [](void *dst, int dst_rank, const void *src, int src_rank, size_t n, hipStream_t stream,
+                                 bool) -> bool {
+                                  if (src_rank == 0 && dst_rank == 1)
+                                      return hipMemsetAsync(dst, 0x5a, n, stream) == hipSuccess;
+                                  peer_copy(dst, src, n, stream);
+                                  return true;
+                              })
+                        : static_cast<Residency::PeerProbe>(
+                              [](void *dst, int dst_rank, const void *src, int src_rank, size_t n, hipStream_t stream,
+                                 bool) -> bool {
+                                  if (src_rank == 0 && dst_rank == 1)
+                                      return false;
+                                  peer_copy(dst, src, n, stream);
+                                  return true;
+                              }));
+            unsetenv("SHELF_HY4_EP_TRANSPORT");
+            const bool forward_peer = gpu.push ? gpu.peer[0][1] : gpu.peer[1][0];
+            const bool reverse_peer = gpu.push ? gpu.peer[1][0] : gpu.peer[0][1];
+            if (host_reduce || forward_peer || !gpu.small_staging[0][1] || !reverse_peer || gpu.small_staging[1][0])
+                throw std::runtime_error("プローブ失敗時の方向別 host フォールバック状態が不正です");
+            for (int dir = 0; dir < 2; ++dir) {
+                const int src = dir;
+                const int dst = 1 - dir;
+                std::vector<uint32_t> expected(passes * words), actual(expected.size());
+                for (size_t i = 0; i < expected.size(); ++i)
+                    expected[i] = uint32_t(i + 1) * 0x9e3779b9u ^ uint32_t(src * 13 + dst * 7 + corrupt);
+                checked(hipSetDevice(gpu.physical[src]));
+                checked(hipMemcpy(history[src], expected.data(), passes * bytes, hipMemcpyHostToDevice));
+                for (int pass = 0; pass < passes; ++pass) {
+                    checked(hipSetDevice(gpu.physical[src]));
+                    peer_copy(packet[src], history[src] + pass * words, bytes, gpu.compute[src]);
+                    gpu.transfer(packet[dst], dst, packet[src], src, bytes);
+                    peer_copy(history[dst] + pass * words, packet[dst], bytes, gpu.compute[dst]);
+                }
+                checked(hipSetDevice(gpu.physical[dst]));
+                checked(hipStreamSynchronize(gpu.compute[dst]));
+                checked(hipMemcpy(actual.data(), history[dst], passes * bytes, hipMemcpyDeviceToHost));
+                if (actual != expected)
+                    throw std::runtime_error("フォールバック経路での転送内容が一致しません");
+            }
+            gpu.shutdown();
+            std::fprintf(stderr, "probe fallback mode=%s corrupt=%d pass\n", mode, int(corrupt));
+        }
+    }
+}
 }
 
 int main() {
@@ -101,6 +179,8 @@ int main() {
                 if (source != destination || count == 1) {
                     std::fprintf(stderr, "peer 転送 GPU %d → GPU %d\n", source, destination);
                     check_transfer(source, destination);
+                    if (source == 0)
+                        check_probe_fallback(source, destination);
                 }
         return 0;
     } catch (const std::exception &e) {
