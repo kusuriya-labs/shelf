@@ -134,6 +134,22 @@ CMakeCache の差も 0 だった。したがって 39.5 は環境ではなく、
 旧 build の 39.75 との差（約 8 %）は、`4e848d9e` の consumed 待ち（実測 3.8 %）と
 run ごとの key 計算・閾値の分。既定は graph on に戻した。
 
+### ACS 有効・無効の最終比較（`b962ab90`、両 boot）
+
+同じ commit を ACS 有効 boot と `pci=disable_acs_redir` boot の両方で回した
+（context 64、8 token、3 回中央値）:
+
+| model | boot | graph off | graph on |
+| --- | --- | ---: | ---: |
+| EXL3-INT8-4bpw TP=2 | ACS 有効 | 27.59 | 36.47 |
+| EXL3-INT8-4bpw TP=2 | ACS 無効 | 27.34 | 36.45 |
+| FP8 TP=2 | ACS 有効 | 30.83 | 27.65 |
+| FP8 TP=2 | ACS 無効 | 31.04 | 27.73 |
+
+TP=1 は両 boot とも 25.3〜25.6。ACS の有無による差は 1 % 未満で、decode 速度には
+影響しない。退行していた 26.2 tok/s は capture の設定と key 計算の問題で、ACS とは
+無関係だった。ACS は P2P の可否（別経路の host フォールバック）にだけ効く。
+
 ### EXL3 と FP8 で graph の効き方が逆になる理由
 
 同じ 27B、TP=2、context 64、8 token で比較した。
