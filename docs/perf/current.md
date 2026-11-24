@@ -865,6 +865,89 @@ qualified baseline ではない。経緯と採否判断は
 
 decode は 17.0 tok/s で変更前後ともに同じ。生成 48 token の列も一致した。
 
+## 2026-11-24 Qwen3.8-Flash-Next EXL3 EP=2 の prefill / decode（host expert あり / なし）
+
+`run.sh` の serving 構成（EP=2 / `octave:c5v5` KV / `--moe-host-experts 96`）に対する
+prefill と decode の reference run である。qualified baseline ではない。同じ断面を
+host expert offload なし（`--moe-host-experts 0`）でも測り、offload のコストを切り分けた。
+
+- measurement revision: 作業ツリー HEAD `882b2078`（build はソースと一致。バイナリが表示する
+  `git_sha` は configure 時の値 `61e30171`）
+- model: `models/kusuriya-labs/Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw`
+- drafter: `models/kusuriya-labs/Qwen3.8-Flash-Next-DFlash2-EXL3-INT8-4bpw`
+- GPU: Radeon AI PRO R9700 ×2（`--device 2,3`）、TP=1 / EP=2。`flock /tmp/r9700.lock` で
+  排他し、1 GPU 1 process
+- KV: `octave:c5v5`、`--rope-factor 2`、`--prefill-chunk 4096`、
+  `--max-num-batched-tokens 4096`、prefix cache なし、greedy（`--temperature 0`）
+- 入力: `tools/bench/real_v1` と `tests/data/mtp_perf/prose.txt` を tokenizer で encode し、
+  先頭から 512 / 2,048 / 8,192 token を切り出した。各断面 3 run
+- host 96 の run 1 は expert 交換（cold cache）、run 2〜3 は交換後である
+
+### prefill（`shelf-compute` の `PREFILL_MS`）
+
+`shelf-bench pp` は EP を持たないため、`shelf-compute` の prefill 区間で測った。
+
+| prompt | host 96（run 1/2/3） | p50 | tok/s | host 0（run 1/2/3） | p50 | tok/s | 比率 |
+| ---: | --- | ---: | ---: | --- | ---: | ---: | ---: |
+| 2,048 | 5,827 / 3,185 / 2,933 ms | 3,185 ms | 643 | 1,362 / 1,351 / 1,321 ms | 1,351 ms | 1,516 | 2.36× |
+| 8,192 | 9,971 / 5,387 / 5,163 ms | 5,387 ms | 1,521 | 3,170 / 3,145 / 3,135 ms | 3,145 ms | 2,605 | 1.71× |
+
+モデルロードは host 96 が 23.1〜23.4 s、host 0 が 17.7〜18.2 s。
+
+### decode 単体（`shelf-bench tg --mode greedy`、128 token、実コーパス）
+
+| context | host 96 tok/s | host 0 tok/s | 比率 |
+| ---: | ---: | ---: | ---: |
+| 512 | 20.88（20.82〜20.90） | 37.10（37.10〜37.23） | 1.78× |
+| 2,048 | 31.26（30.66〜31.36） | 36.64（36.43〜36.71） | 1.17× |
+| 8,192 | 20.52（20.14〜30.52） | 34.56（34.14〜36.18） | 1.68× |
+
+- 数値は各 run の `gpu_tokens_per_sec_p50` の 3 run p50。括弧内は run 間の範囲。
+- host 0 の ms/token は 27.0 / 27.3 / 28.9 ms、host 96 は 47.9 / 32.0 / 48.7 ms。
+- host 96 の ctx 8,192 は 20.1〜30.5 tok/s の 2 峰性で、run 間の差が 30 % を超える。
+  点推定ではなく範囲として扱う。
+- 同一 token（id 1）の繰り返し入力では host 96 の ctx 8,192 が 35.1 tok/s になる。
+  実文では routing が多様になり host expert の miss が増えるため、offload のコストは
+  実文の値で評価する。
+
+### DFlash2 投機 decode（drafts 7、128 token）
+
+| context | host 96 tok/s | host 0 tok/s | 受理 / round | round 数 |
+| ---: | ---: | ---: | --- | --- |
+| 2,048 | 70.69（66.14〜76.26） | 87.56（84.21〜90.05） | host96 3.38〜4.29 / host0 3.54〜3.70 | 24〜29 |
+| 8,192 | 74.73（74.14〜78.09） | 95.38（94.37〜118.42） | host96 4.08〜4.52 / host0 3.89〜5.05 | 21〜26 |
+
+- 投機の速度は受理数に依存するため、host 96 と host 0 の差は offload のコストだけでなく
+  生成内容の差を含む。`shelf-bench tg` は drafter を読み込まないため、DFlash2 は
+  `shelf-compute` の単一リクエスト経路で測った。
+- 同じ prompt・同じ設定でも生成列が run 間で一致しない。host 0 / ctx 512 の decode で
+  最初の token が `594` と `198` に分かれた。速度の p50 は host 0 で 1 % 以内に収まるが、
+  token 一致を基準にした比較はこの build では成立しない。
+
+```text
+# prefill（2048 / 8192）
+shelf-compute --model-dir models/kusuriya-labs/Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw \
+  --input-ids-file /tmp/opencode/corpus_<N>.psktok --max-new-tokens 1 \
+  --max-seq-len <N + 64> --max-num-batched-tokens 4096 --prefill-chunk 4096 \
+  --device 2,3 --expert-parallel 2 --moe-host-experts <96|0> \
+  --kv-cache-dtype octave:c5v5 --rope-factor 2 --prefix-cache 0 --temperature 0
+
+# decode
+shelf-bench tg --model-dir models/kusuriya-labs/Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw \
+  --mode greedy --context <512|2048|8192> --tokens 128 \
+  --tokens-file /tmp/opencode/corpus_<N>.psktok --prefill-chunk 4096 \
+  --device 2,3 --tensor-parallel 1 --expert-parallel 2 --moe-host-experts <96|0> \
+  --kv-cache-dtype octave:c5v5 --rope-factor 2 --warmup 1
+
+# DFlash2
+shelf-compute --model-dir models/kusuriya-labs/Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw \
+  --dflash2-model-dir models/kusuriya-labs/Qwen3.8-Flash-Next-DFlash2-EXL3-INT8-4bpw \
+  --input-ids-file /tmp/opencode/corpus_<N>.psktok --max-new-tokens 128 \
+  --max-seq-len <N + 256> --max-num-batched-tokens 4096 --prefill-chunk 4096 \
+  --device 2,3 --expert-parallel 2 --moe-host-experts <96|0> \
+  --kv-cache-dtype octave:c5v5 --rope-factor 2 --prefix-cache 0 --temperature 0
+```
+
 ## 2026-11-05 EXL3 W16A16 decode / prefill
 
 `models/Qwen3.8-27B-exl3`（mul1、4 bpw、lm_head 6 bpw）を TP1 / bf16 KV / GPU 1 枚で
