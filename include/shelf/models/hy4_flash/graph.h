@@ -34,6 +34,7 @@ struct GraphKey {
     float temperature, top_p;
     int top_k;
     int batch = 0;
+    int draft_tokens = 0;
     const uint16_t *state = nullptr;
     std::array<BatchGraphLane, 16> lanes{};
     bool operator==(const GraphKey &) const = default;

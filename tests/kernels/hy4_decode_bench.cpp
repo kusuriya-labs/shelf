@@ -233,7 +233,7 @@ void print_f32_hash(Ops &op, const float *p, int rows, int cols) {
 
 void benchmark_hy4_decode(Residency &gpu) {
     Ops op(gpu);
-    for (int rows : {1, 6, 16, 96}) {
+    for (int rows : {1, 3, 4, 5, 6, 16, 80, 96}) {
         op.arena.cursor = 0;
         Mat x = input(op, rows, 3072);
         Mat qx = input(op, rows, 1024);

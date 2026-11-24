@@ -92,7 +92,7 @@ def build_compute_argv(opts) -> list[str]:
         if opts.tensor_parallel > 1:
             argv += ["--tensor-parallel", str(opts.tensor_parallel)]
         if opts.dfly_dir:
-            argv += ["--dfly-dir", opts.dfly_dir]
+            argv += ["--dfly-dir", opts.dfly_dir, "--dfly-drafts", str(opts.dfly_drafts)]
         return argv
     argv = [
         opts.compute,
@@ -536,6 +536,8 @@ def parse_args(argv=None):
     parser.add_argument("--placement", help="Hy4 の expert 配置表")
     parser.add_argument("--engram-dir", help="Hy4 FP8 Engram のディレクトリ")
     parser.add_argument("--dfly-dir", help="Hy4 DFly2 のディレクトリ")
+    parser.add_argument("--dfly-drafts", type=int, default=None, choices=(2, 3, 4, 5),
+                        help="Hy4 DFly2 draft tokens per round (default 4)")
     parser.add_argument("--model", default="shelf",
                         help="model name reported by the API")
     parser.add_argument("--host", default="127.0.0.1",
@@ -750,6 +752,14 @@ def _validate_model_dirs(opts) -> None:
         opts.dflash2_model_dir = str(dflash2_dir)
 
 
+def speculative_meta(opts) -> dict | None:
+    if opts.dfly_dir and (opts.max_concurrent_requests == 1 or os.environ.get("SHELF_HY4_BATCH_DFLY") != "0"):
+        return {"method": "dfly2", "drafts": opts.dfly_drafts}
+    if opts.dflash2_model_dir:
+        return {"method": "dflash2", "drafts": opts.dflash2_drafts}
+    return None
+
+
 async def _serve(opts) -> int:
     try:
         config = json.loads((Path(opts.model_dir) / "config.json").read_text())
@@ -835,12 +845,7 @@ async def _serve(opts) -> int:
         else:
             _log(f"PLaMo EXL3 chat warmup: {time.monotonic() - started:.2f}s")
 
-    if opts.dfly_dir and (opts.max_concurrent_requests == 1 or os.environ.get("SHELF_HY4_BATCH_DFLY") != "0"):
-        speculative = {"method": "dfly2", "drafts": 5}
-    elif opts.dflash2_model_dir:
-        speculative = {"method": "dflash2", "drafts": opts.dflash2_drafts}
-    else:
-        speculative = None
+    speculative = speculative_meta(opts)
 
     server_meta = {
         "model": opts.model,

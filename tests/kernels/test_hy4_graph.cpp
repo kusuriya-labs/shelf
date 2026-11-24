@@ -152,25 +152,32 @@ std::vector<Output> run(Residency &gpu, bool graphs) {
     reset_history(gpu);
     Target target(gpu, 0.8f, 42, 0, 1);
     target.history.assign(7, 120000);
+    const int drafts = gpu.draft_tokens;
+    const int block_rows = drafts + 1;
+    const std::vector<int> full_verify{802, 15063, 2576, 12286, 859, 444};
     std::vector<Output> results;
-    for (int keep : {0, 3, 0, 0, 4, 2, 5}) {
+    for (int raw_keep : {0, 3, 0, 0, 4, 2, 5}) {
+        int keep = raw_keep ? std::min(raw_keep, block_rows) : 0;
         if (results.size() == 2) {
             reset_history(gpu);
             target.history.assign(2044, 120000);
         }
         int start = target.history.size();
-        std::vector<int> ids = keep ? std::vector<int>{802, 15063, 2576, 12286, 859, 444} : std::vector<int>{start};
+        std::vector<int> ids = keep ? std::vector<int>(full_verify.begin(), full_verify.begin() + block_rows)
+                                    : std::vector<int>{start};
         Output out;
         out.ids = target.forward(ids, keep != 0);
         out.state.resize(ids.size() * 3072);
         target.op.copy(out.state.data(), target.state.p, out.state.size() * 2, hipMemcpyDeviceToHost);
         if (keep) {
-            out.target_probs.resize(6 * 120832);
+            out.target_probs.resize(block_rows * 120832);
             target.op.copy(out.target_probs.data(), target.target_probs, out.target_probs.size() * 4, hipMemcpyDeviceToHost);
-            target.accept(keep, 6);
+            target.accept(keep, block_rows);
         }
         out.draft = target.propose(500 + start);
-        out.draft_probs.resize(5 * 120832);
+        if (int(out.draft.size()) != drafts)
+            throw std::runtime_error("DFly2 の候補数が設定と一致しません");
+        out.draft_probs.resize(drafts * 120832);
         target.op.copy(out.draft_probs.data(), target.draft_probs, out.draft_probs.size() * 4, hipMemcpyDeviceToHost);
         results.push_back(std::move(out));
     }
@@ -183,6 +190,10 @@ bool same_bits(const std::vector<float> &a, const std::vector<float> &b) {
 
 void check_capture_failure(Residency &gpu) {
     const auto before_target = gpu.target_replays, before_draft = gpu.draft_replays;
+    const int block_rows = gpu.draft_tokens + 1;
+    const std::vector<int> full_verify{850, 401, 82, 44, 276, 903};
+    const std::vector<int> verify_ids(full_verify.begin(), full_verify.begin() + block_rows);
+    const int keep = std::min(3, block_rows);
     std::vector<int> expected_ids, expected_draft;
     for (bool inject : {false, true}) {
         setenv("SHELF_HY4_GRAPH", inject ? "1" : "0", 1);
@@ -191,10 +202,10 @@ void check_capture_failure(Residency &gpu) {
         Target target(gpu, 0.f, 177, 0, 1.f);
         target.history.assign(2047, 120000);
         remaining_instantiations = inject ? 3 : 0;
-        auto ids = target.forward({850, 401, 82, 44, 276, 903}, true);
-        target.accept(3, 6);
+        auto ids = target.forward(verify_ids, true);
+        target.accept(keep, block_rows);
         remaining_instantiations = inject ? 1 : 0;
-        auto draft = target.propose(ids[2]);
+        auto draft = target.propose(ids[keep - 1]);
         if (!inject) {
             expected_ids = ids;
             expected_draft = draft;
@@ -215,20 +226,154 @@ void compare(const Path &body, const Path &draft, int ranks) {
     logical_ranks(gpu, ranks);
     if (ranks == 1)
         check_sliding_chunks(gpu);
-    auto eager = run(gpu, false);
-    if (gpu.target_replays || gpu.draft_replays)
-        throw std::runtime_error("無効化した Graph が起動しました");
-    auto graph = run(gpu, true);
-    for (size_t i = 0; i < eager.size(); ++i) {
-        if (eager[i].ids != graph[i].ids || eager[i].state != graph[i].state || !same_bits(eager[i].target_probs, graph[i].target_probs))
-            throw std::runtime_error("Target の照合失敗: step=" + std::to_string(i));
-        if (eager[i].draft != graph[i].draft || !same_bits(eager[i].draft_probs, graph[i].draft_probs))
-            throw std::runtime_error("DFly2 の照合失敗: step=" + std::to_string(i));
+    auto verify_run = [&](int k) {
+        gpu.draft_tokens = k;
+        auto target_before = gpu.target_replays, draft_before = gpu.draft_replays;
+        auto eager = run(gpu, false);
+        if (gpu.target_replays != target_before || gpu.draft_replays != draft_before)
+            throw std::runtime_error("無効化した Graph が起動しました");
+        auto graph = run(gpu, true);
+        for (size_t i = 0; i < eager.size(); ++i) {
+            if (eager[i].ids != graph[i].ids || eager[i].state != graph[i].state || !same_bits(eager[i].target_probs, graph[i].target_probs))
+                throw std::runtime_error("Target の照合失敗: k=" + std::to_string(k) + " step=" + std::to_string(i));
+            if (eager[i].draft != graph[i].draft || !same_bits(eager[i].draft_probs, graph[i].draft_probs))
+                throw std::runtime_error("DFly2 の照合失敗: k=" + std::to_string(k) + " step=" + std::to_string(i));
+        }
+        if (gpu.target_replays - target_before != 7 || gpu.draft_replays - draft_before != 7)
+            throw std::runtime_error("Graph の replay 回数が異なります");
+    };
+    verify_run(gpu.draft_tokens);
+    if (gpu.target_victim != 4 || gpu.draft_victim != 2)
+        throw std::runtime_error("Graph の capture 回数が異なります");
+    if (ranks == 1) {
+        for (int k : {2, 3, 5})
+            verify_run(k);
+        gpu.draft_tokens = default_draft_tokens;
     }
-    if (gpu.target_replays != 7 || gpu.draft_replays != 7 || gpu.target_victim != 4 || gpu.draft_victim != 2)
-        throw std::runtime_error("Graph の capture 回数または replay 回数が異なります");
     check_capture_failure(gpu);
-    printf("ep=%d target=7/7 draft=7/7 target_captures=4 draft_captures=2 capture_fallback=pass\n", ranks);
+    printf("ep=%d k=%d target=7/7 draft=7/7 target_captures=4 draft_captures=2 capture_fallback=pass\n", ranks, gpu.draft_tokens);
+    gpu.shutdown();
+}
+void compare_draft_counts(const Path &body, const Path &draft) {
+    Checkpoint model(body, body, draft, Owners{}, 1, 1);
+    share_expert_weights(model);
+    for (auto &owners : model.owners)
+        owners.fill(0);
+    std::vector<int> prompt_short{802, 15063, 2576, 12286};
+    std::vector<int> prompt_512(510);
+    std::vector<int> prompt_2048(2046);
+    for (size_t i = 0; i < prompt_512.size(); ++i)
+        prompt_512[i] = 100 + int(i * 13 % 97);
+    for (size_t i = 0; i < prompt_2048.size(); ++i)
+        prompt_2048[i] = 100 + int(i * 7 % 101);
+    const std::vector<std::vector<int>> cases{prompt_short, prompt_512, prompt_2048};
+    const std::vector<int> counts{12, 10, 10};
+    std::vector<std::vector<int>> baselines;
+    {
+        Residency single_gpu(model, 2100, 1);
+        auto status = single_gpu.reserve();
+        if (!status.ok())
+            throw std::runtime_error(status.message());
+        single_gpu.upload();
+        model.has_draft = false;
+        setenv("SHELF_HY4_GRAPH", "0", 1);
+        setenv("SHELF_HY4_DRAFT_GRAPH", "0", 1);
+        for (size_t c = 0; c < cases.size(); ++c)
+            baselines.push_back(generate(single_gpu, cases[c], counts[c], 1024, 0.f, 0, {}));
+        model.has_draft = true;
+        for (int k : {2, 3, 4, 5}) {
+            single_gpu.draft_tokens = k;
+            for (bool graph : {false, true}) {
+                setenv("SHELF_HY4_GRAPH", graph ? "1" : "0", 1);
+                setenv("SHELF_HY4_DRAFT_GRAPH", graph ? "1" : "0", 1);
+                for (size_t c = 0; c < cases.size(); ++c) {
+                    auto target_before = single_gpu.target_replays, draft_before = single_gpu.draft_replays;
+                    auto got = generate(single_gpu, cases[c], counts[c], 1024, 0.f, 0, {}, 0, 1.f, {}, k);
+                    if (got != baselines[c])
+                        throw std::runtime_error("単一スロット greedy 不一致: k=" + std::to_string(k) +
+                                                 " case=" + std::to_string(c) + " graph=" + std::to_string(graph));
+                    if (graph && (single_gpu.target_replays == target_before || single_gpu.draft_replays == draft_before))
+                        throw std::runtime_error("単一スロット Graph が起動しませんでした: k=" + std::to_string(k));
+                }
+            }
+            printf("k_parity_single k=%d=pass\n", k);
+            fflush(stdout);
+        }
+        single_gpu.shutdown();
+    }
+    setenv("SHELF_HY4_BATCH_DFLY", "1", 1);
+    Residency gpu(model, 2100, 16);
+    auto status = gpu.reserve();
+    if (!status.ok())
+        throw std::runtime_error(status.message());
+    gpu.upload();
+    model.has_draft = true;
+    for (int k : {2, 3, 4, 5}) {
+        gpu.draft_tokens = k;
+        for (bool graph : {false, true}) {
+            setenv("SHELF_HY4_GRAPH", graph ? "1" : "0", 1);
+            setenv("SHELF_HY4_DRAFT_GRAPH", graph ? "1" : "0", 1);
+            for (int batch : {1, 2, 4, 8, 16}) {
+                Hy4BatchOptions opts{1024, 0.f, 0, 0, 1.f, k};
+                std::vector<std::vector<int>> inputs(batch, prompt_short);
+                auto target_before = gpu.target_replays, draft_before = gpu.draft_replays;
+                auto results = generate_batch(gpu, inputs, std::vector<int>(batch, counts[0]), opts);
+                for (int i = 0; i < batch; ++i)
+                    if (results[i] != baselines[0])
+                        throw std::runtime_error("バッチ greedy 不一致: k=" + std::to_string(k) +
+                                                 " B=" + std::to_string(batch) + " graph=" + std::to_string(graph));
+                if (graph && batch == 1) {
+                    std::vector<int> one_out;
+                    auto sess_target_before = gpu.target_replays, sess_draft_before = gpu.draft_replays;
+                    Hy4BatchSession one_session(
+                        gpu, [&](int, int token) { one_out.push_back(token); }, [](int, const auto &, const char *) {}, k);
+                    one_session.admit({0, prompt_short, counts[0], opts});
+                    while (one_session.active() || one_session.queued())
+                        one_session.step();
+                    if (one_out != baselines[0])
+                        throw std::runtime_error("単一セッション greedy 不一致: k=" + std::to_string(k));
+                    if (gpu.target_replays == sess_target_before || gpu.draft_replays == sess_draft_before)
+                        throw std::runtime_error("B=1 バッチセッション Graph が起動しませんでした: k=" + std::to_string(k));
+                }
+                if (graph && batch >= 2 && (gpu.target_replays == target_before || gpu.draft_replays == draft_before))
+                    throw std::runtime_error("バッチ Graph が起動しませんでした: k=" + std::to_string(k));
+                if (batch == 2 || batch == 4 || batch == 8 || batch == 16) {
+                    std::vector<std::vector<int>> mixed_inputs;
+                    std::vector<int> mixed_counts;
+                    for (int i = 0; i < batch; ++i) {
+                        size_t idx = (batch <= 4) ? ((i % 2) + 1) : (i % 3);
+                        mixed_inputs.push_back(cases[idx]);
+                        mixed_counts.push_back(counts[idx]);
+                    }
+                    auto mixed = generate_batch(gpu, mixed_inputs, mixed_counts, opts);
+                    for (int i = 0; i < batch; ++i) {
+                        size_t idx = (batch <= 4) ? ((i % 2) + 1) : (i % 3);
+                        if (mixed[i] != baselines[idx])
+                            throw std::runtime_error("境界混在バッチ greedy 不一致: k=" + std::to_string(k) +
+                                                     " B=" + std::to_string(batch) + " graph=" + std::to_string(graph));
+                    }
+                }
+            }
+        }
+        printf("k_parity k=%d single_and_batch(1,2,4,8,16)_512_2048=pass\n", k);
+        fflush(stdout);
+    }
+    setenv("SHELF_HY4_GRAPH", "1", 1);
+    setenv("SHELF_HY4_DRAFT_GRAPH", "1", 1);
+    std::vector<std::vector<int>> session_out(4);
+    Hy4BatchSession session(gpu, [&](int id, int token) { session_out[id].push_back(token); },
+                            [](int, const auto &, const char *) {}, 2);
+    for (int i = 0; i < 4; ++i)
+        session.admit({i, cases[i % 3], counts[i % 3], {1024}});
+    int step_idx = 0;
+    while (session.active() || session.queued()) {
+        session.set_draft_tokens(2 + (step_idx++ % 4));
+        session.step();
+    }
+    for (int i = 0; i < 4; ++i)
+        if (session_out[i] != baselines[i % 3])
+            throw std::runtime_error("動的 K 切替 Hy4BatchSession が非投機と一致しません");
+    printf("k_dynamic_session=pass\n");
     gpu.shutdown();
 }
 void compare_batches(const Path &body, const Path &draft, int ranks) {
@@ -612,12 +757,17 @@ int main(int argc, char **argv) {
             }
             return 0;
         }
+        if (argc == 4 && std::string_view(argv[3]) == "kparity") {
+            compare_draft_counts(argv[1], argv[2]);
+            return 0;
+        }
         if (argc != 3 && (argc != 4 || std::string_view(argv[3]) != "batch"))
             return 2;
         if (argc == 4) {
             for (int ranks : {1, 2, 3, 4}) compare_batches(argv[1], argv[2], ranks);
         } else {
             for (int ranks : {1, 3, 4}) compare(argv[1], argv[2], ranks);
+            compare_draft_counts(argv[1], argv[2]);
         }
         return 0;
     } catch (const std::exception &e) {

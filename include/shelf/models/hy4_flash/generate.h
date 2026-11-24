@@ -12,6 +12,7 @@ struct Hy4BatchOptions {
     uint64_t seed = 0;
     int top_k = 0;
     float top_p = 1;
+    int draft_tokens = 0;
 };
 struct Hy4Request {
     int id;
@@ -23,11 +24,13 @@ class Hy4BatchSession {
 public:
     using Emit = std::function<void(int, int)>;
     using Done = std::function<void(int, const std::vector<int> &, const char *)>;
-    Hy4BatchSession(Residency &gpu, Emit emit, Done done);
+    Hy4BatchSession(Residency &gpu, Emit emit, Done done, int draft_tokens = 0);
     ~Hy4BatchSession();
     void admit(Hy4Request request);
     void cancel(int id);
     void step();
+    void set_draft_tokens(int draft_tokens);
+    int draft_tokens() const;
     size_t active() const;
     size_t queued() const;
     size_t draft_rounds() const;
@@ -42,5 +45,5 @@ int verify_speculation(Ops &op, const float *target_probs, const float *draft_pr
                        uint64_t seed, const std::vector<int> &draft, std::vector<int> &actual);
 std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count, int chunk, float temperature,
               uint64_t seed, const Path &logits_file, int top_k = 0, float top_p = 1,
-              const std::function<void(int)> &emit = {});
+              const std::function<void(int)> &emit = {}, int draft_tokens = 0);
 }

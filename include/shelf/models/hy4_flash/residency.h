@@ -12,6 +12,10 @@
 namespace shelf::hy4 {
 inline constexpr int max_prefill_chunk = 4096;
 inline constexpr int tp_prefill_rows = 1024;
+inline constexpr int min_draft_tokens = 2;
+inline constexpr int max_draft_tokens = 5;
+inline constexpr int max_verify_rows = max_draft_tokens + 1;
+inline constexpr int default_draft_tokens = 4;
 
 inline bool multi_gpu_vmm_allowed(int ranks, std::string_view vmm) {
     return ranks <= 1 || vmm != "1";
@@ -30,23 +34,23 @@ struct Hy4StepParams {
     int32_t position;
     uint64_t seed;
     int draft_last = -1;
-    int ids[6];
+    int ids[max_verify_rows];
 };
 
 struct GraphInput {
     Hy4StepParams step;
-    uint8_t engram[4][6 * 16 * 98];
+    uint8_t engram[4][max_verify_rows * 16 * 98];
 };
 
 struct BatchGraphParams {
     Hy4StepParams lanes[16];
-    int ids[96], anchors[16];
+    int ids[16 * max_verify_rows], anchors[16];
 };
 
 struct BatchGraphInput {
     BatchGraphParams step;
-    int candidates[80];
-    uint8_t engram[96 * 4 * 16 * 98];
+    int candidates[16 * max_draft_tokens];
+    uint8_t engram[16 * max_verify_rows * 4 * 16 * 98];
 };
 
 struct Region {
@@ -60,12 +64,13 @@ struct Residency {
     Checkpoint &model;
     size_t tokens;
     int max_slots;
+    int draft_tokens;
     bool batch_draft;
     bool index_wmma = true;
     std::vector<std::array<int, 42>> sparse_last;
     size_t prefill_rows() const { return std::min(tokens, size_t(tp_size > 1 ? tp_prefill_rows : max_prefill_chunk)); }
     int *sparse_top_slot(int layer, int slot) const {
-        return sparse_top[0][layer] + (prefill_rows() + slot * 6) * 511;
+        return sparse_top[0][layer] + (prefill_rows() + slot * max_verify_rows) * 511;
     }
     int ranks = 0;
     int ep_size = 1;
@@ -81,7 +86,9 @@ struct Residency {
     std::array<std::map<std::string, void *>, 4> folded;
     std::array<std::array<uint8_t *, 42>, 4> cache{};
     std::array<std::array<uint16_t *, 42>, 4> index_keys{};
-    explicit Residency(Checkpoint &model, size_t tokens, int slots = 1);
+    explicit Residency(Checkpoint &model, size_t tokens, int slots = 1, int draft_tokens = 0);
+    static int parse_draft_tokens(std::string_view value);
+    static int resolve_draft_tokens(int requested = 0);
     ~Residency() noexcept;
     Residency(const Residency &) = delete;
     Residency &operator=(const Residency &) = delete;
@@ -109,7 +116,7 @@ struct Residency {
         size_t rows = std::min(tokens, size_t(expert_tile_rows));
         size_t prefill = rows * (1536 * sizeof(uint16_t) + sizeof(PrefillRoutes));
         size_t decode = max_slots == 1 ? Hy4MoePlan::packet_bytes(Hy4MoePlan::max_rows)
-                                     : Hy4GroupedPlan::packet_bytes(max_slots * (batch_draft ? 6 : 1));
+                                     : Hy4GroupedPlan::packet_bytes(max_slots * (batch_draft ? max_verify_rows : 1));
         return std::max(prefill, decode);
     }
     void transfer(void *dst, int destination, const void *src, int source, size_t bytes, int prefill_rows = 0);

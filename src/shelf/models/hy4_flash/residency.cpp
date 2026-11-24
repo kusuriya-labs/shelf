@@ -2,6 +2,7 @@
 #include <shelf/models/hy4_flash/absorbed.h>
 #include <shelf/models/hy4_flash/routes.h>
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -26,8 +27,27 @@ void *Region::next(size_t length) {
     cursor = start + length;
     return base + start;
 }
-Residency::Residency(Checkpoint &model, size_t tokens, int slots)
-    : model(model), tokens(tokens), max_slots(slots), batch_draft(false) {
+int Residency::parse_draft_tokens(std::string_view value) {
+    int drafts = 0;
+    auto [p, err] = std::from_chars(value.data(), value.data() + value.size(), drafts);
+    if (value.empty() || p != value.data() + value.size() || err != std::errc{} ||
+        drafts < min_draft_tokens || drafts > max_draft_tokens)
+        throw std::invalid_argument("DFly2 の候補数は 2〜5 で指定してください");
+    return drafts;
+}
+int Residency::resolve_draft_tokens(int requested) {
+    if (requested != 0) {
+        if (requested < min_draft_tokens || requested > max_draft_tokens)
+            throw std::invalid_argument("DFly2 の候補数は 2〜5 で指定してください");
+        return requested;
+    }
+    const char *env = std::getenv("SHELF_HY4_DFLY_DRAFTS");
+    if (env && *env)
+        return parse_draft_tokens(env);
+    return default_draft_tokens;
+}
+Residency::Residency(Checkpoint &model, size_t tokens, int slots, int drafts)
+    : model(model), tokens(tokens), max_slots(slots), draft_tokens(resolve_draft_tokens(drafts)), batch_draft(false) {
     if (slots < 1 || slots > 16)
         throw std::invalid_argument("スロット数は 1〜16 で指定してください");
     const char *wmma = std::getenv("SHELF_HY4_INDEX_WMMA");

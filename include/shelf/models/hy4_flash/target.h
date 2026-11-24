@@ -16,7 +16,8 @@ struct Target {
     int top_k;
     float top_p;
     uint64_t seed;
-    Target(Residency &gpu, float temp, uint64_t rng, int k, float p, int rank = 0);
+    int draft_tokens;
+    Target(Residency &gpu, float temp, uint64_t rng, int k, float p, int rank = 0, int drafts = 0);
     std::vector<int> forward(const std::vector<int> &ids, bool verify, bool need_head = true, const Path &dump = {});
     std::vector<int> propose(int anchor);
     void accept(int keep, int submitted);

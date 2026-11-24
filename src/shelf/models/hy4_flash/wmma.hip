@@ -201,6 +201,14 @@ __global__ void shared_swiglu(const float *partial, const uint16_t *gate_svh, co
     }
 }
 
+template <int CompactRows>
+void launch_shared_gate_up(const uint16_t *input, const Hy4ExpertProjection &gate, const Hy4ExpertProjection &up,
+                           float *partial, int rows, hipStream_t stream) {
+    gemm_fused<4, false, true, CompactRows><<<dim3(12 * 8, 1, 2), 256, CompactRows * 3 * 132, stream>>>(
+        input, gate.suh, nullptr, nullptr, gate.trellis, partial, rows, 3072, 1536, 3072, 1536, rows, 8,
+        up.suh, up.trellis);
+}
+
 }
 hipError_t shelf_hy4_shared_gate_up(const uint16_t *input, Hy4ExpertProjection gate, Hy4ExpertProjection up,
                                     float *partial, uint16_t *output, int rows, hipStream_t stream) {
@@ -209,22 +217,31 @@ hipError_t shelf_hy4_shared_gate_up(const uint16_t *input, Hy4ExpertProjection g
     };
     if (!input || !output || !partial || rows < 1 || rows > 16 || !supported(gate) || !supported(up))
         return hipErrorInvalidValue;
-    if (rows == 1)
-        gemm_fused<4, false, true, 1><<<dim3(12 * 8, 1, 2), 256, 1 * 3 * 132, stream>>>(
-            input, gate.suh, nullptr, nullptr, gate.trellis, partial, rows, 3072, 1536, 3072, 1536, rows, 8,
-            up.suh, up.trellis);
-    else if (rows == 6)
-        gemm_fused<4, false, true, 6><<<dim3(12 * 8, 1, 2), 256, 6 * 3 * 132, stream>>>(
-            input, gate.suh, nullptr, nullptr, gate.trellis, partial, rows, 3072, 1536, 3072, 1536, rows, 8,
-            up.suh, up.trellis);
-    else if (rows == 16)
-        gemm_fused<4, false, true, 16><<<dim3(12 * 8, 1, 2), 256, 16 * 3 * 132, stream>>>(
-            input, gate.suh, nullptr, nullptr, gate.trellis, partial, rows, 3072, 1536, 3072, 1536, rows, 8,
-            up.suh, up.trellis);
-    else
+    switch (rows) {
+    case 1:
+        launch_shared_gate_up<1>(input, gate, up, partial, rows, stream);
+        break;
+    case 3:
+        launch_shared_gate_up<3>(input, gate, up, partial, rows, stream);
+        break;
+    case 4:
+        launch_shared_gate_up<4>(input, gate, up, partial, rows, stream);
+        break;
+    case 5:
+        launch_shared_gate_up<5>(input, gate, up, partial, rows, stream);
+        break;
+    case 6:
+        launch_shared_gate_up<6>(input, gate, up, partial, rows, stream);
+        break;
+    case 16:
+        launch_shared_gate_up<16>(input, gate, up, partial, rows, stream);
+        break;
+    default:
         gemm_fused<4, false, true><<<dim3(12 * 8, 1, 2), 256, size_t(rows) * (3072 + 24 * sizeof(float)), stream>>>(
             input, gate.suh, nullptr, nullptr, gate.trellis, partial, rows, 3072, 1536, 3072, 1536, rows, 8,
             up.suh, up.trellis);
+        break;
+    }
     auto status = hipGetLastError();
     if (status != hipSuccess) return status;
     shared_swiglu<<<dim3(12, rows), 32, 0, stream>>>(partial, gate.svh, up.svh, output);

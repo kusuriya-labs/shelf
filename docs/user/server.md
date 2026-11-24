@@ -71,6 +71,7 @@ Ready.
 | `--placement PLACEMENT` | Hy4 の expert 配置表 |
 | `--engram-dir ENGRAM_DIR` | Hy4 FP8 Engram のディレクトリ |
 | `--dfly-dir DFLY_DIR` | Hy4 DFly2 のディレクトリ |
+| `--dfly-drafts {2,3,4,5}` | Hy4 DFly2 draft tokens per round (default 4) |
 | `--model MODEL` | model name reported by the API |
 | `--host HOST` | listen address (default 127.0.0.1) |
 | `--port PORT` | listen port (default 8000) |
@@ -377,7 +378,7 @@ curl http://127.0.0.1:8000/v1/meta
 | `device` / `tensor_parallel` / `expert_parallel` / `pipeline_parallel` | `--device` / `--tensor-parallel` / `--expert-parallel` / `--pipeline-parallel` |
 | `kv_cache_dtype` | KV cache の dtype |
 | `working_set_reserve_gib` | `--working-set-reserve-gib` |
-| `speculative` | 有効時の drafter（`{"method": "dflash2", "drafts": 7}` 等）。無効時は `null` |
+| `speculative` | 有効時の drafter（`{"method": "dflash2", "drafts": 7}` や `{"method": "dfly2", "drafts": 4}` 等）。無効時は `null` |
 | `reasoning` | reasoning の既定（`enabled` / `default_reasoning_effort` / `reasoning_efforts`） |
 | `prefix_cache` | compute の `capabilities.prefix_cache` |
 | `inflight` | 現在 generate 中の request 数 |

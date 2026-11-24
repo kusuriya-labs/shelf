@@ -199,7 +199,7 @@ int compute(int argc, char **argv) {
         if (argc == 1 || std::string_view(argv[1]) == "--help") {
             puts(
                 "shelf-compute [hy4] [inspect|reserve|generate|serve] --model-dir PATH --engram-dir PATH --placement "
-                "PATH [--dfly-dir PATH] [--max-seq-len N] [--input-ids-file PATH] [--max-new-tokens N] "
+                "PATH [--dfly-dir PATH] [--dfly-drafts N] [--max-seq-len N] [--input-ids-file PATH] [--max-new-tokens N] "
                 "[--chunk N] [--temperature T] [--seed N] [--dump-logits PATH] [--repeats N] "
                 "[--expert-parallel N] [--tensor-parallel N] [--max-concurrent-requests N] [--batch-size N] "
                 "[--batch-input-files PATH1,PATH2,...] [--batch-max-new-tokens N1,N2,...]");
@@ -210,7 +210,7 @@ int compute(int argc, char **argv) {
         Path model, engram, draft, placement;
         size_t tokens = mode == "reserve" ? 2097152 : 4096;
         Path input, logits_file;
-        int count = 32, chunk = 64, repeats = 1, ep = 0, tp = 1, batch_size = 1, max_concurrent = 1;
+        int count = 32, chunk = 64, repeats = 1, ep = 0, tp = 1, batch_size = 1, max_concurrent = 1, dfly_drafts = 0;
         std::string batch_files, batch_counts;
         float temperature = 0;
         uint64_t seed = 0;
@@ -224,6 +224,8 @@ int compute(int argc, char **argv) {
                 engram = value;
             else if (key == "--dfly-dir")
                 draft = value;
+            else if (key == "--dfly-drafts")
+                dfly_drafts = Residency::parse_draft_tokens(value);
             else if (key == "--temperature") {
                 auto [p, err] = std::from_chars(value.data(), value.data() + value.size(), temperature);
                 if (p != value.data() + value.size() || err != std::errc{} || !std::isfinite(temperature) ||
@@ -268,6 +270,7 @@ int compute(int argc, char **argv) {
             throw std::runtime_error("重みと配置表が必要です");
         if (batch_size > 16 || max_concurrent > 16 || (max_concurrent != 1 && mode != "serve" && mode != "reserve"))
             throw std::invalid_argument("スロット数または動作の指定が不正です");
+        dfly_drafts = Residency::resolve_draft_tokens(dfly_drafts);
         const int slots = mode == "generate" ? batch_size : max_concurrent;
         auto topology = Residency::check_batch_topology(tp, slots);
         if (!topology.ok())
@@ -334,7 +337,7 @@ int compute(int argc, char **argv) {
         } else if (batch_size != 1 || !batch_files.empty() || !batch_counts.empty())
             throw std::invalid_argument("バッチ指定は generate 専用です");
         for (;;) {
-            Residency gpu(checkpoint, tokens, mode == "generate" ? batch_size : max_concurrent);
+            Residency gpu(checkpoint, tokens, mode == "generate" ? batch_size : max_concurrent, dfly_drafts);
             try {
                 auto status = gpu.reserve();
                 if (!status.ok())
