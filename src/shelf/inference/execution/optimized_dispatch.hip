@@ -575,6 +575,11 @@ bool exl3_mul24_use_a_prefill(bool a_selected, uint32_t num_prefill_requests) {
     return a_selected && num_prefill_requests != 0u;
 }
 
+bool exl3_grouped_projection_bits_match(uint32_t first_bits, uint32_t other_bits, uint32_t rows) {
+    if (first_bits != 3u && other_bits != 3u) return first_bits == other_bits;
+    return rows <= 16u && first_bits >= 3u && first_bits <= 4u && other_bits >= 3u && other_bits <= 4u;
+}
+
 // EXL3-INT8 (mul24): rotate + int8-quantize the activations, run the int8 WMMA GEMM that decodes the resident
 // trellis on every read, then rotate the output back. The three launches share the EXL3 workspace of the executor:
 // the xrot region holds the int8 codes and their scales, the accum region the F32 pre-rotation output.
@@ -674,6 +679,29 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
             (static_cast<uint64_t>(e.output_col_offset) + static_cast<uint64_t>(r0) * dst.row_stride) * out_elem_bytes;
         const auto out_dtype =
             out_bf16 ? ::shelf::kernel::Exl3OutputDType::BF16 : ::shelf::kernel::Exl3OutputDType::F32;
+        bool fused_linear_ok = r0 == 0u && n_rows == rows && out_bf16 && rows <= 16u &&
+            (e.exl3_ka == 3u || e.exl3_ka == 4u) && e.output_col_total == 0u && e.output_col_offset == 0u &&
+            in.row_stride % 4u == 0u && dst.row_stride % 4u == 0u && producer == nullptr && gdn_producer == nullptr &&
+            attn_producer == nullptr && final_producer == nullptr && deferred == nullptr;
+        if (fused_linear_ok) {
+            const uintptr_t in_begin = reinterpret_cast<uintptr_t>(in.ptr);
+            const uintptr_t in_end = in_begin + (static_cast<uint64_t>(rows - 1u) * in.row_stride + k) * 2u;
+            const uintptr_t out_begin = reinterpret_cast<uintptr_t>(out_ptr);
+            const uintptr_t out_end = out_begin + (static_cast<uint64_t>(rows - 1u) * dst.row_stride + n) * 2u;
+            if (in_begin < out_end && out_begin < in_end) fused_linear_ok = false;
+            if (fused_linear_ok) {
+                const hipError_t fused_error = ::shelf::kernel::launch_exl3_mul24_fused_linear(
+                    reinterpret_cast<const uint16_t*>(x), in.row_stride, suh, svh,
+                    static_cast<const uint16_t*>(e.codes), out_ptr, dst.row_stride, rows, n, k, e.exl3_ka, stream);
+                if (fused_error == hipSuccess) {
+                    record_physical_launch(1u);
+                    record_optimized_op();
+                    return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
+                }
+                if (fused_error != hipErrorInvalidValue)
+                    return Status::hip_error("exl3 fused linear", hipGetErrorString(fused_error), __FILE__, __LINE__);
+            }
+        }
         hipError_t herr = hipSuccess;
         bool done = false;
         bool fallback_b = false;
@@ -793,7 +821,7 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
                 const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
                 herr = ::shelf::kernel::launch_exl3_mul24_prefill_wmma(
                     codes, scales, code_stride, scale_stride_bytes,
-                    static_cast<const int8_t*>(ctx.exl3_dense), yprime, n_rows, n, k, stream);
+                    static_cast<const int8_t*>(ctx.exl3_dense), yprime, n_rows, n, k, stream, 1u);
                 if (semantic_timing_enabled()) semantic_timing_finish(
                     stream, timing, 0xffff0012u, static_cast<uint32_t>(SemPath::Optimized), 0);
             }
@@ -1077,7 +1105,7 @@ Result<OptimizedLaunchResult> try_launch_exl3_projection(
     const bool is_plamo = weight.plamo_exl3_linear;
     static const bool generic_enabled = std::getenv("SHELF_EXL3_INT8_ROTATE_F4") == nullptr &&
         std::getenv("SHELF_OP_DUMP") == nullptr && std::getenv("SHELF_OP_SYNC") == nullptr;
-    const bool grouped_3bit = weight.exl3_ka == 3u && ctx.capturing_graph;
+    const bool grouped_3bit = weight.exl3_ka == 3u;
     if (!is_plamo && ((!grouped_3bit && weight.exl3_ka != 4u) ||
                       ctx.layer_override_count != 0u || !generic_enabled))
         return miss;
@@ -1111,11 +1139,16 @@ Result<OptimizedLaunchResult> try_launch_exl3_projection(
                                                              ctx.num_prefill_requests));
     if (custom_prefill)
         return miss;
+    auto bits_match = [&](uint32_t ka) {
+        return ::shelf::execution::exl3_grouped_projection_bits_match(weight.exl3_ka, ka, rows);
+    };
+    uint32_t bpw[3] = {};
     uint32_t count = 0u;
     if (is_plamo) {
         count = weight.rows == 3072u && weight.cols == 2560u ? 3u :
                 weight.rows == 10240u && weight.cols == 2560u ? 2u : 1u;
         if (count > end - first) return miss;
+        for (uint32_t j = 0u; j < count; ++j) bpw[j] = weight.exl3_ka;
     } else {
         while (count < 3u && first + count < end) {
             const auto& b = program.dispatches[first + count];
@@ -1124,9 +1157,10 @@ Result<OptimizedLaunchResult> try_launch_exl3_projection(
                 b.weight_index >= ctx.weight_count) break;
             const auto& w = ctx.weights[b.weight_index];
             if (w.plamo_exl3_linear || w.encoding != 4u || w.device_ptr != nullptr ||
-                w.exl3_ka != weight.exl3_ka || w.cols != weight.cols || w.k_padded != w.cols || w.experts != 1u ||
+                !bits_match(w.exl3_ka) || w.cols != weight.cols || w.k_padded != w.cols || w.experts != 1u ||
                 w.rows == 0u || w.rows % 128u != 0u || w.output_col_total != 0u || w.output_col_offset != 0u ||
                 w.preshuffled || w.exl3_half || !w.codes || !w.exl3_suh || !w.exl3_svh) break;
+            bpw[count] = w.exl3_ka;
             ++count;
         }
         if (count < 2u) return miss;
@@ -1148,7 +1182,7 @@ Result<OptimizedLaunchResult> try_launch_exl3_projection(
         const auto& w = ctx.weights[b.weight_index];
         const uint32_t expected_n = count == 3u && j != 0u ? 512u : weight.rows;
         if (w.plamo_exl3_linear != is_plamo || w.encoding != 4u || w.device_ptr != nullptr ||
-            w.exl3_ka != weight.exl3_ka || w.cols != group.k || (is_plamo && w.rows != expected_n) ||
+            !bits_match(w.exl3_ka) || w.cols != group.k || (is_plamo && w.rows != expected_n) ||
             w.output_col_total != 0u || w.preshuffled || w.exl3_half ||
             w.codes == nullptr || w.exl3_suh == nullptr || w.exl3_svh == nullptr)
             return miss;
@@ -1308,9 +1342,27 @@ Result<OptimizedLaunchResult> try_launch_exl3_projection(
             ++launch_count;
         }
     } else {
-        err = ::shelf::kernel::launch_plamo_exl3_projection(group, weight.exl3_ka, stream, &launch_count,
-                                                            is_plamo, producer != nullptr);
-        if (producer != nullptr) ++launch_count;
+        bool mixed = false;
+        for (uint32_t j = 1u; j < count; ++j) mixed = mixed || bpw[j] != bpw[0];
+        if (mixed && producer == nullptr && !use_prefill) {
+            for (uint32_t j = 0u; j < count && err == hipSuccess;) {
+                uint32_t k = j + 1u;
+                while (k < count && bpw[k] == bpw[j]) ++k;
+                ::shelf::kernel::PlamoExl3ProjectionGroup sub = group;
+                const uint32_t sub_count = k - j;
+                sub.count = sub_count;
+                for (uint32_t i = 0u; i < sub_count; ++i) sub.p[i] = group.p[j + i];
+                uint32_t sub_launches = 0u;
+                err = ::shelf::kernel::launch_plamo_exl3_projection(sub, bpw[j], stream, &sub_launches,
+                                                                   false, false);
+                launch_count += sub_launches;
+                j = k;
+            }
+        } else {
+            err = ::shelf::kernel::launch_plamo_exl3_projection(group, weight.exl3_ka, stream, &launch_count,
+                                                                is_plamo, producer != nullptr);
+            if (producer != nullptr) ++launch_count;
+        }
     }
     if (err != hipSuccess)
         return Status::hip_error(is_plamo ? "plamo exl3 projection" : "exl3 grouped projection",

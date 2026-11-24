@@ -1,6 +1,8 @@
+#include <shelf/kernels/fused/exl3/group_body.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
 #include <shelf/kernels/optimized/linear/exl3_family/fwht.h>
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/decode.h>
+#include <shelf/kernels/optimized/linear/exl3_family/mul24/projection.h>
 #include <shelf/quantization/exl3/exl3_int8.h>
 #include <hip/hip_runtime.h>
 #include <cmath>
@@ -243,6 +245,100 @@ hipError_t launch_gemm_bits(
     return hipGetLastError();
 }
 
+template <int BITS, uint32_t ROW_CHUNK>
+__global__ void __launch_bounds__(256) exl3_mul24_fused_linear_kernel(
+    const uint16_t* input, uint32_t input_row_stride,
+    const uint16_t* suh, const uint16_t* svh,
+    const uint32_t* trellis, uint16_t* out, uint32_t out_row_stride,
+    uint32_t rows, uint32_t k, uint32_t n) {
+    extern __shared__ uint8_t shared[];
+    const uint32_t groups = k / kBlock;
+    int8_t* codes = reinterpret_cast<int8_t*>(shared);
+    float* scales = reinterpret_cast<float*>(shared + size_t(ROW_CHUNK) * k);
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t wave = threadIdx.x >> 5u;
+    const uint32_t row0 = blockIdx.y * ROW_CHUNK;
+    const uint32_t cr = min(rows - row0, ROW_CHUNK);
+    for (uint32_t m = 0u; m < cr; ++m) {
+        for (uint32_t g = wave; g < groups; g += 8u) {
+            const uint32_t col = g * kBlock + lane * 4u;
+            const uint2 raw = *reinterpret_cast<const uint2*>(input + size_t(row0 + m) * input_row_stride + col);
+            const uint2 hs = *reinterpret_cast<const uint2*>(suh + col);
+            float v0 = bf16_bits_to_f32(static_cast<uint16_t>(raw.x & 0xffffu)) * f16_bits_to_f32(static_cast<uint16_t>(hs.x & 0xffffu));
+            float v1 = bf16_bits_to_f32(static_cast<uint16_t>(raw.x >> 16u)) * f16_bits_to_f32(static_cast<uint16_t>(hs.x >> 16u));
+            float v2 = bf16_bits_to_f32(static_cast<uint16_t>(raw.y & 0xffffu)) * f16_bits_to_f32(static_cast<uint16_t>(hs.y & 0xffffu));
+            float v3 = bf16_bits_to_f32(static_cast<uint16_t>(raw.y >> 16u)) * f16_bits_to_f32(static_cast<uint16_t>(hs.y >> 16u));
+            fwht128(v0, v1, v2, v3, lane);
+            float peak = 0.0f;
+            v0 *= kInvSqrt128;
+            v1 *= kInvSqrt128;
+            v2 *= kInvSqrt128;
+            v3 *= kInvSqrt128;
+            peak = fmaxf(peak, fabsf(v0));
+            peak = fmaxf(peak, fabsf(v1));
+            peak = fmaxf(peak, fabsf(v2));
+            peak = fmaxf(peak, fabsf(v3));
+            for (uint32_t off = 16u; off != 0u; off >>= 1u)
+                peak = fmaxf(peak, __shfl_xor(peak, off, 32u));
+            const float scale = peak / 127.0f;
+            uint32_t packed = 0u;
+            if (scale > 0.0f) {
+                const float q0 = fminf(fmaxf(rintf(v0 / scale), -128.0f), 127.0f);
+                const float q1 = fminf(fmaxf(rintf(v1 / scale), -128.0f), 127.0f);
+                const float q2 = fminf(fmaxf(rintf(v2 / scale), -128.0f), 127.0f);
+                const float q3 = fminf(fmaxf(rintf(v3 / scale), -128.0f), 127.0f);
+                packed = (static_cast<uint32_t>(static_cast<int8_t>(q0)) & 0xffu) |
+                         ((static_cast<uint32_t>(static_cast<int8_t>(q1)) & 0xffu) << 8u) |
+                         ((static_cast<uint32_t>(static_cast<int8_t>(q2)) & 0xffu) << 16u) |
+                         ((static_cast<uint32_t>(static_cast<int8_t>(q3)) & 0xffu) << 24u);
+            }
+            *reinterpret_cast<uint32_t*>(codes + size_t(m) * k + col) = packed;
+            if (lane == 0u) scales[size_t(m) * groups + g] = scale;
+        }
+    }
+    __syncthreads();
+    PlamoExl3Projection ep{};
+    ep.svh = svh;
+    ep.out = reinterpret_cast<::shelf::bf16_t*>(out) + size_t(row0) * out_row_stride;
+    ep.out_stride = out_row_stride;
+    group_body<BITS, 1, false, 8u, true, false, false>(
+        codes, scales, k, groups, trellis, nullptr, cr, nullptr, n, k, groups, 1u, blockIdx.x, 0u, &ep);
+}
+
+template <int BITS>
+hipError_t launch_fused_bits(
+    const uint16_t* input, uint32_t input_row_stride,
+    const uint16_t* suh, const uint16_t* svh,
+    const uint16_t* trellis, uint16_t* out, uint32_t out_row_stride,
+    uint32_t rows, uint32_t n, uint32_t k, hipStream_t stream) {
+    const uint32_t groups = k / kBlock;
+    const uint64_t per_row = static_cast<uint64_t>(k) + static_cast<uint64_t>(groups) * sizeof(float);
+    const uint64_t budget = 56ull * 1024ull;
+    uint32_t row_chunk = 16u;
+    while (row_chunk > rows) row_chunk >>= 1u;
+    while (row_chunk > 1u && static_cast<uint64_t>(row_chunk) * per_row > budget)
+        row_chunk >>= 1u;
+    if (static_cast<uint64_t>(row_chunk) * per_row > budget)
+        return hipErrorInvalidValue;
+    const size_t shared = static_cast<size_t>(row_chunk) * per_row;
+    const dim3 grid(n / 128u, (rows + row_chunk - 1u) / row_chunk);
+    auto go = [&](auto rc) {
+        constexpr uint32_t RC = decltype(rc)::value;
+        exl3_mul24_fused_linear_kernel<BITS, RC><<<grid, 256, shared, stream>>>(
+            input, input_row_stride, suh, svh, reinterpret_cast<const uint32_t*>(trellis), out,
+            out_row_stride, rows, k, n);
+    };
+    using std::integral_constant;
+    switch (row_chunk) {
+        case 16u: go(integral_constant<uint32_t, 16u>{}); break;
+        case 8u: go(integral_constant<uint32_t, 8u>{}); break;
+        case 4u: go(integral_constant<uint32_t, 4u>{}); break;
+        case 2u: go(integral_constant<uint32_t, 2u>{}); break;
+        default: go(integral_constant<uint32_t, 1u>{}); break;
+    }
+    return hipGetLastError();
+}
+
 template <bool BF16>
 __global__ void __launch_bounds__(kBlock) exl3_mul24_rotate_out_kernel(
     const float* __restrict__ yprime,
@@ -321,6 +417,25 @@ __global__ void __launch_bounds__(256) exl3_mul24_rotate_out_f4_kernel(
 //   rowslot: flagged rows get consecutive slots in row order (deterministic); beyond `cap` they stay unflagged.
 //   rowfinish: flagged rows are copied (codes + scales) to the compact buffers; the others are re-rounded in place.
 }  // namespace
+
+hipError_t launch_exl3_mul24_fused_linear(
+    const uint16_t* input, uint32_t input_row_stride,
+    const uint16_t* suh, const uint16_t* svh,
+    const uint16_t* trellis, void* out, uint32_t out_row_stride,
+    uint32_t rows, uint32_t n, uint32_t k, uint32_t bits, hipStream_t stream) {
+    if (rows == 0u) return hipSuccess;
+    if (!input || !suh || !svh || !trellis || !out || rows > 16u || n == 0u ||
+        (n % 128u) != 0u || k == 0u || (k % kBlock) != 0u ||
+        input_row_stride < k || (input_row_stride % 4u) != 0u || (out_row_stride % 4u) != 0u ||
+        (bits != 3u && bits != 4u))
+        return hipErrorInvalidValue;
+    uint16_t* out16 = static_cast<uint16_t*>(out);
+    if (bits == 3u)
+        return launch_fused_bits<3>(input, input_row_stride, suh, svh, trellis, out16, out_row_stride,
+                                    rows, n, k, stream);
+    return launch_fused_bits<4>(input, input_row_stride, suh, svh, trellis, out16, out_row_stride,
+                                rows, n, k, stream);
+}
 
 hipError_t launch_exl3_mul24_gemm(
     const int8_t* codes, const float* scales, uint32_t code_row_stride_bytes,

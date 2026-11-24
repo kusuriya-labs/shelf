@@ -40,7 +40,8 @@ __global__ void __launch_bounds__(kWaves * 32u) exl3_mul24_prefill_wmma_kernel(
     uint32_t row_base,
     uint32_t rows,
     uint32_t n,
-    uint32_t k) {
+    uint32_t k,
+    uint32_t split_groups) {
     const uint32_t lane = threadIdx.x & 31u;
     const uint32_t wave = threadIdx.x >> 5u;
     const uint32_t col = lane & 15u;
@@ -60,7 +61,6 @@ __global__ void __launch_bounds__(kWaves * 32u) exl3_mul24_prefill_wmma_kernel(
     const uint32_t m0 = row_base + by * (WM * MT * kWaveRows) + wave_m * (MT * kWaveRows);
     const uint32_t n_base = bx * ((kWaves / WM) * NT * 16u) + wave_n * (NT * 16u);
     const uint32_t n_tile = n_base >> 4u;
-    const uint32_t groups = k / 128u;
 
     float accum[MT][NT][8];
     #pragma unroll
@@ -70,7 +70,10 @@ __global__ void __launch_bounds__(kWaves * 32u) exl3_mul24_prefill_wmma_kernel(
             #pragma unroll
             for (uint32_t i = 0; i < 8; ++i) accum[mt][nt][i] = 0.0f;
 
-    for (uint32_t g = 0; g < groups; ++g) {
+    const uint32_t first_group = blockIdx.z * split_groups;
+    const uint32_t last_group = first_group + split_groups;
+    yprime += static_cast<size_t>(blockIdx.z) * rows * n;
+    for (uint32_t g = first_group; g < last_group; ++g) {
         int32x8_t acc[MT][NT];
         #pragma unroll
         for (uint32_t mt = 0; mt < MT; ++mt)
@@ -140,30 +143,33 @@ __global__ void __launch_bounds__(kWaves * 32u) exl3_mul24_prefill_wmma_kernel(
 template <uint32_t MT, uint32_t NT, uint32_t WM, uint32_t kSwizzle>
 hipError_t launch_tiles(const int8_t* codes, const float* scales, uint32_t code_stride,
                         uint32_t scale_stride_bytes, const int8_t* weights, float* yprime,
-                        uint32_t rows, uint32_t n, uint32_t k, hipStream_t stream) {
+                        uint32_t rows, uint32_t n, uint32_t k, hipStream_t stream, uint32_t splits) {
     constexpr uint32_t kRowsPerCta = WM * MT * kWaveRows;
     constexpr uint32_t kOutPerCta = (kWaves / WM) * NT * 16u;
     const uint32_t full = rows / kRowsPerCta;
     const uint32_t tail = rows - full * kRowsPerCta;
+    const uint32_t split_groups = k / 128u / splits;
     if (full != 0u) {
         const bool swizzled = (kSwizzle > 1u) && ((full % kSwizzle) == 0u);
         if (swizzled) {
             exl3_mul24_prefill_wmma_kernel<MT, NT, WM, true, kSwizzle>
-                <<<dim3(n / kOutPerCta, full), kWaves * 32u, 0, stream>>>(
-                    codes, scales, code_stride, scale_stride_bytes / 4u, weights, yprime, 0u, rows, n, k);
+                <<<dim3(n / kOutPerCta, full, splits), kWaves * 32u, 0, stream>>>(
+                    codes, scales, code_stride, scale_stride_bytes / 4u, weights, yprime, 0u, rows, n, k,
+                    split_groups);
         } else {
             exl3_mul24_prefill_wmma_kernel<MT, NT, WM, true, 1u>
-                <<<dim3(n / kOutPerCta, full), kWaves * 32u, 0, stream>>>(
-                    codes, scales, code_stride, scale_stride_bytes / 4u, weights, yprime, 0u, rows, n, k);
+                <<<dim3(n / kOutPerCta, full, splits), kWaves * 32u, 0, stream>>>(
+                    codes, scales, code_stride, scale_stride_bytes / 4u, weights, yprime, 0u, rows, n, k,
+                    split_groups);
         }
         const hipError_t e = hipGetLastError();
         if (e != hipSuccess) return e;
     }
     if (tail != 0u) {
         exl3_mul24_prefill_wmma_kernel<MT, NT, WM, false, 1u>
-            <<<dim3(n / kOutPerCta, 1u), kWaves * 32u, 0, stream>>>(
+            <<<dim3(n / kOutPerCta, 1u, splits), kWaves * 32u, 0, stream>>>(
                 codes, scales, code_stride, scale_stride_bytes / 4u, weights, yprime,
-                full * kRowsPerCta, rows, n, k);
+                full * kRowsPerCta, rows, n, k, split_groups);
         const hipError_t e = hipGetLastError();
         if (e != hipSuccess) return e;
     }
@@ -175,9 +181,9 @@ hipError_t launch_exl3_mul24_prefill_wmma(
     const int8_t* codes, const float* scales,
     uint32_t code_stride, uint32_t scale_stride_bytes,
     const int8_t* dense_weights, float* yprime,
-    uint32_t rows, uint32_t n, uint32_t k, hipStream_t stream) {
+    uint32_t rows, uint32_t n, uint32_t k, hipStream_t stream, uint32_t splits) {
     if (rows == 0u) return hipSuccess;
-    if (!codes || !scales || !dense_weights || !yprime ||
+    if (splits == 0u || (k / 128u) % splits != 0u || !codes || !scales || !dense_weights || !yprime ||
         (n % 64u) != 0u || (k % 128u) != 0u ||
         (scale_stride_bytes % sizeof(float)) != 0u ||
         code_stride < k || scale_stride_bytes < (k / 128u) * sizeof(float))
@@ -186,7 +192,10 @@ hipError_t launch_exl3_mul24_prefill_wmma(
     constexpr uint32_t kNT = 2u;
     constexpr uint32_t kWm = 4u;
     constexpr uint32_t kSwizzle = 8u;
+    if (rows >= 256u)
+        return launch_tiles<4u, 2u, kWm, kSwizzle>(codes, scales, code_stride, scale_stride_bytes, dense_weights,
+                                                   yprime, rows, n, k, stream, splits);
     return launch_tiles<kMT, kNT, kWm, kSwizzle>(codes, scales, code_stride, scale_stride_bytes, dense_weights,
-                                                 yprime, rows, n, k, stream);
+                                                 yprime, rows, n, k, stream, splits);
 }
 }  // namespace shelf::kernel

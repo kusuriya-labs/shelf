@@ -9,7 +9,8 @@
 
 namespace shelf::kernel::exl3_detail::mul24 {
 
-template <int BITS, int MT, bool PIPE = true, int WAVES = 4, bool FUSED = false>
+template <int BITS, int MT, bool PIPE = true, int WAVES = 4, bool FUSED = false, bool K_MAJOR = false,
+          bool SHUFFLE_PREVIOUS = false>
 __device__ __forceinline__ void
 group_body(const int8_t *__restrict__ codes, const float *__restrict__ scales,
            const uint32_t code_row_stride, const uint32_t scale_row_stride_floats,
@@ -61,18 +62,20 @@ group_body(const int8_t *__restrict__ codes, const float *__restrict__ scales,
     const uint32_t g1 = min(k >> 7u, g0 + groups_per_split);
     if constexpr (!FUSED)
         yprime += static_cast<size_t>(tile_z) * rows * n;
-    const uint32_t *tile_base = trellis + static_cast<size_t>(nt) * (k >> 4u) * kWords;
-    constexpr size_t kt_stride = kWords;
+    const uint32_t *tile_base = trellis + static_cast<size_t>(nt) * (K_MAJOR ? 1u : (k >> 4u)) * kWords;
+    const size_t kt_stride = K_MAJOR ? static_cast<size_t>(n >> 4u) * kWords : kWords;
     const uint32_t *wp0 = tile_base + static_cast<size_t>(g0 * 8u) * kt_stride + i0;
     const uint32_t *wp1 = tile_base + static_cast<size_t>(g0 * 8u) * kt_stride + i1;
     const uint32_t *wp2 = tile_base + static_cast<size_t>(g0 * 8u) * kt_stride + i2;
-    uint32_t cur[8][3];
-    uint32_t nxt[8][3];
+    uint32_t cur[PIPE ? 8 : 1][PIPE ? 3 : 1];
+    uint32_t nxt[PIPE ? 8 : 1][PIPE ? 3 : 1];
+    if constexpr (PIPE) {
 #pragma unroll
-    for (uint32_t s = 0u; s < 8u; ++s) {
-        cur[s][0] = wp0[s * kt_stride];
-        cur[s][1] = wp1[s * kt_stride];
-        cur[s][2] = kNeedW2 ? wp2[s * kt_stride] : 0u;
+        for (uint32_t s = 0u; s < 8u; ++s) {
+            cur[s][0] = wp0[s * kt_stride];
+            cur[s][1] = wp1[s * kt_stride];
+            cur[s][2] = kNeedW2 ? wp2[s * kt_stride] : 0u;
+        }
     }
     for (uint32_t g = g0; g < g1; ++g) {
         if constexpr (PIPE)
@@ -84,17 +87,19 @@ group_body(const int8_t *__restrict__ codes, const float *__restrict__ scales,
                     nxt[s][2] = kNeedW2 ? wp2[(8u + s) * kt_stride] : 0u;
                 }
             }
-        int32x2_t afrag[MT][8];
+        int32x2_t afrag[MT <= 3 ? MT : 1][MT <= 3 ? 8 : 1];
+        if constexpr (MT <= 3) {
 #pragma unroll
-        for (int mt = 0; mt < MT; ++mt)
+            for (int mt = 0; mt < MT; ++mt)
 #pragma unroll
-            for (uint32_t s = 0u; s < 8u; ++s) {
-                afrag[mt][s] = *reinterpret_cast<const int32x2_t *>(arow[mt] + g * kBlock + s * 16u);
-                if (!arow_ok[mt]) {
-                    afrag[mt][s][0] = 0;
-                    afrag[mt][s][1] = 0;
+                for (uint32_t s = 0u; s < 8u; ++s) {
+                    afrag[mt][s] = *reinterpret_cast<const int32x2_t *>(arow[mt] + g * kBlock + s * 16u);
+                    if (!arow_ok[mt]) {
+                        afrag[mt][s][0] = 0;
+                        afrag[mt][s][1] = 0;
+                    }
                 }
-            }
+        }
         int32x8_t acc[MT];
 #pragma unroll
         for (int mt = 0; mt < MT; ++mt)
@@ -103,10 +108,33 @@ group_body(const int8_t *__restrict__ codes, const float *__restrict__ scales,
                 acc[mt][i] = 0;
 #pragma unroll
         for (uint32_t s = 0u; s < 8u; ++s) {
+            int32x2_t afrag_s[MT <= 3 ? 1 : MT];
+            if constexpr (MT > 3) {
+#pragma unroll
+                for (int mt = 0; mt < MT; ++mt) {
+                    afrag_s[mt] = *reinterpret_cast<const int32x2_t *>(arow[mt] + g * kBlock + s * 16u);
+                    if (!arow_ok[mt]) {
+                        afrag_s[mt][0] = 0;
+                        afrag_s[mt][1] = 0;
+                    }
+                }
+            }
             int32x2_t b;
-            const uint32_t w0 = PIPE ? cur[s][0] : wp0[s * kt_stride];
-            const uint32_t w1 = PIPE ? cur[s][1] : wp1[s * kt_stride];
-            const uint32_t w2 = PIPE ? cur[s][2] : (kNeedW2 ? wp2[s * kt_stride] : 0u);
+            uint32_t w0, w1, w2;
+            if constexpr (PIPE) {
+                w0 = cur[s][0];
+                w1 = cur[s][1];
+                w2 = cur[s][2];
+            } else {
+                w1 = wp1[s * kt_stride];
+                if constexpr (SHUFFLE_PREVIOUS) {
+                    static_assert(BITS == 4 && K_MAJOR && !PIPE);
+                    w0 = __shfl(w1, (lane + 31u) % 32u, 32);
+                } else {
+                    w0 = wp0[s * kt_stride];
+                }
+                w2 = kNeedW2 ? wp2[s * kt_stride] : 0u;
+            }
             uint32_t packed[2] = {0u, 0u};
 #pragma unroll
             for (uint32_t i = 0u; i < 8u; ++i) {
@@ -139,16 +167,18 @@ group_body(const int8_t *__restrict__ codes, const float *__restrict__ scales,
             b[1] = static_cast<int32_t>(packed[1] ^ 0x80808080u);
 #pragma unroll
             for (int mt = 0; mt < MT; ++mt) {
-                acc[mt] = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32_gfx12(true, afrag[mt][s], true, b,
-                                                                           acc[mt], false);
+                const int32x2_t av = MT <= 3 ? afrag[mt][s] : afrag_s[mt];
+                acc[mt] = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32_gfx12(true, av, true, b, acc[mt], false);
             }
         }
 
+        if constexpr (PIPE) {
 #pragma unroll
-        for (uint32_t s = 0u; s < ((PIPE) ? 8u : 0u); ++s) {
-            cur[s][0] = nxt[s][0];
-            cur[s][1] = nxt[s][1];
-            cur[s][2] = nxt[s][2];
+            for (uint32_t s = 0u; s < 8u; ++s) {
+                cur[s][0] = nxt[s][0];
+                cur[s][1] = nxt[s][1];
+                cur[s][2] = nxt[s][2];
+            }
         }
         wp0 += 8u * kt_stride;
         wp1 += 8u * kt_stride;
@@ -166,7 +196,7 @@ group_body(const int8_t *__restrict__ codes, const float *__restrict__ scales,
         }
     }
 
-    __shared__ float epi[MT * 16 * 128];
+    __shared__ float epi[FUSED ? MT * 16 * 128 : 1];
 #pragma unroll
     for (int mt = 0; mt < MT; ++mt) {
 #pragma unroll
