@@ -51,6 +51,7 @@ struct DFlash2BatcherStats {
     double adaptive_actual_ms = 0.0;
     uint32_t full_accepts = 0;
     uint32_t partial_accepts = 0;
+    uint64_t proposed_drafts = 0u;
     uint32_t accepted_drafts = 0;
     uint32_t generated_tokens = 0;
     uint64_t verify_rows = 0;

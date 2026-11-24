@@ -168,6 +168,11 @@ static void test_kernel_four_input_sum(int device) {
         fd[i] = static_cast<float>(i) + 1.0f;
     }
 
+    a[0] = 0x7f80u;
+    b[0] = 0xff80u;
+    a[1] = b[1] = c[1] = d[1] = 0x8000u;
+    a[2] = b[2] = c[2] = d[2] = 1u;
+
     void* da = nullptr;
     void* db = nullptr;
     void* dc = nullptr;
@@ -296,38 +301,42 @@ static void test_large_four_input_sum(int device) {
     shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
 }
 
-static void test_staged_collective() {
+static void test_collective(const std::vector<int>& devices, const shelf::runtime::TpPeerLinkMap& links) {
     using namespace shelf::runtime;
-    const std::vector<int> devices{0, 0};
+    const auto ranks = static_cast<int>(devices.size());
+    const auto vocab = static_cast<uint32_t>(ranks * 2);
     auto transport = HipPeerTpTransport::create(devices, TpCombineBackend::Event,
-                                               TpPeerLinkMap(2, std::vector<uint8_t>(2, 0)));
+                                               links);
     if (!transport.ok() || !transport.value()->verify().ok()) {
         fail("staged transport setup");
         return;
     }
-    TpBarrierGroup group(2, devices, transport.value().get());
-    if (!group.initialize().ok()) {
+    TpBarrierGroup group(ranks, devices, transport.value().get());
+    if (!group.initialize().ok() || !group.reserve_argmax(1u).ok() || !group.reserve_argmax(3u).ok()) {
         fail("argmax barrier initialization");
         return;
     }
-    auto run = [&](int rank, bool& passed) {
+    std::vector<uint8_t> results(ranks);
+    auto run = [&](int rank) {
         hipStream_t stream{};
         float* logits{};
         int32_t* ids{};
-        passed = hipSetDevice(0) == hipSuccess && hipStreamCreate(&stream) == hipSuccess &&
-            hipMalloc(&logits, 12 * sizeof(float)) == hipSuccess &&
+        bool passed = hipSetDevice(devices[rank]) == hipSuccess && hipStreamCreate(&stream) == hipSuccess &&
+            hipMalloc(&logits, 3u * vocab * sizeof(float)) == hipSuccess &&
             hipMalloc(&ids, 32 * 3 * sizeof(int32_t)) == hipSuccess;
-        const float data[2][12] = {{-2, -1, 0, 0, 9, 1, 0, 0, 4, 8, 0, 0},
-                                   {0, 0, -3, 6, 0, 0, 9, 3, 0, 0, 7, 8}};
-        if (passed) passed = hipMemcpy(logits, data[rank], sizeof(data[rank]), hipMemcpyHostToDevice) == hipSuccess;
+        std::vector<float> data(3u * vocab, -10.0f);
+        data[rank * 2u + 1u] = static_cast<float>(rank);
+        data[vocab + rank * 2u] = 1.0f;
+        data[2u * vocab + rank * 2u + 1u] = -1.0f;
+        if (passed) passed = hipMemcpy(logits, data.data(), data.size() * sizeof(float), hipMemcpyHostToDevice) == hipSuccess;
         if (!passed) group.abort(shelf::Status::invalid_state("test setup failed", __FILE__, __LINE__));
-        const int32_t want[3]{3, 0, 1};
+        const int32_t want[3]{ranks * 2 - 1, 0, 1};
         for (unsigned step = 0; passed && step < 32; ++step) {
             TpArgmaxInvocation in;
             in.local_offset = rank * 2u;
             in.local_logits = logits + in.local_offset;
             in.local_cols = 2;
-            in.row_stride = in.vocab = 4;
+            in.row_stride = in.vocab = vocab;
             in.rows = step % 3 + 1;
             in.out_ids = ids + step * 3;
             in.stream = stream;
@@ -342,22 +351,21 @@ static void test_staged_collective() {
         if (ids) shelf::gpu::discard_cleanup_result(hipFree(ids));
         if (logits) shelf::gpu::discard_cleanup_result(hipFree(logits));
         if (stream) shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+        results[rank] = passed;
     };
-    bool first = false, second = false;
-    std::thread a(run, 0, std::ref(first));
-    std::thread b(run, 1, std::ref(second));
-    a.join();
-    b.join();
-    check(first && second, "two staged ranks retain their inputs and agree on sampled IDs");
+    std::vector<std::thread> threads;
+    for (int r = 0; r < ranks; ++r) threads.emplace_back(run, r);
+    for (auto& thread : threads) thread.join();
+    check(std::all_of(results.begin(), results.end(), [](auto ok) { return ok != 0; }),
+          "all ranks retain their inputs and agree on sampled IDs");
     check(group.shutdown().ok() && transport.value()->shutdown().ok() &&
           transport.value()->shutdown().ok(), "staged argmax shutdown is idempotent");
 }
 
-static void test_four_rank_order() {
+static void test_four_rank_order(const std::vector<int>& devices, const shelf::runtime::TpPeerLinkMap& links) {
     using namespace shelf::runtime;
-    const std::vector<int> devices(4, 0);
     auto peer = HipPeerTpTransport::create(devices, TpCombineBackend::Event,
-                                           TpPeerLinkMap(4, std::vector<uint8_t>(4, 0)));
+                                           links);
     if (!peer.ok() || !peer.value()->verify().ok()) {
         fail("four staged ranks verify");
         return;
@@ -368,6 +376,8 @@ static void test_four_rank_order() {
     const float initial[]{1.0e20f, -1.0e20f, 1.0f, 2.0f};
     bool valid = true;
     for (unsigned r = 0; r < 4 && valid; ++r) {
+        valid = hipSetDevice(devices[r]) == hipSuccess;
+        if (!valid) break;
         auto& t = targets[r];
         t.rows = t.row_stride = t.feature_count = 1;
         t.dtype = ValueDType::F32;
@@ -378,6 +388,7 @@ static void test_four_rank_order() {
     }
     if (valid) valid = peer.value()->sum_hidden(TpSumInvocation{targets, streams, ready}).ok();
     for (unsigned r = 0; r < 4; ++r) {
+        if (hipSetDevice(devices[r]) != hipSuccess) { valid = false; continue; }
         float result{};
         if (valid) valid = hipStreamSynchronize(streams[r]) == hipSuccess &&
             hipMemcpy(&result, targets[r].ptr, sizeof(result), hipMemcpyDeviceToHost) == hipSuccess &&
@@ -390,14 +401,38 @@ static void test_four_rank_order() {
     check(peer.value()->shutdown().ok(), "four-rank transport shutdown");
 }
 
-int main() {
+int main(int argc, char** argv) {
     int device_count = 0;
     if (hipGetDeviceCount(&device_count) != hipSuccess || device_count < 1) {
         std::printf("SKIP: tp argmax kernels require a GPU\n");
         return 77;
     }
-    test_four_rank_order();
-    test_staged_collective();
+    if (argc == 2) {
+        const int ranks = std::strcmp(argv[1], "--physical-2") == 0 ? 2 :
+                          std::strcmp(argv[1], "--physical-4") == 0 ? 4 : 0;
+        if (!ranks) return 2;
+        if (device_count < ranks) return 77;
+        std::vector<int> devices;
+        for (int i = 0; i < ranks; ++i) {
+            hipDeviceProp_t props{};
+            if (hipGetDeviceProperties(&props, i) != hipSuccess) return 1;
+            if (std::strncmp(props.gcnArchName, "gfx1201", 7) != 0) return 77;
+            devices.push_back(i);
+        }
+        auto links = shelf::runtime::probe_tp_peer_links(devices);
+        if (!links.ok()) return 1;
+        std::printf("physical ranks=%d disabled peer directions=%zu\n", ranks,
+                    shelf::runtime::tp_peer_link_map_disabled(links.value()));
+        test_collective(devices, links.value());
+        if (ranks == 4) test_four_rank_order(devices, links.value());
+        links.value()[1][0] = 0u;
+        test_collective(devices, links.value());
+        if (ranks == 4) test_four_rank_order(devices, links.value());
+        return g_fail ? 1 : 0;
+    }
+    if (argc != 1) return 2;
+    test_four_rank_order(std::vector<int>(4, 0), shelf::runtime::TpPeerLinkMap(4, std::vector<uint8_t>(4, 0)));
+    test_collective({0, 0}, shelf::runtime::TpPeerLinkMap(2, std::vector<uint8_t>(2, 0)));
     test_kernel_argmax(0, 40u);
     test_kernel_argmax(0, 248320u);
     test_kernel_four_input_sum(0);

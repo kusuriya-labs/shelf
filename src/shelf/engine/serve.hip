@@ -776,7 +776,7 @@ struct ServeController::Impl {
             fprintf(stderr,
                     "MTP_BATCH rounds=%llu accepted=%llu emitted=%llu chunks=%llu "
                     "draft_forwards=%llu max_draft_per_round=%u max_verify_per_round=%u "
-                    "max_active=%u round_ms=%.3f\n",
+                    "max_active=%u round_ms=%.3f shared_draft=%u\n",
                     static_cast<unsigned long long>(mtp.rounds),
                     static_cast<unsigned long long>(mtp.accepted_drafts),
                     static_cast<unsigned long long>(mtp.emitted_tokens),
@@ -785,7 +785,8 @@ struct ServeController::Impl {
                     mtp.max_draft_forwards_per_round,
                     mtp.max_verify_chunks_per_round,
                     mtp.max_active_requests,
-                    mtp.rounds > 0u ? mtp.round_ms / static_cast<double>(mtp.rounds) : 0.0);
+                    mtp.rounds > 0u ? mtp.round_ms / static_cast<double>(mtp.rounds) : 0.0,
+                    static_cast<unsigned>(mtp.batch.shared_draft != nullptr));
         }
     }
 
@@ -1712,9 +1713,12 @@ void ServeController::write_final_stats() {
     }
     const auto& t = impl_->dflash_stats;
     const float rounds = static_cast<float>(t.rounds);
-    const float mean = t.rounds > 0u ? static_cast<float>(t.accepted_drafts) / rounds : 0.0f;
-    const float full_rate =
-        t.rounds > 0u ? static_cast<float>(t.full_accepts) / rounds : 0.0f;
+    const double lane_rounds = static_cast<double>(t.full_accepts) + t.partial_accepts;
+    const double mean = lane_rounds > 0.0 ? t.accepted_drafts / lane_rounds : 0.0;
+    const double full_rate = lane_rounds > 0.0 ? t.full_accepts / lane_rounds : 0.0;
+    const double acceptance = t.proposed_drafts ? static_cast<double>(t.accepted_drafts) / t.proposed_drafts : 0.0;
+    fprintf(stderr, "DFLASH2_PROPOSED_DRAFTS=%llu\n", static_cast<unsigned long long>(t.proposed_drafts));
+    fprintf(stderr, "DFLASH2_ACCEPTANCE_RATE=%.6f\n", acceptance);
     const float emitted =
         t.rounds > 0u ? static_cast<float>(t.generated_tokens) / rounds : 0.0f;
     if (impl_->config.dflash_adaptive && t.adaptive_rounds != 0u) {

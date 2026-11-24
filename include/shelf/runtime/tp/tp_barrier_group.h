@@ -26,6 +26,7 @@ public:
                     bool peer_written) override;
     bool supports_combine_fusion() const noexcept override;
     Status peer_write_target(int rank, std::size_t bytes, void*& peer_out) override;
+    Status reserve_argmax(std::size_t rows) override;
     bool supports_argmax_reduce() const noexcept override;
     Status argmax_reduce(int rank, const TpArgmaxInvocation& invocation) override;
     Status reserve(std::size_t bytes) override;

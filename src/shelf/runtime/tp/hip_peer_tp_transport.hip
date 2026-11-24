@@ -10,6 +10,8 @@
 
 #include "tp_transport_internal.h"
 
+#include <hip/hip_bf16.h>
+
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -71,6 +73,11 @@ struct ThreePeerInputs {
 template <unsigned FixedPeers = 0u, class PeerList>
 __global__ void tp_add_peers_bf16_kernel(const uint16_t* own, PeerList peers, uint32_t peer_count,
                                     uint16_t* out, uint64_t count, bool vectorized) {
+    const auto convert = [](float value) {
+        if constexpr (FixedPeers == 3u)
+            return static_cast<uint16_t>(isnan(value) ? 0x7fc0u : __bfloat16_as_ushort(__float2bfloat16(value)));
+        return tp_f32_to_bf16(value);
+    };
     const uint32_t npeers = FixedPeers == 0u ? peer_count : FixedPeers;
     const uint64_t stride = static_cast<uint64_t>(blockDim.x) * gridDim.x;
     const uint64_t vectors = (FixedPeers == 0u || vectorized) ? count >> 3u : 0u;
@@ -101,8 +108,8 @@ __global__ void tp_add_peers_bf16_kernel(const uint16_t* own, PeerList peers, ui
         uint32_t* words = reinterpret_cast<uint32_t*>(&result);
         #pragma unroll
         for (uint32_t w = 0; w < 4u; ++w) {
-            words[w] = static_cast<uint32_t>(tp_f32_to_bf16(acc[2u * w])) |
-                       (static_cast<uint32_t>(tp_f32_to_bf16(acc[2u * w + 1u])) << 16u);
+            words[w] = static_cast<uint32_t>(convert(acc[2u * w])) |
+                       (static_cast<uint32_t>(convert(acc[2u * w + 1u])) << 16u);
         }
         reinterpret_cast<uint4*>(out)[v] = result;
     }
@@ -112,7 +119,7 @@ __global__ void tp_add_peers_bf16_kernel(const uint16_t* own, PeerList peers, ui
         float value = tp_bf16_to_f32(own[i]);
         for (uint32_t p = 0; p < npeers; ++p)
             value += tp_bf16_to_f32(peers[p][i]);
-        out[i] = tp_f32_to_bf16(value);
+        out[i] = convert(value);
     }
 }
 
@@ -385,10 +392,11 @@ hipError_t launch_tp_sum_f32_4(float* dst, const float* s0, const float* s1, con
 
 hipError_t launch_tp_peer_probe_copy(void* dst, const void* src, std::size_t bytes,
                                      hipStream_t stream) {
-    const std::size_t words = bytes / sizeof(uint32_t);
-    if (words == 0u) return hipSuccess;
-    if (dst == nullptr || src == nullptr || (bytes % sizeof(uint32_t)) != 0u)
+    if (bytes == 0u) return hipSuccess;
+    if (!dst || !src || (bytes % sizeof(uint32_t)) != 0u ||
+        ((reinterpret_cast<uintptr_t>(dst) | reinterpret_cast<uintptr_t>(src)) & 3u) != 0u)
         return hipErrorInvalidValue;
+    const std::size_t words = bytes / sizeof(uint32_t);
     const uint32_t threads = 256u;
     const uint32_t blocks = static_cast<uint32_t>((words + threads - 1u) / threads);
     tp_peer_probe_copy_kernel<<<blocks, threads, 0, stream>>>(
@@ -1011,6 +1019,13 @@ Status HipPeerTpTransport::ensure_lm_buffers(std::size_t rows, std::size_t rank_
     return Status::make_ok();
 }
 
+Status HipPeerTpTransport::reserve_argmax(std::size_t rows) {
+    if (rows == 0u) return Status::make_ok();
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (devices_.empty()) return Status::invalid_state("TP transport is closed", __FILE__, __LINE__);
+    return ensure_lm_buffers(rows, devices_.size());
+}
+
 Status HipPeerTpTransport::begin_argmax(int rank, const TpArgmaxInvocation& invocation) {
     const std::size_t rank_count = devices_.size();
     if (rank < 0 || static_cast<std::size_t>(rank) >= rank_count) {
@@ -1021,8 +1036,8 @@ Status HipPeerTpTransport::begin_argmax(int rank, const TpArgmaxInvocation& invo
         return Status::invalid_argument("argmax invocation is empty", __FILE__, __LINE__);
     }
     std::lock_guard<std::mutex> lock(mutex_);
-    Status st = ensure_lm_buffers(invocation.rows, rank_count);
-    if (!st.ok()) return st;
+    if (invocation.rows > lm_rows_)
+        return Status::insufficient_memory("argmax rows exceed reserved capacity", __FILE__, __LINE__);
     const std::size_t r = static_cast<std::size_t>(rank);
     auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
     if (!scope.ok()) return scope.status();

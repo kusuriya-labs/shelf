@@ -1737,12 +1737,19 @@ Result<MtpIterationOutput> accept_verified(
 
 }  // namespace
 
+static void capture_mtp_draft_boundary(MtpDrafter& drafter, MtpBoundaryCapture* boundary,
+                                       uint32_t position, uint32_t page_tokens, hipStream_t stream) {
+    if (!boundary || !boundary->capture || !page_tokens || position % page_tokens) return;
+    auto snapshot = mtp_save_draft_snapshot(drafter, position, stream);
+    if (snapshot.ok()) boundary->capture(boundary->context, position, snapshot.value());
+}
+
 Result<MtpDraftResult> mtp_draft(
     MtpDrafter& drafter,
     Executor& target,
     state::PagedSequenceState& target_sequence,
     int32_t pending_token,
-    uint32_t remaining_tokens) {
+    uint32_t remaining_tokens, uint32_t page_tokens, MtpBoundaryCapture* boundary) {
     (void)target;
     if (!drafter.initialized) {
         return Status::invalid_state("mtp_draft: drafter is not initialized", __FILE__,
@@ -1765,6 +1772,9 @@ Result<MtpDraftResult> mtp_draft(
     uint32_t drafts = std::min(drafter.num_drafts, remaining_tokens - 1u);
     if (room < 2u) drafts = 0u;
     else drafts = std::min(drafts, room - 1u);
+
+    if (page_tokens && boundary)
+        drafts = std::min(drafts, page_tokens - position % page_tokens - 1u);
 
     MtpDraftResult result;
     result.position = position;
@@ -1802,6 +1812,7 @@ Result<MtpDraftResult> mtp_draft(
     result.proposals[0] = first_sampled.value();
     copy = copy_hidden_to_all(drafter, drafter_hidden_output(drafter), 0u, 1u, stream);
     if (!copy.ok()) return copy;
+    capture_mtp_draft_boundary(drafter, boundary, position, page_tokens, stream);
     for (uint32_t i = 1u; i < drafts; ++i) {
         std::vector<int32_t> step_tokens{result.proposals[i - 1u]};
         auto step = run_mtp_forward(drafter, step_tokens, position + i - 1u, true,
@@ -2421,17 +2432,9 @@ Status mtp_draft_batch(
         if (!copy.ok()) return copy;
     }
     for (std::size_t i = 0u; i < count; ++i) {
-        MtpBoundaryCapture* boundary = slots[i].boundary_capture;
-        if (boundary == nullptr || boundary->capture == nullptr) continue;
-        if (stopped[i] != 0 || plans[i].decode_only) continue;
-        if (slots[i].page_tokens == 0u ||
-            plans[i].position % slots[i].page_tokens != 0u) {
-            continue;
-        }
-        auto snapshot =
-            mtp_save_draft_snapshot(*slots[i].drafter, plans[i].position, stream);
-        if (!snapshot.ok()) continue;
-        boundary->capture(boundary->context, plans[i].position, snapshot.value());
+        if (!stopped[i] && !plans[i].decode_only)
+            capture_mtp_draft_boundary(*slots[i].drafter, slots[i].boundary_capture, plans[i].position,
+                                       slots[i].page_tokens, stream);
     }
     for (uint32_t depth = 1u; depth < max_drafts; ++depth) {
         active.clear();
@@ -2715,9 +2718,10 @@ Result<MtpSpecBatchOutput> mtp_spec_step_batch(
                 continue;
             }
             auto draft = mtp_draft(*slot.drafter, *context.target, *slot.sequence,
-                                   slot.pending_token, slot.remaining_tokens);
+                                   slot.pending_token, slot.remaining_tokens, slot.page_tokens, slot.boundary_capture);
             if (!draft.ok()) return draft.status();
             drafts[i] = draft.value();
+            draft_forwards += drafts[i].drafts;
             if (!drafts[i].decode_only) total_rows += drafts[i].drafts + 1u;
         }
     }

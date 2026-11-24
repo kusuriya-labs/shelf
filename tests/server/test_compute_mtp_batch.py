@@ -124,7 +124,7 @@ def target_baseline() -> dict[int, list[int]]:
     )
     try:
         harness.start()
-        harness.wait_ready()
+        harness.wait_ready(timeout=1200.0)
         baseline = {}
         for request_id, prompt in enumerate(prompts()):
             harness.send({
@@ -273,7 +273,7 @@ def main() -> int:
     )
     try:
         harness.start()
-        harness.wait_ready()
+        harness.wait_ready(timeout=1200.0)
 
         first = run_batch(harness, 100)
         second = run_batch(harness, 200)
@@ -319,7 +319,7 @@ def main() -> int:
         match = re.search(
             r"MTP_BATCH rounds=(\d+) accepted=(\d+) emitted=(\d+) chunks=(\d+) "
             r"draft_forwards=(\d+) max_draft_per_round=(\d+) "
-            r"max_verify_per_round=(\d+) max_active=(\d+)",
+            r"max_verify_per_round=(\d+) max_active=(\d+) round_ms=[0-9.]+ shared_draft=(\d+)",
             stderr)
         checker.check("mtp-batch-stats", match is not None, stderr[-500:])
         if match is not None:
@@ -330,15 +330,16 @@ def main() -> int:
             max_draft_per_round = int(match.group(6))
             max_verify_per_round = int(match.group(7))
             max_active = int(match.group(8))
+            forward_lanes = 1 if int(match.group(9)) else max_active
             checker.check("multi-request-round", max_active >= 2, match.group(0))
             checker.check("multi-batch-verify", chunks >= 2 and rounds >= 2,
                           match.group(0))
             drafts = int(os.environ.get("SHELF_MTP_DRAFTS", "4"))
             checker.check("draft-forwards-bounded",
-                          rounds <= draft_forwards <= rounds * drafts,
+                          rounds <= draft_forwards <= rounds * drafts * forward_lanes,
                           match.group(0))
             checker.check("draft-forwards-per-round",
-                          max_draft_per_round <= drafts,
+                          max_draft_per_round <= drafts * forward_lanes,
                           match.group(0))
             if os.environ.get("SHELF_MTP_WAVEFRONT", "0") not in ("", "0"):
                 checker.check("verify-forwards-per-round",

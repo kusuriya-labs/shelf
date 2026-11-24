@@ -129,6 +129,8 @@ public:
         return Status::make_ok();
     }
 
+    virtual Status reserve_argmax(std::size_t) { return Status::make_ok(); }
+
     virtual bool supports_argmax_reduce() const noexcept { return false; }
 
     virtual Status begin_argmax(int rank, const TpArgmaxInvocation& invocation) {
@@ -167,6 +169,8 @@ public:
         peer_out = nullptr;
         return Status::make_ok();
     }
+
+    virtual Status reserve_argmax(std::size_t) { return Status::make_ok(); }
 
     virtual bool supports_argmax_reduce() const noexcept { return false; }
 

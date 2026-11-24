@@ -43,6 +43,7 @@ public:
     Status reserve(std::size_t bytes) override;
     Status peer_write_target(int rank, std::size_t bytes, void*& peer_out) override;
     bool has_peer_links() const noexcept { return !tp_peer_link_map_none(peer_link_); }
+    Status reserve_argmax(std::size_t rows) override;
     bool supports_argmax_reduce() const noexcept override;
     Status begin_argmax(int rank, const TpArgmaxInvocation& invocation) override;
     Status finish_argmax(int rank, const TpArgmaxInvocation& invocation) override;

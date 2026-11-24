@@ -365,7 +365,7 @@ python3 tools/bench/evalscope_agentic.py run --profile hy4-c32 --runner builtin 
   --dataset-path /tmp/agentic.json --sweep-dir /tmp/agentic-results
 ```
 
-`summary.csv` と `summary.json` に同時要求数ごとの出力速度、最初のトークンまでの時間、プロンプトのキャッシュ利用率を保存する。既定で `ignore_eos` を有効にする。ストリームの更新1回に含まれるトークン数は、サーバー内部の投機ラウンド数とは別に集計する。
+`summary.csv` と `summary.json` に同時要求数ごとの出力速度、最初のトークンまでの時間、プロンプトのキャッシュ利用率を保存する。既定で `ignore_eos` を有効にする。「Tokens per stream update」は、受信したストリームの更新1回あたりのトークン数を示す。
 
 ## 統一ベンチマークスイート（`tools/bench/shelf_bench_suite.py`）
 

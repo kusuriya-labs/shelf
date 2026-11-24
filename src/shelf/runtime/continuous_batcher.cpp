@@ -243,7 +243,10 @@ Status ContinuousBatcher::set_ignore_eos(uint64_t id, bool ignore_eos) {
     if (it == request_index_.end()) {
         return Status::invalid_argument("request id not found", __FILE__, __LINE__);
     }
-    it->second->ignore_eos = ignore_eos;
+    auto& request = *it->second;
+    request.ignore_eos = ignore_eos;
+    if (request.dflash && request.dflash->decoder)
+        request.dflash->decoder->config.eos_tokens = ignore_eos ? qwen_hybrid::StopTokens{} : config_.eos_token_ids;
     return Status::make_ok();
 }
 
@@ -1261,6 +1264,8 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
             }
         }
         if (!dflash_.adaptive && measure_drafts != nullptr) slot.proposal_drafts = dflash_.num_drafts;
+        slot.batch_anchor_only = dflash_.adaptive && !request->structured_dflash &&
+            !dflash_.batch->tree_budget_auto && dflash_.batch->tree_budget == 0u;
         slot.remaining_tokens = request->max_new_tokens - request->generated_tokens;
         slot.page_tokens =
             request->prefix_capture != 0u ? config_.page_tokens : 0u;
@@ -1321,28 +1326,7 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
         if (cost_trace) clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu_start);
         const auto cost_start = cost_trace ? std::chrono::steady_clock::now()
                                             : std::chrono::steady_clock::time_point{};
-        auto run_verify = [&]() -> Result<DFlash2SpecBatchOutput> {
-            constexpr std::size_t cohort = 8u;
-            if (!dflash_.adaptive || slots.size() <= 16u || prefix_cache_ == nullptr)
-                return dflash2_spec_step_batch(*dflash_.batch, slots, other_decoding_requests);
-            DFlash2SpecBatchOutput merged;
-            merged.slots.reserve(slots.size());
-            for (std::size_t first = 0; first < slots.size(); first += cohort) {
-                const auto group = std::span(slots).subspan(first, std::min(cohort, slots.size() - first));
-                auto part = dflash2_spec_step_batch(*dflash_.batch, group,
-                    other_decoding_requests + static_cast<uint32_t>(slots.size() - group.size()));
-                if (!part.ok()) return part.status();
-                auto& batch = part.value();
-                merged.slots.insert(merged.slots.end(), batch.slots.begin(), batch.slots.end());
-                merged.rounds += batch.rounds;
-                merged.total_rows += batch.total_rows;
-                merged.round_ms += batch.round_ms;
-                merged.draft_gpu_ms += batch.draft_gpu_ms;
-                merged.verify_gpu_ms += batch.verify_gpu_ms;
-            }
-            return merged;
-        };
-        auto batch_result = run_verify();
+        auto batch_result = dflash2_spec_step_batch(*dflash_.batch, slots, other_decoding_requests);
         if (cost_trace) clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu_end);
         const double cost_wall = cost_trace ? std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - cost_start).count() : 0.0;
@@ -1419,12 +1403,12 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
             request.dflash->pending_token = step.pending_token;
             if (dflash_.stats != nullptr) {
                 DFlash2BatcherStats& stats = *dflash_.stats;
+                stats.proposed_drafts += step.num_drafts;
                 stats.accepted_drafts += step.num_accepted;
                 stats.generated_tokens += step.emitted_count;
-                if (step.num_accepted >= step.num_drafts) {
-                    ++stats.full_accepts;
-                } else {
-                    ++stats.partial_accepts;
+                if (step.num_drafts != 0u) {
+                    if (step.num_accepted == step.num_drafts) ++stats.full_accepts;
+                    else ++stats.partial_accepts;
                 }
                 const uint32_t bucket = std::min<uint32_t>(
                     request.sequence.position / kDFlash2PositionBucketTokens,

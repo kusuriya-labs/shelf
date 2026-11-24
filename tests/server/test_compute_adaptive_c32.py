@@ -38,6 +38,11 @@ def main():
                     assert len(streamed[rid]) == 48 and streamed[rid] == event["generated_ids"]
                     assert all(token >= 0 for token in streamed[rid])
                     pending.remove(rid)
+    stats = dict(line.strip().split("=", 1) for line in harness.stderr_lines
+                 if line.startswith(("DFLASH2_FULL_ACCEPT_RATE=", "DFLASH2_ACCEPTANCE_RATE=", "DFLASH2_PROPOSED_DRAFTS=")))
+    assert int(stats["DFLASH2_PROPOSED_DRAFTS"]) > 0
+    assert 0 <= float(stats["DFLASH2_ACCEPTANCE_RATE"]) <= 1
+    assert 0 <= float(stats["DFLASH2_FULL_ACCEPT_RATE"]) <= 1
     print("同時32要求で6回、ストリームと確定した生成列が一致")
     return 0
 

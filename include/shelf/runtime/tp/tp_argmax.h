@@ -40,6 +40,7 @@ struct TpArgmaxInvocation {
     hipStream_t stream = nullptr;
 };
 
+bool tp_argmax_enabled() noexcept;
 bool tp_greedy_argmax_eligible(const TpGreedyProbe& probe) noexcept;
 
 void tp_argmax_pack_host(const float* logits, uint32_t rows, uint32_t row_stride,

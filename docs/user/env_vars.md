@@ -33,8 +33,8 @@ embedding、prefix checkpoint、offload 用バッファもドライバの GTT �
 | `SHELF_ARENA_VMM` | `0` | runtime | `1` で GPU arena に VMM 割り当て経路を使用する |
 | `SHELF_KV_POOL_PAGES` | 未設定（自動計算） | compute | 物理 KV pool のページ数を明示指定する（PP 等で全 stage のページ数を揃える用途） |
 | `SHELF_LM_HEAD_INT8` | `1` | compute / bench / runtime | `1` で BF16 の `lm_head` をロード時に INT8 W32 へ量子化する（`--lm-head-int8` と同等） |
-| `SHELF_TP_TRANSPORT` | `auto` | compute / server / bench | TP 通信の transport を強制選択する（`auto` / `p2p` / `host`、`--tp-transport` と同等） |
-| `SHELF_TP_ARGMAX` | `0` | server | `1` で、全出力が制約なしの greedy サンプリングであり、最終語彙投影を TP 分割した場合に、各行の最大値とトークン ID を交換する |
+| `SHELF_TP_TRANSPORT` | `auto` | compute / server / bench | TP 通信方式（`--tp-transport` と同等）。`host` は全方向でホスト転送、`auto` と `p2p` は検査を通った方向で peer 転送を使う |
+| `SHELF_TP_ARGMAX` | `0` | compute / server / bench | `1` で、全出力が制約なしの greedy サンプリングであり、最終語彙投影を TP 分割した場合に、各行の最大値とトークン ID を交換する |
 | `SHELF_TP_P2P_PROBE` | `1` | runtime | 起動時に方向ごとの peer 書き込みを検証する。`0` ではドライバーのアクセス可否を使う |
 | `SHELF_TP_FUSE` | `1` | runtime | `0` で HIP peer TP transport の融合を無効にする |
 | `SHELF_TP_SIGNAL_BARRIER` | 未設定 | compute / server / bench / tests | `1` で StreamSignal を強制、`0` で Event に固定する |

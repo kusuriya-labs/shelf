@@ -407,11 +407,7 @@ Status record_value_trace(const ::shelf::runtime::Program& program, std::size_t 
 }
 
 bool greedy_argmax_allowed(const HostExecutionContext& ctx) {
-    static const bool enabled = [] {
-        const char* env = std::getenv("SHELF_TP_ARGMAX");
-        return env != nullptr && std::strcmp(env, "1") == 0;
-    }();
-    if (!enabled || !ctx.sampled_ids_only || ctx.actual_outputs == 0u ||
+    if (!::shelf::runtime::tp_argmax_enabled() || !ctx.sampled_ids_only || ctx.value_trace || g_op_dump_enabled || ctx.actual_outputs == 0u ||
         ctx.actual_sampled_outputs != ctx.actual_outputs || ctx.staged_requests == nullptr || ctx.staged_request_count == 0u)
         return false;
     for (uint32_t i = 0u; i < ctx.staged_request_count; ++i) {

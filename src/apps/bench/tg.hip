@@ -970,6 +970,7 @@ int run_tg(int argc, char** argv) {
             req.sample = true;
             std::vector<::shelf::runtime::ScheduledRequest> reqs = {req};
             ::shelf::runtime::ScheduledBatch batch;
+            batch.sampled_ids_only = tp_coordinator != nullptr;
             batch.token_ids = token_ids.data();
             batch.requests = reqs;
             batch.num_tokens = 1;

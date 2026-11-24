@@ -178,6 +178,12 @@ Status TpBarrierGroup::arrive(int rank, const TpSumTarget& target, hipStream_t s
     return result;
 }
 
+Status TpBarrierGroup::reserve_argmax(std::size_t rows) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (aborted_) return abort_status_;
+    return transport_->reserve_argmax(rows);
+}
+
 bool TpBarrierGroup::supports_argmax_reduce() const noexcept {
     return transport_ != nullptr && transport_->supports_argmax_reduce();
 }

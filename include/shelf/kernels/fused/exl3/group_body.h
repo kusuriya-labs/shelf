@@ -87,19 +87,17 @@ group_body(const int8_t *__restrict__ codes, const float *__restrict__ scales,
                     nxt[s][2] = kNeedW2 ? wp2[(8u + s) * kt_stride] : 0u;
                 }
             }
-        int32x2_t afrag[MT <= 3 ? MT : 1][MT <= 3 ? 8 : 1];
-        if constexpr (MT <= 3) {
+        int32x2_t afrag[MT][8];
 #pragma unroll
-            for (int mt = 0; mt < MT; ++mt)
+        for (int mt = 0; mt < MT; ++mt)
 #pragma unroll
-                for (uint32_t s = 0u; s < 8u; ++s) {
-                    afrag[mt][s] = *reinterpret_cast<const int32x2_t *>(arow[mt] + g * kBlock + s * 16u);
-                    if (!arow_ok[mt]) {
-                        afrag[mt][s][0] = 0;
-                        afrag[mt][s][1] = 0;
-                    }
+            for (uint32_t s = 0u; s < 8u; ++s) {
+                afrag[mt][s] = *reinterpret_cast<const int32x2_t *>(arow[mt] + g * kBlock + s * 16u);
+                if (!arow_ok[mt]) {
+                    afrag[mt][s][0] = 0;
+                    afrag[mt][s][1] = 0;
                 }
-        }
+            }
         int32x8_t acc[MT];
 #pragma unroll
         for (int mt = 0; mt < MT; ++mt)
@@ -108,17 +106,6 @@ group_body(const int8_t *__restrict__ codes, const float *__restrict__ scales,
                 acc[mt][i] = 0;
 #pragma unroll
         for (uint32_t s = 0u; s < 8u; ++s) {
-            int32x2_t afrag_s[MT <= 3 ? 1 : MT];
-            if constexpr (MT > 3) {
-#pragma unroll
-                for (int mt = 0; mt < MT; ++mt) {
-                    afrag_s[mt] = *reinterpret_cast<const int32x2_t *>(arow[mt] + g * kBlock + s * 16u);
-                    if (!arow_ok[mt]) {
-                        afrag_s[mt][0] = 0;
-                        afrag_s[mt][1] = 0;
-                    }
-                }
-            }
             int32x2_t b;
             uint32_t w0, w1, w2;
             if constexpr (PIPE) {
@@ -167,8 +154,7 @@ group_body(const int8_t *__restrict__ codes, const float *__restrict__ scales,
             b[1] = static_cast<int32_t>(packed[1] ^ 0x80808080u);
 #pragma unroll
             for (int mt = 0; mt < MT; ++mt) {
-                const int32x2_t av = MT <= 3 ? afrag[mt][s] : afrag_s[mt];
-                acc[mt] = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32_gfx12(true, av, true, b, acc[mt], false);
+                acc[mt] = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32_gfx12(true, afrag[mt][s], true, b, acc[mt], false);
             }
         }
 

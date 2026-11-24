@@ -147,6 +147,14 @@ target_include_directories(test_tp_reduction PRIVATE "${CMAKE_SOURCE_DIR}/src")
 shelf_add_test(NAME test_tp_argmax SOURCE unit/test_tp_argmax.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
 shelf_add_test(NAME test_tp_peer_links SOURCE unit/test_tp_peer_links.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
 shelf_add_test(NAME test_tp_argmax_kernels SOURCE unit/test_tp_argmax.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_runtime)
+foreach(ranks IN ITEMS 2 4)
+    add_test(NAME test_tp_argmax_physical_${ranks} COMMAND shelf-gpu-test-runner
+        --gpu-count ${ranks} --cost-gb 1 --timeout 120
+        --state-dir "${CMAKE_BINARY_DIR}/gpu-test-state"
+        -- $<TARGET_FILE:test_tp_argmax_kernels> --physical-${ranks})
+    set_tests_properties(test_tp_argmax_physical_${ranks} PROPERTIES
+        LABELS "gpu${ranks};optional" TIMEOUT 1080 SKIP_RETURN_CODE 77)
+endforeach()
 shelf_add_test(NAME test_tp_barrier_group SOURCE unit/test_tp_barrier_group.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
 target_include_directories(test_tp_barrier_group PRIVATE "${CMAKE_SOURCE_DIR}/src")
 shelf_add_test(NAME test_tp_transport SOURCE unit/test_tp_transport.cpp LABELS "gpu2;optional" TIMEOUT 120 GPU_COUNT 2 GPU_COST_GB 1 LIBRARIES shelf_runtime)

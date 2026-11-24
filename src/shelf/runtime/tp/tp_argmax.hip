@@ -11,6 +11,8 @@
 #include <climits>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 
 namespace shelf::runtime {
 
@@ -111,6 +113,14 @@ uint32_t grid_for(std::size_t count, uint32_t threads) {
     return static_cast<uint32_t>(std::min<uint64_t>(blocks, 65535u));
 }
 
+}
+
+bool tp_argmax_enabled() noexcept {
+    static const bool enabled = [] {
+        const char* value = std::getenv("SHELF_TP_ARGMAX");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    return enabled;
 }
 
 bool tp_greedy_argmax_eligible(const TpGreedyProbe& probe) noexcept {

@@ -17,9 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import support  # noqa: E402
 
-REPO = Path(__file__).resolve().parents[2]
-COMPUTE = REPO / "build/shelf-compute"
-MODEL = REPO / "models/Qwen3.8-27B-QSA-Quark-AWQ-MXFP4"
+COMPUTE = support.compute_binary()
+MODEL = support.model_dir()
 
 
 def run_compute(extra, model_dir=MODEL, device="0"):

@@ -74,7 +74,6 @@ hipError_t launch_exl3_mul24_rowscale(
 // B prefill: reconstructed dense INT8 weights in trellis n-major tile order,
 // per-128-K activation scales, gfx12 iu8 WMMA into int32 followed by
 // group-scale FP32 FMA.
-// Writes F32 yprime [rows][n] including the EXL3 grid-step factor.
 hipError_t launch_exl3_mul24_prefill_wmma(
     const int8_t* codes, const float* scales,
     uint32_t code_stride, uint32_t scale_stride_bytes,

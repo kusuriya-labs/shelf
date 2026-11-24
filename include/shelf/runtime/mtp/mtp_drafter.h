@@ -307,12 +307,15 @@ struct MtpDraftResult {
     bool decode_only = false;
 };
 
+struct MtpBoundaryCapture;
+
 Result<MtpDraftResult> mtp_draft(
     MtpDrafter& drafter,
     Executor& target,
     state::PagedSequenceState& target_sequence,
     int32_t pending_token,
-    uint32_t remaining_tokens);
+    uint32_t remaining_tokens, uint32_t page_tokens = 0u,
+    MtpBoundaryCapture* boundary = nullptr);
 
 struct MtpDraftSnapshot;
 
