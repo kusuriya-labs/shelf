@@ -4,6 +4,7 @@
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/decode.h>
 #include <algorithm>
 #include <bit>
+#include <charconv>
 #include <chrono>
 #include <cstdio>
 #include <fstream>
@@ -415,6 +416,8 @@ std::vector<int> Target::forward(const std::vector<int> &ids, bool verify, bool 
     if (std::any_of(ids.begin(), ids.end(), [](int id) { return id < 0 || id >= 120832; }))
         throw std::runtime_error("token ID が範囲外です");
     auto &gpu = op.gpu;
+    if (gpu.kv_pages_total > 0 && !gpu.allocate_slot_pages(op.slot, size_t(start) + size_t(rows)))
+        throw std::runtime_error("KV ページが不足しています");
     op.arena.cursor = base;
     if (gpu.graph_input && target_graph && !gpu.target_capture_failed && need_head && dump.empty() &&
         Hy4MoePlan::supports(rows) && (verify || rows == 1)) {
@@ -675,9 +678,24 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
     size_t restored = 0;
     bool use_snap = false;
     std::vector<std::vector<uint8_t>> pending_restore;
+    if (gpu.kv_pages_total > 0 && gpu.pages_for_tokens(ids.size() + size_t(count)) > gpu.kv_pages_total)
+        throw std::runtime_error("要求長が KV プール容量を超えています");
+    struct SlotPageGuard {
+        Residency &gpu;
+        bool release = true;
+        ~SlotPageGuard() {
+            if (release && gpu.kv_pages_total > 0)
+                gpu.release_slot_pages(0);
+        }
+    } page_guard{gpu, true};
     if (prefix_slot) {
         if (prefix_stats && prefix_stats->enabled) {
             restored = match_hy4_prefix(*prefix_slot, ids, gpu, use_snap);
+            if (gpu.kv_pages_total > 0 && restored > 0 &&
+                prefix_slot->pages.size() < gpu.pages_for_tokens(restored)) {
+                restored = 0;
+                use_snap = false;
+            }
             if (restored > 0) {
                 ++prefix_stats->hits;
                 ++prefix_stats->restores;
@@ -689,6 +707,15 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
             prefix_stats->reuse_slots = gpu.max_slots;
             prefix_stats->entries = prefix_slot->valid ? 1 : 0;
         }
+        gpu.release_slot_pages(0);
+        if (gpu.kv_pages_total > 0 && restored > 0) {
+            const size_t keep = gpu.pages_for_tokens(restored);
+            for (size_t pi = 0; pi < keep; ++pi)
+                gpu.slot_page_tables[0].push_back(prefix_slot->pages[pi]);
+            gpu.retain_pages(gpu.slot_page_tables[0]);
+            gpu.sync_slot_page_table(0);
+        }
+        gpu.release_pages(prefix_slot->pages);
         prefix_slot->valid = false;
         prefix_slot->snap_valid = false;
         prefix_slot->tokens.clear();
@@ -701,6 +728,16 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
             prefix_slot->swa_snap.clear();
         if (prefix_stats)
             prefix_stats->entries = 0;
+    } else if (gpu.kv_pages_total > 0) {
+        gpu.release_slot_pages(0);
+    }
+    if (gpu.kv_pages_total > 0) {
+        const size_t reserve_toks = std::min(gpu.tokens, ids.size() + size_t(count) + (gpu.model.has_draft ? 5 : 0));
+        const size_t target_toks = gpu.pages_for_tokens(reserve_toks) <= gpu.kv_pages_total
+            ? reserve_toks
+            : ids.size() + size_t(count);
+        if (!gpu.allocate_slot_pages(0, target_toks))
+            throw std::runtime_error("KV ページ割当に失敗しました");
     }
     if (restored_out) *restored_out = restored;
     struct Lane {
@@ -782,7 +819,10 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
             const int block_rows = drafts + 1;
             while (int(generated.size()) < count && (ignore_eos || generated.back() != 120025)) {
                 int anchor = generated.back();
-                if (!gpu.model.has_draft || target.history.size() + block_rows > gpu.tokens ||
+                const size_t draft_end = target.history.size() + size_t(block_rows);
+                const bool draft_fits_kv = gpu.kv_pages_total == 0 ||
+                    gpu.pages_for_tokens(draft_end) <= gpu.slot_page_tables[0].size();
+                if (!gpu.model.has_draft || draft_end > gpu.tokens || !draft_fits_kv ||
                     int(generated.size()) + 1 == count) {
                     max_written = std::max(max_written, target.history.size() + 1);
                     auto output = target.forward({anchor}, false);
@@ -863,6 +903,13 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
         prefix_slot->snap_max_written = ids.size();
         prefix_slot->snap_valid = prefix_slot->snap_pos > 0 && !prefix_slot->swa_snap.empty() &&
                                   !prefix_slot->swa_snap[0].empty();
+        if (gpu.kv_pages_total > 0 && prefix_slot->valid) {
+            const size_t keep = gpu.pages_for_tokens(prefix_slot->tokens.size());
+            prefix_slot->pages.assign(gpu.slot_page_tables[0].begin(),
+                                      gpu.slot_page_tables[0].begin() +
+                                          ptrdiff_t(std::min(keep, gpu.slot_page_tables[0].size())));
+            gpu.retain_pages(prefix_slot->pages);
+        }
         prefix_stats->entries = prefix_slot->valid ? 1 : 0;
         if (prefix_slot->valid) ++prefix_stats->saves;
     }
@@ -904,6 +951,7 @@ struct BatchLane {
     bool ignore_eos = false;
     float *target_probs = nullptr;
     float *draft_probs = nullptr;
+    size_t token_cap = 0;
 };
 struct BatchStats {
     size_t rounds = 0, accepted = 0, tokens = 0;
@@ -1145,9 +1193,16 @@ void decode_batch(Target &target, std::vector<BatchLane> &lanes, BatchStats &sta
     const int block_rows = drafts + 1;
     bool speculative = gpu.batch_draft && lanes.size() <= Hy4GroupedPlan::max_rows / block_rows &&
         std::all_of(lanes.begin(), lanes.end(), [&](const BatchLane &lane) {
-            return lane.history.size() + block_rows <= gpu.tokens && lane.generated.size() + 1 < size_t(lane.limit);
+            size_t cap = lane.token_cap ? lane.token_cap : gpu.tokens;
+            return lane.history.size() + size_t(block_rows) <= cap && lane.generated.size() + 1 < size_t(lane.limit);
         });
     int rows = speculative ? block_rows : 1;
+    if (gpu.kv_pages_total > 0) {
+        for (const auto &lane : lanes) {
+            if (!gpu.allocate_slot_pages(lane.slot, lane.history.size() + size_t(rows)))
+                throw std::runtime_error("decode_batch の KV ページ割当に失敗しました");
+        }
+    }
     BatchLayout layout(op, lanes, rows);
     std::vector<int> ids;
     if (speculative) {
@@ -1276,6 +1331,22 @@ std::vector<std::vector<int>> generate_batch(Residency &gpu, const std::vector<s
     }
     auto now = std::chrono::steady_clock::now;
     auto begin = now();
+    struct BatchPageGuard {
+        Residency &gpu;
+        size_t count;
+        ~BatchPageGuard() {
+            if (gpu.kv_pages_total > 0)
+                for (size_t s = 0; s < count; ++s)
+                    gpu.release_slot_pages(int(s));
+        }
+    } batch_guard{gpu, batch};
+    if (gpu.kv_pages_total > 0) {
+        for (size_t s = 0; s < batch; ++s) {
+            gpu.release_slot_pages(int(s));
+            if (!gpu.allocate_slot_pages(int(s), prompts[s].size() + size_t(counts[s])))
+                throw std::runtime_error("バッチの KV ページが不足しています");
+        }
+    }
     Target target(gpu, options.temperature, options.seed, options.top_k, options.top_p, 0, resolved_drafts);
     target.op.slot_draft = gpu.batch_draft;
     std::vector<std::vector<int>> histories(batch), generated(batch);
@@ -1325,6 +1396,8 @@ struct Hy4BatchSession::Impl {
         size_t max_written = 0;
         size_t snap_pos = 0;
         size_t snap_max_written = 0;
+        size_t reserved_pages = 0;
+        uint64_t admit_seq = 0;
         std::vector<uint8_t> swa_snap_buf;
         std::vector<uint8_t> swa_pending;
     };
@@ -1334,88 +1407,266 @@ struct Hy4BatchSession::Impl {
     Emit emit;
     Done done;
     std::vector<std::optional<State>> states;
-    std::vector<Hy4PrefixSlot> slot_caches;
+    std::vector<Hy4PrefixSlot> prefix_entries;
+    std::vector<uint64_t> slot_swa_gen;
+    std::vector<size_t> slot_reserved_pages;
     std::deque<Hy4Request> waiting;
     BatchStats stats;
     Hy4PrefixStats prefix;
     uint64_t use_clock = 0;
+    uint64_t admit_clock = 0;
     size_t last_prompt = 0;
     size_t last_restored = 0;
+    int prefill_decode_interval = 1;
+    size_t prefill_chunks_since_decode = 0;
+    size_t prefill_tokens_since_decode = 0;
+    bool last_prefill_incomplete = false;
+    size_t max_prefix_entries = 64;
     Impl(Residency &gpu, Emit emit, Done done, int drafts)
         : gpu(gpu), draft_tokens(Residency::resolve_draft_tokens(drafts ? drafts : gpu.draft_tokens)),
-          emit(std::move(emit)), done(std::move(done)), states(gpu.max_slots), slot_caches(gpu.max_slots) {
+          emit(std::move(emit)), done(std::move(done)), states(gpu.max_slots),
+          slot_swa_gen(gpu.max_slots, 0), slot_reserved_pages(gpu.max_slots, 0),
+          max_prefix_entries(std::max<size_t>(size_t(gpu.max_slots) * 4, 64)) {
         if (gpu.tp_size > 1)
             throw std::invalid_argument("バッチセッションは TP=1 で使用してください");
         prefix.enabled = true;
         prefix.reuse_slots = gpu.max_slots;
+        if (const char *env = std::getenv("SHELF_HY4_PREFILL_DECODE_INTERVAL"); env && *env) {
+            int val = 0;
+            auto [p, err] = std::from_chars(env, env + std::strlen(env), val);
+            if (err != std::errc{} || p != env + std::strlen(env) || val < 0)
+                throw std::runtime_error("SHELF_HY4_PREFILL_DECODE_INTERVAL が不正です");
+            prefill_decode_interval = val;
+        }
+    }
+    ~Impl() {
+        for (size_t s = 0; s < states.size(); ++s) {
+            if (states[s] && gpu.kv_pages_total > 0)
+                gpu.release_slot_pages(int(s));
+        }
+        for (auto &entry : prefix_entries)
+            gpu.release_pages(entry.pages);
+    }
+    size_t unmapped_reserved_pages() const {
+        size_t res = 0;
+        for (size_t s = 0; s < states.size(); ++s) {
+            if (!states[s]) continue;
+            size_t mapped = gpu.slot_page_tables[s].size();
+            if (slot_reserved_pages[s] > mapped)
+                res += slot_reserved_pages[s] - mapped;
+        }
+        return res;
+    }
+    size_t avail_for_new() const {
+        size_t free_p = gpu.free_kv_pages();
+        size_t res_p = unmapped_reserved_pages();
+        return free_p > res_p ? free_p - res_p : 0;
+    }
+    bool evict_one_prefix(const Hy4PrefixSlot *protect = nullptr) {
+        auto best_it = prefix_entries.end();
+        for (auto it = prefix_entries.begin(); it != prefix_entries.end(); ++it) {
+            if (&(*it) == protect) continue;
+            if (best_it == prefix_entries.end() || it->last_used < best_it->last_used)
+                best_it = it;
+        }
+        if (best_it == prefix_entries.end())
+            return false;
+        gpu.release_pages(best_it->pages);
+        prefix_entries.erase(best_it);
+        ++prefix.evictions;
+        return true;
+    }
+    size_t match_prefix_entry(const Hy4PrefixSlot &entry, const std::vector<int> &input, size_t swa_slots,
+                              bool &use_snap, int &preferred_slot) const {
+        use_snap = false;
+        preferred_slot = -1;
+        if (!entry.valid || entry.tokens.empty() || input.size() <= 1)
+            return 0;
+        size_t common = 0;
+        size_t limit = std::min(entry.tokens.size(), input.size() - 1);
+        while (common < limit && entry.tokens[common] == input[common])
+            ++common;
+        if (gpu.kv_pages_total > 0)
+            common = std::min(common, entry.pages.size() * kv_page_tokens);
+        const bool live_ok = entry.live_swa_slot >= 0 && size_t(entry.live_swa_slot) < states.size() &&
+                             !states[entry.live_swa_slot] &&
+                             slot_swa_gen[entry.live_swa_slot] == entry.live_swa_gen;
+        if (live_ok) {
+            size_t live_pos = (common / 4) * 4;
+            if (live_pos > 0 && swa_range_intact(live_pos, entry.max_written, swa_slots)) {
+                preferred_slot = entry.live_swa_slot;
+                return live_pos;
+            }
+        }
+        if (entry.snap_valid) {
+            size_t snap_limit = std::min(common, entry.snap_pos);
+            size_t snap_pos = (snap_limit / 4) * 4;
+            if (snap_pos > 0 && swa_range_intact(snap_pos, entry.snap_max_written, swa_slots)) {
+                use_snap = true;
+                return snap_pos;
+            }
+        }
+        return 0;
     }
     void fill() {
         while (!waiting.empty()) {
             const auto &req = waiting.front();
-            int chosen = -1;
+            int free_slot = -1;
+            for (size_t s = 0; s < states.size(); ++s) {
+                if (!states[s]) {
+                    free_slot = int(s);
+                    break;
+                }
+            }
+            if (free_slot < 0)
+                break;
+            size_t best_idx = SIZE_MAX;
             size_t best_match = 0;
             bool best_snap = false;
+            int best_pref_slot = -1;
+            uint64_t best_clock = 0;
             if (prefix.enabled) {
-                uint64_t best_clock = 0;
-                for (size_t s = 0; s < states.size(); ++s) {
-                    if (states[s]) continue;
+                const size_t swa_slots = swa_window_slots(gpu);
+                for (size_t i = 0; i < prefix_entries.size(); ++i) {
                     bool snap = false;
-                    size_t m = match_hy4_prefix(slot_caches[s], req.input_ids, gpu, snap);
-                    if (m > 0 && (chosen < 0 || m > best_match || (m == best_match && slot_caches[s].last_used > best_clock))) {
-                        chosen = int(s);
+                    int pref_slot = -1;
+                    size_t m = match_prefix_entry(prefix_entries[i], req.input_ids, swa_slots, snap, pref_slot);
+                    if (m > 0 && (best_idx == SIZE_MAX || m > best_match ||
+                                  (m == best_match && prefix_entries[i].last_used > best_clock))) {
+                        best_idx = i;
                         best_match = m;
                         best_snap = snap;
-                        best_clock = slot_caches[s].last_used;
+                        best_pref_slot = pref_slot;
+                        best_clock = prefix_entries[i].last_used;
                     }
                 }
             }
-            if (chosen < 0) {
-                uint64_t oldest = UINT64_MAX;
-                for (size_t s = 0; s < states.size(); ++s) {
-                    if (states[s]) continue;
-                    if (!slot_caches[s].valid) {
-                        chosen = int(s);
+            int chosen = best_pref_slot >= 0 ? best_pref_slot : free_slot;
+            size_t total_pages = gpu.kv_pages_total ? gpu.pages_for_tokens(req.input_ids.size() + size_t(req.count)) : 0;
+            std::vector<uint8_t> snap_copy;
+            if (gpu.kv_pages_total > 0) {
+                size_t shared_full = best_match / kv_page_tokens;
+                size_t rem = best_match % kv_page_tokens;
+                size_t need_new = total_pages > shared_full ? total_pages - shared_full : 0;
+                const Hy4PrefixSlot *protect = best_idx != SIZE_MAX ? &prefix_entries[best_idx] : nullptr;
+                while (avail_for_new() < need_new) {
+                    if (!evict_one_prefix(protect))
                         break;
-                    }
-                    if (slot_caches[s].last_used < oldest) {
-                        oldest = slot_caches[s].last_used;
-                        chosen = int(s);
+                    if (protect) {
+                        best_idx = SIZE_MAX;
+                        for (size_t i = 0; i < prefix_entries.size(); ++i) {
+                            if (&prefix_entries[i] == protect) {
+                                best_idx = i;
+                                break;
+                            }
+                        }
                     }
                 }
+                bool steal_best_tail = false;
+                if (avail_for_new() < need_new && best_idx != SIZE_MAX) {
+                    auto &entry = prefix_entries[best_idx];
+                    bool can_steal_tail = (rem > 0 && shared_full < entry.pages.size() &&
+                                           gpu.kv_page_refs[entry.pages[shared_full]] == 1);
+                    size_t extra_trailing = 0;
+                    for (size_t pi = shared_full + (can_steal_tail ? 1 : 0); pi < entry.pages.size(); ++pi) {
+                        if (entry.pages[pi] >= 0 && gpu.kv_page_refs[entry.pages[pi]] == 1)
+                            ++extra_trailing;
+                    }
+                    size_t effective_need = need_new - (can_steal_tail ? 1 : 0);
+                    if (avail_for_new() + extra_trailing >= effective_need) {
+                        steal_best_tail = can_steal_tail;
+                    } else {
+                        gpu.release_pages(entry.pages);
+                        prefix_entries.erase(prefix_entries.begin() + ptrdiff_t(best_idx));
+                        ++prefix.evictions;
+                        best_idx = SIZE_MAX;
+                        best_match = 0;
+                        best_snap = false;
+                        chosen = free_slot;
+                        shared_full = 0;
+                        rem = 0;
+                        need_new = total_pages;
+                    }
+                }
+                if (avail_for_new() < (need_new - (steal_best_tail ? 1 : 0)))
+                    break;
+                gpu.release_slot_pages(chosen);
+                if (best_idx != SIZE_MAX && best_match > 0) {
+                    auto &entry = prefix_entries[best_idx];
+                    if (best_snap && !entry.swa_snap.empty())
+                        snap_copy = entry.swa_snap[0];
+                    std::vector<int32_t> restored_pages;
+                    restored_pages.reserve(shared_full + (rem > 0 ? 1 : 0));
+                    for (size_t pi = 0; pi < shared_full; ++pi)
+                        restored_pages.push_back(entry.pages[pi]);
+                    gpu.retain_pages(restored_pages);
+                    int32_t tail_src = -1;
+                    if (rem > 0) {
+                        if (steal_best_tail) {
+                            int32_t p = entry.pages[shared_full];
+                            entry.pages[shared_full] = -1;
+                            restored_pages.push_back(p);
+                        } else {
+                            tail_src = entry.pages[shared_full];
+                            int32_t p = gpu.alloc_single_page();
+                            if (p < 0)
+                                throw std::runtime_error("KV ページ割当に失敗しました");
+                            restored_pages.push_back(p);
+                        }
+                    }
+                    const size_t remaining_pages = total_pages > restored_pages.size() ? total_pages - restored_pages.size() : 0;
+                    if (steal_best_tail || avail_for_new() < remaining_pages) {
+                        gpu.release_pages(entry.pages);
+                        prefix_entries.erase(prefix_entries.begin() + ptrdiff_t(best_idx));
+                        ++prefix.evictions;
+                    } else {
+                        entry.last_used = ++use_clock;
+                    }
+                    gpu.slot_page_tables[chosen] = std::move(restored_pages);
+                    gpu.sync_slot_page_table(chosen);
+                    if (tail_src >= 0)
+                        copy_dsa_page_prefix(gpu, 0, gpu.slot_page_tables[chosen].back(), tail_src, int(rem), gpu.compute[0]);
+                }
+                if (!gpu.allocate_slot_pages(chosen, req.input_ids.size()))
+                    throw std::runtime_error("KV ページ割当に失敗しました");
+            } else if (best_idx != SIZE_MAX && best_match > 0 && best_snap && !prefix_entries[best_idx].swa_snap.empty()) {
+                snap_copy = prefix_entries[best_idx].swa_snap[0];
             }
-            if (chosen < 0) break;
-            auto &slot_cache = slot_caches[chosen];
+            ++slot_swa_gen[chosen];
+            slot_reserved_pages[chosen] = total_pages;
             auto &state = states[chosen].emplace();
             state.request = std::move(waiting.front());
             waiting.pop_front();
+            state.reserved_pages = total_pages;
+            state.admit_seq = ++admit_clock;
             if (prefix.enabled) {
                 if (best_match > 0) {
                     ++prefix.hits;
                     ++prefix.restores;
-                    if (best_snap && !slot_cache.swa_snap.empty())
-                        state.swa_pending = std::move(slot_cache.swa_snap[0]);
+                    if (best_snap && !snap_copy.empty())
+                        state.swa_pending = std::move(snap_copy);
                     state.prefetched = best_match;
                     state.restored_tokens = best_match;
                     state.max_written = best_match;
                     state.history.assign(state.request.input_ids.begin(), state.request.input_ids.begin() + best_match);
                 } else {
-                    if (slot_cache.valid) ++prefix.evictions;
                     ++prefix.misses;
                 }
             }
-            slot_cache = {};
         }
     }
     void finish(int slot, const char *reason) {
         auto state = std::move(*states[slot]);
         states[slot].reset();
+        slot_reserved_pages[slot] = 0;
         if (prefix.enabled && reason &&
-            (std::string_view(reason) == "stop" || std::string_view(reason) == "length")) {
-            auto &cache = slot_caches[slot];
+            (std::string_view(reason) == "stop" || std::string_view(reason) == "length") &&
+            !state.history.empty()) {
+            Hy4PrefixSlot cache;
             cache.tokens = std::move(state.history);
             cache.max_written = state.max_written;
             cache.last_used = ++use_clock;
-            cache.valid = !cache.tokens.empty();
+            cache.valid = true;
             cache.snap_pos = state.snap_pos;
             cache.snap_max_written = state.snap_max_written;
             cache.snap_valid = !state.swa_snap_buf.empty() && cache.snap_pos > 0;
@@ -1423,9 +1674,29 @@ struct Hy4BatchSession::Impl {
                 cache.swa_snap.resize(1);
                 cache.swa_snap[0] = std::move(state.swa_snap_buf);
             }
-            if (cache.valid) ++prefix.saves;
+            cache.live_swa_slot = slot;
+            cache.live_swa_gen = slot_swa_gen[slot];
+            if (gpu.kv_pages_total > 0) {
+                const size_t keep = gpu.pages_for_tokens(cache.tokens.size());
+                auto &table = gpu.slot_page_tables[slot];
+                if (table.size() > keep) {
+                    std::vector<int32_t> extra(table.begin() + ptrdiff_t(keep), table.end());
+                    table.resize(keep);
+                    gpu.release_pages(extra);
+                }
+                cache.pages = std::move(table);
+                table.clear();
+            }
+            while (prefix_entries.size() >= max_prefix_entries) {
+                if (!evict_one_prefix())
+                    break;
+            }
+            prefix_entries.push_back(std::move(cache));
+            ++prefix.saves;
         } else {
-            slot_caches[slot] = {};
+            ++slot_swa_gen[slot];
+            if (gpu.kv_pages_total > 0)
+                gpu.release_slot_pages(slot);
         }
         last_prompt = state.request.input_ids.size();
         last_restored = state.restored_tokens;
@@ -1440,58 +1711,94 @@ struct Hy4BatchSession::Impl {
             target->op.slot_draft = gpu.batch_draft;
         }
         target->draft_tokens = draft_tokens;
+        int prefill_slot = -1;
+        uint64_t best_admit = UINT64_MAX;
+        bool has_decode = false;
         for (size_t s = 0; s < states.size(); ++s) {
-            if (!states[s] || states[s]->prefetched == states[s]->request.input_ids.size()) continue;
+            if (!states[s]) continue;
+            if (states[s]->prefetched < states[s]->request.input_ids.size()) {
+                if (states[s]->admit_seq < best_admit) {
+                    best_admit = states[s]->admit_seq;
+                    prefill_slot = int(s);
+                }
+            } else {
+                has_decode = true;
+            }
+        }
+        const bool should_decode_interleave =
+            prefill_slot >= 0 && has_decode && prefill_decode_interval > 0 &&
+            prefill_chunks_since_decode >= size_t(prefill_decode_interval) &&
+            (last_prefill_incomplete ||
+             prefill_tokens_since_decode >= size_t(states[prefill_slot]->request.options.chunk));
+        if (prefill_slot >= 0 && !should_decode_interleave) {
+            const int s = prefill_slot;
             auto &state = *states[s];
             auto &request = state.request;
             if (!state.swa_pending.empty()) {
-                restore_swa_snapshot(gpu, int(s), 0, target->op.stream, state.swa_pending);
+                restore_swa_snapshot(gpu, s, 0, target->op.stream, state.swa_pending);
                 state.swa_pending.clear();
             }
             auto end = std::min(state.prefetched + size_t(request.options.chunk), request.input_ids.size());
+            const size_t chunk_len = end - state.prefetched;
+            const bool incomplete = end < request.input_ids.size();
             target->op.batch_decode = false;
-            target->op.slot = int(s);
+            target->op.slot = s;
             target->history = std::move(state.history);
             target->temperature = request.options.temperature;
             target->seed = request.options.seed;
             target->top_k = request.options.top_k;
             target->top_p = request.options.top_p;
             auto result = target->forward({request.input_ids.begin() + state.prefetched, request.input_ids.begin() + end},
-                                         false, end == request.input_ids.size());
+                                         false, !incomplete);
             state.history = std::move(target->history);
             state.max_written = std::max(state.max_written, end);
             state.prefetched = end;
-            if (end == request.input_ids.size() && prefix.enabled && gpu.cache[0][2]) {
+            ++prefill_chunks_since_decode;
+            prefill_tokens_since_decode += chunk_len;
+            last_prefill_incomplete = incomplete;
+            if (!incomplete && prefix.enabled && gpu.cache[0][2]) {
                 state.snap_pos = align_hy4_prefix(end, end + 1);
                 state.snap_max_written = end;
                 if (state.snap_pos > 0)
-                    save_swa_snapshot(gpu, int(s), 0, target->op.stream, state.swa_snap_buf);
+                    save_swa_snapshot(gpu, s, 0, target->op.stream, state.swa_snap_buf);
             }
             if (!result.empty()) {
                 state.generated.push_back(result.back());
                 if (emit) emit(request.id, result.back());
                 const bool hit_eos = !request.options.ignore_eos && result.back() == 120025;
-                if (hit_eos || state.generated.size() == size_t(request.count))
-                    finish(int(s), hit_eos ? "stop" : "length");
+                if (hit_eos || state.generated.size() == size_t(request.count)) {
+                    finish(s, hit_eos ? "stop" : "length");
+                    fill();
+                }
             }
             return;
         }
         std::vector<BatchLane> lanes;
-        for (size_t s = 0; s < states.size(); ++s) if (states[s]) {
+        for (size_t s = 0; s < states.size(); ++s) if (states[s] && states[s]->prefetched == states[s]->request.input_ids.size()) {
             auto &state = *states[s];
+            size_t cap = gpu.kv_pages_total ? std::min(gpu.tokens, state.reserved_pages * kv_page_tokens) : gpu.tokens;
             lanes.push_back({int(s), state.request.id, state.request.count, state.history, state.generated,
-                             state.request.options, state.max_written, state.request.options.ignore_eos});
+                             state.request.options, state.max_written, state.request.options.ignore_eos,
+                             nullptr, nullptr, cap});
         }
         if (lanes.empty()) return;
         target->draft_tokens = draft_tokens;
+        prefill_chunks_since_decode = 0;
+        prefill_tokens_since_decode = 0;
+        last_prefill_incomplete = false;
         decode_batch(*target, lanes, stats, emit);
+        bool any_finished = false;
         for (auto &lane : lanes) {
             int slot = lane.slot;
             auto &state = *states[slot];
             const bool hit_eos = !state.request.options.ignore_eos && state.generated.back() == 120025;
-            if (hit_eos || state.generated.size() == size_t(state.request.count))
+            if (hit_eos || state.generated.size() == size_t(state.request.count)) {
                 finish(slot, hit_eos ? "stop" : "length");
+                any_finished = true;
+            }
         }
+        if (any_finished)
+            fill();
     }
 };
 Hy4BatchSession::Hy4BatchSession(Residency &gpu, Emit emit, Done done, int draft_tokens)
@@ -1507,6 +1814,8 @@ void Hy4BatchSession::admit(Hy4Request request) {
         o.chunk < 1 || o.chunk > max_prefill_chunk || !std::isfinite(o.temperature) || o.temperature < 0 ||
         o.top_k < 0 || o.top_k > 64 || !(o.top_p > 0 && o.top_p <= 1) ||
         (o.temperature > 0 && o.top_p < 1 && !o.top_k) ||
+        (impl->gpu.kv_pages_total > 0 &&
+         impl->gpu.pages_for_tokens(request.input_ids.size() + size_t(request.count)) > impl->gpu.kv_pages_total) ||
         std::any_of(request.input_ids.begin(), request.input_ids.end(), [](int id) { return id < 0 || id >= 120832; }))
         throw std::invalid_argument("入力列または生成パラメータが不正です");
     for (const auto &state : impl->states)
@@ -1535,13 +1844,23 @@ void Hy4BatchSession::cancel(int id) {
 void Hy4BatchSession::step() { impl->step(); }
 void Hy4BatchSession::set_prefix_cache(bool enabled) {
     impl->prefix.enabled = enabled;
-    if (!enabled)
-        for (auto &cache : impl->slot_caches) cache = {};
+    if (!enabled) {
+        for (auto &entry : impl->prefix_entries)
+            impl->gpu.release_pages(entry.pages);
+        impl->prefix_entries.clear();
+    }
+}
+void Hy4BatchSession::set_prefill_decode_interval(int interval) {
+    if (interval < 0)
+        throw std::invalid_argument("prefill_decode_interval は 0 以上で指定してください");
+    impl->prefill_decode_interval = interval;
+}
+int Hy4BatchSession::prefill_decode_interval() const {
+    return impl->prefill_decode_interval;
 }
 Hy4PrefixStats Hy4BatchSession::prefix_stats() const {
     Hy4PrefixStats copy = impl->prefix;
-    copy.entries = std::count_if(impl->slot_caches.begin(), impl->slot_caches.end(),
-                                 [](const Hy4PrefixSlot &c) { return c.valid; });
+    copy.entries = impl->prefix_entries.size();
     return copy;
 }
 size_t Hy4BatchSession::last_prompt_tokens() const { return impl->last_prompt; }

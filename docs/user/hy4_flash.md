@@ -24,7 +24,7 @@ EP で長い入力を処理する場合、compute では `--chunk 2048` また�
 
 ## HIP Graph の切り替え
 
-TP=1、EP=1〜4 で push 転送を使用し、すべての GPU 間で peer access が有効な場合、バッチ decode と verify に層ごとの HIP Graph を使用する。DFly2 は `--dfly-drafts`（または環境変数 `SHELF_HY4_DFLY_DRAFTS`）で 1 ラウンドあたりの候補数 `K` を `2, 3, 4, 5` から指定でき、既定は `4` である。バッチ実行時は最大 16 スロットの候補を 1 回の Graph 起動で生成し、Target がスロットごとに `K + 1` 行（最大 6 行）を検証する。初回のバッチ形状では Graph を作成し、同じ形状と対応するコンテキスト長では再利用する。Target は `SHELF_HY4_GRAPH=0`、DFly2 は `SHELF_HY4_DRAFT_GRAPH=0` で個別に eager 実行へ切り替えられる。
+TP=1、EP=1〜4 で push 転送を使用し、すべての GPU 間で peer access が有効な場合、バッチ decode と verify に層ごとの HIP Graph を使用する。DFly2 は `--dfly-drafts`（または環境変数 `SHELF_HY4_DFLY_DRAFTS`）で 1 ラウンドあたりの候補数 `K` を `2, 3, 4, 5` から指定でき、既定は `4` である。バッチ実行時は最大 32 スロットの候補を 1 回の Graph 起動で生成し、Target がスロットごとに `K + 1` 行（最大 6 行）を検証する。初回のバッチ形状では Graph を作成し、同じ形状と対応するコンテキスト長では再利用する。Target は `SHELF_HY4_GRAPH=0`、DFly2 は `SHELF_HY4_DRAFT_GRAPH=0` で個別に eager 実行へ切り替えられる。
 
 `placement.py` は TP=1 の各 rank の `peak_estimate` に Graph 用の 256 MiB を含める。実行時は、重み、KV、作業域の予約後にこの余裕を確保できる場合に Graph を有効にする。余裕不足、capture 失敗、EP のプロファイル取得時は eager 実行を使用する。単一スロットの DFly2 は rank 0 で完結し、TP=1 では peer / host 転送時にも Graph を使用できる。
 
@@ -71,7 +71,13 @@ export SHELF_HY4_ENGRAM_MLOCK=1
 
 ## バッチ生成と Continuous Batching
 
-`shelf-server --max-concurrent-requests N` は TP=1、EP=1〜4 で 1〜16 件を同時に保持する。既定値は 4 件である。compute を直接起動する場合は `shelf-compute hy4 serve --max-concurrent-requests N` を使う。こちらの既定値は 1 件である。`--max-seq-len` はスロットごとの予約長を表す。配置試算と実行には同じ予約長とスロット数を指定する。
+`shelf-server --max-concurrent-requests N` は TP=1、EP=1〜4 で 1〜32 件を同時に保持する。既定値は 4 件である。compute を直接起動する場合は `shelf-compute hy4 serve --max-concurrent-requests N` を使う。こちらの既定値は 1 件である。`--max-seq-len` は各リクエストの最大長を表す。DSA 12 層の KV と圧縮 index は 256 token 単位の共有ページプールから動的に割り当てられ、SWA 30 層のみ固定長のリングバッファをスロットごとに保持する。
+
+共有 KV ページプールの総容量を明示する場合は `--kv-pool-tokens N`（または環境変数 `SHELF_HY4_KV_POOL_TOKENS`）を指定する。未指定時は残余 VRAM から自動算出する。空きページが不足すると、未使用の Prefix Cache エントリを LRU 順に解放し、それでも不足する場合は新規リクエストを `waiting` 状態に留めて Admission Control を行う。
+
+長文 prefill 中の他リクエストの停止を防ぐため、既定（`--prefill-decode-interval 1`、または環境変数 `SHELF_HY4_PREFILL_DECODE_INTERVAL`）では prefill 1 チャンク完了ごとに decode 可能なアクティブスロットの 1 ステップを優先割り込み実行する。`0` を指定すると従来の prefill 連続実行へ戻る。
+
+配置試算と実行には同じ最大長とスロット数を指定する。
 
 `placement.py` は複数スロットで `--balance-experts` を既定にする。容量と安全余裕を守りながら、共有 expert を実行する rank 0 の routed expert 数を、他の同型 GPU の約 9 割にする。4 台では rank 0 の目安が 23.1% となる。`--no-balance-experts` は各 rank の合計使用量を均等側へ寄せる。単一スロットではこちらが既定である。
 

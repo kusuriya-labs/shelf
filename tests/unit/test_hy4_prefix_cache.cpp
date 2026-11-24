@@ -285,19 +285,30 @@ void test_session_suite(Checkpoint &model, bool has_draft) {
         require_equal("b2_b2", res_on[202], off_b2[0].generated);
         require_equal("mismatch", res_on[203], off_mis[0].generated);
 
-        cached.admit({301, mismatch, 12, {1024, 0.f, 0, 0, 1.f, false}});
+        auto cancel_p = make_tokens(350, 101);
+        cached.admit({301, cancel_p, 12, {1024, 0.f, 0, 0, 1.f, false}});
         cached.step();
         cached.cancel(301);
         while (cached.active() || cached.queued()) cached.step();
-        auto mis_ext = mismatch;
-        mis_ext.push_back(12345);
-        cached.admit({302, mis_ext, 10, {1024, 0.f, 0, 0, 1.f, false}});
+        auto cancel_ext = cancel_p;
+        cancel_ext.push_back(12345);
+        cached.admit({302, cancel_ext, 10, {1024, 0.f, 0, 0, 1.f, false}});
         while (cached.active() || cached.queued()) cached.step();
         if (rest_on[302] != 0)
-            throw std::runtime_error("cancelled request must invalidate slot reuse");
-        require_equal("post_cancel", res_on[302], run_session_sequence(gpu, false, {mis_ext}, {10})[0].generated);
-        fprintf(stderr, "[draft=%d] concurrent_b2_mismatch_cancel: r201=%zu r202=%zu PASS\n",
-                int(has_draft), rest_on[201], rest_on[202]);
+            throw std::runtime_error("cancelled request must not leave reusable prefix cache");
+        require_equal("post_cancel_fresh", res_on[302], run_session_sequence(gpu, false, {cancel_ext}, {10})[0].generated);
+
+        cached.admit({303, mismatch, 12, {1024, 0.f, 0, 0, 1.f, false}});
+        cached.step();
+        cached.cancel(303);
+        while (cached.active() || cached.queued()) cached.step();
+        auto mis_ext = mismatch;
+        mis_ext.push_back(12345);
+        cached.admit({304, mis_ext, 10, {1024, 0.f, 0, 0, 1.f, false}});
+        while (cached.active() || cached.queued()) cached.step();
+        require_equal("post_cancel_isolated", res_on[304], run_session_sequence(gpu, false, {mis_ext}, {10})[0].generated);
+        fprintf(stderr, "[draft=%d] concurrent_b2_mismatch_cancel: r201=%zu r202=%zu r304=%zu PASS\n",
+                int(has_draft), rest_on[201], rest_on[202], rest_on[304]);
     }
 
     gpu.shutdown();
@@ -330,6 +341,191 @@ void test_single_slot_generate(Checkpoint &model) {
             r2, p2.size(), stats.hits, stats.saves);
     gpu.shutdown();
 }
+
+void test_paged_kv_boundaries_and_1m_c16(Checkpoint &model) {
+    {
+        Residency gpu1m(model, 1048576, 16);
+        auto st = gpu1m.reserve();
+        if (!st.ok())
+            throw std::runtime_error(std::string("1Mi x c=16 reserve failed: ") + st.message());
+        if (gpu1m.kv_pages_total == 0)
+            throw std::runtime_error("1Mi x c=16 expected kv_pages_total > 0");
+        fprintf(stderr, "reserve_1Mi_c16: kv_pages=%zu capacity_tokens=%zu graph_room=%d PASS\n",
+                gpu1m.kv_pages_total, gpu1m.kv_pages_total * kv_page_tokens, int(gpu1m.graph_room));
+        gpu1m.shutdown();
+    }
+
+    Residency gpu(model, 4608, 2);
+    auto st = gpu.reserve();
+    if (!st.ok()) throw std::runtime_error(st.message());
+    gpu.upload();
+    for (size_t len : {size_t(255), size_t(256), size_t(257), size_t(512), size_t(2048), size_t(4097)}) {
+        auto prompt = make_tokens(len, int(len));
+        setenv("SHELF_HY4_GRAPH", "0", 1);
+        setenv("SHELF_HY4_DRAFT_GRAPH", "0", 1);
+        auto eager = generate(gpu, prompt, 8, 1024, 0.f, 0, {});
+        setenv("SHELF_HY4_GRAPH", "1", 1);
+        setenv("SHELF_HY4_DRAFT_GRAPH", "1", 1);
+        auto graph = generate(gpu, prompt, 8, 1024, 0.f, 0, {});
+        require_equal(("boundary_" + std::to_string(len)).c_str(), graph, eager);
+        if (gpu.free_kv_pages() != gpu.kv_pages_total)
+            throw std::runtime_error("KV page leak after boundary generate");
+        fprintf(stderr, "boundary_%zu: len=%zu graph==eager=8/8 PASS\n", len, len);
+    }
+    gpu.shutdown();
+}
+
+void test_lru_eviction_and_admission_control(Checkpoint &model) {
+    Residency gpu(model, 1024, 4, 1024);
+    auto st = gpu.reserve();
+    if (!st.ok()) throw std::runtime_error(st.message());
+    gpu.upload();
+    if (gpu.kv_pages_total != 4)
+        throw std::runtime_error("expected 4 pages for kv_pool_tokens=1024");
+
+    auto p1 = make_tokens(300, 71);
+    auto p2 = make_tokens(300, 72);
+    auto p3 = make_tokens(300, 73);
+    auto cold1 = generate(gpu, p1, 12, 1024, 0.f, 0, {});
+    auto cold2 = generate(gpu, p2, 12, 1024, 0.f, 0, {});
+    auto cold3 = generate(gpu, p3, 12, 1024, 0.f, 0, {});
+
+    {
+        std::map<int, std::vector<int>> results;
+        Hy4BatchSession session(gpu, {}, [&](int id, const std::vector<int> &ids, const char *) {
+            results[id] = ids;
+        });
+        session.set_prefix_cache(true);
+        session.admit({1, p1, 12, {1024, 0.f, 0, 0, 1.f, true}});
+        while (session.active() || session.queued()) session.step();
+        session.admit({2, p2, 12, {1024, 0.f, 0, 0, 1.f, true}});
+        while (session.active() || session.queued()) session.step();
+        if (gpu.free_kv_pages() != 0 || session.prefix_stats().entries != 2)
+            throw std::runtime_error("expected 2 prefix entries occupying all 4 pages");
+
+        session.admit({3, p3, 12, {1024, 0.f, 0, 0, 1.f, true}});
+        if (session.active() != 1 || session.queued() != 0)
+            throw std::runtime_error("expected LRU eviction to admit req 3 immediately");
+        if (session.prefix_stats().evictions < 1)
+            throw std::runtime_error("expected evictions >= 1");
+        while (session.active() || session.queued()) session.step();
+        require_equal("evict_lru_req3", results[3], cold3);
+
+        auto p2_next = p2;
+        p2_next.insert(p2_next.end(), cold2.begin(), cold2.end());
+        p2_next.push_back(777);
+        session.admit({4, p2_next, 8, {1024, 0.f, 0, 0, 1.f, true}});
+        while (session.active() || session.queued()) session.step();
+        if (session.last_restored_tokens() == 0)
+            throw std::runtime_error("expected req 4 (MRU p2) to still hit prefix cache after req 1 evicted");
+        fprintf(stderr, "lru_eviction: evictions=%zu p2_restored=%zu PASS\n",
+                session.prefix_stats().evictions, session.last_restored_tokens());
+    }
+
+    if (gpu.free_kv_pages() != gpu.kv_pages_total)
+        throw std::runtime_error("KV page leak after LRU test");
+
+    {
+        std::map<int, std::vector<int>> results;
+        Hy4BatchSession session(gpu, {}, [&](int id, const std::vector<int> &ids, const char *) {
+            results[id] = ids;
+        });
+        session.set_prefix_cache(true);
+        session.admit({11, p1, 12, {1024, 0.f, 0, 0, 1.f, true}});
+        session.admit({12, p2, 12, {1024, 0.f, 0, 0, 1.f, true}});
+        session.admit({13, p3, 12, {1024, 0.f, 0, 0, 1.f, true}});
+        if (session.active() != 2 || session.queued() != 1)
+            throw std::runtime_error("admission control expected active=2 queued=1 under 4-page budget");
+        while (session.active() || session.queued()) session.step();
+        require_equal("admission_req11", results[11], cold1);
+        require_equal("admission_req12", results[12], cold2);
+        require_equal("admission_req13", results[13], cold3);
+        fprintf(stderr, "admission_control: active=2/queued=1->all_resumed_completed PASS\n");
+    }
+
+    if (gpu.free_kv_pages() != gpu.kv_pages_total)
+        throw std::runtime_error("KV page leak after admission control test");
+    gpu.shutdown();
+}
+
+void test_decode_priority_interleaving(Checkpoint &model) {
+    Residency gpu(model, 8192, 4);
+    auto st = gpu.reserve();
+    if (!st.ok()) throw std::runtime_error(st.message());
+    gpu.upload();
+
+    auto short_prompt = make_tokens(64, 81);
+    auto long_prompt = make_tokens(6144, 82);
+    auto ref_short = generate(gpu, short_prompt, 48, 1024, 0.f, 0, {}, 0, 1.f, {}, true);
+    auto ref_long = generate(gpu, long_prompt, 8, 1024, 0.f, 0, {}, 0, 1.f, {}, true);
+
+    struct TimingResult {
+        std::vector<int> short_ids;
+        std::vector<int> long_ids;
+        size_t tokens_during_long_prefill = 0;
+        double max_short_itl_ms = 0.0;
+        double p95_short_itl_ms = 0.0;
+    };
+
+    auto run_mode = [&](int interval) {
+        TimingResult res;
+        std::vector<double> short_times_ms;
+        bool long_prefill_done = false;
+        auto t0 = std::chrono::steady_clock::now();
+        Hy4BatchSession session(gpu,
+            [&](int id, int) {
+                double now_ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - t0).count();
+                if (id == 1) {
+                    short_times_ms.push_back(now_ms);
+                    if (!long_prefill_done)
+                        ++res.tokens_during_long_prefill;
+                } else if (id == 2 && !long_prefill_done) {
+                    long_prefill_done = true;
+                }
+            },
+            [&](int id, const std::vector<int> &ids, const char *) {
+                if (id == 1) res.short_ids = ids;
+                else if (id == 2) res.long_ids = ids;
+            });
+        session.set_prefix_cache(false);
+        session.set_prefill_decode_interval(interval);
+        session.admit({1, short_prompt, 48, {1024, 0.f, 0, 0, 1.f, true}});
+        session.step();
+        session.step();
+        size_t before_long = short_times_ms.size();
+        session.admit({2, long_prompt, 8, {1024, 0.f, 0, 0, 1.f, true}});
+        res.tokens_during_long_prefill = 0;
+        while (session.active() || session.queued()) session.step();
+        std::vector<double> itls;
+        for (size_t i = std::max<size_t>(1, before_long); i < short_times_ms.size(); ++i)
+            itls.push_back(short_times_ms[i] - short_times_ms[i - 1]);
+        if (!itls.empty()) {
+            std::sort(itls.begin(), itls.end());
+            res.max_short_itl_ms = itls.back();
+            res.p95_short_itl_ms = itls[std::min(itls.size() - 1, (itls.size() * 95) / 100)];
+        }
+        return res;
+    };
+
+    auto off_res = run_mode(0);
+    auto on_res = run_mode(1);
+    require_equal("interleave_short_off", off_res.short_ids, ref_short);
+    require_equal("interleave_long_off", off_res.long_ids, ref_long);
+    require_equal("interleave_short_on", on_res.short_ids, ref_short);
+    require_equal("interleave_long_on", on_res.long_ids, ref_long);
+    if (off_res.tokens_during_long_prefill != 0)
+        throw std::runtime_error("interval=0 expected 0 decode tokens during long prefill");
+    if (on_res.tokens_during_long_prefill == 0)
+        throw std::runtime_error("interval=1 expected decode tokens interleaved during long prefill");
+    if (on_res.max_short_itl_ms >= off_res.max_short_itl_ms)
+        throw std::runtime_error("interval=1 expected lower max ITL than interval=0");
+    fprintf(stderr,
+            "hol_interleave: off(during_pp=%zu p95=%.1fms max=%.1fms) on(during_pp=%zu p95=%.1fms max=%.1fms) PASS\n",
+            off_res.tokens_during_long_prefill, off_res.p95_short_itl_ms, off_res.max_short_itl_ms,
+            on_res.tokens_during_long_prefill, on_res.p95_short_itl_ms, on_res.max_short_itl_ms);
+    gpu.shutdown();
+}
 }
 
 int main(int argc, char **argv) {
@@ -343,6 +539,9 @@ int main(int argc, char **argv) {
         share_expert_weights(model_draft);
         test_session_suite(model_draft, true);
         test_single_slot_generate(model_draft);
+        test_paged_kv_boundaries_and_1m_c16(model_draft);
+        test_lru_eviction_and_admission_control(model_draft);
+        test_decode_priority_interleaving(model_draft);
 
         Checkpoint model_nodraft(argv[1], engram_dir, {}, Owners{}, 1, 1);
         share_expert_weights(model_nodraft);

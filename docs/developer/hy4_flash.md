@@ -38,17 +38,17 @@ eager 実行では各 forward の開始時に 4 つの Engram 層の行を非同
 
 ## 複数リクエストの実行
 
-TP=1、EP=1〜4 では、各スロットが独立した KV、圧縮 index、生成履歴を持つ。DFly2 の隠れ状態と疎な attention の選択行もスロットに対応付ける。バッチ decode と verify は同じ rank 別 Graph を使う。EP=1 では層 0 と残りの層をまとめた 2 個の Graph を順に起動する。EP が複数の場合は rank 0 の routed expert と共有 FFN を別々の stream で実行し、合流後に部分和を加える。DFly2 の候補数 `K` は `--dfly-drafts` / `SHELF_HY4_DFLY_DRAFTS` で `2, 3, 4, 5`（既定 `4`）を指定でき、バッチ DFly2 は指定された `K` 候補を 1 回の Graph 起動で生成する。Target は最大 4 件、DFly2 は最大 2 件の Graph を予約単位で保持する。バッチのキーには稼働中の件数と候補数 `draft_tokens` を含め、上限を超えた場合は順番に入れ替える。疎な attention を使う行ではスロット番号と 2048 境界までの行数を区別し、draft ではスロットごとのサンプリング設定も区別する。位置、seed、受理行、token ID、Engram 入力は再生ごとに更新する。対応する転送構成と切替方法は[操作方法](../user/hy4_flash.md)を参照する。
+TP=1、EP=1〜4 では、SWA 30 層の固定長リングバッファと生成履歴をスロットごとに持ち、DSA 12 層の KV（294 B/tok/layer）と圧縮 index（64 B/tok/layer、4-token グループ単位）は `kv_page_tokens = 256` の共有ページプールとスロット別 `page_table` を介して参照する。DFly2 の隠れ状態と疎な attention の選択行もスロットに対応付ける。バッチ decode と verify は同じ rank 別 Graph を使う。EP=1 では層 0 と残りの層をまとめた 2 個の Graph を順に起動する。EP が複数の場合は rank 0 の routed expert と共有 FFN を別々の stream で実行し、合流後に部分和を加える。DFly2 の候補数 `K` は `--dfly-drafts` / `SHELF_HY4_DFLY_DRAFTS` で `2, 3, 4, 5`（既定 `4`）を指定でき、バッチ DFly2 は指定された `K` 候補を 1 回の Graph 起動で生成する。Target は最大 4 件、DFly2 は最大 2 件の Graph を予約単位で保持する。バッチのキーには稼働中の件数と候補数 `draft_tokens` を含め、上限を超えた場合は順番に入れ替える。疎な attention を使う行ではスロット番号と 2048 境界までの行数を区別し、draft ではスロットごとのサンプリング設定も区別する。位置、seed、受理行、token ID、Engram 入力は再生ごとに更新する。対応する転送構成と切替方法は[操作方法](../user/hy4_flash.md)を参照する。
 
 TP>1 の予約は同時リクエスト数が 1 を超えると `Status::unsupported` を返す。
 
-`generate_batch` は 1〜16 件を受け付ける。prefill は入力ごとに実行し、decode では処理中のスロットと位置を GPU に渡す。通常の dense・sliding decode は各層で全行のスコア計算、正規化、値の集約を 1 つのカーネルで行い、KV と index を一括更新する。疎な attention の対象になる位置はスロットごとに処理する。
+`generate_batch` は 1〜32 件を受け付ける。prefill は入力ごとに実行し、decode では処理中のスロットと位置を GPU に渡す。通常の dense・sliding decode は各層で全行のスコア計算、正規化、値の集約を 1 つのカーネルで行い、KV と index を一括更新する。疎な attention の対象になる位置はスロットごとに処理する。
 
 バッチ decode と verify で各 EP rank の GPU 計画は所有 expert、入力行、重み、元の加算順を保持する。複数行は expert ごとにまとめ、最大 16 行の `Hy4ExpertBatch` を全 rank で gfx1201 WMMA に渡す。部分和は各入力行の expert 順で計算し、rank 0 が rank 順に加算する。転送には通常経路と同じ方向別の peer 判定と 2 組の event を使用する。
 
-`Hy4BatchSession` は要求を FIFO で空きスロットに割り当てる。1 回の `step()` で prefill の 1 チャンク、または準備が済んだ要求の decode を進める。キャンセルは指定した要求だけを完了させ、解放したスロットに待機中の要求を割り当てる。DFly2 は各スロットの anchor と `K` 候補（`K + 1` 行）をまとめ、最大 96 行を検証する。`Residency` / `GraphInput` / `BatchGraphInput` / `sparse_top_slot` / SWA の固定バッファ容量は最大 `K=5`（6 行）分を確保し、実行時の `K` は `Target` / `Hy4BatchSession` / `GraphKey` で保持する。受理数と乱数 seed は要求ごとに管理する。いずれかの要求で KV 残量が `K + 1` 未満、または生成できる残りが 1 トークンの場合、そのステップは通常の decode を使う。`SHELF_HY4_BATCH_DFLY=0` でバッチ投機を無効にできる。
+`Hy4BatchSession` は要求を FIFO で空きスロットに割り当て、Prefix Cache の完全ページをページ参照カウントで共有し、末尾の部分ページのみコピーまたは引き継ぎで再利用する。ページプールの空きが不足する場合は未使用 Prefix Cache エントリを LRU 順に解放し、それでも不足する要求は `waiting` キューで Admission Control を行う。1 回の `step()` で prefill の 1 チャンク、または準備が済んだ要求の decode を進め、`prefill_decode_interval`（既定 `1`）ごとに完了前の長文 prefill チャンク間に decode ステップを優先割り込みさせる。キャンセルは指定した要求だけを完了させ、解放したスロットに待機中の要求を割り当てる。DFly2 は各スロットの anchor と `K` 候補（`K + 1` 行）をまとめ、最大 192 行を検証する。`Residency` / `GraphInput` / `BatchGraphInput` / `sparse_top_slot` / SWA の固定バッファ容量は最大 `K=5`（6 行）分を確保し、実行時の `K` は `Target` / `Hy4BatchSession` / `GraphKey` で保持する。受理数と乱数 seed は要求ごとに管理する。いずれかの要求で KV 残量が `K + 1` 未満、または生成できる残りが 1 トークンの場合、そのステップは通常の decode を使う。`SHELF_HY4_BATCH_DFLY=0` でバッチ投機を無効にできる。
 
-`test_hy4_graph BODY DRAFT batch` は単一 R9700 上で 1〜4 論理 rank を使い、バッチの greedy 生成 ID を B=1 と照合する。単一 rank では B=2〜16 の各件数を検査する。位置 2047・2053 の混在は各 EP 構成で検査する。4 スロットのセッションではキャンセル後の再利用、FIFO、KV 残量が異なる要求、capture 失敗後の eager 復帰を検査する。
+`test_hy4_graph BODY DRAFT batch` は単一 R9700 上で 1〜4 論理 rank を使い、バッチの greedy 生成 ID を B=1 と照合する。単一 rank では B=2〜32 の各件数を検査する。位置 2047・2053 の混在は各 EP 構成で検査する。4 スロットのセッションではキャンセル後の再利用、FIFO、KV 残量が異なる要求、capture 失敗後の eager 復帰を検査する。
 
 `test_hy4_graph BODY microbench` は 4 bpw の共有 expert の線形射影と routed expert の 3 射影を測る。`test_hy4_graph BODY moebench` は router、共有 expert、加重和を含む MoE 全体を測る。`test_hy4_graph BODY DRAFT stepbench B [EP]` は指定した論理 EP（既定は 3）で同じ入力に対して Graph 有効・無効の step 時間と生成 ID を照合する。投機なしの計測では DRAFT に `-` を渡す。
 

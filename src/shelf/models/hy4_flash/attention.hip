@@ -22,6 +22,22 @@ __device__ int kv_base(int first, int row_offset, bool sliding, const Hy4StepPar
         return first;
     return sliding ? max(0, params->position + row_offset - 511) : 0;
 }
+__device__ __forceinline__ const uint8_t *kv_record_const(const uint8_t *base, const int32_t *page_table, int pos, int slots) {
+    return page_table ? base + (size_t(page_table[pos >> 8]) * 256 + (pos & 255)) * 294
+                      : base + size_t(pos % slots) * 294;
+}
+__device__ __forceinline__ uint8_t *kv_record(uint8_t *base, const int32_t *page_table, int pos, int slots) {
+    return page_table ? base + (size_t(page_table[pos >> 8]) * 256 + (pos & 255)) * 294
+                      : base + size_t(pos % slots) * 294;
+}
+__device__ __forceinline__ const uint16_t *index_group_const(const uint16_t *base, const int32_t *page_table, int group) {
+    return page_table ? base + (size_t(page_table[group >> 6]) * 64 + (group & 63)) * 128
+                      : base + size_t(group) * 128;
+}
+__device__ __forceinline__ uint16_t *index_group(uint16_t *base, const int32_t *page_table, int group) {
+    return page_table ? base + (size_t(page_table[group >> 6]) * 64 + (group & 63)) * 128
+                      : base + size_t(group) * 128;
+}
 __device__ constexpr float levels[] = {-2.73258948f, -2.06901717f, -1.61804640f, -1.25623119f,
                                        -0.94234043f, -0.65675914f, -0.38804829f, -0.12839504f,
                                        0.12839504f,  0.38804829f,  0.65675914f,  0.94234043f,
@@ -143,7 +159,7 @@ __global__ void pack_kv_combined(Mat lat, Mat rot, uint8_t *records) {
 template <int Width, int Salt>
 __global__ void unpack(const uint8_t *cache, const uint8_t *fresh, const int *ids, int first, int start, int slots,
                        Mat out, int offset, const Hy4StepParams *params, bool sliding, int row_offset, int chunk_rows,
-                       const int *meta) {
+                       const int *meta, const int32_t *page_table) {
     int unpack_row = blockIdx.y + blockIdx.z * gridDim.y;
     if (meta && unpack_row >= meta[512] + meta[513])
         return;
@@ -162,7 +178,7 @@ __global__ void unpack(const uint8_t *cache, const uint8_t *fresh, const int *id
         out.p[size_t(row) * out.cols + sub * Width + c] = 0;
         return;
     }
-    const uint8_t *rec = id >= start ? fresh + size_t(id - start) * 294 : cache + size_t(id % slots) * 294;
+    const uint8_t *rec = id >= start ? fresh + size_t(id - start) * 294 : kv_record_const(cache, page_table, id, slots);
     const uint8_t *src = rec + offset + sub * (Width / 2 + 2);
     int code = (src[c / 2] >> (4 * (c % 2))) & 15;
     float scale = __half2float(__ushort_as_half(src[Width / 2] | (src[Width / 2 + 1] << 8)));
@@ -171,7 +187,8 @@ __global__ void unpack(const uint8_t *cache, const uint8_t *fresh, const int *id
 }
 __global__ void unpack_quant(const uint8_t *cache, const uint8_t *fresh, const int *ids, int first, int start,
                              int slots, const uint16_t *suh, _Float16 *out, const Hy4StepParams *params,
-                             bool sliding, int row_offset, int chunk_rows, const int *meta, int max_rows) {
+                             bool sliding, int row_offset, int chunk_rows, const int *meta, int max_rows,
+                             const int32_t *page_table) {
     int row = blockIdx.y + blockIdx.z * gridDim.y, sub = blockIdx.x, c = threadIdx.x;
     if ((meta && row >= meta[512] + meta[513]) || row >= max_rows)
         return;
@@ -189,7 +206,7 @@ __global__ void unpack_quant(const uint8_t *cache, const uint8_t *fresh, const i
         }
         return;
     }
-    const uint8_t *rec = id >= start ? fresh + size_t(id - start) * 294 : cache + size_t(id % slots) * 294;
+    const uint8_t *rec = id >= start ? fresh + size_t(id - start) * 294 : kv_record_const(cache, page_table, id, slots);
     const uint8_t *src = rec + sub * 130;
     if (c < 32)
         *reinterpret_cast<uint32_t *>(s_src + c * 4) = *reinterpret_cast<const uint32_t *>(src + c * 4);
@@ -227,7 +244,8 @@ __global__ void unpack_quant(const uint8_t *cache, const uint8_t *fresh, const i
 }
 template <int Width, int Salt>
 __global__ void unpack_batch(const uint8_t *cache, const uint8_t *fresh, const int *slots,
-                             const int *positions, int cache_slots, int stride, Mat out, int offset, bool sliding, int block_rows) {
+                             const int *positions, int cache_slots, int stride, Mat out, int offset, bool sliding,
+                             int block_rows, const int32_t *page_table, int page_stride) {
     __shared__ float scratch[Width];
     int c = threadIdx.x, sub = blockIdx.x, t = blockIdx.y, block = blockIdx.z;
     int row = block * block_rows, start = positions[row];
@@ -237,8 +255,11 @@ __global__ void unpack_batch(const uint8_t *cache, const uint8_t *fresh, const i
         out.p[(size_t(block) * stride + t) * out.cols + sub * Width + c] = 0;
         return;
     }
-    const uint8_t *rec = id >= start ? fresh + size_t(row + id - start) * 294
-        : cache + (size_t(slots[row]) * cache_slots + id % cache_slots) * 294;
+    const int32_t *pt = page_table ? page_table + size_t(slots[row]) * page_stride : nullptr;
+    const uint8_t *rec = id >= start
+        ? fresh + size_t(row + id - start) * 294
+        : (sliding ? cache + (size_t(slots[row]) * cache_slots + id % cache_slots) * 294
+                   : kv_record_const(cache, pt, id, cache_slots));
     const uint8_t *src = rec + offset + sub * (Width / 2 + 2);
     int code = (src[c / 2] >> (4 * (c % 2))) & 15;
     float scale = __half2float(__ushort_as_half(src[Width / 2] | (src[Width / 2 + 1] << 8)));
@@ -247,7 +268,8 @@ __global__ void unpack_batch(const uint8_t *cache, const uint8_t *fresh, const i
 }
 __global__ void unpack_batch_quant(const uint8_t *cache, const uint8_t *fresh, const int *slots,
                                    const int *positions, int cache_slots, int stride, const uint16_t *suh,
-                                   _Float16 *out, bool sliding, int block_rows) {
+                                   _Float16 *out, bool sliding, int block_rows,
+                                   const int32_t *page_table, int page_stride) {
     __shared__ float scratch[256];
     __shared__ uint16_t decoded[256];
     int c = threadIdx.x, sub = blockIdx.x, t = blockIdx.y, block = blockIdx.z;
@@ -262,8 +284,11 @@ __global__ void unpack_batch_quant(const uint8_t *cache, const uint8_t *fresh, c
         }
         return;
     }
-    const uint8_t *rec = id >= start ? fresh + size_t(row + id - start) * 294
-        : cache + (size_t(slots[row]) * cache_slots + id % cache_slots) * 294;
+    const int32_t *pt = page_table ? page_table + size_t(slots[row]) * page_stride : nullptr;
+    const uint8_t *rec = id >= start
+        ? fresh + size_t(row + id - start) * 294
+        : (sliding ? cache + (size_t(slots[row]) * cache_slots + id % cache_slots) * 294
+                   : kv_record_const(cache, pt, id, cache_slots));
     const uint8_t *src = rec + sub * 130;
     int code = (src[c / 2] >> (4 * (c % 2))) & 15;
     float scale = __half2float(__ushort_as_half(src[128] | (src[129] << 8)));
@@ -299,22 +324,28 @@ __global__ void batch_offsets(int *offsets, const int *positions, int stride, bo
     if (t < stride) offsets[size_t(row) * stride + t] = t < len ? base + t : -1;
 }
 __global__ void save_records_batch(uint8_t *cache, const uint8_t *fresh, const int *slots,
-                                   const int *positions, int cache_slots, int rows) {
+                                   const int *positions, int cache_slots, int rows,
+                                   const int32_t *page_table, int page_stride) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < rows * 294) {
         int row = i / 294;
-        cache[(size_t(slots[row]) * cache_slots + positions[row] % cache_slots) * 294 + i % 294] = fresh[i];
+        if (page_table) {
+            kv_record(cache, page_table + size_t(slots[row]) * page_stride, positions[row], cache_slots)[i % 294] = fresh[i];
+        } else {
+            cache[(size_t(slots[row]) * cache_slots + positions[row] % cache_slots) * 294 + i % 294] = fresh[i];
+        }
     }
 }
 __global__ void save_records(uint8_t *cache, const uint8_t *fresh, int rows, int start, int slots,
-                             const Hy4StepParams *params) {
+                             const Hy4StepParams *params, const int32_t *page_table) {
     start = step_at(start, params);
-    int i = (rows - min(rows, slots)) * 294 + blockIdx.x * blockDim.x + threadIdx.x;
+    int i = (page_table ? 0 : (rows - min(rows, slots)) * 294) + blockIdx.x * blockDim.x + threadIdx.x;
     if (i < 294 * rows)
-        cache[size_t((start + i / 294) % slots) * 294 + i % 294] = fresh[i];
+        kv_record(cache, page_table, start + i / 294, slots)[i % 294] = fresh[i];
 }
 __global__ void pool(Mat keys, uint16_t *history, int first, int start, Param values, Param gates, Param ape,
-                     Param norm, const uint16_t *pending, const Hy4StepParams *params, int rows) {
+                     Param norm, const uint16_t *pending, const Hy4StepParams *params, int rows,
+                     const int32_t *page_table) {
     __shared__ float pooled[128], scratch[128];
     start = step_at(start, params);
     first = start / 4;
@@ -351,15 +382,16 @@ __global__ void pool(Mat keys, uint16_t *history, int first, int start, Param va
         float si = bf16_bits_to_f32(f32_to_bf16_rne_device(sinf(phase)));
         out = out * co + pooled[c ^ 1] * ((c & 1) ? si : -si);
     }
-    history[size_t(group) * 128 + c] = f32_to_bf16_rne_device(out);
+    index_group(history, page_table, group)[c] = f32_to_bf16_rne_device(out);
 }
-__global__ void pool_batch(Mat keys, uint16_t *all_history, int tokens, const int *slots, const int *positions,
-                           Param values, Param gates, Param ape, Param norm, int block_rows) {
+__global__ void pool_batch(Mat keys, uint16_t *all_history, const uint16_t *all_pending, const int *slots,
+                           const int *positions, Param values, Param gates, Param ape, Param norm, int block_rows,
+                           const int32_t *page_table, int page_stride) {
     __shared__ float pooled[128], scratch[128];
     int row = blockIdx.x, start = positions[row];
     if ((start & 3) != 3) return;
-    auto history = all_history + size_t(slots[row]) * (tokens / 4 + 12) * 128;
-    auto pending = history + (tokens / 4) * 128;
+    auto pending = all_pending + size_t(slots[row]) * 12 * 128;
+    const int32_t *pt = page_table ? page_table + size_t(slots[row]) * page_stride : nullptr;
     int c = threadIdx.x, group = start / 4;
     start -= row % block_rows;
     keys.p += size_t(row - row % block_rows) * keys.cols;
@@ -393,12 +425,11 @@ __global__ void pool_batch(Mat keys, uint16_t *all_history, int tokens, const in
         float si = bf16_bits_to_f32(f32_to_bf16_rne_device(sinf(phase)));
         out = out * co + pooled[c ^ 1] * ((c & 1) ? si : -si);
     }
-    history[size_t(group) * 128 + c] = f32_to_bf16_rne_device(out);
+    index_group(all_history, pt, group)[c] = f32_to_bf16_rne_device(out);
 }
-__global__ void save_pending_batch(Mat keys, uint16_t *all_history, int tokens, const int *slots,
-                                   const int *positions) {
+__global__ void save_pending_batch(Mat keys, uint16_t *all_pending, const int *slots, const int *positions) {
     int row = blockIdx.x;
-    auto pending = all_history + (size_t(slots[row]) * (tokens / 4 + 12) + tokens / 4) * 128;
+    auto pending = all_pending + size_t(slots[row]) * 12 * 128;
     pending[(positions[row] % 12) * 128 + threadIdx.x] = keys.p[size_t(row) * 128 + threadIdx.x];
 }
 __global__ void save_pending(Mat k, int start, uint16_t *pending, const Hy4StepParams *params) {
@@ -408,7 +439,8 @@ __global__ void save_pending(Mat k, int start, uint16_t *pending, const Hy4StepP
 }
 template <bool Refine = false>
 __global__ void index_scores(Mat q, Mat weights, const uint16_t *groups, int first, int start, int stride,
-                             float *scores, const Hy4StepParams *params, const float *bounds = nullptr) {
+                             float *scores, const Hy4StepParams *params, const float *bounds = nullptr,
+                             const int32_t *page_table = nullptr) {
     start = step_at(start, params);
     int row = first + blockIdx.y;
     int count = (start + row) / 4;
@@ -420,11 +452,12 @@ __global__ void index_scores(Mat q, Mat weights, const uint16_t *groups, int fir
         float score = scores[size_t(blockIdx.y) * stride + group];
         if (score < bounds[2 * blockIdx.y] || score > bounds[2 * blockIdx.y + 1]) return;
     }
+    const uint16_t *group_ptr = index_group_const(groups, page_table, group);
     float sum = 0;
     for (int h = 0; h < 16; ++h) {
         float dot = 0;
         for (int j = lane; j < 128; j += 32)
-            dot += bv(q, row, h * 128 + j) * bf16_bits_to_f32(groups[size_t(group) * 128 + j]);
+            dot += bv(q, row, h * 128 + j) * bf16_bits_to_f32(group_ptr[j]);
         for (int dist = 16; dist; dist /= 2)
             dot += __shfl_down(dot, dist, 32);
         sum += fmaxf(dot, 0) * bv(weights, row, h);
@@ -443,14 +476,17 @@ __device__ IndexFragment index_fragment(const uint16_t *src) {
 }
 
 __global__ void index_scores_wmma(Mat q, Mat weights, const uint16_t *groups, int first, int start,
-                                  int stride, float *scores) {
+                                  int stride, float *scores, const int32_t *page_table) {
     int row = first + blockIdx.y, count = min(stride, (start + row) / 4);
     int lane = threadIdx.x % 32, half = lane / 16, col = lane % 16;
     int tile = blockIdx.x * 64 + threadIdx.x / 32 * 16;
     if (tile >= count) return;
     int group = tile + col;
     const uint16_t *query = q.p + (size_t(row) * 16 + col) * 128 + half * 4;
-    const uint16_t *key = groups + size_t(min(group, count - 1)) * 128 + half * 4;
+    int clamped = min(group, count - 1);
+    const uint16_t *key = (page_table
+        ? groups + (size_t(page_table[tile >> 6]) * 64 + (clamped & 63)) * 128
+        : groups + size_t(clamped) * 128) + half * 4;
     IndexSum dots{};
 #pragma unroll
     for (int k = 0; k < 128; k += 16)
@@ -465,11 +501,13 @@ __global__ void index_scores_wmma(Mat q, Mat weights, const uint16_t *groups, in
         scores[size_t(blockIdx.y) * stride + group] = sum;
 }
 
-__global__ void index_key_peak(const uint16_t *keys, unsigned *peak, int elements) {
+__global__ void index_key_peak(const uint16_t *keys, unsigned *peak, int elements, const int32_t *page_table) {
     __shared__ unsigned waves[8];
     unsigned bits = 0;
-    for (int j = blockIdx.x * 256 + threadIdx.x; j < elements; j += gridDim.x * 256)
-        bits = max(bits, unsigned(keys[j] & 0x7fffu));
+    for (int j = blockIdx.x * 256 + threadIdx.x; j < elements; j += gridDim.x * 256) {
+        uint16_t val = page_table ? keys[size_t(page_table[j >> 13]) * 8192 + (j & 8191)] : keys[j];
+        bits = max(bits, unsigned(val & 0x7fffu));
+    }
     for (int d = 16; d; d /= 2)
         bits = max(bits, __shfl_down(bits, d));
     if (!(threadIdx.x % 32)) waves[threadIdx.x / 32] = bits;
@@ -481,7 +519,7 @@ __global__ void index_key_peak(const uint16_t *keys, unsigned *peak, int element
 }
 __global__ void __launch_bounds__(256) index_scores_refine(Mat q, Mat weights, const uint16_t *groups,
                                                              int first, int start, int stride, float *scores,
-                                                             const float *bounds) {
+                                                             const float *bounds, const int32_t *page_table = nullptr) {
     __shared__ int cand[256];
     __shared__ int cand_count;
     int t = threadIdx.x, row = first + blockIdx.y;
@@ -506,7 +544,7 @@ __global__ void __launch_bounds__(256) index_scores_refine(Mat q, Mat weights, c
         w_head[h] = bv(weights, row, h);
     for (int idx = wave; idx < total; idx += 8) {
         int group = cand[idx];
-        const uint16_t *gp = groups + size_t(group) * 128;
+        const uint16_t *gp = index_group_const(groups, page_table, group);
         float kg[4] = {
             bf16_bits_to_f32(gp[lane]),
             bf16_bits_to_f32(gp[lane + 32]),
@@ -940,19 +978,22 @@ __global__ void gather_sparse_inputs(Mat hidden, Mat sparse_hidden, Mat qres, Ma
 }
 __global__ void index_scores_sparse_batch(Mat q, Mat weights, const uint16_t *all_groups, size_t group_slot_stride,
                                           int stride, float *scores, const int *sparse_slots,
-                                          const int *sparse_positions, SparseLaneArgs args, int block_rows) {
+                                          const int *sparse_positions, SparseLaneArgs args, int block_rows,
+                                          const int32_t *page_table, int page_stride) {
     int r = blockIdx.y, pos = sparse_positions[r];
     int count = min(stride, pos / 4);
     int group = blockIdx.x * 4 + threadIdx.x / 32, lane = threadIdx.x % 32;
     if (pos < 2048 || group >= count)
         return;
     int slot = sparse_slots ? sparse_slots[r / block_rows] : args.slot[r / block_rows];
-    const uint16_t *groups = all_groups + size_t(slot) * group_slot_stride;
+    const int32_t *pt = page_table ? page_table + size_t(slot) * page_stride : nullptr;
+    const uint16_t *groups = pt ? all_groups : all_groups + size_t(slot) * group_slot_stride;
+    const uint16_t *group_ptr = index_group_const(groups, pt, group);
     float sum = 0;
     for (int h = 0; h < 16; ++h) {
         float dot = 0;
         for (int j = lane; j < 128; j += 32)
-            dot += bv(q, r, h * 128 + j) * bf16_bits_to_f32(groups[size_t(group) * 128 + j]);
+            dot += bv(q, r, h * 128 + j) * bf16_bits_to_f32(group_ptr[j]);
         for (int dist = 16; dist; dist /= 2)
             dot += __shfl_down(dot, dist, 32);
         sum += fmaxf(dot, 0) * bv(weights, r, h);
@@ -1176,7 +1217,8 @@ __global__ void unpack_quant_sparse_batch(const uint8_t *cache, const uint8_t *f
                                           const int *id_counts, const int *sparse_slots,
                                           const int *sparse_positions, const int *sparse_blocks,
                                           SparseLaneArgs args, int cache_slots, int block_rows, int id_stride,
-                                          const uint16_t *suh, _Float16 *all_out) {
+                                          const uint16_t *suh, _Float16 *all_out,
+                                          const int32_t *page_table, int page_stride) {
     __shared__ float scratch[256];
     __shared__ uint16_t decoded[256];
     int sub = blockIdx.x, t = blockIdx.y, k = blockIdx.z, c = threadIdx.x;
@@ -1194,8 +1236,10 @@ __global__ void unpack_quant_sparse_batch(const uint8_t *cache, const uint8_t *f
         }
         return;
     }
+    const int32_t *pt = page_table ? page_table + size_t(slot) * page_stride : nullptr;
     const uint8_t *rec = id >= start ? fresh + size_t(orig_block * block_rows + (id - start)) * 294
-                                     : cache + (size_t(slot) * cache_slots + size_t(id % cache_slots)) * 294;
+                                     : (pt ? kv_record_const(cache, pt, id, cache_slots)
+                                           : cache + (size_t(slot) * cache_slots + size_t(id % cache_slots)) * 294);
     const uint8_t *src = rec + sub * 130;
     int code = (src[c / 2] >> (4 * (c % 2))) & 15;
     float scale = __half2float(__ushort_as_half(src[128] | (src[129] << 8)));
@@ -1224,7 +1268,7 @@ __global__ void unpack_rot_sparse_batch(const uint8_t *cache, const uint8_t *fre
                                         const int *id_counts, const int *sparse_slots,
                                         const int *sparse_positions, const int *sparse_blocks,
                                         SparseLaneArgs args, int cache_slots, int block_rows, int id_stride,
-                                        uint16_t *all_out) {
+                                        uint16_t *all_out, const int32_t *page_table, int page_stride) {
     __shared__ float scratch[64];
     int t = blockIdx.y, k = blockIdx.z, c = threadIdx.x;
     if (t >= id_counts[k])
@@ -1237,8 +1281,10 @@ __global__ void unpack_rot_sparse_batch(const uint8_t *cache, const uint8_t *fre
         all_out[(size_t(k) * id_stride + t) * 64 + c] = 0;
         return;
     }
+    const int32_t *pt = page_table ? page_table + size_t(slot) * page_stride : nullptr;
     const uint8_t *rec = id >= start ? fresh + size_t(orig_block * block_rows + (id - start)) * 294
-                                     : cache + (size_t(slot) * cache_slots + size_t(id % cache_slots)) * 294;
+                                     : (pt ? kv_record_const(cache, pt, id, cache_slots)
+                                           : cache + (size_t(slot) * cache_slots + size_t(id % cache_slots)) * 294);
     const uint8_t *src = rec + 260;
     int code = (src[c / 2] >> (4 * (c % 2))) & 15;
     float scale = __half2float(__ushort_as_half(src[32] | (src[33] << 8)));
@@ -1252,17 +1298,23 @@ Selection select(Ops &op, const std::string &p, int layer, int start, Mat x, Mat
     bool sliding = layer != 0 && layer % 4 != 1;
     int begin = sliding ? x.rows : std::min(x.rows, std::max(0, 2048 - start));
     if (!sliding) {
-        auto groups = op.gpu.index_keys[op.rank][layer] + op.slot * (op.gpu.tokens / 4 + 12) * 128;
+        const int32_t *page_table = op.gpu.page_table[op.rank]
+            ? op.gpu.page_table[op.rank] + size_t(op.slot) * op.gpu.kv_page_stride
+            : nullptr;
+        auto groups = page_table ? op.gpu.index_keys[op.rank][layer]
+                                 : op.gpu.index_keys[op.rank][layer] + op.slot * (op.gpu.tokens / 4 + 12) * 128;
+        auto pending = op.gpu.index_pending[op.rank][layer]
+            ? op.gpu.index_pending[op.rank][layer] + size_t(op.slot) * 12 * 128
+            : groups + (op.gpu.tokens / 4) * 128;
         if (!index_ready) {
             Mat k = op.norm(op.linear(p + "token_key_projection", x), p + "token_key_norm.weight");
-            auto pending = groups + (op.gpu.tokens / 4) * 128;
             int first = start / 4, ng = end / 4 - first;
             int pool_blocks = op.params ? 2 : ng;
             if (pool_blocks) {
                 pool<<<pool_blocks, 128, 0, op.stream>>>(k, groups, first, start, op.param(p + "key_value_projection.weight"),
                                                 op.param(p + "key_gate_projection.weight"),
                                                 op.param(p + "intra_group_ape"), op.param(p + "key_norm.weight"),
-                                                pending, op.params, x.rows);
+                                                pending, op.params, x.rows, page_table);
                 checked(hipGetLastError());
             }
             save_pending<<<std::min(k.rows, 12), 128, 0, op.stream>>>(k, start, pending, op.params);
@@ -1285,12 +1337,14 @@ Selection select(Ops &op, const std::string &p, int layer, int start, Mat x, Mat
                 shared_peak = static_cast<unsigned *>(op.arena.next(sizeof(unsigned)));
                 checked(hipMemsetAsync(shared_peak, 0, sizeof(unsigned), op.stream));
                 int elements = std::min(stride, (end - 1) / 4) * 128;
-                index_key_peak<<<std::min(256, (elements + 255) / 256), 256, 0, op.stream>>>(groups, shared_peak, elements);
+                index_key_peak<<<std::min(256, (elements + 255) / 256), 256, 0, op.stream>>>(
+                    groups, shared_peak, elements, page_table);
             }
             for (int row = begin; row < x.rows; row += batch) {
                 int rows = std::min(batch, x.rows - row);
                 index_select(q, w, groups, row, rows, start, stride, buffer, top + size_t(row) * 511,
-                             op.params, op.gpu.index_wmma && !op.params && q.rows > 6 && start + row >= 4096, op.stream, shared_peak);
+                             op.params, op.gpu.index_wmma && !op.params && q.rows > 6 && start + row >= 4096,
+                             op.stream, shared_peak, page_table);
             }
         }
     }
@@ -1301,9 +1355,44 @@ Selection select(Ops &op, const std::string &p, int layer, int start, Mat x, Mat
     }
     return selected;
 }
+struct DsaLayerPtrs {
+    uint8_t *kv[12];
+    uint16_t *idx[12];
+};
+__global__ void copy_dsa_page_prefix_kernel(DsaLayerPtrs ptrs, int32_t dst_page, int32_t src_page, int tokens) {
+    int l = blockIdx.y;
+    size_t kv_bytes = size_t(tokens) * 294;
+    uint8_t *dst_kv = ptrs.kv[l] + size_t(dst_page) * kv_page_tokens * 294;
+    const uint8_t *src_kv = ptrs.kv[l] + size_t(src_page) * kv_page_tokens * 294;
+    for (size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x; i < kv_bytes; i += size_t(gridDim.x) * blockDim.x)
+        dst_kv[i] = src_kv[i];
+    size_t idx_elems = size_t(tokens / 4) * 128;
+    uint16_t *dst_idx = ptrs.idx[l] + size_t(dst_page) * kv_page_groups * 128;
+    const uint16_t *src_idx = ptrs.idx[l] + size_t(src_page) * kv_page_groups * 128;
+    for (size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x; i < idx_elems; i += size_t(gridDim.x) * blockDim.x)
+        dst_idx[i] = src_idx[i];
+}
+}
+void copy_dsa_page_prefix(Residency &gpu, int rank, int32_t dst_page, int32_t src_page, int tokens, hipStream_t stream) {
+    if (tokens <= 0 || dst_page < 0 || src_page < 0)
+        return;
+    DsaLayerPtrs ptrs{};
+    int idx = 0;
+    for (int layer = 0; layer < 42; ++layer) {
+        if (Residency::is_sparse_layer(layer)) {
+            ptrs.kv[idx] = gpu.cache[rank][layer];
+            ptrs.idx[idx] = gpu.index_keys[rank][layer];
+            ++idx;
+        }
+    }
+    size_t kv_bytes = size_t(tokens) * 294;
+    unsigned blocks_x = unsigned(std::min<size_t>(256, (kv_bytes + 255) / 256));
+    copy_dsa_page_prefix_kernel<<<dim3(blocks_x, 12), 256, 0, stream>>>(ptrs, dst_page, src_page, tokens);
+    checked(hipGetLastError());
 }
 void index_select(Mat q, Mat weights, const uint16_t *groups, int first, int rows, int start, int stride,
-                  float *scores, int *selected, const Hy4StepParams *params, bool wmma, hipStream_t stream, const unsigned *shared_peak) {
+                  float *scores, int *selected, const Hy4StepParams *params, bool wmma, hipStream_t stream,
+                  const unsigned *shared_peak, const int32_t *page_table) {
     if (wmma) {
         auto bounds = scores + size_t(rows) * stride;
         auto peak = shared_peak;
@@ -1311,16 +1400,18 @@ void index_select(Mat q, Mat weights, const uint16_t *groups, int first, int row
             auto local_peak = reinterpret_cast<unsigned *>(bounds + 2 * rows);
             checked(hipMemsetAsync(local_peak, 0, sizeof(unsigned), stream));
             int elements = std::min(stride, (start + first + rows - 1) / 4) * 128;
-            index_key_peak<<<std::min(256, (elements + 255) / 256), 256, 0, stream>>>(groups, local_peak, elements);
+            index_key_peak<<<std::min(256, (elements + 255) / 256), 256, 0, stream>>>(
+                groups, local_peak, elements, page_table);
             peak = local_peak;
         }
-        index_scores_wmma<<<dim3((stride + 63) / 64, rows), 128, 0, stream>>>(q, weights, groups, first, start, stride, scores);
+        index_scores_wmma<<<dim3((stride + 63) / 64, rows), 128, 0, stream>>>(
+            q, weights, groups, first, start, stride, scores, page_table);
         index_bounds<<<rows, 256, 0, stream>>>(q, weights, scores, first, start, stride, bounds, peak);
         index_scores_refine<<<dim3((stride + 255) / 256, rows), 256, 0, stream>>>(
-            q, weights, groups, first, start, stride, scores, bounds);
+            q, weights, groups, first, start, stride, scores, bounds, page_table);
     } else {
         index_scores<<<dim3((stride + 3) / 4, rows), 128, 0, stream>>>(
-            q, weights, groups, first, start, stride, scores, params);
+            q, weights, groups, first, start, stride, scores, params, nullptr, page_table);
     }
     checked(hipGetLastError());
     index_topk<<<rows, 256, 0, stream>>>(scores, first, start, stride, selected, params);
@@ -1343,7 +1434,10 @@ Mat attention_inner(Ops &op, const std::string &p, int layer, int start, Mat hid
         selected = select(op, p + "compressed_indexer.", layer, start, hidden, qres, index_ready);
     Mat out = op.mat(hidden.rows, heads * 256);
     int slots = sliding ? std::min(op.gpu.tokens, size_t(518)) : op.gpu.tokens;
-    auto cache = op.gpu.cache[op.rank][layer] + size_t(op.slot) * slots * 294;
+    const int32_t *page_table = (!sliding && op.gpu.page_table[op.rank])
+        ? op.gpu.page_table[op.rank] + size_t(op.slot) * op.gpu.kv_page_stride
+        : nullptr;
+    auto cache = op.gpu.cache[op.rank][layer] + (sliding || !page_table ? size_t(op.slot) * slots * 294 : 0);
     bool contiguous = sliding || (draft ? start <= 2048 : start + hidden.rows <= 2048);
     int begin = std::min(hidden.rows, std::max(0, 2048 - start));
     bool batched_projection = !contiguous && !draft && start >= 2048 && start + hidden.rows > 4096 && hidden.rows > 16 && hidden.rows <= 1024;
@@ -1463,10 +1557,10 @@ Mat attention_inner(Ops &op, const std::string &p, int layer, int start, Mat hid
         unpack_quant<<<dim3(2, id_rows, id_slices), 256, 0, op.stream>>>(
             cache, fresh, ids_gpu, first, start, slots,
             static_cast<const uint16_t *>(op.param(p + "kv_b_proj.suh").p), prequant, op.params, sliding, i, n,
-            meta, ids_count);
+            meta, ids_count, page_table);
         checked(hipGetLastError());
         unpack<64, 11><<<dim3(1, id_rows, id_slices), 64, 0, op.stream>>>(cache, fresh, ids_gpu, first, start, slots, b, 260,
-                                                                  op.params, sliding, i, n, meta);
+                                                                  op.params, sliding, i, n, meta, page_table);
         checked(hipGetLastError());
         attend_absorbed(op, p + "kv_b_proj", a, b, q.row(i, n), gate.row(i, n), offsets_gpu, stride,
                         sinks, out.row(i, n), chunk_contiguous, sliding, i, n, meta, prequant,
@@ -1479,7 +1573,7 @@ Mat attention_inner(Ops &op, const std::string &p, int layer, int start, Mat hid
         checked(shelf_hy4_mla_project_value(batch_values, op.gpu.folded[op.rank].at(p + "kv_b_proj"), gate.p, out.p, hidden.rows, heads, op.stream));
     if (!draft) {
         save_records<<<(std::min(hidden.rows, slots) * 294 + 255) / 256, 256, 0, op.stream>>>(
-            cache, fresh, hidden.rows, start, slots, op.params);
+            cache, fresh, hidden.rows, start, slots, op.params, page_table);
         checked(hipGetLastError());
     }
     return out;
@@ -1522,18 +1616,21 @@ Mat attention_batch(Ops &op, const std::string &prefix, int layer, const std::ve
     if (!sliding && !draft) {
         std::string ip = p + "compressed_indexer.";
         Mat k = op.norm(op.linear(ip + "token_key_projection", hidden), ip + "token_key_norm.weight");
-        pool_batch<<<hidden.rows, 128, 0, op.stream>>>(k, op.gpu.index_keys[op.rank][layer], op.gpu.tokens,
-            device_slots, device_positions, op.param(ip + "key_value_projection.weight"),
-            op.param(ip + "key_gate_projection.weight"), op.param(ip + "intra_group_ape"),
-            op.param(ip + "key_norm.weight"), block_rows);
+        pool_batch<<<hidden.rows, 128, 0, op.stream>>>(k, op.gpu.index_keys[op.rank][layer],
+            op.gpu.index_pending[op.rank][layer], device_slots, device_positions,
+            op.param(ip + "key_value_projection.weight"), op.param(ip + "key_gate_projection.weight"),
+            op.param(ip + "intra_group_ape"), op.param(ip + "key_norm.weight"), block_rows,
+            op.gpu.page_table[op.rank], int(op.gpu.kv_page_stride));
         checked(hipGetLastError());
-        save_pending_batch<<<hidden.rows, 128, 0, op.stream>>>(k, op.gpu.index_keys[op.rank][layer], op.gpu.tokens,
+        save_pending_batch<<<hidden.rows, 128, 0, op.stream>>>(k, op.gpu.index_pending[op.rank][layer],
                                                                device_slots, device_positions);
         checked(hipGetLastError());
     }
     Mat out = op.mat(hidden.rows, heads * 256);
     size_t mark = op.arena.cursor;
     int cache_slots = sliding ? std::min(op.gpu.tokens, size_t(518)) : op.gpu.tokens;
+    const int32_t *batch_pt = !sliding ? op.gpu.page_table[op.rank] : nullptr;
+    const int batch_pt_stride = int(op.gpu.kv_page_stride);
     auto sparse = [&](int row) {
         return !sliding && (draft ? positions[row] > 2048 : positions[row] + block_rows > 2048);
     };
@@ -1559,11 +1656,11 @@ Mat attention_batch(Ops &op, const std::string &prefix, int layer, const std::ve
         unpack_batch_quant<<<dim3(2, stride, blocks), 256, 0, op.stream>>>(
             op.gpu.cache[op.rank][layer], fresh + size_t(first) * 294, device_slots + first, device_positions + first,
             cache_slots, stride, static_cast<const uint16_t *>(op.param(p + "kv_b_proj.suh").p), prequant,
-            sliding, block_rows);
+            sliding, block_rows, batch_pt, batch_pt_stride);
         checked(hipGetLastError());
         unpack_batch<64, 11><<<dim3(1, stride, blocks), 64, 0, op.stream>>>(
             op.gpu.cache[op.rank][layer], fresh + size_t(first) * 294, device_slots + first, device_positions + first,
-            cache_slots, stride, b, 260, sliding, block_rows);
+            cache_slots, stride, b, 260, sliding, block_rows, batch_pt, batch_pt_stride);
         checked(hipGetLastError());
         auto offsets = static_cast<int *>(op.arena.next(size_t(rows) * stride * sizeof(int)));
         batch_offsets<<<dim3((stride + 255) / 256, rows), 256, 0, op.stream>>>(
@@ -1638,7 +1735,7 @@ Mat attention_batch(Ops &op, const std::string &prefix, int layer, const std::ve
             size_t group_slot_stride = (op.gpu.tokens / 4 + 12) * 128;
             index_scores_sparse_batch<<<dim3((idx_stride + 3) / 4, sparse_rows), 128, 0, op.stream>>>(
                 q_idx, w_idx, op.gpu.index_keys[op.rank][layer], group_slot_stride, idx_stride, idx_scores,
-                sparse_slots_dev, sparse_positions_dev, args, block_rows);
+                sparse_slots_dev, sparse_positions_dev, args, block_rows, batch_pt, batch_pt_stride);
             checked(hipGetLastError());
             index_topk_sparse_batch<<<sparse_rows, 256, 0, op.stream>>>(
                 idx_scores, idx_stride, selected_buf, top_slot_base_write, sparse_slots_dev, sparse_positions_dev,
@@ -1661,11 +1758,13 @@ Mat attention_batch(Ops &op, const std::string &prefix, int layer, const std::ve
         unpack_quant_sparse_batch<<<dim3(2, id_stride, K), 256, 0, op.stream>>>(
             op.gpu.cache[op.rank][layer], fresh, all_ids, id_counts, sparse_slots_dev, sparse_positions_dev,
             sparse_blocks_dev, args, cache_slots, block_rows, id_stride,
-            static_cast<const uint16_t *>(op.param(p + "kv_b_proj.suh").p), prequant_sparse);
+            static_cast<const uint16_t *>(op.param(p + "kv_b_proj.suh").p), prequant_sparse,
+            batch_pt, batch_pt_stride);
         checked(hipGetLastError());
         unpack_rot_sparse_batch<<<dim3(1, id_stride, K), 64, 0, op.stream>>>(
             op.gpu.cache[op.rank][layer], fresh, all_ids, id_counts, sparse_slots_dev, sparse_positions_dev,
-            sparse_blocks_dev, args, cache_slots, block_rows, id_stride, rotary_sparse);
+            sparse_blocks_dev, args, cache_slots, block_rows, id_stride, rotary_sparse,
+            batch_pt, batch_pt_stride);
         checked(hipGetLastError());
         attend_absorbed_sparse_batch(op, p + "kv_b_proj", prequant_sparse, rotary_sparse, q, gate, all_offsets,
                                      attn_stride, id_stride, sparse_positions_dev, sparse_blocks_dev,
@@ -1674,7 +1773,8 @@ Mat attention_batch(Ops &op, const std::string &prefix, int layer, const std::ve
     }
     if (!draft) {
         save_records_batch<<<(hidden.rows * 294 + 255) / 256, 256, 0, op.stream>>>(
-            op.gpu.cache[op.rank][layer], fresh, device_slots, device_positions, cache_slots, hidden.rows);
+            op.gpu.cache[op.rank][layer], fresh, device_slots, device_positions, cache_slots, hidden.rows,
+            batch_pt, batch_pt_stride);
         checked(hipGetLastError());
     }
     op.slot = 0;

@@ -127,7 +127,8 @@ def main():
         server.send({'op': 'stats'})
         stats = server.event()
         before = stats['batch_draft_rounds']
-        assert stats['kv']['total_pages'] == stats['kv']['free_pages'] == 4
+        assert stats['kv']['page_tokens'] == 256
+        assert stats['kv']['total_pages'] == stats['kv']['free_pages'] == 8
         assert stats['kv']['capacity_tokens'] == stats['kv']['free_tokens'] == 4 * 512
         actual, done, _ = run(server, items, cancel=2, arrival=arrival)
         assert done[2]['finish_reason'] == 'cancelled'

@@ -34,6 +34,9 @@ struct Hy4PrefixSlot {
     size_t snap_pos = 0;
     size_t snap_max_written = 0;
     std::vector<std::vector<uint8_t>> swa_snap;
+    std::vector<int32_t> pages;
+    int live_swa_slot = -1;
+    uint64_t live_swa_gen = 0;
 };
 struct Hy4Request {
     int id;
@@ -53,6 +56,8 @@ public:
     void set_draft_tokens(int draft_tokens);
     int draft_tokens() const;
     void set_prefix_cache(bool enabled);
+    void set_prefill_decode_interval(int interval);
+    int prefill_decode_interval() const;
     Hy4PrefixStats prefix_stats() const;
     size_t last_prompt_tokens() const;
     size_t last_restored_tokens() const;

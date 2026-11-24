@@ -26,16 +26,20 @@ void reply(const Json &event) {
 }
 
 void reply_stats(const Residency &gpu, size_t active, size_t queued, size_t draft_rounds, const Hy4PrefixStats &prefix) {
-    size_t free_slots = gpu.max_slots - active;
+    const bool paged = gpu.kv_pages_total > 0;
+    const size_t page_tokens = paged ? kv_page_tokens : gpu.tokens;
+    const size_t total_pages = paged ? gpu.kv_pages_total : size_t(gpu.max_slots);
+    const size_t used_pages = paged ? gpu.used_kv_pages() : active;
+    const size_t free_pages = paged ? gpu.free_kv_pages() : (size_t(gpu.max_slots) - active);
     reply({{"event", "stats"}, {"max_concurrent_requests", gpu.max_slots}, {"slot_tokens", gpu.tokens},
            {"active_requests", active}, {"queued_requests", queued}, {"batch_draft_rounds", draft_rounds},
            {"prefix", {{"enabled", prefix.enabled}, {"reuse_slots", prefix.reuse_slots},
                        {"entries", prefix.entries}, {"saves", prefix.saves},
                        {"hits", prefix.hits}, {"misses", prefix.misses},
                        {"restores", prefix.restores}, {"evictions", prefix.evictions}}},
-           {"kv", {{"page_tokens", gpu.tokens}, {"total_pages", gpu.max_slots}, {"used_pages", active},
-                   {"free_pages", free_slots}, {"capacity_tokens", gpu.max_slots * gpu.tokens},
-                   {"free_tokens", free_slots * gpu.tokens}, {"active_requests", active},
+           {"kv", {{"page_tokens", page_tokens}, {"total_pages", total_pages}, {"used_pages", used_pages},
+                   {"free_pages", free_pages}, {"capacity_tokens", total_pages * page_tokens},
+                   {"free_tokens", free_pages * page_tokens}, {"active_requests", active},
                    {"queued_requests", queued}, {"banker_safe", true}, {"overcommit_pages", 0}}}});
 }
 
@@ -89,7 +93,8 @@ void serve(Residency &gpu, int chunk, bool prefix_cache) {
     auto control = [&](const Json &request, int active) {
         const auto op = request.at("op").get<std::string>();
         if (op == "ping")
-            reply({{"event", "pong"}, {"protocol_version", 1}, {"capabilities", {{"prefix_cache", prefix_cache}}}});
+            reply({{"event", "pong"}, {"protocol_version", 1},
+                   {"capabilities", {{"prefix_cache", prefix_cache}, {"paged_kv", gpu.kv_pages_total > 0}}}});
         else if (op == "stats")
             reply_stats(gpu, active >= 0, 0, 0, prefix_stats);
         else if (op == "shutdown") {
@@ -164,7 +169,7 @@ void serve(Residency &gpu, int chunk, bool prefix_cache) {
         }
     }
 }
-void serve_batch(Residency &gpu, int chunk, bool prefix_cache) {
+void serve_batch(Residency &gpu, int chunk, bool prefix_cache, int prefill_decode_interval) {
     bool stopping = false, eof = false;
     std::string pending;
     Hy4BatchSession *session_ptr = nullptr;
@@ -180,13 +185,18 @@ void serve_batch(Residency &gpu, int chunk, bool prefix_cache) {
         });
     session_ptr = &session;
     session.set_prefix_cache(prefix_cache);
+    if (prefill_decode_interval >= 0)
+        session.set_prefill_decode_interval(prefill_decode_interval);
     auto handle = [&](const std::string &line) {
         int id = -1;
         try {
             auto request = Json::parse(line);
             auto op = request.at("op").get<std::string>();
             if (op == "ping")
-                reply({{"event", "pong"}, {"protocol_version", 1}, {"capabilities", {{"prefix_cache", prefix_cache}}}});
+                reply({{"event", "pong"}, {"protocol_version", 1},
+                       {"capabilities", {{"prefix_cache", prefix_cache},
+                                         {"paged_kv", gpu.kv_pages_total > 0},
+                                         {"prefill_decode_interval", session.prefill_decode_interval()}}}});
             else if (op == "stats")
                 reply_stats(gpu, session.active(), session.queued(), session.draft_rounds(), session.prefix_stats());
             else if (op == "shutdown") { stopping = true; reply({{"event", "shutdown"}}); }
@@ -241,18 +251,21 @@ int compute(int argc, char **argv) {
         if (argc == 1 || std::string_view(argv[1]) == "--help") {
             puts(
                 "shelf-compute [hy4] [inspect|reserve|generate|serve] --model-dir PATH --engram-dir PATH --placement "
-                "PATH [--dfly-dir PATH] [--dfly-drafts N] [--max-seq-len N] [--input-ids-file PATH] [--max-new-tokens N] "
-                "[--chunk N] [--temperature T] [--seed N] [--dump-logits PATH] [--repeats N] "
-                "[--expert-parallel N] [--tensor-parallel N] [--max-concurrent-requests N] [--batch-size N] "
-                "[--batch-input-files PATH1,PATH2,...] [--batch-max-new-tokens N1,N2,...] [--prefix-cache 0|1]");
+                "PATH [--dfly-dir PATH] [--dfly-drafts N] [--max-seq-len N] [--kv-pool-tokens N] [--input-ids-file PATH] "
+                "[--max-new-tokens N] [--chunk N] [--prefill-decode-interval N] [--temperature T] [--seed N] "
+                "[--dump-logits PATH] [--repeats N] [--expert-parallel N] [--tensor-parallel N] "
+                "[--max-concurrent-requests N] [--batch-size N] [--batch-input-files PATH1,PATH2,...] "
+                "[--batch-max-new-tokens N1,N2,...] [--prefix-cache 0|1]");
             return 0;
         }
         bool implicit = std::string_view(argv[1]).starts_with("--");
         std::string_view mode = implicit ? "generate" : argv[1];
         Path model, engram, draft, placement;
         size_t tokens = mode == "reserve" ? 2097152 : 4096;
+        size_t kv_pool_tokens = 0;
         Path input, logits_file;
-        int count = 32, chunk = 64, repeats = 1, ep = 0, tp = 1, batch_size = 1, max_concurrent = 1, dfly_drafts = 0, prefix_cache = 1;
+        int count = 32, chunk = 64, repeats = 1, ep = 0, tp = 1, batch_size = 1, max_concurrent = 1,
+            dfly_drafts = 0, prefix_cache = 1, prefill_decode_interval = -1;
         std::string batch_files, batch_counts;
         float temperature = 0;
         uint64_t seed = 0;
@@ -300,6 +313,15 @@ int compute(int argc, char **argv) {
                 auto [p, err] = std::from_chars(value.data(), value.data() + value.size(), prefix_cache);
                 if (p != value.data() + value.size() || err != std::errc{} || (prefix_cache != 0 && prefix_cache != 1))
                     throw std::runtime_error("prefix-cache の値が不正です");
+            } else if (key == "--prefill-decode-interval") {
+                auto [p, err] = std::from_chars(value.data(), value.data() + value.size(), prefill_decode_interval);
+                if (p != value.data() + value.size() || err != std::errc{} || prefill_decode_interval < 0)
+                    throw std::runtime_error("prefill-decode-interval の値が不正です");
+            } else if (key == "--kv-pool-tokens") {
+                auto end = value.data() + value.size();
+                auto [p, err] = std::from_chars(value.data(), end, kv_pool_tokens);
+                if (p != end || err != std::errc{} || !kv_pool_tokens)
+                    throw std::runtime_error("kv-pool-tokens の値が不正です");
             } else if (key == "--placement")
                 placement = value;
             else if (key == "--max-seq-len") {
@@ -383,7 +405,8 @@ int compute(int argc, char **argv) {
         } else if (batch_size != 1 || !batch_files.empty() || !batch_counts.empty())
             throw std::invalid_argument("バッチ指定は generate 専用です");
         for (;;) {
-            Residency gpu(checkpoint, tokens, mode == "generate" ? batch_size : max_concurrent, dfly_drafts);
+            Residency gpu(checkpoint, tokens, mode == "generate" ? batch_size : max_concurrent, kv_pool_tokens,
+                          dfly_drafts);
             try {
                 auto status = gpu.reserve();
                 if (!status.ok())
@@ -401,7 +424,7 @@ int compute(int argc, char **argv) {
                         profile && std::string_view(profile) == "1")
                         checkpoint.report_engram_residency("ready");
                     if (max_concurrent == 1) serve(gpu, chunk, prefix_cache != 0);
-                    else serve_batch(gpu, chunk, prefix_cache != 0);
+                    else serve_batch(gpu, chunk, prefix_cache != 0, prefill_decode_interval);
                 } else if (mode == "generate") {
                     gpu.upload();
                     for (int pass = 0; pass < repeats; ++pass) {

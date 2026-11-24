@@ -16,6 +16,8 @@ inline constexpr int min_draft_tokens = 2;
 inline constexpr int max_draft_tokens = 5;
 inline constexpr int max_verify_rows = max_draft_tokens + 1;
 inline constexpr int default_draft_tokens = 4;
+inline constexpr size_t kv_page_tokens = 256;
+inline constexpr size_t kv_page_groups = kv_page_tokens / 4;
 
 inline bool multi_gpu_vmm_allowed(int ranks, std::string_view vmm) {
     return ranks <= 1 || vmm != "1";
@@ -65,6 +67,9 @@ struct Residency {
     size_t tokens;
     int max_slots;
     int draft_tokens;
+    size_t kv_pool_tokens = 0;
+    size_t kv_pages_total = 0;
+    size_t kv_page_stride = 0;
     bool batch_draft;
     bool index_wmma = true;
     std::vector<std::array<int, 42>> sparse_last;
@@ -86,7 +91,23 @@ struct Residency {
     std::array<std::map<std::string, void *>, 4> folded;
     std::array<std::array<uint8_t *, 42>, 4> cache{};
     std::array<std::array<uint16_t *, 42>, 4> index_keys{};
-    explicit Residency(Checkpoint &model, size_t tokens, int slots = 1, int draft_tokens = 0);
+    std::array<std::array<uint16_t *, 42>, 4> index_pending{};
+    std::array<int32_t *, 4> page_table{};
+    std::vector<int32_t> kv_free_pages;
+    std::vector<uint32_t> kv_page_refs;
+    std::vector<std::vector<int32_t>> slot_page_tables;
+    static bool is_sparse_layer(int layer) { return layer == 0 || layer % 4 == 1; }
+    size_t pages_for_tokens(size_t n) const { return n ? (n + kv_page_tokens - 1) / kv_page_tokens : 0; }
+    size_t free_kv_pages() const { return kv_free_pages.size(); }
+    size_t used_kv_pages() const { return kv_pages_total - kv_free_pages.size(); }
+    void sync_slot_page_table(int slot);
+    bool allocate_slot_pages(int slot, size_t needed_tokens);
+    void release_slot_pages(int slot);
+    void retain_pages(const std::vector<int32_t> &pages);
+    void release_pages(std::vector<int32_t> &pages);
+    int32_t alloc_single_page();
+    explicit Residency(Checkpoint &model, size_t tokens, int slots = 1, size_t kv_pool_tokens = 0,
+                       int draft_tokens = 0);
     static int parse_draft_tokens(std::string_view value);
     static int resolve_draft_tokens(int requested = 0);
     ~Residency() noexcept;

@@ -27,10 +27,20 @@ void *Region::next(size_t length) {
     cursor = start + length;
     return base + start;
 }
-Residency::Residency(Checkpoint &model, size_t tokens, int slots, int drafts)
-    : model(model), tokens(tokens), max_slots(slots), draft_tokens(resolve_draft_tokens(drafts)), batch_draft(false) {
+Residency::Residency(Checkpoint &model, size_t tokens, int slots, size_t kv_pool_tokens, int drafts)
+    : model(model), tokens(tokens), max_slots(slots), draft_tokens(resolve_draft_tokens(drafts)),
+      kv_pool_tokens(kv_pool_tokens), batch_draft(false) {
     if (slots < 1 || slots > 32)
         throw std::invalid_argument("スロット数は 1〜32 で指定してください");
+    if (this->kv_pool_tokens == 0) {
+        if (const char *env = std::getenv("SHELF_HY4_KV_POOL_TOKENS"); env && *env) {
+            size_t parsed = 0;
+            auto [p, err] = std::from_chars(env, env + std::strlen(env), parsed);
+            if (err != std::errc{} || p != env + std::strlen(env) || !parsed)
+                throw std::runtime_error("SHELF_HY4_KV_POOL_TOKENS が不正です");
+            this->kv_pool_tokens = parsed;
+        }
+    }
     const char *wmma = std::getenv("SHELF_HY4_INDEX_WMMA");
     index_wmma = !wmma || std::string_view(wmma) != "0";
     const char *draft = std::getenv("SHELF_HY4_BATCH_DFLY");
@@ -79,7 +89,7 @@ Status Residency::reserve() {
             throw std::runtime_error("gfx1201 の R9700 のみ指定してください");
         physical[device] = device;
     }
-    std::array<size_t, 4> available{}, overhead{};
+    std::array<size_t, 4> available{}, base_overhead{}, overhead{};
     std::array<int64_t, 4> remaining{};
     std::array<int, 4> used{};
     for (const auto &row : model.owners)
@@ -88,35 +98,69 @@ Status Residency::reserve() {
                 throw std::runtime_error("配置表の group が EP 数を超えています");
             ++used[r];
         }
+    kv_page_stride = pages_for_tokens(tokens);
+    constexpr size_t dsa_layers = 12;
+    const size_t per_page_bytes = dsa_layers * (align(kv_page_tokens * 294) + align(kv_page_groups * 256));
+    int64_t min_attention_budget = std::numeric_limits<int64_t>::max();
     for (int r = 0; r < ranks; ++r) {
         check(hipSetDevice(physical[r]));
         size_t total = 0;
         check(hipMemGetInfo(&available[r], &total));
         available[r] -= std::min(available[r], size_t(8) << 20);
         const bool attention_rank = tp_size > 1 || r == 0;
-        overhead[r] = (tp_size > 1 ? size_t(1) << 30 : (r == 0 ? size_t(2) << 30 : size_t(512) << 20)) + matrix_bytes;
+        base_overhead[r] =
+            (tp_size > 1 ? size_t(1) << 30 : (r == 0 ? size_t(2) << 30 : size_t(512) << 20)) + matrix_bytes;
         if (attention_rank) {
-            overhead[r] += align(41 * 512 * sizeof(int)) + align(41 * 512 * sizeof(float)) + 256;
+            base_overhead[r] += align(41 * 512 * sizeof(int)) + align(41 * 512 * sizeof(float)) + 256;
             for (int i = 0; i < 42; ++i) {
-                bool sparse = i == 0 || i % 4 == 1;
-                overhead[r] += align(max_slots * 294 * (sparse ? tokens : std::min(tokens, size_t(518))));
-                if (sparse)
-                    overhead[r] += align((tokens / 4 + 12) * 256 * max_slots);
+                if (!is_sparse_layer(i))
+                    base_overhead[r] += align(max_slots * 294 * std::min(tokens, size_t(518)));
+                else
+                    base_overhead[r] += align(size_t(max_slots) * 12 * 256);
             }
+            base_overhead[r] += align(size_t(max_slots) * kv_page_stride * sizeof(int32_t));
             for (const auto &[name, ignored] : folded[r])
-                overhead[r] += size_t(model.shape_of(name, r)->at(1)) * 512 * 2;
+                base_overhead[r] += size_t(model.shape_of(name, r)->at(1)) * 512 * 2;
         }
         if (tp_size > 1)
-            overhead[r] += tp_prefill_rows * 3072u * 2u;
+            base_overhead[r] += tp_prefill_rows * 3072u * 2u;
         if (tp_size > 1 && ep_size > 1)
-            overhead[r] += tp_prefill_rows * 1536u * 2u;
+            base_overhead[r] += tp_prefill_rows * 1536u * 2u;
+        const int64_t budget = int64_t(available[r]) - int64_t(align(model.bytes[r]) + base_overhead[r]);
+        if (budget < 0)
+            return Status::unsupported("要求された配置と予約長は GPU の空き容量に収まりません", __FILE__, __LINE__);
+        if (attention_rank)
+            min_attention_budget = std::min(min_attention_budget, budget);
+    }
+    if (kv_pool_tokens > 0) {
+        kv_pages_total = std::max<size_t>(1, pages_for_tokens(kv_pool_tokens));
+        if (min_attention_budget < int64_t(kv_pages_total * per_page_bytes))
+            return Status::unsupported("要求された配置と予約長は GPU の空き容量に収まりません", __FILE__, __LINE__);
+    } else {
+        const size_t max_useful = size_t(max_slots) * kv_page_stride;
+        const size_t fit_with_graph = (tp_size == 1 && min_attention_budget > int64_t(graph_headroom))
+                                          ? size_t(min_attention_budget - int64_t(graph_headroom)) / per_page_bytes
+                                          : 0;
+        const size_t fit_no_graph = size_t(min_attention_budget) / per_page_bytes;
+        const size_t min_required = max_slots == 1 ? kv_page_stride : std::min(kv_page_stride, max_useful);
+        if (fit_with_graph >= min_required)
+            kv_pages_total = std::min(max_useful, fit_with_graph);
+        else if (fit_no_graph >= min_required)
+            kv_pages_total = std::min(max_useful, fit_no_graph);
+        else
+            return Status::unsupported("要求された配置と予約長は GPU の空き容量に収まりません", __FILE__, __LINE__);
+    }
+    for (int r = 0; r < ranks; ++r) {
+        const bool attention_rank = tp_size > 1 || r == 0;
+        overhead[r] = base_overhead[r] + (attention_rank ? kv_pages_total * per_page_bytes : 0);
         remaining[r] = int64_t(available[r]) - int64_t(align(model.bytes[r]) + overhead[r]);
     }
     if (*std::min_element(remaining.begin(), remaining.begin() + ranks) < 0)
         return Status::unsupported("要求された配置と予約長は GPU の空き容量に収まりません", __FILE__, __LINE__);
     graph_room = tp_size == 1 && std::all_of(remaining.begin(), remaining.begin() + ranks,
                                             [](int64_t bytes) { return bytes >= int64_t(graph_headroom); });
-    fprintf(stderr, "rank_counts=%d,%d,%d,%d\n", used[0], used[1], used[2], used[3]);
+    fprintf(stderr, "rank_counts=%d,%d,%d,%d kv_pages=%zu kv_page_tokens=%zu\n", used[0], used[1], used[2], used[3],
+            kv_pages_total, kv_page_tokens);
     for (int r = 0; r < ranks; ++r) {
         check(hipSetDevice(physical[r]));
         size_t free, total;
@@ -141,12 +185,19 @@ Status Residency::reserve() {
         check(hipStreamCreateWithFlags(&compute[r], hipStreamNonBlocking));
         weight_base[r] = static_cast<uint8_t *>(buffer.next(model.bytes[r]));
         if (attention_rank) {
+            page_table[r] = static_cast<int32_t *>(buffer.next(size_t(max_slots) * kv_page_stride * sizeof(int32_t)));
+            check(hipMemset(page_table[r], 0xff, size_t(max_slots) * kv_page_stride * sizeof(int32_t)));
             for (int i = 0; i < 42; ++i) {
-                bool sparse = i == 0 || i % 4 == 1;
-                cache[r][i] = static_cast<uint8_t *>(
-                    buffer.next(max_slots * 294 * (sparse ? tokens : std::min(tokens, size_t(518)))));
-                if (sparse)
-                    index_keys[r][i] = static_cast<uint16_t *>(buffer.next((tokens / 4 + 12) * 256 * max_slots));
+                if (!is_sparse_layer(i)) {
+                    cache[r][i] = static_cast<uint8_t *>(
+                        buffer.next(max_slots * 294 * std::min(tokens, size_t(518))));
+                } else {
+                    cache[r][i] = static_cast<uint8_t *>(buffer.next(kv_pages_total * kv_page_tokens * 294));
+                    index_keys[r][i] = static_cast<uint16_t *>(
+                        buffer.next(kv_pages_total * kv_page_groups * 128 * sizeof(uint16_t)));
+                    index_pending[r][i] = static_cast<uint16_t *>(
+                        buffer.next(size_t(max_slots) * 12 * 128 * sizeof(uint16_t)));
+                }
             }
             for (auto &[name, ptr] : folded[r])
                 ptr = buffer.next(size_t(model.shape_of(name, r)->at(1)) * 512 * 2);
@@ -169,7 +220,81 @@ Status Residency::reserve() {
             ep_barrier[t] = std::make_unique<SyncBarrier>(2);
     if (tp_size > 1)
         all_barrier = std::make_unique<SyncBarrier>(ranks);
+    kv_page_refs.assign(kv_pages_total, 0);
+    kv_free_pages.resize(kv_pages_total);
+    for (size_t i = 0; i < kv_pages_total; ++i)
+        kv_free_pages[i] = int32_t(kv_pages_total - 1 - i);
+    slot_page_tables.assign(max_slots, {});
     return Status::make_ok();
+}
+void Residency::sync_slot_page_table(int slot) {
+    if (slot < 0 || size_t(slot) >= slot_page_tables.size() || !kv_page_stride)
+        return;
+    const auto &pages = slot_page_tables[slot];
+    const size_t count = std::min(pages.size(), kv_page_stride);
+    for (int r = 0; r < ranks; ++r) {
+        if (!page_table[r])
+            continue;
+        check(hipSetDevice(physical[r]));
+        if (count)
+            check(hipMemcpyAsync(page_table[r] + size_t(slot) * kv_page_stride, pages.data(),
+                                 count * sizeof(int32_t), hipMemcpyHostToDevice, compute[r]));
+        if (count < kv_page_stride)
+            check(hipMemsetAsync(page_table[r] + size_t(slot) * kv_page_stride + count, 0xff,
+                                 (kv_page_stride - count) * sizeof(int32_t), compute[r]));
+    }
+    if (ranks > 0)
+        check(hipSetDevice(physical[0]));
+}
+bool Residency::allocate_slot_pages(int slot, size_t needed_tokens) {
+    if (!kv_pages_total)
+        return true;
+    if (slot < 0 || size_t(slot) >= slot_page_tables.size())
+        return false;
+    const size_t need = pages_for_tokens(needed_tokens);
+    if (need > kv_page_stride)
+        return false;
+    auto &table = slot_page_tables[slot];
+    if (table.size() >= need)
+        return true;
+    if (need - table.size() > kv_free_pages.size())
+        return false;
+    while (table.size() < need) {
+        int32_t page = kv_free_pages.back();
+        kv_free_pages.pop_back();
+        kv_page_refs[page] = 1;
+        table.push_back(page);
+    }
+    sync_slot_page_table(slot);
+    return true;
+}
+void Residency::release_slot_pages(int slot) {
+    if (slot < 0 || size_t(slot) >= slot_page_tables.size())
+        return;
+    release_pages(slot_page_tables[slot]);
+}
+void Residency::retain_pages(const std::vector<int32_t> &pages) {
+    for (int32_t p : pages) {
+        if (p >= 0 && size_t(p) < kv_page_refs.size())
+            ++kv_page_refs[p];
+    }
+}
+void Residency::release_pages(std::vector<int32_t> &pages) {
+    for (int32_t p : pages) {
+        if (p >= 0 && size_t(p) < kv_page_refs.size()) {
+            if (--kv_page_refs[p] == 0)
+                kv_free_pages.push_back(p);
+        }
+    }
+    pages.clear();
+}
+int32_t Residency::alloc_single_page() {
+    if (kv_free_pages.empty())
+        return -1;
+    int32_t page = kv_free_pages.back();
+    kv_free_pages.pop_back();
+    kv_page_refs[page] = 1;
+    return page;
 }
 void Residency::reserve_experts(int r, Region &buffer) {
     matrices[r] = static_cast<Hy4ExpertProjection *>(buffer.next(matrix_bytes));
@@ -585,6 +710,15 @@ void Residency::shutdown() {
             errors += status.message() + "\n";
     }
     arenas.clear();
+    kv_free_pages.clear();
+    kv_page_refs.clear();
+    slot_page_tables.clear();
+    kv_pages_total = 0;
+    kv_page_stride = 0;
+    page_table.fill(nullptr);
+    index_pending = {};
+    cache = {};
+    index_keys = {};
     for (int r = 0; r < ranks; ++r) {
         collect(hipSetDevice(physical[r]));
         for (auto events : {&tp_ready, &tp_done, &tp_arrived, &tp_consumed, &ep_ready, &ep_done, &ep_arrived, &ep_consumed})

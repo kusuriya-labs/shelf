@@ -16,7 +16,7 @@ int main() {
     if (gpu.draft_tokens != 4)
         return 1;
     for (int k : {2, 3, 4, 5}) {
-        Residency configured(model, 32, 2, k);
+        Residency configured(model, 32, 2, 0, k);
         if (configured.draft_tokens != k)
             return 1;
         Hy4BatchSession scoped(configured, {}, {}, k);
@@ -25,7 +25,7 @@ int main() {
     }
     for (int bad : {-1, 1, 6}) {
         try {
-            Residency rejected(model, 32, 2, bad);
+            Residency rejected(model, 32, 2, 0, bad);
             return 1;
         } catch (const std::invalid_argument &) {}
     }
@@ -69,5 +69,22 @@ int main() {
     session.cancel(4);
     session.cancel(2);
     session.step();
-    return session.active() || cancelled != std::vector<int>{3, 0, 1, 4, 2};
+    if (session.active() || cancelled != std::vector<int>{3, 0, 1, 4, 2})
+        return 1;
+    if (session.prefill_decode_interval() != 1)
+        return 1;
+    session.set_prefill_decode_interval(0);
+    if (session.prefill_decode_interval() != 0)
+        return 1;
+    session.set_prefill_decode_interval(2);
+    if (session.prefill_decode_interval() != 2)
+        return 1;
+    try {
+        session.set_prefill_decode_interval(-1);
+        return 1;
+    } catch (const std::invalid_argument &) {}
+    if (gpu.pages_for_tokens(0) != 0 || gpu.pages_for_tokens(1) != 1 ||
+        gpu.pages_for_tokens(kv_page_tokens) != 1 || gpu.pages_for_tokens(kv_page_tokens + 1) != 2)
+        return 1;
+    return 0;
 }

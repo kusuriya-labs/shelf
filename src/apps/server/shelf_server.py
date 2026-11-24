@@ -95,6 +95,10 @@ def build_compute_argv(opts) -> list[str]:
             argv += ["--dfly-dir", opts.dfly_dir, "--dfly-drafts", str(opts.dfly_drafts)]
         if not opts.prefix_cache:
             argv += ["--prefix-cache", "0"]
+        if getattr(opts, "kv_pool_tokens", None) is not None:
+            argv += ["--kv-pool-tokens", str(opts.kv_pool_tokens)]
+        if getattr(opts, "prefill_decode_interval", None) is not None:
+            argv += ["--prefill-decode-interval", str(opts.prefill_decode_interval)]
         return argv
     argv = [
         opts.compute,

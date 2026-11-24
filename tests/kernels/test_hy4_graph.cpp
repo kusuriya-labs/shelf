@@ -99,6 +99,9 @@ void logical_ranks(Residency &gpu, int ranks) {
 }
 
 void reset_history(Residency &gpu) {
+    gpu.release_slot_pages(0);
+    if (!gpu.allocate_slot_pages(0, gpu.tokens))
+        throw std::runtime_error("KV ページ割当に失敗しました");
     std::vector<uint8_t> kv(gpu.tokens * 294);
     for (size_t row = 0; row < gpu.tokens; ++row) {
         auto rec = kv.data() + row * 294;
@@ -113,10 +116,28 @@ void reset_history(Residency &gpu) {
     for (size_t i = 0; i < groups.size(); ++i)
         groups[i] = uint16_t(std::bit_cast<uint32_t>(float(int(i * 37 % 101) - 50) / 64) >> 16);
     for (int l = 0; l < 42; ++l) {
-        auto slots = gpu.index_keys[0][l] ? gpu.tokens : std::min(gpu.tokens, size_t(518));
-        checked(hipMemcpy(gpu.cache[0][l], kv.data(), slots * 294, hipMemcpyHostToDevice));
-        if (gpu.index_keys[0][l])
-            checked(hipMemcpy(gpu.index_keys[0][l], groups.data(), groups.size() * 2, hipMemcpyHostToDevice));
+        if (!Residency::is_sparse_layer(l)) {
+            auto slots = std::min(gpu.tokens, size_t(518));
+            checked(hipMemcpy(gpu.cache[0][l], kv.data(), slots * 294, hipMemcpyHostToDevice));
+            continue;
+        }
+        const auto &pages = gpu.slot_page_tables[0];
+        const size_t total_groups = gpu.tokens / 4;
+        for (size_t pi = 0; pi < pages.size(); ++pi) {
+            const int32_t phys = pages[pi];
+            const size_t tok_off = pi * kv_page_tokens;
+            const size_t tok_cnt = std::min(kv_page_tokens, gpu.tokens - tok_off);
+            checked(hipMemcpy(gpu.cache[0][l] + size_t(phys) * kv_page_tokens * 294,
+                              kv.data() + tok_off * 294, tok_cnt * 294, hipMemcpyHostToDevice));
+            const size_t grp_off = pi * kv_page_groups;
+            if (grp_off < total_groups) {
+                const size_t grp_cnt = std::min(kv_page_groups, total_groups - grp_off);
+                checked(hipMemcpy(gpu.index_keys[0][l] + size_t(phys) * kv_page_groups * 128,
+                                  groups.data() + grp_off * 128, grp_cnt * 256, hipMemcpyHostToDevice));
+            }
+        }
+        checked(hipMemcpy(gpu.index_pending[0][l], groups.data() + total_groups * 128,
+                          12 * 256, hipMemcpyHostToDevice));
     }
 }
 
@@ -292,7 +313,8 @@ void compare_draft_counts(const Path &body, const Path &draft) {
                 setenv("SHELF_HY4_DRAFT_GRAPH", graph ? "1" : "0", 1);
                 for (size_t c = 0; c < cases.size(); ++c) {
                     auto target_before = single_gpu.target_replays, draft_before = single_gpu.draft_replays;
-                    auto got = generate(single_gpu, cases[c], counts[c], 1024, 0.f, 0, {}, 0, 1.f, {}, k);
+                    auto got = generate(single_gpu, cases[c], counts[c], 1024, 0.f, 0, {}, 0, 1.f, {}, false, nullptr,
+                                        nullptr, nullptr, k);
                     if (got != baselines[c])
                         throw std::runtime_error("単一スロット greedy 不一致: k=" + std::to_string(k) +
                                                  " case=" + std::to_string(c) + " graph=" + std::to_string(graph));
@@ -597,12 +619,20 @@ void check_prefill(Residency &gpu, const std::vector<int> &prompt) {
                 checked(hipMemsetAsync(gpu.workspace[r].base, pattern, gpu.workspace[r].size, gpu.compute[r]));
             }
             checked(hipSetDevice(gpu.physical[0]));
+            gpu.release_slot_pages(0);
+            if (!gpu.allocate_slot_pages(0, gpu.tokens))
+                throw std::runtime_error("KV ページ割当に失敗しました");
             for (int layer = 0; layer < 42; ++layer) {
-                auto slots = gpu.index_keys[0][layer] ? gpu.tokens : std::min(gpu.tokens, size_t(518));
-                checked(hipMemsetAsync(gpu.cache[0][layer], pattern, slots * 294, gpu.compute[0]));
-                if (gpu.index_keys[0][layer])
-                    checked(hipMemsetAsync(gpu.index_keys[0][layer], pattern, (gpu.tokens / 4 + 12) * 256,
-                                           gpu.compute[0]));
+                if (!Residency::is_sparse_layer(layer)) {
+                    auto slots = std::min(gpu.tokens, size_t(518));
+                    checked(hipMemsetAsync(gpu.cache[0][layer], pattern, slots * 294, gpu.compute[0]));
+                } else {
+                    checked(hipMemsetAsync(gpu.cache[0][layer], pattern,
+                                           gpu.kv_pages_total * kv_page_tokens * 294, gpu.compute[0]));
+                    checked(hipMemsetAsync(gpu.index_keys[0][layer], pattern,
+                                           gpu.kv_pages_total * kv_page_groups * 256, gpu.compute[0]));
+                    checked(hipMemsetAsync(gpu.index_pending[0][layer], pattern, 12 * 256, gpu.compute[0]));
+                }
             }
             auto logits = prefill_logits(gpu, prompt, chunk);
             if (reference.empty()) {
