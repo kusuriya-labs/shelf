@@ -1323,3 +1323,10 @@ prefix capture 中の制約は [prefix cache の DFlash2 経路](prefix_cache.md
 chunk verify は lossy・exact とも逐次計算との bit 一致を保証せず、単一 request でも
 非投機 greedy と生成列が異なる場合がある。batch 形状でも生成列は分岐する。
 速度と生成列の評価、制限は [調査結果](../research/20261111/dflash2_policy.md) を参照。
+
+## Online N-gram ハイブリッド事前ゲート
+
+`--ngram` を併用すると、各ラウンドで `OnlineNgramMatcher::propose()` を先に評価し、
+一致時は `dflash2_propose_*` をスキップして `DFlash2SpecBatchSlot::precomputed_drafts`
+（または `dflash2_spec_step` の `precomputed_drafts`）経由で同一の `K + 1` 行 verify へ流す。
+詳細は [online_ngram.md](online_ngram.md) を参照。

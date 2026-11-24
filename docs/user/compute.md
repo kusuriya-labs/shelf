@@ -82,6 +82,11 @@ prefill の chunk 境界や prefix cache の有無によって、同じ入力の
 | `--mtp-sink N` | attention-sink tokens kept before the window |
 | `--mtp-drafts N` | speculative draft tokens per round (default 7, max 31) |
 | `--mtp-stats 0\|1` | print MTP speculative decode statistics (default 1) |
+| `--ngram` | enable online n-gram / suffix speculative decoding (standalone verify when no drafter, or pre-gate hybrid with --dflash2-model-dir / --mtp) |
+| `--ngram-drafts N` | n-gram draft tokens per round (default 7; standalone supports 3, 7, or 15 with HIP Graph verify) |
+| `--ngram-min-match N` | minimum suffix match length (0 = auto: 4 greedy, 6 stochastic; default 0) |
+| `--ngram-max-match N` | maximum suffix match length (default 32) |
+| `--ngram-stats 0\|1` | print online n-gram statistics (default 1) |
 | `--prefix-cache 0\|1` | enable prefix cache (default 1) |
 | `--working-set-reserve-gib N` | arena headroom kept free for the working set (executor workspace allocated after the memory plan; 0 = size it from the row bucket, default 0) |
 | `--prefix-cache-checkpoints N` | stored prefix checkpoints in host memory (default 16) |
@@ -253,6 +258,14 @@ block size 16 の `DFlash2DraftModel` は `--dflash2-drafts 15` で最大幅を�
 
 - `--dump-logits`
 - `--dflash2-drafts` が `block_size - 1` を超える
+
+### Online N-gram / Suffix 投機的デコード
+
+`--ngram` を指定すると、現在のリクエスト履歴（入力プロンプト + 生成済みトークン）から最長 suffix 一致を検出し、追加重み・追加 VRAM なしで draft トークンを提案する。詳細は [../developer/online_ngram.md](../developer/online_ngram.md) を参照。
+
+- **単独実行（`--ngram`）**: ドラフタ重みを使わず既定 `K=7`（`--ngram-drafts` 3/7/15）の verify を行い、不一致時は通常の 1 行 `DECODE` にフォールバックする。
+- **ハイブリッド併用（`--dflash2-model-dir` + `--ngram` または `--mtp` + `--ngram`）**: 事前ゲートとして先に一致判定し、ヒット時は DFlash2 / MTP の draft forward をスキップして検証へ流す。
+- 既定の最小一致長（`--ngram-min-match 0`）は greedy 時 `4`、stochastic（`--temperature > 0`）時 `6`、最大照合長は `--ngram-max-match 32`。`--ngram-stats 1` で `NGRAM_ROUNDS` / `NGRAM_HITS` / `NGRAM_ACCEPTED_DRAFTS` / `NGRAM_MEAN_ACCEPTED` / `NGRAM_DFLASH_SKIPPED` / `NGRAM_CPU_US_PER_ROUND` を出力する。
 
 `--serve-stdio` と `--kv-cache-dtype fp8|octave:FORMAT` は併用できる。DFlash2 の
 drafter ring は target の KV dtype と独立して BF16 のままである。serve mode では

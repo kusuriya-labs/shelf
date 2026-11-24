@@ -103,6 +103,11 @@ Ready.
 | `--dflash2-radix-topn DFLASH2_RADIX_TOPN` | drafter の radix top-n 幅（default は code 側） |
 | `--mtp` | checkpoint の MTP block を drafter として使う（複数 request を同時に処理する） |
 | `--mtp-drafts MTP_DRAFTS` | MTP の draft tokens per round（default 4） |
+| `--ngram` | online n-gram / suffix 投機的デコードを有効にする |
+| `--ngram-drafts NGRAM_DRAFTS` | n-gram の draft tokens per round（default 7、単独時は 3/7/15） |
+| `--ngram-min-match NGRAM_MIN_MATCH` | 最小一致長（未指定時は自動: greedy 4 / stochastic 6） |
+| `--ngram-max-match NGRAM_MAX_MATCH` | 最大一致長（default 32） |
+| `--ngram-stats {0,1}` | online n-gram 統計出力の有効化 0\|1（default 1） |
 | `--moe-host-experts MOE_HOST_EXPERTS` | 層あたり host に退避する routed expert 数（default 0） |
 | `--lm-head-int8 {0,1}` | lm head を load 時に INT8 W32 へ量子化する（default 1） |
 | `--pcie-frac PCIE_FRAC` | runtime が使ってよい PCIe の割合（default 0.25） |
@@ -816,7 +821,7 @@ strict tools の stream は完成した tool call をまとめて送る。生成
 制約付き request は DFlash2 が有効な場合、DFlash2 投機 decode と併用して動作する
 （thinking 有効時は `</think>` まで通常どおり DFlash2 で生成し、検出位置で状態を整えて
 次のラウンドから制約付き DFlash2 へ切り替える）。MTP が有効な場合は引き続き通常 decode へ
-フォールバックする。
+フォールバックする。`--ngram` 併用時は非制約・制約付きいずれのリクエストでも N-gram ヒット時に DFlash2 / MTP の draft forward をスキップして同じ verify 経路へ合流する（[online_ngram.md](../developer/online_ngram.md)）。
 
 ## PLaMo 3 Translate
 

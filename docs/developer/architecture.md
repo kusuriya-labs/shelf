@@ -33,7 +33,7 @@ shelf_qwen35_runtime                          shelf_mtp
       \                                            /
        v                                          v
 shelf_runtime (共通 runtime)
-  Executor / ContinuousBatcher / DFlash2 spec decode / spec state / request / token budget /
+  Executor / ContinuousBatcher / DFlash2 spec decode / Online N-gram / spec state / request / token budget /
   prefix cache / decode backend / TP / pipeline parallel / graph / program / workspace layout
       ↓
 shelf_dflash2 + shelf_kernels_dflash2

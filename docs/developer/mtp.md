@@ -402,3 +402,10 @@ optional external test:
 MTP の verify は出力可能な残り token 数と停止 token の最初の位置で受理結果を
 制限してから target の状態を確定する。停止 token 自体は出力し、その後の行は確定しない。round の入力 `pending_token` が停止 token の場合は、
 step の先頭で何も draft せず `finished=true`（出力 0 個）を返す。
+
+## Online N-gram ハイブリッド事前ゲート
+
+`--ngram` を併用すると、各ラウンドで `OnlineNgramMatcher::propose()` を先に評価し、
+一致時は `precomputed_drafts` 経由で `first_pass` のみ `compute_logits=false` で実行して
+ドラフタ KV / GDN 状態のみを追従させ、`lm_head` と `1..K-1` 自己回帰をスキップする。
+詳細は [online_ngram.md](online_ngram.md) を参照。
