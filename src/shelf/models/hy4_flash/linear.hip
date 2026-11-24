@@ -56,32 +56,38 @@ __global__ void rotate_input(const uint16_t *input, const uint16_t *suh, int8_t 
     *reinterpret_cast<uint32_t *>(codes + size_t(blockIdx.y) * padded + base) = packed;
 }
 
+template <int RowsPerBlock>
 __global__ void rotate_output(const float *partial, const uint16_t *svh, uint16_t *output, int width,
                               int padded, const Hy4ExpertProjection *group = nullptr, int stride = 0,
                               float *logits = nullptr, const Hy4Route *routes = nullptr, int splits = 1,
-                              const int *count = nullptr) {
-    if (count && int(blockIdx.y) >= *count)
+                              const int *count = nullptr, int total_rows = 0) {
+    const int row = int(blockIdx.y) * RowsPerBlock + (RowsPerBlock > 1 ? int(threadIdx.x >> 5) : 0);
+    if (total_rows && row >= total_rows)
         return;
+    if (count && row >= *count)
+        return;
+    const unsigned lane = RowsPerBlock > 1 ? (threadIdx.x & 31u) : threadIdx.x;
+    const int stride_rows = total_rows ? total_rows : int(gridDim.y);
     if (group)
-        svh = group[(routes ? routes[blockIdx.y].expert : blockIdx.y) * stride].svh;
-    const int base = blockIdx.x * 128 + threadIdx.x * 4;
-    float4 acc = *reinterpret_cast<const float4 *>(partial + size_t(blockIdx.y) * padded + base);
+        svh = group[(routes ? routes[row].expert : row) * stride].svh;
+    const int base = blockIdx.x * 128 + lane * 4;
+    float4 acc = *reinterpret_cast<const float4 *>(partial + size_t(row) * padded + base);
     for (int s = 1; s < splits; ++s) {
-        float4 add = *reinterpret_cast<const float4 *>(partial + (size_t(s) * gridDim.y + blockIdx.y) * padded + base);
+        float4 add = *reinterpret_cast<const float4 *>(partial + (size_t(s) * stride_rows + row) * padded + base);
         acc.x += add.x;
         acc.y += add.y;
         acc.z += add.z;
         acc.w += add.w;
     }
     float v[4] = {acc.x, acc.y, acc.z, acc.w};
-    fwht128(v[0], v[1], v[2], v[3], threadIdx.x);
+    fwht128(v[0], v[1], v[2], v[3], lane);
     if (base + 3 < width && (width & 3) == 0) {
         const uint2 hs = *reinterpret_cast<const uint2 *>(svh + base);
         float s0 = v[0] * kInvSqrt128 * f16_bits_to_f32(uint16_t(hs.x & 0xffffu));
         float s1 = v[1] * kInvSqrt128 * f16_bits_to_f32(uint16_t(hs.x >> 16));
         float s2 = v[2] * kInvSqrt128 * f16_bits_to_f32(uint16_t(hs.y & 0xffffu));
         float s3 = v[3] * kInvSqrt128 * f16_bits_to_f32(uint16_t(hs.y >> 16));
-        size_t offset = size_t(blockIdx.y) * width + base;
+        size_t offset = size_t(row) * width + base;
         if (logits) {
             *reinterpret_cast<float4 *>(logits + offset) = float4{s0, s1, s2, s3};
         } else {
@@ -93,7 +99,7 @@ __global__ void rotate_output(const float *partial, const uint16_t *svh, uint16_
     } else {
         for (int i = 0; i < 4 && base + i < width; ++i) {
             float value = v[i] * kInvSqrt128 * f16_bits_to_f32(svh[base + i]);
-            size_t offset = size_t(blockIdx.y) * width + base + i;
+            size_t offset = size_t(row) * width + base + i;
             if (logits)
                 logits[offset] = value;
             else
@@ -113,10 +119,28 @@ __global__ void gather_rotate_pair(const uint16_t *input, const Hy4Route *routes
     const unsigned lane = threadIdx.x;
     const int base = blockIdx.x * 128 + lane * 4;
     float v0[4], v1[4];
-    for (int i = 0; i < 4; ++i) {
-        float value = base + i < width ? bf16_bits_to_f32(input[size_t(src) * width + base + i]) : 0.0f;
-        v0[i] = value * f16_bits_to_f32(suh0[base + i]);
-        v1[i] = value * f16_bits_to_f32(suh1[base + i]);
+    if (base + 3 < width && (width & 3) == 0) {
+        const uint2 raw = *reinterpret_cast<const uint2 *>(input + size_t(src) * width + base);
+        const uint2 h0 = *reinterpret_cast<const uint2 *>(suh0 + base);
+        const uint2 h1 = *reinterpret_cast<const uint2 *>(suh1 + base);
+        const float x0 = bf16_bits_to_f32(uint16_t(raw.x & 0xffffu));
+        const float x1 = bf16_bits_to_f32(uint16_t(raw.x >> 16));
+        const float x2 = bf16_bits_to_f32(uint16_t(raw.y & 0xffffu));
+        const float x3 = bf16_bits_to_f32(uint16_t(raw.y >> 16));
+        v0[0] = x0 * f16_bits_to_f32(uint16_t(h0.x & 0xffffu));
+        v0[1] = x1 * f16_bits_to_f32(uint16_t(h0.x >> 16));
+        v0[2] = x2 * f16_bits_to_f32(uint16_t(h0.y & 0xffffu));
+        v0[3] = x3 * f16_bits_to_f32(uint16_t(h0.y >> 16));
+        v1[0] = x0 * f16_bits_to_f32(uint16_t(h1.x & 0xffffu));
+        v1[1] = x1 * f16_bits_to_f32(uint16_t(h1.x >> 16));
+        v1[2] = x2 * f16_bits_to_f32(uint16_t(h1.y & 0xffffu));
+        v1[3] = x3 * f16_bits_to_f32(uint16_t(h1.y >> 16));
+    } else {
+        for (int i = 0; i < 4; ++i) {
+            float value = base + i < width ? bf16_bits_to_f32(input[size_t(src) * width + base + i]) : 0.0f;
+            v0[i] = value * f16_bits_to_f32(suh0[base + i]);
+            v1[i] = value * f16_bits_to_f32(suh1[base + i]);
+        }
     }
     fwht128(v0[0], v0[1], v0[2], v0[3], lane);
     fwht128(v1[0], v1[1], v1[2], v1[3], lane);
@@ -137,10 +161,15 @@ __global__ void gather_rotate_pair(const uint16_t *input, const Hy4Route *routes
         scales[size_t(blockIdx.y) * (padded / 128) + blockIdx.x] = scale0;
         scales1[size_t(blockIdx.y) * (padded / 128) + blockIdx.x] = scale1;
     }
+    uint32_t packed0 = 0, packed1 = 0;
     for (int i = 0; i < 4; ++i) {
-        codes[size_t(blockIdx.y) * padded + base + i] = scale0 ? int8_t(rintf(v0[i] / scale0)) : 0;
-        codes1[size_t(blockIdx.y) * padded + base + i] = scale1 ? int8_t(rintf(v1[i] / scale1)) : 0;
+        int8_t q0 = scale0 ? int8_t(rintf(v0[i] / scale0)) : 0;
+        int8_t q1 = scale1 ? int8_t(rintf(v1[i] / scale1)) : 0;
+        packed0 |= uint32_t(uint8_t(q0)) << (8 * i);
+        packed1 |= uint32_t(uint8_t(q1)) << (8 * i);
     }
+    *reinterpret_cast<uint32_t *>(codes + size_t(blockIdx.y) * padded + base) = packed0;
+    *reinterpret_cast<uint32_t *>(codes1 + size_t(blockIdx.y) * padded + base) = packed1;
 }
 
 __global__ void rotate_output_swiglu_quant(const float *partial0, const float *partial1,
@@ -151,22 +180,30 @@ __global__ void rotate_output_swiglu_quant(const float *partial0, const float *p
     const auto &mat = matrices[size_t(routes[blockIdx.y].expert) * stride];
     const uint16_t *svh0 = mat.svh, *svh1 = (&mat)[1].svh, *suh2 = (&mat)[2].suh;
     const int base = blockIdx.x * 128 + threadIdx.x * 4;
-    float v0[4], v1[4];
-    for (int i = 0; i < 4; ++i) {
-        size_t off = size_t(blockIdx.y) * padded + base + i;
-        v0[i] = partial0[off];
-        v1[i] = partial1[off];
-    }
+    size_t row_off = size_t(blockIdx.y) * padded + base;
+    float4 p0 = *reinterpret_cast<const float4 *>(partial0 + row_off);
+    float4 p1 = *reinterpret_cast<const float4 *>(partial1 + row_off);
+    float v0[4] = {p0.x, p0.y, p0.z, p0.w};
+    float v1[4] = {p1.x, p1.y, p1.z, p1.w};
     fwht128(v0[0], v0[1], v0[2], v0[3], threadIdx.x);
     fwht128(v1[0], v1[1], v1[2], v1[3], threadIdx.x);
+    const uint2 h_sv0 = *reinterpret_cast<const uint2 *>(svh0 + base);
+    const uint2 h_sv1 = *reinterpret_cast<const uint2 *>(svh1 + base);
+    const uint2 h_su2 = *reinterpret_cast<const uint2 *>(suh2 + base);
+    const float s0[4] = {f16_bits_to_f32(uint16_t(h_sv0.x & 0xffffu)), f16_bits_to_f32(uint16_t(h_sv0.x >> 16)),
+                         f16_bits_to_f32(uint16_t(h_sv0.y & 0xffffu)), f16_bits_to_f32(uint16_t(h_sv0.y >> 16))};
+    const float s1[4] = {f16_bits_to_f32(uint16_t(h_sv1.x & 0xffffu)), f16_bits_to_f32(uint16_t(h_sv1.x >> 16)),
+                         f16_bits_to_f32(uint16_t(h_sv1.y & 0xffffu)), f16_bits_to_f32(uint16_t(h_sv1.y >> 16))};
+    const float u2[4] = {f16_bits_to_f32(uint16_t(h_su2.x & 0xffffu)), f16_bits_to_f32(uint16_t(h_su2.x >> 16)),
+                         f16_bits_to_f32(uint16_t(h_su2.y & 0xffffu)), f16_bits_to_f32(uint16_t(h_su2.y >> 16))};
     float v[4];
     for (int i = 0; i < 4; ++i) {
-        float g = round_bf16(v0[i] * kInvSqrt128 * f16_bits_to_f32(svh0[base + i]));
-        float u = round_bf16(v1[i] * kInvSqrt128 * f16_bits_to_f32(svh1[base + i]));
+        float g = round_bf16(v0[i] * kInvSqrt128 * s0[i]);
+        float u = round_bf16(v1[i] * kInvSqrt128 * s1[i]);
         g = fminf(g, 10.f);
         u = fminf(10.f, fmaxf(-10.f, u));
         uint16_t bits = f32_to_bf16_rne_device(round_bf16(g / (1.f + expf(-g))) * u);
-        v[i] = bf16_bits_to_f32(bits) * f16_bits_to_f32(suh2[base + i]);
+        v[i] = bf16_bits_to_f32(bits) * u2[i];
     }
     fwht128(v[0], v[1], v[2], v[3], threadIdx.x);
     float peak = 0;
@@ -179,8 +216,12 @@ __global__ void rotate_output_swiglu_quant(const float *partial0, const float *p
     const float scale = peak / 127.0f;
     if (!threadIdx.x)
         scales[size_t(blockIdx.y) * (padded / 128) + blockIdx.x] = scale;
-    for (int i = 0; i < 4; ++i)
-        codes[size_t(blockIdx.y) * padded + base + i] = scale ? int8_t(rintf(v[i] / scale)) : 0;
+    uint32_t packed = 0;
+    for (int i = 0; i < 4; ++i) {
+        int8_t q = scale ? int8_t(rintf(v[i] / scale)) : 0;
+        packed |= uint32_t(uint8_t(q)) << (8 * i);
+    }
+    *reinterpret_cast<uint32_t *>(codes + row_off) = packed;
 }
 }
 
@@ -228,8 +269,12 @@ hipError_t shelf_hy4_linear_workspace(const uint16_t *input, const uint16_t *suh
         if (status != hipSuccess)
             return status;
     }
-    rotate_output<<<dim3(padded_output / 128, rows), 32, 0, stream>>>(
-        partial, svh, output, output_width, padded_output, nullptr, 0, nullptr, nullptr, splits);
+    if (rows >= 4)
+        rotate_output<4><<<dim3(padded_output / 128, (rows + 3) / 4), 128, 0, stream>>>(
+            partial, svh, output, output_width, padded_output, nullptr, 0, nullptr, nullptr, splits, nullptr, rows);
+    else
+        rotate_output<1><<<dim3(padded_output / 128, rows), 32, 0, stream>>>(
+            partial, svh, output, output_width, padded_output, nullptr, 0, nullptr, nullptr, splits, nullptr, rows);
     return hipGetLastError();
 }
 
@@ -263,7 +308,12 @@ extern "C" hipError_t shelf_hy4_expert_linear(const uint16_t *x, const Hy4Expert
     status = hipGetLastError();
     if (status != hipSuccess)
         return status;
-    rotate_output<<<dim3(n / 128, rows), 32, 0, stream>>>(partial, nullptr, y, n, n, matrices, stride, nullptr, routes);
+    if (rows >= 4)
+        rotate_output<4><<<dim3(n / 128, (rows + 3) / 4), 128, 0, stream>>>(
+            partial, nullptr, y, n, n, matrices, stride, nullptr, routes, 1, nullptr, rows);
+    else
+        rotate_output<1><<<dim3(n / 128, rows), 32, 0, stream>>>(
+            partial, nullptr, y, n, n, matrices, stride, nullptr, routes, 1, nullptr, rows);
     return hipGetLastError();
 }
 
@@ -343,7 +393,12 @@ hipError_t shelf_hy4_head(const uint16_t *x, const uint16_t *suh, const uint16_t
     status = shelf_hy4_wmma(codes, scales, trellis, partial, rows, 3072, 120832, 6, stream, 1);
     if (status != hipSuccess)
         return status;
-    rotate_output<<<dim3(944, rows), 32, 0, stream>>>(partial, svh, nullptr, 120832, 120832, nullptr, 0, logits);
+    if (rows >= 4)
+        rotate_output<4><<<dim3(944, (rows + 3) / 4), 128, 0, stream>>>(
+            partial, svh, nullptr, 120832, 120832, nullptr, 0, logits, nullptr, 1, nullptr, rows);
+    else
+        rotate_output<1><<<dim3(944, rows), 32, 0, stream>>>(
+            partial, svh, nullptr, 120832, 120832, nullptr, 0, logits, nullptr, 1, nullptr, rows);
     return hipGetLastError();
 }
 
@@ -399,8 +454,12 @@ hipError_t shelf_hy4_expert_decode(const uint16_t *latent, const Hy4ExpertProjec
                                    intermediate, width, 1, stream, batches, num_batches, prefill);
     if (status != hipSuccess)
         return status;
-    rotate_output<<<dim3(width / 128, capacity), 32, 0, stream>>>(
-        partial, nullptr, output, width, width, matrices + 2, 3, nullptr, routes, 1, count);
+    if (capacity >= 4)
+        rotate_output<4><<<dim3(width / 128, (capacity + 3) / 4), 128, 0, stream>>>(
+            partial, nullptr, output, width, width, matrices + 2, 3, nullptr, routes, 1, count, capacity);
+    else
+        rotate_output<1><<<dim3(width / 128, capacity), 32, 0, stream>>>(
+            partial, nullptr, output, width, width, matrices + 2, 3, nullptr, routes, 1, count, capacity);
     return hipGetLastError();
 }
 

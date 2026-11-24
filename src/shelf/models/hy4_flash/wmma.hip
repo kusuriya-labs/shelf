@@ -14,7 +14,7 @@ void launch(const int8_t *codes, const float *scales, const uint32_t *weight, fl
             int n, hipStream_t stream, int splits) {
     if (Bits == 6 && rows > 48 && rows <= 96) {
         int blocks = (rows + 47) / 48;
-        batch<Bits, 3, false, Bits == 4><<<dim3(blocks * (n / 64), 1, splits), 128, 0, stream>>>(
+        batch<Bits, 3, false, false><<<dim3(blocks * (n / 64), 1, splits), 128, 0, stream>>>(
             codes, scales, weight, partial, rows, k, n, blocks);
     } else if (rows >= 32) {
         int blocks = (rows + 31) / 32;
