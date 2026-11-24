@@ -9,6 +9,9 @@
 
 namespace shelf::runtime {
 
+hipError_t launch_tp_peer_probe_copy(void* dst, const void* src, std::size_t bytes,
+                                     hipStream_t stream);
+
 inline uint64_t tp_target_bytes(const TpSumTarget& target) {
     return target.rows * static_cast<uint64_t>(target.row_stride) *
            value_dtype_bytes(target.dtype);

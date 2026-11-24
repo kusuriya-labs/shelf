@@ -278,6 +278,35 @@ static void run_case_signal(TpTransport* transport, void* buffer_a, hipStream_t 
     }
 }
 
+static void run_link_fallback_case(const std::vector<int>& devices, void* buffer_a,
+                                   hipStream_t stream_a, hipEvent_t ready_a, void* buffer_b,
+                                   hipStream_t stream_b, hipEvent_t ready_b) {
+    using shelf::runtime::TpPeerLinkMap;
+    TpPeerLinkMap links(2, std::vector<std::uint8_t>(2, 1u));
+    links[0][0] = 0u;
+    links[1][1] = 0u;
+    links[1][0] = 0u;
+    check(shelf::runtime::tp_peer_link_map_disabled(links) == 1u,
+          "link fallback map has one disabled direction");
+    auto selection = create_tp_transport(devices,
+                                         shelf::runtime::TpCombineBackend::StreamSignal, links);
+    check(selection.ok(), "create_tp_transport with directional fallback");
+    if (!selection.ok()) return;
+    TpTransport* transport = selection.value().transport.get();
+    check(std::string(transport->name()) == "hip-p2p",
+          "partial link failure keeps the peer transport");
+    check(!transport->stream_signal_ready(),
+          "stream signal is disabled when a link needs host staging");
+    const Status verify = transport->verify();
+    check(verify.ok(), "directional fallback transport verifies: " + verify.message());
+    if (!verify.ok()) return;
+    check(transport->reserve(2048ull * 5120u * 4u).ok(), "directional fallback reserve");
+    run_case(transport, buffer_a, stream_a, ready_a, buffer_b, stream_b, ready_b, 32,
+             5120u, ValueDType::BF16, "directional-fallback");
+    run_case(transport, buffer_a, stream_a, ready_a, buffer_b, stream_b, ready_b, 9,
+             5120u, ValueDType::F32, "directional-fallback");
+}
+
 int main() {
     int device_count = 0;
     if (hipGetDeviceCount(&device_count) != hipSuccess || device_count < 2) {
@@ -340,6 +369,8 @@ int main() {
                             kFeatures, 100);
         }
     }
+
+    run_link_fallback_case(devices, buffer_a, stream_a, ready_a, buffer_b, stream_b, ready_b);
 
     HostMediatedTpTransport host_transport(devices);
     check(host_transport.reserve(kMaxBytes).ok(), "reserve host transport staging");

@@ -62,6 +62,33 @@ void try_fuse_combine_consumer(const PrimitiveGraph& graph, const Program& progr
     segment.dispatch_end = static_cast<uint32_t>(consumer_dispatch + 1u);
 }
 
+void try_bind_argmax_consumer(const PrimitiveGraph& graph, const Program& program,
+                              uint32_t group_end, ValueId combine, TpProgramSegment& segment) {
+    for (uint32_t i = group_end; i < program.dispatches.size(); ++i) {
+        const uint32_t node_index = program.dispatch_source_node[i];
+        if (node_index < graph.nodes.size() &&
+            (graph.nodes[node_index].tp_combine != 0 ||
+             graph.nodes[node_index].ep_combine != 0)) {
+            break;
+        }
+        const DispatchBinding& binding = program.dispatches[i];
+        if (binding.kernel_id != KernelId::SAMPLING || binding.output_count != 1u) continue;
+        bool consumes = false;
+        for (uint32_t s = 0u; s < binding.input_count; ++s) {
+            if (binding.input_slots[s] == combine.id) {
+                consumes = true;
+                break;
+            }
+        }
+        if (!consumes) continue;
+        const ValueId output{binding.output_slots[0]};
+        if (program.find_value(output) == nullptr) continue;
+        segment.argmax_output = output;
+        segment.argmax_dispatch = i;
+        return;
+    }
+}
+
 }  // namespace
 
 Result<TpExecutionSchedule> build_tp_execution_schedule(
@@ -109,6 +136,7 @@ Result<TpExecutionSchedule> build_tp_execution_schedule(
             current.combine_value = combine;
             current.combine_local_cols = node.tp_combine_local_cols;
             try_fuse_combine_consumer(graph, program, group_end, combine, current);
+            try_bind_argmax_consumer(graph, program, group_end, combine, current);
             const uint32_t next_begin = current.dispatch_end;
             const bool ep_reduce = ep_enabled && node.ep_combine != 0u && ep_size > 1u;
             const bool tp_reduce = node.tp_combine != 0u && tp_size != 1u;

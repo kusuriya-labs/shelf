@@ -173,6 +173,55 @@ Status TpBarrierGroup::arrive(int rank, const TpSumTarget& target, hipStream_t s
     return result;
 }
 
+bool TpBarrierGroup::supports_argmax_reduce() const noexcept {
+    return transport_ != nullptr && transport_->supports_argmax_reduce();
+}
+
+Status TpBarrierGroup::argmax_reduce(int rank, const TpArgmaxInvocation& invocation) {
+    if (rank < 0 || rank >= rank_count_) {
+        return Status::invalid_argument("tp argmax rank out of range", __FILE__, __LINE__);
+    }
+    if (!supports_argmax_reduce()) {
+        return Status::unsupported("tp transport does not support argmax reduce", __FILE__,
+                                   __LINE__);
+    }
+    const std::size_t index = static_cast<std::size_t>(rank);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (aborted_) return abort_status_;
+    }
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (aborted_) return abort_status_;
+    argmax_invocations_.assign(rank_count_, TpArgmaxInvocation{});
+    argmax_streams_.assign(rank_count_, nullptr);
+    argmax_invocations_[index] = invocation;
+    argmax_streams_[index] = invocation.stream;
+    const uint64_t seq = open_barrier_;
+    ++arrived_;
+    if (arrived_ == rank_count_) {
+        Status st = Status::make_ok();
+        for (int r = 0; r < rank_count_; ++r) {
+            st = transport_->begin_argmax(r, argmax_invocations_[static_cast<std::size_t>(r)]);
+            if (!st.ok()) break;
+        }
+        if (!st.ok()) {
+            aborted_ = true;
+            abort_status_ = st;
+            arrived_ = 0;
+            cv_.notify_all();
+            return st;
+        }
+        arrived_ = 0;
+        ++open_barrier_;
+        completed_barriers_ = open_barrier_;
+        cv_.notify_all();
+        return transport_->finish_argmax(rank, invocation);
+    }
+    cv_.wait(lock, [&] { return completed_barriers_ > seq || aborted_; });
+    if (aborted_) return abort_status_;
+    return transport_->finish_argmax(rank, invocation);
+}
+
 Status TpBarrierGroup::reserve(std::size_t bytes) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (aborted_) return abort_status_;

@@ -192,6 +192,7 @@ struct HostExecutionContext {
     bool tp_active = false;
     bool tp_peer_armed = false;
     bool tp_peer_written = false;
+    uint32_t argmax_skip_dispatch = UINT32_MAX;
     const LayerInputOverride* layer_overrides = nullptr;
     uint32_t layer_override_count = 0;
     LayerInputOverride layer_override_storage[8] = {};

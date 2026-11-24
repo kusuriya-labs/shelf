@@ -1,0 +1,238 @@
+#include <shelf/runtime/tp/tp_argmax.h>
+#include <shelf/core/memory/types.h>
+
+#include "tp_transport_internal.h"
+
+#include <hip/hip_bf16.h>
+#include <hip/hip_runtime.h>
+
+#include <algorithm>
+#include <cfloat>
+#include <climits>
+#include <cstddef>
+#include <cstdint>
+
+namespace shelf::runtime {
+
+namespace {
+
+constexpr uint32_t kPackThreads = 256u;
+
+__global__ void tp_argmax_pack_kernel(const float* logits, TpArgmaxPair* pairs, uint32_t rows,
+                                      uint32_t row_stride, uint32_t local_cols,
+                                      uint32_t local_offset) {
+    __shared__ float shared_value[kPackThreads];
+    __shared__ int shared_id[kPackThreads];
+    const uint32_t row = blockIdx.x;
+    if (row >= rows) return;
+    const uint32_t tid = threadIdx.x;
+    const float* src = logits + static_cast<uint64_t>(row) * row_stride;
+    float best = -FLT_MAX;
+    int best_id = INT_MAX;
+    for (uint32_t c = tid; c < local_cols; c += blockDim.x) {
+        const float value = src[c];
+        const int id = static_cast<int>(local_offset + c);
+        if (value > best || (value == best && id < best_id)) {
+            best = value;
+            best_id = id;
+        }
+    }
+    shared_value[tid] = best;
+    shared_id[tid] = best_id;
+    __syncthreads();
+    for (uint32_t stride = blockDim.x / 2u; stride != 0u; stride >>= 1u) {
+        if (tid < stride) {
+            const float other = shared_value[tid + stride];
+            const int other_id = shared_id[tid + stride];
+            if (other > shared_value[tid] ||
+                (other == shared_value[tid] && other_id < shared_id[tid])) {
+                shared_value[tid] = other;
+                shared_id[tid] = other_id;
+            }
+        }
+        __syncthreads();
+    }
+    if (tid == 0u) {
+        pairs[row].value = shared_value[0];
+        pairs[row].id = shared_id[0] == INT_MAX ? -1 : shared_id[0];
+    }
+}
+
+__global__ void tp_argmax_reduce_kernel(const TpArgmaxPair* pairs, uint32_t pair_stride,
+                                        uint32_t ranks, uint32_t rows, int32_t* out_ids) {
+    const uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= rows) return;
+    float best = -FLT_MAX;
+    int best_id = INT_MAX;
+    for (uint32_t r = 0u; r < ranks; ++r) {
+        const TpArgmaxPair pair = pairs[static_cast<uint64_t>(r) * pair_stride + row];
+        if (pair.value > best || (pair.value == best && pair.id >= 0 && pair.id < best_id)) {
+            best = pair.value;
+            best_id = pair.id;
+        }
+    }
+    out_ids[row] = best_id == INT_MAX ? -1 : best_id;
+}
+
+__global__ void tp_sum_bf16_4_kernel(uint16_t* dst, const uint16_t* s0, const uint16_t* s1,
+                                     const uint16_t* s2, const uint16_t* s3, uint64_t count) {
+    const uint64_t stride = static_cast<uint64_t>(blockDim.x) * gridDim.x;
+    for (uint64_t i = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x; i < count;
+         i += stride) {
+        const __hip_bfloat16 a = *reinterpret_cast<const __hip_bfloat16*>(&s0[i]);
+        const __hip_bfloat16 b = *reinterpret_cast<const __hip_bfloat16*>(&s1[i]);
+        const __hip_bfloat16 c = *reinterpret_cast<const __hip_bfloat16*>(&s2[i]);
+        const __hip_bfloat16 d = *reinterpret_cast<const __hip_bfloat16*>(&s3[i]);
+        const float acc = __bfloat162float(a) + __bfloat162float(b) +
+                          __bfloat162float(c) + __bfloat162float(d);
+        dst[i] = __bfloat16_as_ushort(__float2bfloat16(acc));
+    }
+}
+
+__global__ void tp_sum_f32_4_kernel(float* dst, const float* s0, const float* s1,
+                                    const float* s2, const float* s3, uint64_t count) {
+    const uint64_t stride = static_cast<uint64_t>(blockDim.x) * gridDim.x;
+    for (uint64_t i = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x; i < count;
+         i += stride) {
+        dst[i] = s0[i] + s1[i] + s2[i] + s3[i];
+    }
+}
+
+__global__ void tp_sum_f32_to_bf16_4_kernel(uint16_t* dst, const float* s0, const float* s1,
+                                            const float* s2, const float* s3, uint64_t count) {
+    const uint64_t stride = static_cast<uint64_t>(blockDim.x) * gridDim.x;
+    for (uint64_t i = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x; i < count;
+         i += stride) {
+        dst[i] = __bfloat16_as_ushort(__float2bfloat16(s0[i] + s1[i] + s2[i] + s3[i]));
+    }
+}
+
+uint32_t grid_for(std::size_t count, uint32_t threads) {
+    const uint64_t blocks = (static_cast<uint64_t>(count) + threads - 1u) / threads;
+    return static_cast<uint32_t>(std::min<uint64_t>(blocks, 65535u));
+}
+
+}  // namespace
+
+bool tp_greedy_argmax_eligible(const TpGreedyProbe& probe) noexcept {
+    return probe.temperature == 0.0f && probe.top_p == 1.0f && probe.min_p == 0.0f &&
+           probe.top_k == 0u && !probe.has_token_bitmask;
+}
+
+uint32_t tp_reduce_shot_count(std::size_t bytes) noexcept {
+    return bytes <= kTpReduceShotThresholdBytes ? 1u : 2u;
+}
+
+uint32_t tp_reduce_four_input_shots(std::size_t bytes) noexcept {
+    return bytes <= kTpReduceShotThresholdBytes ? 1u : 2u;
+}
+
+void tp_argmax_pack_host(const float* logits, uint32_t rows, uint32_t row_stride,
+                         uint32_t local_cols, uint32_t local_offset, TpArgmaxPair* pairs) {
+    for (uint32_t row = 0u; row < rows; ++row) {
+        const float* src = logits + static_cast<uint64_t>(row) * row_stride;
+        float best = -FLT_MAX;
+        int best_id = -1;
+        for (uint32_t c = 0u; c < local_cols; ++c) {
+            const int id = static_cast<int>(local_offset + c);
+            if (src[c] > best || (src[c] == best && id < best_id)) {
+                best = src[c];
+                best_id = id;
+            }
+        }
+        pairs[row].value = best;
+        pairs[row].id = best_id;
+    }
+}
+
+void tp_argmax_reduce_host(const TpArgmaxPair* pairs, uint32_t pair_stride, uint32_t ranks,
+                           uint32_t rows, int32_t* out_ids) {
+    for (uint32_t row = 0u; row < rows; ++row) {
+        float best = -FLT_MAX;
+        int best_id = -1;
+        for (uint32_t r = 0u; r < ranks; ++r) {
+            const TpArgmaxPair pair = pairs[static_cast<uint64_t>(r) * pair_stride + row];
+            if (pair.id < 0) continue;
+            if (pair.value > best || (pair.value == best && pair.id < best_id)) {
+                best = pair.value;
+                best_id = pair.id;
+            }
+        }
+        out_ids[row] = best_id;
+    }
+}
+
+void tp_sum_bf16_4_host(uint16_t* dst, const uint16_t* s0, const uint16_t* s1,
+                        const uint16_t* s2, const uint16_t* s3, std::size_t count) {
+    for (std::size_t i = 0u; i < count; ++i) {
+        const float a = tp_bf16_bits_to_f32(s0[i]);
+        const float b = tp_bf16_bits_to_f32(s1[i]);
+        const float c = tp_bf16_bits_to_f32(s2[i]);
+        const float d = tp_bf16_bits_to_f32(s3[i]);
+        dst[i] = f32_to_bf16_rne(a + b + c + d);
+    }
+}
+
+void tp_sum_f32_4_host(float* dst, const float* s0, const float* s1, const float* s2,
+                       const float* s3, std::size_t count) {
+    for (std::size_t i = 0u; i < count; ++i) dst[i] = s0[i] + s1[i] + s2[i] + s3[i];
+}
+
+hipError_t launch_tp_argmax_pack(const float* logits, TpArgmaxPair* pairs, uint32_t rows,
+                                 uint32_t row_stride, uint32_t local_cols,
+                                 uint32_t local_offset, hipStream_t stream) {
+    if (rows == 0u) return hipSuccess;
+    if (logits == nullptr || pairs == nullptr || local_cols == 0u) return hipErrorInvalidValue;
+    tp_argmax_pack_kernel<<<rows, kPackThreads, 0, stream>>>(
+        logits, pairs, rows, row_stride, local_cols, local_offset);
+    return hipGetLastError();
+}
+
+hipError_t launch_tp_argmax_reduce(const TpArgmaxPair* pairs, uint32_t pair_stride,
+                                   uint32_t ranks, uint32_t rows, int32_t* out_ids,
+                                   hipStream_t stream) {
+    if (rows == 0u) return hipSuccess;
+    if (pairs == nullptr || out_ids == nullptr || ranks == 0u) return hipErrorInvalidValue;
+    const uint32_t threads = 256u;
+    const uint32_t blocks = grid_for(rows, threads);
+    tp_argmax_reduce_kernel<<<blocks, threads, 0, stream>>>(pairs, pair_stride, ranks, rows,
+                                                            out_ids);
+    return hipGetLastError();
+}
+
+hipError_t launch_tp_sum_bf16_4(uint16_t* dst, const uint16_t* s0, const uint16_t* s1,
+                                const uint16_t* s2, const uint16_t* s3, std::size_t count,
+                                hipStream_t stream) {
+    if (count == 0u) return hipSuccess;
+    if (dst == nullptr || s0 == nullptr || s1 == nullptr || s2 == nullptr || s3 == nullptr)
+        return hipErrorInvalidValue;
+    const uint32_t threads = 256u;
+    tp_sum_bf16_4_kernel<<<grid_for(count, threads), threads, 0, stream>>>(
+        dst, s0, s1, s2, s3, static_cast<uint64_t>(count));
+    return hipGetLastError();
+}
+
+hipError_t launch_tp_sum_f32_4(float* dst, const float* s0, const float* s1, const float* s2,
+                               const float* s3, std::size_t count, hipStream_t stream) {
+    if (count == 0u) return hipSuccess;
+    if (dst == nullptr || s0 == nullptr || s1 == nullptr || s2 == nullptr || s3 == nullptr)
+        return hipErrorInvalidValue;
+    const uint32_t threads = 256u;
+    tp_sum_f32_4_kernel<<<grid_for(count, threads), threads, 0, stream>>>(
+        dst, s0, s1, s2, s3, static_cast<uint64_t>(count));
+    return hipGetLastError();
+}
+
+hipError_t launch_tp_sum_f32_to_bf16_4(uint16_t* dst, const float* s0, const float* s1,
+                                       const float* s2, const float* s3, std::size_t count,
+                                       hipStream_t stream) {
+    if (count == 0u) return hipSuccess;
+    if (dst == nullptr || s0 == nullptr || s1 == nullptr || s2 == nullptr || s3 == nullptr)
+        return hipErrorInvalidValue;
+    const uint32_t threads = 256u;
+    tp_sum_f32_to_bf16_4_kernel<<<grid_for(count, threads), threads, 0, stream>>>(
+        dst, s0, s1, s2, s3, static_cast<uint64_t>(count));
+    return hipGetLastError();
+}
+
+}  // namespace shelf::runtime

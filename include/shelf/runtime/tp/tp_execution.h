@@ -14,6 +14,8 @@
 
 namespace shelf::runtime {
 
+struct TpArgmaxInvocation;
+
 enum class TpBarrierKind : uint8_t {
     None = 0,
     SumHidden = 1,
@@ -43,6 +45,8 @@ struct TpProgramSegment {
     ValueId fusion_residual{};
     ValueId fusion_injection{};
     ValueId fusion_output{};
+    ValueId argmax_output{};
+    uint32_t argmax_dispatch = UINT32_MAX;
 };
 
 struct TpExecutionSchedule {
@@ -124,6 +128,20 @@ public:
         return Status::make_ok();
     }
 
+    virtual bool supports_argmax_reduce() const noexcept { return false; }
+
+    virtual Status begin_argmax(int rank, const TpArgmaxInvocation& invocation) {
+        (void)rank;
+        (void)invocation;
+        return Status::unsupported("argmax reduce is not supported", __FILE__, __LINE__);
+    }
+
+    virtual Status finish_argmax(int rank, const TpArgmaxInvocation& invocation) {
+        (void)rank;
+        (void)invocation;
+        return Status::unsupported("argmax reduce is not supported", __FILE__, __LINE__);
+    }
+
 protected:
     TpTransport() = default;
 };
@@ -147,6 +165,14 @@ public:
         (void)bytes;
         peer_out = nullptr;
         return Status::make_ok();
+    }
+
+    virtual bool supports_argmax_reduce() const noexcept { return false; }
+
+    virtual Status argmax_reduce(int rank, const TpArgmaxInvocation& invocation) {
+        (void)rank;
+        (void)invocation;
+        return Status::unsupported("argmax reduce is not supported", __FILE__, __LINE__);
     }
 };
 
