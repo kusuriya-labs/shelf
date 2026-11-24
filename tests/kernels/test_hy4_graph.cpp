@@ -150,7 +150,6 @@ void reserve_logical(Residency &gpu, size_t work = size_t(1) << 30) {
     gpu.lm_head_tp = gpu.model.split_lm_head;
     gpu.lm_host_fallback = false;
     gpu.lm_parity = 0;
-    gpu.lm_recorded = {};
     gpu.lm_ready_rec = {};
     gpu.lm_done_rec = {};
     gpu.lm_arrived_rec = {};
@@ -1196,12 +1195,26 @@ void compare_tp(const Path &body, const Path &engram, const Path &draft) {
                     for (bool graphs : {false, true}) {
                         setenv("SHELF_HY4_GRAPH", graphs ? "1" : "0", 1);
                         setenv("SHELF_HY4_DRAFT_GRAPH", graphs ? "1" : "0", 1);
-                        auto ids = generate(gpu, prompt20, 4, 20, 0.f, 0, {});
                         auto &expected = speculate ? tp_gen_draft : tp_gen_nodraft;
-                        if (expected.empty())
-                            expected = ids;
-                        else if (ids != expected)
-                            throw std::runtime_error("TP generate が eager/graph または transport 間で一致しません");
+                        const bool repeat = !graphs && (std::string_view(transport) == "push" ||
+                                                       (tp == 4 && std::string_view(transport) == "peer"));
+                        const int runs = repeat ? 5 : 1;
+                        for (int i = 0; i < runs; ++i) {
+                            auto ids = generate(gpu, prompt20, 4, 20, 0.f, 0, {});
+                            if (ids.empty())
+                                throw std::runtime_error("TP generate の出力が空です");
+                            if (expected.empty())
+                                expected = ids;
+                            else if (ids != expected)
+                                throw std::runtime_error("TP generate の生成 ID が一致しません");
+                        }
+                        if (repeat) {
+                            printf("ep=%d tp=%d transport=%s draft=%d deterministic=%d/%d ids=",
+                                   ep, tp, transport, speculate, runs, runs);
+                            for (size_t i = 0; i < expected.size(); ++i)
+                                printf("%s%d", i ? "," : "", expected[i]);
+                            printf("\n");
+                        }
                         if (!graphs && std::string_view(transport) == "push") {
                             const auto &ref_bp = speculate ? ref_batch_draft : ref_batch_nodraft;
                             int bp_matches = 0;

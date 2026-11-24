@@ -74,12 +74,6 @@ struct Region {
     void *next(size_t length);
 };
 
-struct RankEvent {
-    hipEvent_t handle{};
-    int owner = -1;
-    operator hipEvent_t() const { return handle; }
-};
-
 struct Residency {
     Checkpoint &model;
     size_t tokens;
@@ -148,11 +142,12 @@ struct Residency {
     std::array<float *, 4> gate_expert_norms{};
     std::array<uint64_t *, 4> moe_counts{};
     std::array<hipStream_t, 4> local_expert{};
-    std::array<hipEvent_t, 4> local_ready{}, local_done{};
+    std::array<RankEvent, 4> local_ready{}, local_done{};
     std::array<std::array<void *, 4>, 4> small_staging{};
     void reserve_experts(int rank, Region &buffer);
-    void create_event(RankEvent &event, int rank);
+    void create_event(RankEvent &event, int rank, unsigned flags = hipEventDisableTiming | hipEventReleaseToSystem);
     void record_event(const RankEvent &event, int rank) const;
+    void record_event(const RankEvent &event, int rank, hipStream_t stream) const;
     void sync_record(const RankEvent &event, bool &recorded, int rank) const;
     void collect_route_counts(int rank);
     static constexpr size_t matrix_bytes = 41 * 512 * 3 * sizeof(Hy4ExpertProjection);
@@ -193,7 +188,6 @@ struct Residency {
     std::array<void *, 4> lm_dst_ptr{};
     std::array<size_t, 4> lm_xfer_bytes{};
     std::array<std::array<RankEvent, 2>, 4> lm_ready{}, lm_done{}, lm_arrived{}, lm_consumed{};
-    std::array<std::array<bool, 2>, 4> lm_recorded{};
     std::array<std::array<bool, 2>, 4> lm_ready_rec{}, lm_done_rec{}, lm_arrived_rec{}, lm_consumed_rec{};
     int lm_parity = 0;
     std::array<std::array<RankEvent, 2>, 4> tp_ready{}, tp_done{}, tp_arrived{}, tp_consumed{}, tp_ag_done{};

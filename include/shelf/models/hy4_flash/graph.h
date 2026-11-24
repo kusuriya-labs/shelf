@@ -58,9 +58,15 @@ struct GraphHeadStep {
     std::array<std::array<hipEvent_t, 4>, 2> rank_done{};
 };
 
+struct RankEvent {
+    hipEvent_t handle{};
+    int owner = -1;
+    operator hipEvent_t() const { return handle; }
+};
+
 struct TpGraphStep {
     std::array<hipGraphExec_t, 4> exec{};
-    std::array<std::array<hipEvent_t, 4>, 2> done{};
+    std::array<std::array<RankEvent, 4>, 2> done{};
     uint8_t group_mode = 0;
 };
 
@@ -76,13 +82,13 @@ struct GraphPlan {
     std::vector<TpGraphStep> tp_steps{};
     std::array<std::vector<hipGraphExec_t>, 4> tp_captured{};
     std::array<std::vector<uint8_t>, 4> tp_modes{};
-    std::array<std::array<hipEvent_t, 4>, 2> tp_rank_done{};
+    std::array<std::array<RankEvent, 4>, 2> tp_rank_done{};
     std::array<float *, 4> tp_logits{};
     std::array<int *, 4> tp_tokens{};
     std::array<uint16_t *, 4> tp_hidden{};
     std::array<size_t, 4> tp_cursor{};
     int tp_ranks = 0;
-    std::array<hipEvent_t, 2> replay_done{};
+    std::array<RankEvent, 2> replay_done{};
     std::array<bool, 2> replay_recorded{};
     unsigned replay_slot{};
     bool events_ready{};

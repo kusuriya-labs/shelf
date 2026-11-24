@@ -515,13 +515,13 @@ Mat decode_moe(Ops &op, int layer, const std::string &prefix, Mat x, Mat latent,
         bool overlap = !capture;
         if (overlap) {
             checked(hipEventSynchronize(gpu.local_done[rank]));
-            checked(hipEventRecord(gpu.local_ready[rank], op.stream));
+            gpu.record_event(gpu.local_ready[rank], rank, op.stream);
             checked(hipStreamWaitEvent(gpu.local_expert[rank], gpu.local_ready[rank], 0));
             const size_t shared_ws = size_t(x.rows) * (200u << 10) + (1u << 20);
             Region shared_region{static_cast<uint8_t *>(op.arena.next(shared_ws)), shared_ws};
             Ops shared_op(gpu, rank, shared_region, gpu.local_expert[rank]);
             shared = feedforward(shared_op, prefix + "shared_experts", x);
-            checked(hipEventRecord(gpu.local_done[rank], gpu.local_expert[rank]));
+            gpu.record_event(gpu.local_done[rank], rank, gpu.local_expert[rank]);
         }
         auto *result_f32 = static_cast<float *>(op.arena.next(size_t(x.rows) * 1536 * sizeof(float)));
         Mat result = decode_experts(op, layer, latent, reinterpret_cast<Plan *>(packets), op.stream, result_f32);
@@ -574,12 +574,12 @@ Mat decode_moe(Ops &op, int layer, const std::string &prefix, Mat x, Mat latent,
         local_stream = op.stream;
     } else {
         checked(hipEventSynchronize(gpu.local_done[rank]));
-        checked(hipEventRecord(gpu.local_ready[rank], op.stream));
+        gpu.record_event(gpu.local_ready[rank], rank, op.stream);
         checked(hipStreamWaitEvent(local_stream, gpu.local_ready[rank], 0));
     }
     Mat result = decode_experts(op, layer, latent, reinterpret_cast<Plan *>(packets), local_stream);
     if (!capture)
-        checked(hipEventRecord(gpu.local_done[rank], local_stream));
+        gpu.record_event(gpu.local_done[rank], rank, local_stream);
     if (segment && op.batch_decode) {
         capture->finish(segment->local);
         capture->begin(rank);
@@ -790,14 +790,14 @@ static Mat prefill_moe(Ops &op, int layer, const std::string &p, Mat x, Mat late
     bool overlap_shared = gpu.tp_size > 1 && !op.capture;
     if (overlap_shared) {
         checked(hipEventSynchronize(gpu.local_done[op.rank]));
-        checked(hipEventRecord(gpu.local_ready[op.rank], op.stream));
+        gpu.record_event(gpu.local_ready[op.rank], op.rank, op.stream);
         checked(hipStreamWaitEvent(gpu.local_expert[op.rank], gpu.local_ready[op.rank], 0));
         const size_t shared_ws = std::max(size_t(x.rows) * (80u << 10) + (8u << 20),
                                           size_t(x.rows) * (200u << 10) + (1u << 20));
         Region shared_region{static_cast<uint8_t *>(op.arena.next(shared_ws)), shared_ws};
         Ops shared_op(gpu, op.rank, shared_region, gpu.local_expert[op.rank]);
         shared = feedforward(shared_op, p + "shared_experts", x);
-        checked(hipEventRecord(gpu.local_done[op.rank], gpu.local_expert[op.rank]));
+        gpu.record_event(gpu.local_done[op.rank], op.rank, gpu.local_expert[op.rank]);
     }
     Mat result = op.mat(x.rows, 1536);
     float *result_f32 = gpu.tp_size > 1 ? static_cast<float *>(op.arena.next(size_t(x.rows) * 1536 * sizeof(float)))

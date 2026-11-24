@@ -50,6 +50,14 @@ void check_peer_collectives() {
     }
     if (!rejected)
         throw std::runtime_error("別の論理 rank での event の記録を検出できませんでした");
+    rejected = false;
+    try {
+        gpu.record_event(gpu.tp_ready[1][0], 1, gpu.compute[0]);
+    } catch (const std::logic_error &) {
+        rejected = true;
+    }
+    if (!rejected)
+        throw std::runtime_error("別の論理 rank の stream が受理されました");
     std::array<std::exception_ptr, 4> failures{};
     std::array<std::jthread, 4> workers;
     try {
@@ -584,7 +592,7 @@ void check_tp4_reduce_argmax_war() {
         for (auto events : {&gpu.tp_ready, &gpu.tp_done, &gpu.tp_arrived, &gpu.tp_consumed, &gpu.tp_ag_done,
                             &gpu.lm_ready, &gpu.lm_done, &gpu.lm_arrived, &gpu.lm_consumed})
             for (auto &event : (*events)[r])
-                checked(hipEventCreateWithFlags(&event, hipEventDisableTiming | hipEventReleaseToSystem));
+                gpu.create_event(event, r);
     }
     struct Mode {
         bool push;
