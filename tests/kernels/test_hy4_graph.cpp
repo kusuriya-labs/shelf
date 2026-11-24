@@ -303,7 +303,9 @@ void compare_draft_counts(const Path &body, const Path &draft) {
         prompt_2048[i] = 100 + int(i * 7 % 101);
     const std::vector<std::vector<int>> cases{prompt_short, prompt_512, prompt_2048};
     const std::vector<int> counts{12, 10, 10};
+    constexpr int adaptive_count = 48;
     std::vector<std::vector<int>> baselines;
+    std::vector<int> adaptive_baseline;
     {
         Residency single_gpu(model, 2100, 1);
         auto status = single_gpu.reserve();
@@ -315,6 +317,7 @@ void compare_draft_counts(const Path &body, const Path &draft) {
         setenv("SHELF_HY4_DRAFT_GRAPH", "0", 1);
         for (size_t c = 0; c < cases.size(); ++c)
             baselines.push_back(generate(single_gpu, cases[c], counts[c], 1024, 0.f, 0, {}));
+        adaptive_baseline = generate(single_gpu, prompt_short, adaptive_count, 1024, 0.f, 0, {});
         model.has_draft = true;
         for (int k : {2, 3, 4, 5}) {
             single_gpu.draft_tokens = k;
@@ -333,6 +336,22 @@ void compare_draft_counts(const Path &body, const Path &draft) {
                 }
             }
             printf("k_parity_single k=%d=pass\n", k);
+            fflush(stdout);
+        }
+        single_gpu.draft_tokens = default_draft_tokens;
+        for (bool graph : {false, true}) {
+            setenv("SHELF_HY4_GRAPH", graph ? "1" : "0", 1);
+            setenv("SHELF_HY4_DRAFT_GRAPH", graph ? "1" : "0", 1);
+            auto target_before = single_gpu.target_replays, draft_before = single_gpu.draft_replays;
+            Hy4DflyStats adaptive_stats;
+            auto got = generate(single_gpu, prompt_short, adaptive_count, 1024, 0.f, 0, {}, 0, 1.f, {},
+                                false, nullptr, nullptr, nullptr, default_draft_tokens, true, &adaptive_stats);
+            if (got != adaptive_baseline)
+                throw std::runtime_error("単一スロット Adaptive K greedy 不一致: graph=" + std::to_string(graph));
+            if (graph && (single_gpu.target_replays == target_before || single_gpu.draft_replays == draft_before))
+                throw std::runtime_error("単一スロット Adaptive K Graph が起動しませんでした");
+            printf("k_adaptive_single graph=%d rounds=%zu k_final=%d switches=%zu=pass\n",
+                   graph, adaptive_stats.draft_rounds, adaptive_stats.draft_tokens, adaptive_stats.k_switches);
             fflush(stdout);
         }
         single_gpu.shutdown();
@@ -410,6 +429,28 @@ void compare_draft_counts(const Path &body, const Path &draft) {
         if (session_out[i] != baselines[i % 3])
             throw std::runtime_error("動的 K 切替 Hy4BatchSession が非投機と一致しません");
     printf("k_dynamic_session=pass\n");
+    gpu.draft_tokens = default_draft_tokens;
+    for (bool graph : {false, true}) {
+        setenv("SHELF_HY4_GRAPH", graph ? "1" : "0", 1);
+        setenv("SHELF_HY4_DRAFT_GRAPH", graph ? "1" : "0", 1);
+        auto target_before = gpu.target_replays, draft_before = gpu.draft_replays;
+        std::vector<std::vector<int>> adaptive_out(2);
+        Hy4BatchSession adaptive_sess(
+            gpu, [&](int id, int token) { adaptive_out[id].push_back(token); },
+            [](int, const auto &, const char *) {}, default_draft_tokens, true);
+        for (int i = 0; i < 2; ++i)
+            adaptive_sess.admit({i, prompt_short, adaptive_count, {1024}});
+        while (adaptive_sess.active() || adaptive_sess.queued())
+            adaptive_sess.step();
+        for (int i = 0; i < 2; ++i)
+            if (adaptive_out[i] != adaptive_baseline)
+                throw std::runtime_error("バッチ Adaptive K Hy4BatchSession が非投機と一致しません");
+        if (graph && (gpu.target_replays == target_before || gpu.draft_replays == draft_before))
+            throw std::runtime_error("バッチ Adaptive K Graph が起動しませんでした");
+        printf("k_adaptive_batch graph=%d rounds=%zu k_final=%d switches=%zu=pass\n",
+               graph, adaptive_sess.draft_rounds(), adaptive_sess.draft_tokens(), adaptive_sess.k_switches());
+        fflush(stdout);
+    }
     gpu.shutdown();
 }
 void compare_batches(const Path &body, const Path &draft, int ranks) {

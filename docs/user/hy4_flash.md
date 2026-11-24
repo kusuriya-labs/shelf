@@ -24,7 +24,7 @@ EP で長い入力を処理する場合、compute では `--chunk 2048` また�
 
 ## HIP Graph の切り替え
 
-TP=1、EP=1〜4 で push 転送を使用し、すべての GPU 間で peer access が有効な場合、バッチ decode と verify に層ごとの HIP Graph を使用する。DFly2 は `--dfly-drafts`（または環境変数 `SHELF_HY4_DFLY_DRAFTS`）で 1 ラウンドあたりの候補数 `K` を `2, 3, 4, 5` から指定でき、既定は `4` である。バッチ実行時は最大 32 スロットの候補を 1 回の Graph 起動で生成し、Target がスロットごとに `K + 1` 行（最大 6 行）を検証する。初回のバッチ形状では Graph を作成し、同じ形状と対応するコンテキスト長では再利用する。Target は `SHELF_HY4_GRAPH=0`、DFly2 は `SHELF_HY4_DRAFT_GRAPH=0` で個別に eager 実行へ切り替えられる。
+TP=1、EP=1〜4 で push 転送を使用し、すべての GPU 間で peer access が有効な場合、バッチ decode と verify に層ごとの HIP Graph を使用する。DFly2 は `--dfly-drafts`（または環境変数 `SHELF_HY4_DFLY_DRAFTS`）で 1 ラウンドあたりの候補数 `K` を `2, 3, 4, 5` から指定でき、既定は `4` である。`--dfly-adaptive`（または `SHELF_HY4_DFLY_ADAPTIVE=1`、既定オフ）を指定すると、直近の平均受理数 `acc_ema` とアクティブなバッチサイズに応じて `K ∈ {2, 3, 4, 5}` を動的に切り替える。バッチ実行時は最大 32 スロットの候補を 1 回の Graph 起動で生成し、Target がスロットごとに `K + 1` 行（最大 6 行）を検証する。初回のバッチ形状では Graph を作成し、同じ形状と対応するコンテキスト長では再利用する。Target は `SHELF_HY4_GRAPH=0`、DFly2 は `SHELF_HY4_DRAFT_GRAPH=0` で個別に eager 実行へ切り替えられる。
 
 `placement.py` は TP=1 の各 rank の `peak_estimate` に Graph 用の 256 MiB を含める。実行時は、重み、KV、作業域の予約後にこの余裕を確保できる場合に Graph を有効にする。余裕不足、capture 失敗、EP のプロファイル取得時は eager 実行を使用する。単一スロットの DFly2 は `lm_head` 語彙分割が無効な場合は rank 0 で完結し peer / host 転送時にも Graph を使用できるが、`lm_head` 語彙分割が有効な複数 GPU 実行（例: 2 台または 4 台、既定有効、`SHELF_HY4_LM_HEAD_TP=0` で無効化）では全 rank で `lm_head` を並列実行するため push かつ全 peer access 時に Graph を使用する。
 
@@ -81,7 +81,7 @@ export SHELF_HY4_ENGRAM_MLOCK=1
 
 `placement.py` は複数スロットで `--balance-experts` を既定にする。容量と安全余裕を守りながら、共有 expert を実行する rank 0 の routed expert 数を、他の同型 GPU の約 9 割にする。4 台では rank 0 の目安が 23.1% となる。`--no-balance-experts` は各 rank の合計使用量を均等側へ寄せる。単一スロットではこちらが既定である。
 
-`--dfly-dir` を指定すると、複数スロットでも DFly2 の候補をまとめて生成・検証する。`--dfly-drafts`（`2, 3, 4, 5`、既定 `4`）および環境変数 `SHELF_HY4_DFLY_DRAFTS` は単一スロット・バッチ双方に適用される（範囲外は起動エラー）。`SHELF_HY4_BATCH_DFLY=0` で複数スロットの投機を無効にできる。Target Graph と DFly2 Graph の切り替えは上記の「HIP Graph の切り替え」を参照する。
+`--dfly-dir` を指定すると、複数スロットでも DFly2 の候補をまとめて生成・検証する。`--dfly-drafts`（`2, 3, 4, 5`、既定 `4`）および環境変数 `SHELF_HY4_DFLY_DRAFTS` は単一スロット・バッチ双方に適用される（範囲外は起動エラー）。`--dfly-adaptive`（または `SHELF_HY4_DFLY_ADAPTIVE=1`）を有効にすると、初期値 `--dfly-drafts` から開始し、直近の受理長 EMA とアクティブバッチサイズに基づきヒステリシス付きで `K` を動的調整する。`SHELF_HY4_BATCH_DFLY=0` で複数スロットの投機を無効にできる。Target Graph と DFly2 Graph の切り替えは上記の「HIP Graph の切り替え」を参照する。
 
 ### R9700 を 3 台または 4 台使った照合
 

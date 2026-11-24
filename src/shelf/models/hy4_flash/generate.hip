@@ -6,6 +6,7 @@
 #include <bit>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <stdexcept>
@@ -878,10 +879,65 @@ void decoder_layer(Ops &op, int layer, int start, Mat x, const std::vector<int> 
         op.gpu.ffn_ms += std::chrono::duration<double, std::milli>(now() - start_time).count();
     }
 }
+Hy4DflyAdaptiveController::Hy4DflyAdaptiveController(int initial_k, int switch_interval, float alpha)
+    : current_k(Residency::resolve_draft_tokens(initial_k)), min_switch_interval(switch_interval), ema_alpha(alpha) {
+    if (switch_interval < 1 || !std::isfinite(alpha) || alpha <= 0.f || alpha > 1.f)
+        throw std::invalid_argument("Adaptive K の更新間隔または EMA 係数が不正です");
+}
+void Hy4DflyAdaptiveController::reset(int initial_k) {
+    current_k = Residency::resolve_draft_tokens(initial_k);
+    acc_ema = 0.0;
+    has_sample = false;
+    rounds = 0;
+    rounds_since_switch = 0;
+}
+int Hy4DflyAdaptiveController::select_k(int current_k, double acc_ema, int batch_size) {
+    if (batch_size > 16) {
+        const double thr23 = current_k <= 2 ? 1.95 : 1.65;
+        const double thr34 = current_k <= 3 ? 3.35 : 3.05;
+        if (acc_ema < thr23)
+            return 2;
+        if (acc_ema < thr34)
+            return 3;
+        return 4;
+    }
+    const double thr23 = current_k <= 2 ? 1.25 : 1.05;
+    const double thr34 = current_k <= 3 ? 1.95 : 1.65;
+    const double thr45 = current_k <= 4 ? 3.35 : 3.05;
+    if (acc_ema < thr23)
+        return 2;
+    if (acc_ema < thr34)
+        return 3;
+    if (acc_ema < thr45)
+        return 4;
+    return 5;
+}
+int Hy4DflyAdaptiveController::observe(double accepted_per_lane, int batch_size) {
+    if (batch_size < 1 || !std::isfinite(accepted_per_lane) || accepted_per_lane < 0.0)
+        throw std::invalid_argument("Adaptive K の観測値が不正です");
+    if (!has_sample) {
+        acc_ema = accepted_per_lane;
+        has_sample = true;
+    } else {
+        acc_ema = (1.0 - double(ema_alpha)) * acc_ema + double(ema_alpha) * accepted_per_lane;
+    }
+    ++rounds;
+    ++rounds_since_switch;
+    if (rounds_since_switch < size_t(min_switch_interval))
+        return current_k;
+    int next_k = select_k(current_k, acc_ema, batch_size);
+    if (next_k != current_k) {
+        current_k = next_k;
+        ++switches;
+        rounds_since_switch = 0;
+    }
+    return current_k;
+}
+
 std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count, int chunk, float temperature,
               uint64_t seed, const Path &logits_file, int top_k, float top_p, const std::function<void(int)> &emit,
               bool ignore_eos, Hy4PrefixSlot *prefix_slot, Hy4PrefixStats *prefix_stats, size_t *restored_out,
-              int draft_tokens) {
+              int draft_tokens, bool adaptive, Hy4DflyStats *stats_out) {
     if (ids.empty() || !count || ids.size() + count > gpu.tokens || gpu.tokens > 1048576 || chunk < 1 ||
         chunk > max_prefill_chunk)
         throw std::runtime_error("入力・出力長または prefill chunk が範囲外です");
@@ -890,6 +946,7 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
     if (top_k < 0 || top_k > 64 || !(top_p > 0 && top_p <= 1) || (temperature > 0 && top_p < 1 && !top_k))
         throw std::invalid_argument("top_k は 0〜64、top_p を使う場合は top_k が必要です");
     const int resolved_drafts = Residency::resolve_draft_tokens(draft_tokens ? draft_tokens : gpu.draft_tokens);
+    const bool use_adaptive = adaptive || gpu.adaptive_draft;
     size_t restored = 0;
     bool use_snap = false;
     std::vector<std::vector<uint8_t>> pending_restore;
@@ -965,7 +1022,8 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
         double pp_expert = 0;
         std::array<uint64_t, 4> pp_routes_all{};
         std::array<double, 4> pp_expert_all{};
-        int rounds = 0, accepted = 0;
+        int rounds = 0, accepted = 0, final_drafts = default_draft_tokens;
+        size_t k_switches = 0;
         std::array<int, max_verify_rows> histogram{};
     };
     std::array<Lane, 4> lane;
@@ -984,6 +1042,7 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
                 restore_swa_snapshot(gpu, 0, rank, target.op.stream, pending_restore[rank]);
             if (restored > 0)
                 target.history.assign(ids.begin(), ids.begin() + restored);
+            Hy4DflyAdaptiveController controller(resolved_drafts);
             auto begin = now();
             int next = 0;
             for (size_t first = restored; first < ids.size(); first += chunk) {
@@ -1030,10 +1089,10 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
                 if (rank == 0 && emit) emit(id);
             };
             auto &stats = lane[rank];
-            const int drafts = target.draft_tokens;
-            const int block_rows = drafts + 1;
             while (int(generated.size()) < count && (ignore_eos || generated.back() != 120025)) {
                 int anchor = generated.back();
+                const int drafts = target.draft_tokens;
+                const int block_rows = drafts + 1;
                 const size_t draft_end = target.history.size() + size_t(block_rows);
                 const bool draft_fits_kv = gpu.kv_pages_total == 0 ||
                     gpu.pages_for_tokens(draft_end) <= gpu.slot_page_tables[0].size();
@@ -1064,6 +1123,8 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
                 stats.accepted += keep - 1;
                 ++stats.histogram[keep - 1];
                 target.accept(keep, block_rows);
+                if (use_adaptive)
+                    target.draft_tokens = controller.observe(double(keep - 1), 1);
                 for (int i = 0; i < keep && int(generated.size()) < count; ++i) {
                     append(actual[i]);
                     if (!ignore_eos && actual[i] == 120025)
@@ -1075,6 +1136,8 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
             stats.history = std::move(target.history);
             stats.max_written = max_written;
             stats.head = target.head_ms;
+            stats.final_drafts = target.draft_tokens;
+            stats.k_switches = controller.switches;
             stats.prefill = std::chrono::duration<double>(prefill - begin).count();
             stats.decode = std::chrono::duration<double>(now() - prefill).count();
         } catch (...) {
@@ -1129,11 +1192,16 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
         if (prefix_slot->valid) ++prefix_stats->saves;
     }
     const auto &stats = lane[0];
+    if (stats_out)
+        *stats_out = {stats.final_drafts, size_t(stats.rounds), size_t(stats.accepted), stats.k_switches};
     fprintf(stderr,
-            "prefill_tokens=%zu prefill_s=%.6f decode_tokens=%zu decode_s=%.6f draft_rounds=%d accepted=%d\n",
-            ids.size(), stats.prefill, stats.generated.size() - 1, stats.decode, stats.rounds, stats.accepted);
+            "prefill_tokens=%zu prefill_s=%.6f decode_tokens=%zu decode_s=%.6f draft_rounds=%d accepted=%d "
+            "draft_tokens=%d k_switches=%zu\n",
+            ids.size(), stats.prefill, stats.generated.size() - 1, stats.decode, stats.rounds, stats.accepted,
+            stats.final_drafts, stats.k_switches);
     fprintf(stderr, "accepted_histogram=");
-    for (int i = 0; i <= resolved_drafts; ++i)
+    const int max_hist = use_adaptive ? max_draft_tokens : resolved_drafts;
+    for (int i = 0; i <= max_hist; ++i)
         fprintf(stderr, "%s%d", i ? "," : "", stats.histogram[i]);
     fputc('\n', stderr);
     for (int r = 0; r < gpu.ranks; ++r) {
@@ -1538,10 +1606,11 @@ std::vector<std::vector<int>> generate_batch(Residency &gpu, const std::vector<s
             std::any_of(prompts[s].begin(), prompts[s].end(), [](int id) { return id < 0 || id >= 120832; }))
             throw std::invalid_argument("入力列または生成長が不正です");
     const int resolved_drafts = Residency::resolve_draft_tokens(options.draft_tokens ? options.draft_tokens : gpu.draft_tokens);
+    const bool use_adaptive = options.adaptive || gpu.adaptive_draft;
     if (batch == 1) {
         auto output = generate(gpu, prompts.front(), counts.front(), options.chunk, options.temperature,
                                options.seed, {}, options.top_k, options.top_p, [&](int id) { if (emit) emit(0, id); },
-                               options.ignore_eos, nullptr, nullptr, nullptr, resolved_drafts);
+                               options.ignore_eos, nullptr, nullptr, nullptr, resolved_drafts, use_adaptive);
         return {std::move(output)};
     }
     auto now = std::chrono::steady_clock::now;
@@ -1563,6 +1632,7 @@ std::vector<std::vector<int>> generate_batch(Residency &gpu, const std::vector<s
         }
     }
     Target target(gpu, options.temperature, options.seed, options.top_k, options.top_p, 0, resolved_drafts);
+    Hy4DflyAdaptiveController controller(resolved_drafts);
     target.op.slot_draft = gpu.batch_draft;
     std::vector<std::vector<int>> histories(batch), generated(batch);
     std::vector<size_t> written(batch, 0);
@@ -1590,10 +1660,17 @@ std::vector<std::vector<int>> generate_batch(Residency &gpu, const std::vector<s
             if (generated[s].size() < size_t(counts[s]) && (options.ignore_eos || generated[s].back() != 120025))
                 lanes.push_back({int(s), int(s), counts[s], histories[s], generated[s], options, written[s], options.ignore_eos});
         if (lanes.empty()) break;
+        const size_t rounds_before = stats.rounds, accepted_before = stats.accepted;
         decode_batch(target, lanes, stats, emit);
+        if (use_adaptive && stats.rounds > rounds_before) {
+            const size_t round_lanes = stats.rounds - rounds_before;
+            const size_t round_accepted = stats.accepted - accepted_before;
+            target.draft_tokens = controller.observe(double(round_accepted) / double(round_lanes), int(round_lanes));
+        }
     }
     size_t decode_tokens = stats.tokens;
-    fprintf(stderr, "batch_draft_rounds=%zu batch_accepted=%zu\n", stats.rounds, stats.accepted);
+    fprintf(stderr, "batch_draft_rounds=%zu batch_accepted=%zu draft_tokens=%d k_switches=%zu\n",
+            stats.rounds, stats.accepted, target.draft_tokens, controller.switches);
     auto end = now();
     double pp = std::chrono::duration<double>(prefill - begin).count();
     double tg = std::chrono::duration<double>(end - prefill).count();
@@ -1618,6 +1695,8 @@ struct Hy4BatchSession::Impl {
     };
     Residency &gpu;
     int draft_tokens;
+    bool adaptive;
+    Hy4DflyAdaptiveController controller;
     std::optional<Target> target;
     Emit emit;
     Done done;
@@ -1637,8 +1716,9 @@ struct Hy4BatchSession::Impl {
     size_t prefill_tokens_since_decode = 0;
     bool last_prefill_incomplete = false;
     size_t max_prefix_entries = 64;
-    Impl(Residency &gpu, Emit emit, Done done, int drafts)
+    Impl(Residency &gpu, Emit emit, Done done, int drafts, bool adaptive)
         : gpu(gpu), draft_tokens(Residency::resolve_draft_tokens(drafts ? drafts : gpu.draft_tokens)),
+          adaptive(adaptive || gpu.adaptive_draft), controller(draft_tokens),
           emit(std::move(emit)), done(std::move(done)), states(gpu.max_slots),
           slot_swa_gen(gpu.max_slots, 0), slot_reserved_pages(gpu.max_slots, 0),
           max_prefix_entries(std::max<size_t>(size_t(gpu.max_slots) * 4, 64)) {
@@ -1986,7 +2066,14 @@ struct Hy4BatchSession::Impl {
         prefill_chunks_since_decode = 0;
         prefill_tokens_since_decode = 0;
         last_prefill_incomplete = false;
+        const size_t rounds_before = stats.rounds, accepted_before = stats.accepted;
         decode_batch(*target, lanes, stats, emit);
+        if (adaptive && stats.rounds > rounds_before) {
+            const size_t round_lanes = stats.rounds - rounds_before;
+            const size_t round_accepted = stats.accepted - accepted_before;
+            draft_tokens = controller.observe(double(round_accepted) / double(round_lanes), int(round_lanes));
+            target->draft_tokens = draft_tokens;
+        }
         bool any_finished = false;
         for (auto &lane : lanes) {
             int slot = lane.slot;
@@ -2001,13 +2088,17 @@ struct Hy4BatchSession::Impl {
             fill();
     }
 };
-Hy4BatchSession::Hy4BatchSession(Residency &gpu, Emit emit, Done done, int draft_tokens)
-    : impl(std::make_unique<Impl>(gpu, std::move(emit), std::move(done), draft_tokens)) {}
+Hy4BatchSession::Hy4BatchSession(Residency &gpu, Emit emit, Done done, int draft_tokens, bool adaptive)
+    : impl(std::make_unique<Impl>(gpu, std::move(emit), std::move(done), draft_tokens, adaptive)) {}
 Hy4BatchSession::~Hy4BatchSession() = default;
 void Hy4BatchSession::set_draft_tokens(int draft_tokens) {
     impl->draft_tokens = Residency::resolve_draft_tokens(draft_tokens);
+    impl->controller.reset(impl->draft_tokens);
 }
 int Hy4BatchSession::draft_tokens() const { return impl->draft_tokens; }
+bool Hy4BatchSession::adaptive() const { return impl->adaptive; }
+size_t Hy4BatchSession::k_switches() const { return impl->controller.switches; }
+double Hy4BatchSession::acceptance_ema() const { return impl->controller.acc_ema; }
 void Hy4BatchSession::admit(Hy4Request request) {
     auto &o = request.options;
     if (request.input_ids.empty() || request.count <= 0 || request.input_ids.size() + request.count > impl->gpu.tokens ||

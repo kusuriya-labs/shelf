@@ -14,6 +14,29 @@ struct Hy4BatchOptions {
     float top_p = 1;
     bool ignore_eos = false;
     int draft_tokens = 0;
+    bool adaptive = false;
+};
+struct Hy4DflyStats {
+    int draft_tokens = default_draft_tokens;
+    size_t draft_rounds = 0;
+    size_t accepted = 0;
+    size_t k_switches = 0;
+};
+struct Hy4DflyAdaptiveController {
+    int current_k = default_draft_tokens;
+    int min_switch_interval = 8;
+    float ema_alpha = 0.25f;
+    double acc_ema = 0.0;
+    bool has_sample = false;
+    size_t rounds = 0;
+    size_t rounds_since_switch = 0;
+    size_t switches = 0;
+
+    explicit Hy4DflyAdaptiveController(int initial_k = default_draft_tokens, int switch_interval = 8,
+                                       float alpha = 0.25f);
+    void reset(int initial_k);
+    static int select_k(int current_k, double acc_ema, int batch_size);
+    int observe(double accepted_per_lane, int batch_size);
 };
 struct Hy4PrefixStats {
     bool enabled = false;
@@ -48,7 +71,7 @@ class Hy4BatchSession {
 public:
     using Emit = std::function<void(int, int)>;
     using Done = std::function<void(int, const std::vector<int> &, const char *)>;
-    Hy4BatchSession(Residency &gpu, Emit emit, Done done, int draft_tokens = 0);
+    Hy4BatchSession(Residency &gpu, Emit emit, Done done, int draft_tokens = 0, bool adaptive = false);
     ~Hy4BatchSession();
     void admit(Hy4Request request);
     void cancel(int id);
@@ -61,9 +84,12 @@ public:
     Hy4PrefixStats prefix_stats() const;
     size_t last_prompt_tokens() const;
     size_t last_restored_tokens() const;
+    bool adaptive() const;
     size_t active() const;
     size_t queued() const;
     size_t draft_rounds() const;
+    size_t k_switches() const;
+    double acceptance_ema() const;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl;
@@ -77,5 +103,6 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
               uint64_t seed, const Path &logits_file, int top_k = 0, float top_p = 1,
               const std::function<void(int)> &emit = {}, bool ignore_eos = false,
               Hy4PrefixSlot *prefix_slot = nullptr, Hy4PrefixStats *prefix_stats = nullptr,
-              size_t *restored_out = nullptr, int draft_tokens = 0);
+              size_t *restored_out = nullptr, int draft_tokens = 0, bool adaptive = false,
+              Hy4DflyStats *stats_out = nullptr);
 }

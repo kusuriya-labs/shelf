@@ -46,9 +46,19 @@ int Residency::resolve_draft_tokens(int requested) {
         return parse_draft_tokens(env);
     return default_draft_tokens;
 }
-Residency::Residency(Checkpoint &model, size_t tokens, int slots, size_t kv_pool_tokens, int drafts)
+bool Residency::resolve_adaptive_draft(bool requested) {
+    if (requested)
+        return true;
+    const char *env = std::getenv("SHELF_HY4_DFLY_ADAPTIVE");
+    if (!env || !*env || std::string_view(env) == "0")
+        return false;
+    if (std::string_view(env) == "1")
+        return true;
+    throw std::invalid_argument("SHELF_HY4_DFLY_ADAPTIVE は 0 または 1 で指定してください");
+}
+Residency::Residency(Checkpoint &model, size_t tokens, int slots, size_t kv_pool_tokens, int drafts, bool adaptive)
     : model(model), tokens(tokens), max_slots(slots), draft_tokens(resolve_draft_tokens(drafts)),
-      kv_pool_tokens(kv_pool_tokens), batch_draft(false) {
+      kv_pool_tokens(kv_pool_tokens), batch_draft(false), adaptive_draft(resolve_adaptive_draft(adaptive)) {
     if (slots < 1 || slots > 32)
         throw std::invalid_argument("スロット数は 1〜32 で指定してください");
     if (this->kv_pool_tokens == 0) {
