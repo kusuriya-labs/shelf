@@ -128,7 +128,7 @@ group_body(const int8_t *__restrict__ codes, const float *__restrict__ scales,
             } else {
                 w1 = wp1[s * kt_stride];
                 if constexpr (SHUFFLE_PREVIOUS) {
-                    static_assert(BITS == 4 && K_MAJOR && !PIPE);
+                    static_assert(BITS == 4 && !PIPE);
                     w0 = __shfl(w1, (lane + 31u) % 32u, 32);
                 } else {
                     w0 = wp0[s * kt_stride];

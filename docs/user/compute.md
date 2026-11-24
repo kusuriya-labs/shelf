@@ -94,7 +94,7 @@ prefill の chunk 境界や prefix cache の有無によって、同じ入力の
 
 `--prefill-decode-interval N` は連続する prefill chunk が `N` 回に達した時点で、
 decode 待ちの request があれば prefill を中断して decode ステップを優先する。
-既定の `0` は割り込みを行わない。decode を実行すると連続回数は 0 に戻る。
+既定の `0` は割り込みを行わない。decode を実行すると連続回数は 0 に戻る。切り替えはスケジューラのバッチ境界で行い、実行中のカーネルを中断しない。DFlash2 の初回セッション準備は、1要求の準備完了を1回として数える。
 
 `--arena-gib auto` は起動時の空き VRAM から 0.8 GiB を引いた容量を arena に使う。
 `--arena-gib N`（N > 0.3）は arena 外の消費を見込んで N - 0.3 GiB を使う。

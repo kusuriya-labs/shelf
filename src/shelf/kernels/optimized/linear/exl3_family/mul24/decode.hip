@@ -301,7 +301,7 @@ __global__ void __launch_bounds__(256) exl3_mul24_fused_linear_kernel(
     ep.svh = svh;
     ep.out = reinterpret_cast<::shelf::bf16_t*>(out) + size_t(row0) * out_row_stride;
     ep.out_stride = out_row_stride;
-    group_body<BITS, 1, false, 8u, true, false, false>(
+    group_body<BITS, 1, false, 8u, true, false, BITS == 4>(
         codes, scales, k, groups, trellis, nullptr, cr, nullptr, n, k, groups, 1u, blockIdx.x, 0u, &ep);
 }
 

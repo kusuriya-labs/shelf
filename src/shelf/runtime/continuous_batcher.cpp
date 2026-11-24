@@ -563,7 +563,9 @@ Result<StepResult> ContinuousBatcher::step() {
                  request.finish_reason == FinishReason::None && !request.waiting_for_token_bitmask);
         });
     for (auto& request : requests_) {
-        if (decode_due) break;
+        if (decode_due || (dflash_prefilled_requests != 0u && config_.prefill_decode_interval != 0u &&
+            static_cast<uint64_t>(prefill_chunks_since_decode_) + dflash_prefilled_requests >=
+                config_.prefill_decode_interval)) break;
         if (request.state != RequestState::Queued) {
             continue;
         }
@@ -744,7 +746,10 @@ Result<StepResult> ContinuousBatcher::step() {
     }
 
     if (dflash_prefilled_requests > 0u) {
-        if (config_.prefill_decode_interval != 0u) ++prefill_chunks_since_decode_;
+        if (config_.prefill_decode_interval != 0u)
+            prefill_chunks_since_decode_ = static_cast<uint32_t>(std::min<uint64_t>(
+                config_.prefill_decode_interval, static_cast<uint64_t>(prefill_chunks_since_decode_) +
+                dflash_prefilled_requests));
         return StepResult{true, dflash_prefilled_tokens, dflash_prefilled_requests};
     }
 

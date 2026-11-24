@@ -667,6 +667,10 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
                                std::getenv("SHELF_EXL3_INT8_DENSE") == nullptr &&
                                std::getenv("SHELF_EXL3_MUL24_PREFILL_AB") == nullptr;
     const bool dense_ok = ctx.exl3_dense != nullptr && ctx.exl3_rowsum != nullptr && layout.fits;
+    static const int fused_small_batch = [] {
+        const char* value = std::getenv("SHELF_EXL3_MUL24_FUSED_SMALL_BATCH");
+        return value ? static_cast<int>(std::strcmp(value, "1") == 0) : -1;
+    }();
     uint32_t launches = 0;
     for (uint32_t r0 = 0; r0 < rows; r0 += chunk) {
         const uint32_t n_rows = std::min(chunk, rows - r0);
@@ -679,7 +683,9 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
             (static_cast<uint64_t>(e.output_col_offset) + static_cast<uint64_t>(r0) * dst.row_stride) * out_elem_bytes;
         const auto out_dtype =
             out_bf16 ? ::shelf::kernel::Exl3OutputDType::BF16 : ::shelf::kernel::Exl3OutputDType::F32;
-        bool fused_linear_ok = !use_dense && r0 == 0u && n_rows == rows && out_bf16 && rows <= 16u &&
+        const bool measured_shape = rows == 1u && n == 17408u && k == 5120u && e.exl3_ka == 4u;
+        bool fused_linear_ok = (fused_small_batch > 0 || (fused_small_batch < 0 && measured_shape)) &&
+            !use_dense && r0 == 0u && n_rows == rows && out_bf16 && rows <= 16u &&
             (e.exl3_ka == 3u || e.exl3_ka == 4u) && e.output_col_total == 0u && e.output_col_offset == 0u &&
             in.row_stride % 4u == 0u && dst.row_stride % 4u == 0u && producer == nullptr && gdn_producer == nullptr &&
             attn_producer == nullptr && final_producer == nullptr && deferred == nullptr;
