@@ -60,3 +60,46 @@ Step 1 全体の通常実行は AB/BA で各 3 回。中央値は次のとおり
 4097 token の反復入力について、chunk 1 / 8 / 15 / 16 / 20 / 32 / 512 / 1024 それぞれで、位置 510〜512、2046〜2048、4094〜4096 および chunk 境界付近の全 logits と末尾 logits が基準とバイト一致した。境界採取は一時的な計測器を使い eager で行った。Prefill-1 単独と Step 1 全体の双方を照合した。
 
 最終候補の必須 CPU CTest 133 件、`test_hy4_peer_transfer`、`test_hy4_reduce` が通過した。event 再利用検査付き `test_hy4_graph` は論理 EP=1 / 3 / 4 で Target・DFly2 とも 7/7 一致し、capture 失敗時の fallback も通過した。追加のバッチ Graph 試験は event 再利用検査付きで EP=1 の B=2〜16、EP=2〜4 の B=2 / 4 / 8 / 16 を Graph・DFly2 の有効 / 無効で通過した。これらは物理 GPU 間転送の試験ではない。
+
+## Step 2: MLA と DSA の試作
+
+基準は Step 1 の `f03c3c5c`、単一 R9700、同じ checkpoint・expert 共有配置と反復入力。MLA は sparse prefill の Octave 復号直後に BF16 RNE を保持したうえで latent 量子化を融合し、Q/V 射影を最大 1024 行で一括化した。最大 64 行の query の KV 和集合を作り、展開・量子化を共有する。展開数が HIP grid の上限を超える場合は grid を分割する。作業域は既存の arena の容量検査を通す。
+
+DSA は既出 key 全体の最大値を各 16 行の indexer で繰り返し計算せず、chunk 内の最大範囲について一度計算して共有する。将来の query 行の key を含むため値は各行にとって安全側であり、境界周辺の scalar 再計算は維持した。これは group ごとの prefix max を永続保存する方式ではない。
+
+通常実行は 2k / 8k / 32k で AB/BA 各 2 回の中央値、128k は各 1 回。末尾の全 120,832 logits はすべて基準とバイト一致した。
+
+| token | Step 1（秒） | 候補（秒） |
+|---:|---:|---:|
+| 2048 | 2.095 | 2.099 |
+| 8192 | 10.138 | 9.626 |
+| 32768 | 45.626 | 40.924 |
+| 131072 | 205.128 | 183.472 |
+
+32k では融合のみの AB/BA が基準 45.704 / 45.515 秒、候補 45.338 / 45.249 秒で、DSA の最大値共有を加えると 44.760 / 44.763 秒だった。64 行の和集合共有を含む候補が上表の値。未使用 ID 初期化を省略する別案は 40.790 → 41.007 秒（各 1 回）で改善せず棄却した。
+
+4097 token の chunk 16 / 512 / 1024 について、位置 510〜512、2046〜2048、4094〜4096 および chunk 境界付近の全 logits が基準と一致した。境界取得は一時的な eager 計測器を使用した。
+
+router の WMMA 近似選択は未実装。近似 score の 16 位と 17 位の差だけでは、FP32 累積順・sigmoid・bias 加算の誤差による選択順位の不変性を保証できない。厳密な誤差上界と不確実行の fallback を確認するまでは、既存の exact router を維持する。2Mi 予約時の全経路の実機容量検証は未実施。
+
+32k の `rocprofv3 --kernel-trace` は最終候補で 1 回取得した。profiler 付き prefill 壁時計は 41.675 秒。次は GPU kernel 時間の合計で、CPU・転送・待機を含まない。
+
+| kernel | 呼び出し | GPU 時間（秒） |
+|---|---:|---:|
+| unpack_quant | 5,400 | 0.855 |
+| unpack | 7,368 | 0.113 |
+| quant_latent | 984 | 0.007 |
+| project_query | 1,344 | 1.243 |
+| project_value | 1,344 | 1.923 |
+| recall_scores | 6,384 | 3.215 |
+| recall_values | 6,384 | 4.165 |
+| index_key_peak | 336 | 0.007 |
+| index_bounds | 21,504 | 0.419 |
+| index_scores_wmma | 21,504 | 0.210 |
+| index_topk | 23,040 | 1.239 |
+| router | 1,312 | 4.572 |
+| choose | 1,312 | 0.078 |
+
+profiler 付き実行の末尾 logits も基準と一致した。上記は未分類 kernel を含まない。物理 GPU 間転送は測定していない。
+
+最終候補で event 再利用検査付き `test_hy4_graph` は論理 EP=1 / 3 / 4 の Target・DFly2 とも 7/7、`test_hy4_reduce` と必須 CPU CTest 133 件も通過した。128k は要求どおり各版 1 回で、反復安定性は未評価。実機結果は expert 共有配置・単一 R9700 の測定である。
