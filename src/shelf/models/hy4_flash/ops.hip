@@ -293,8 +293,7 @@ Mat Ops::linear(const std::string &name, Mat x) {
     auto codes = static_cast<int8_t *>(arena.next(size_t(x.rows) * pk));
     auto scales = static_cast<float *>(arena.next(size_t(x.rows) * pk / 128 * 4));
     int splits = 1;
-    int rb = (x.rows > 32 && x.rows <= 96) ? 2 : 1;
-    while (splits < 16 && (pn / 64) * rb * splits < 128 && (pk / 128) % (2 * splits) == 0)
+    while (splits < 16 && (pn / 64) * splits < 128 && (pk / 128) % (2 * splits) == 0)
         splits *= 2;
     auto partial = static_cast<float *>(arena.next(size_t(x.rows) * pn * 4 * splits));
     auto expanded = x.rows >= 256 ? static_cast<int8_t *>(arena.next(size_t(pk) * pn)) : nullptr;

@@ -12,7 +12,7 @@ __global__ void batch(const int8_t *codes, const float *scales, const uint32_t *
 template <int Bits>
 void launch(const int8_t *codes, const float *scales, const uint32_t *weight, float *partial, int rows, int k,
             int n, hipStream_t stream, int splits) {
-    if (rows > 48 && rows <= 96) {
+    if (Bits == 6 && rows > 48 && rows <= 96) {
         int blocks = (rows + 47) / 48;
         batch<Bits, 3, false, Bits == 4><<<dim3(blocks * (n / 64), 1, splits), 128, 0, stream>>>(
             codes, scales, weight, partial, rows, k, n, blocks);
