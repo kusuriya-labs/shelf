@@ -21,7 +21,9 @@ __global__ void fold(const uint32_t *trellis, const uint16_t *svh, _Float16 *res
     weight = fwht128_smem(weight, shared, threadIdx.x) * kInvSqrt128 * f16_bits_to_f32(svh[out]);
     result[size_t(out) * 512 + k] = static_cast<_Float16>(weight);
 }
-__global__ void quant_latent(Mat latent, const uint16_t *suh, _Float16 *data) {
+__global__ void quant_latent(Mat latent, const uint16_t *suh, _Float16 *data, const int *meta) {
+    if (meta && int(blockIdx.y) >= meta[512] + meta[513])
+        return;
     int col = blockIdx.x * 128 + threadIdx.x * 4;
     float v[4], peak = 0;
     for (int i = 0; i < 4; ++i)
@@ -53,7 +55,7 @@ void fold_kv_weights(Residency &gpu, int rank) {
 }
 void attend_absorbed(Ops &op, const std::string &projection, Mat latent, Mat rotary, Mat q, Mat gate,
                      const int *positions, int stride, Param sinks, Mat out, bool contiguous, bool sliding,
-                     int row_offset, int chunk_rows) {
+                     int row_offset, int chunk_rows, const int *meta) {
     auto folded = static_cast<const _Float16 *>(op.gpu.folded[op.rank].at(projection));
     int heads = q.cols / 256, rows = q.rows;
     auto input = static_cast<_Float16 *>(op.arena.next(size_t(latent.rows) * 512 * 2));
@@ -63,7 +65,7 @@ void attend_absorbed(Ops &op, const std::string &projection, Mat latent, Mat rot
     auto scores = static_cast<float *>(op.arena.next(length * 4));
     auto probs = static_cast<uint16_t *>(op.arena.next(length * 2));
     quant_latent<<<dim3(4, latent.rows), 32, 0, op.stream>>>(
-        latent, static_cast<const uint16_t *>(op.param(projection + ".suh").p), input);
+        latent, static_cast<const uint16_t *>(op.param(projection + ".suh").p), input, meta);
     checked(hipGetLastError());
     checked(shelf_hy4_mla_absorbed(q.p, folded, rotary.p, gate.p, sinks.p, sinks.type == io::SType::F32,
                                    positions, stride, input, query, values, scores, probs, out.p, rows, heads,
@@ -81,7 +83,7 @@ void attend_absorbed_batch(Ops &op, const std::string &projection, Mat latent, M
     auto scores = static_cast<float *>(op.arena.next(length * 4));
     auto probs = static_cast<uint16_t *>(op.arena.next(length * 2));
     quant_latent<<<dim3(4, latent.rows), 32, 0, op.stream>>>(
-        latent, static_cast<const uint16_t *>(op.param(projection + ".suh").p), input);
+        latent, static_cast<const uint16_t *>(op.param(projection + ".suh").p), input, nullptr);
     checked(hipGetLastError());
     checked(shelf_hy4_mla_absorbed_batch(q.p, folded, rotary.p, gate.p, sinks.p, sinks.type == io::SType::F32,
                                          indices, stride, input, query, values, scores, probs, out.p, rows, heads,

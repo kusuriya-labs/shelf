@@ -112,7 +112,10 @@ __global__ void pack_kv_combined(Mat lat, Mat rot, uint8_t *records) {
 }
 template <int Width, int Salt>
 __global__ void unpack(const uint8_t *cache, const uint8_t *fresh, const int *ids, int first, int start, int slots,
-                       Mat out, int offset, const Hy4StepParams *params, bool sliding, int row_offset, int chunk_rows) {
+                       Mat out, int offset, const Hy4StepParams *params, bool sliding, int row_offset, int chunk_rows,
+                       const int *meta) {
+    if (meta && int(blockIdx.y) >= meta[512] + meta[513])
+        return;
     __shared__ float scratch[Width];
     start = step_at(start, params);
     int base = kv_base(first, row_offset, sliding, params);
@@ -431,44 +434,38 @@ __global__ void sort_top(const int *top, int *groups, int *mask, int row_begin, 
     __syncthreads();
     groups[size_t(r) * 512 + t] = g[t];
     if (t < 511 && g[t] < width)
-        mask[size_t(r) * width + g[t]] = 1;
+        atomicOr(reinterpret_cast<unsigned *>(mask) + (g[t] >> 5), 1u << (g[t] & 31));
 }
 __global__ void sparse_group_ids(int *mask, int rows, int width, int *meta, int *ids, int *rev,
                                  unsigned *bits, int pos0, int row_offset, const Hy4StepParams *params) {
     pos0 = step_at(pos0, params) + row_offset;
-    for (int g = threadIdx.x; g < width; g += blockDim.x) {
-        int v = 0;
-        for (int r = 0; r < rows; ++r)
-            v |= mask[size_t(r) * width + g];
-        mask[g] = v;
-    }
-    __syncthreads();
     using Scan = rocprim::block_scan<int, 256>;
     __shared__ typename Scan::storage_type scan;
-    int span = (width + 255) / 256;
-    int first = min(int(threadIdx.x) * span, width);
-    int end = min(first + span, width);
+    int words = (width + 31) / 32;
+    int span = (words + 255) / 256;
+    int first = min(int(threadIdx.x) * span, words);
+    int end = min(first + span, words);
+    auto group_bits = reinterpret_cast<const unsigned *>(mask);
     int count = 0;
-    for (int g = first; g < end; ++g)
-        count += mask[g];
+    for (int w = first; w < end; ++w)
+        count += __popc(group_bits[w]);
     int prefix;
     Scan().exclusive_scan(count, prefix, 0, scan);
-    int total = prefix + count;
-    for (int g = first; g < end; ++g) {
-        int present = mask[g];
-        mask[g] = present ? prefix * 4 : -1;
-        prefix += present;
-    }
     if (threadIdx.x == 255)
-        meta[512] = total * 4;
-    __syncthreads();
-    for (int g = threadIdx.x; g < width; g += blockDim.x)
-        if (mask[g] >= 0)
+        meta[512] = (prefix + count) * 4;
+    for (int w = first; w < end; ++w) {
+        unsigned present = group_bits[w];
+        while (present) {
+            int g = w * 32 + __ffs(present) - 1;
             for (int k = 0; k < 4; ++k) {
                 int token = 4 * g + k;
-                ids[mask[g] + k] = token;
-                rev[token] = mask[g] + k;
+                ids[prefix * 4 + k] = token;
+                rev[token] = prefix * 4 + k;
             }
+            ++prefix;
+            present &= present - 1;
+        }
+    }
     for (int r = threadIdx.x; r < rows; r += blockDim.x) {
         int pos = pos0 + r, base = pos & ~3;
         for (int k = base; k <= pos; ++k)
@@ -479,7 +476,7 @@ __global__ void sparse_tail_emit(const unsigned *bits, int *ids, int *rev, int *
                                  int start, int row_offset, int rows, const Hy4StepParams *params) {
     int pos = step_at(start, params) + row_offset;
     if (dedup)
-        lo = 2048, hi = pos + rows;
+        lo = pos & ~3, hi = pos + rows;
     else
         lo = pos & ~3, hi = lo + (pos & 3) + 1;
     int i = blockIdx.x * blockDim.x + threadIdx.x, token = lo + i;
@@ -662,14 +659,14 @@ Mat attention_inner(Ops &op, const std::string &p, int layer, int start, Mat hid
             int capacity = op.params ? bucket : start + n;
             int words = (capacity + 31) / 32, rev_count = capacity + 8;
             groups = static_cast<int *>(op.arena.next(size_t(512) * 4));
-            mask = static_cast<int *>(op.arena.next(size_t(width) * 4));
+            mask = static_cast<int *>(op.arena.next(size_t((width + 31) / 32) * 4));
             bits = static_cast<unsigned *>(op.arena.next(size_t(words) * 4));
             meta = static_cast<int *>(op.arena.next(size_t(516) * 4));
             rev = static_cast<int *>(op.arena.next(size_t(rev_count) * 4));
             ids_gpu = static_cast<int *>(op.arena.next(size_t(ids_count) * 4));
             offsets_gpu = static_cast<int *>(op.arena.next(size_t(n) * stride * 4));
-            sparse_clear<<<(std::max({width, words, rev_count, 516}) + 255) / 256, 256, 0, op.stream>>>(
-                mask, width, bits, words, meta, rev, rev_count);
+            sparse_clear<<<(std::max({(width + 31) / 32, words, rev_count, 516}) + 255) / 256, 256, 0, op.stream>>>(
+                mask, (width + 31) / 32, bits, words, meta, rev, rev_count);
             auto top = op.slot_draft ? op.gpu.sparse_top_slot(layer, op.slot) : op.gpu.sparse_top[op.rank][layer];
             sort_top<<<1, 512, 0, op.stream>>>(top, groups, mask, last, 1, width, op.params);
             sparse_group_ids<<<1, 256, 0, op.stream>>>(mask, 1, width, meta, ids_gpu, rev, bits,
@@ -709,19 +706,19 @@ Mat attention_inner(Ops &op, const std::string &p, int layer, int start, Mat hid
             int words = (bucket + 31) / 32;
             int rev_count = bucket + 8;
             groups = static_cast<int *>(op.arena.next(size_t(rows) * 512 * 4));
-            mask = static_cast<int *>(op.arena.next(size_t(rows) * width * 4));
+            mask = static_cast<int *>(op.arena.next(size_t((width + 31) / 32) * 4));
             bits = static_cast<unsigned *>(op.arena.next(size_t(words) * 4));
             meta = static_cast<int *>(op.arena.next(size_t(516) * 4));
             rev = static_cast<int *>(op.arena.next(size_t(rev_count) * 4));
             ids_gpu = static_cast<int *>(op.arena.next(size_t(ids_count) * 4));
             offsets_gpu = static_cast<int *>(op.arena.next(size_t(rows) * stride * 4));
-            int mask_count = rows * width;
+            int mask_count = (width + 31) / 32;
             sparse_clear<<<(std::max({mask_count, words, rev_count, 516}) + 255) / 256, 256, 0, op.stream>>>(
                 mask, mask_count, bits, words, meta, rev, rev_count);
             sort_top<<<rows, 512, 0, op.stream>>>(op.gpu.sparse_top[op.rank][layer], groups, mask, i, rows, width);
             sparse_group_ids<<<1, 256, 0, op.stream>>>(mask, rows, width, meta, ids_gpu, rev, bits,
                                                                        start, i, op.params);
-            sparse_tail_emit<<<(bucket + rows - 2048 + 255) / 256, 256, 0, op.stream>>>(
+            sparse_tail_emit<<<(rows + 3 + 255) / 256, 256, 0, op.stream>>>(
                 bits, ids_gpu, rev, meta, 2048, pos0 + rows, true, start, i, rows, op.params);
             sparse_offsets<<<dim3((std::max(stride, ids_count) + 255) / 256, rows), 256, 0, op.stream>>>(
                 groups, rev, offsets_gpu, rows, stride, start, ids_gpu, meta, ids_count, i, op.params);
@@ -729,13 +726,13 @@ Mat attention_inner(Ops &op, const std::string &p, int layer, int start, Mat hid
         checked(hipGetLastError());
         Mat a = op.mat(ids_count, 512), b = op.mat(ids_count, 64);
         unpack<256, 29><<<dim3(2, ids_count), 256, 0, op.stream>>>(cache, fresh, ids_gpu, first, start, slots, a, 0,
-                                                                    op.params, sliding, i, n);
+                                                                    op.params, sliding, i, n, meta);
         checked(hipGetLastError());
         unpack<64, 11><<<dim3(1, ids_count), 64, 0, op.stream>>>(cache, fresh, ids_gpu, first, start, slots, b, 260,
-                                                                  op.params, sliding, i, n);
+                                                                  op.params, sliding, i, n, meta);
         checked(hipGetLastError());
         attend_absorbed(op, p + "kv_b_proj", a, b, q.row(i, n), gate.row(i, n), offsets_gpu, stride,
-                        sinks, out.row(i, n), chunk_contiguous, sliding, i, n);
+                        sinks, out.row(i, n), chunk_contiguous, sliding, i, n, meta);
         op.arena.cursor = save;
         i += n;
     }
