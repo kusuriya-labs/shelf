@@ -44,16 +44,22 @@ Status HostMediatedTpTransport::ensure_staging(std::size_t bytes, std::size_t co
     return Status::make_ok();
 }
 
+Status HostMediatedTpTransport::reserve(std::size_t bytes) {
+    return ensure_staging(bytes, bytes / sizeof(std::uint16_t));
+}
+
 Status HostMediatedTpTransport::sum_hidden(const TpSumInvocation& invocation) {
     std::size_t bytes = 0;
     Status st = validate_tp_sum_invocation(invocation, devices_.size(), bytes);
     if (!st.ok()) return st;
+    if (staging_bytes_ < bytes) {
+        return Status::unsupported("host transport staging is not reserved", __FILE__,
+                                   __LINE__);
+    }
 
     const ValueDType dtype = invocation.targets[0].dtype;
     const std::size_t elem = value_dtype_bytes(dtype);
     const std::size_t count = bytes / elem;
-    st = ensure_staging(bytes, count);
-    if (!st.ok()) return st;
 
     for (std::size_t r = 0; r < devices_.size(); ++r) {
         auto device = shelf::gpu::ScopedDevice::create(devices_[r]);

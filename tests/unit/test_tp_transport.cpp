@@ -21,6 +21,13 @@ using shelf::runtime::create_tp_transport;
 
 static int g_fail = 0;
 
+static float bf16_to_f32_host(std::uint16_t v) {
+    const std::uint32_t u = static_cast<std::uint32_t>(v) << 16;
+    float f = 0.0f;
+    std::memcpy(&f, &u, sizeof(f));
+    return f;
+}
+
 static void fail(const std::string& msg) {
     g_fail++;
     std::printf("FAIL %s\n", msg.c_str());
@@ -189,6 +196,88 @@ static void run_case(TpTransport* transport, void* buffer_a, hipStream_t stream_
     check(got_a == got_b, case_tag + " ranks are identical after broadcast");
 }
 
+static void run_case_fused(TpTransport* transport, void* buffer_a, hipStream_t stream_a,
+                           void* buffer_b, hipStream_t stream_b, std::uint64_t rows,
+                           std::uint32_t features) {
+    const std::size_t elems = static_cast<std::size_t>(rows) * features;
+    const std::size_t bytes = elems * sizeof(std::uint16_t);
+    std::vector<std::uint8_t> host_a(bytes);
+    std::vector<std::uint8_t> host_b(bytes);
+    auto* ba = reinterpret_cast<std::uint16_t*>(host_a.data());
+    auto* bb = reinterpret_cast<std::uint16_t*>(host_b.data());
+    for (std::size_t i = 0; i < elems; ++i) {
+        const float va = static_cast<float>((i * 37u + 11u) % 1009u) * (1.0f / 64.0f) - 8.0f;
+        const float vb = static_cast<float>((i * 53u + 7u) % 997u) * (1.0f / 64.0f) - 8.0f;
+        ba[i] = shelf::f32_to_bf16_rne(va);
+        bb[i] = shelf::f32_to_bf16_rne(vb);
+    }
+    {
+        auto scope = shelf::gpu::ScopedDevice::create(0);
+        if (!scope.ok()) { fail("fused upload scope 0"); return; }
+        if (hipMemcpy(buffer_a, host_a.data(), bytes, hipMemcpyHostToDevice) != hipSuccess) {
+            fail("fused upload a");
+            return;
+        }
+    }
+    {
+        auto scope = shelf::gpu::ScopedDevice::create(1);
+        if (!scope.ok()) { fail("fused upload scope 1"); return; }
+        if (hipMemcpy(buffer_b, host_b.data(), bytes, hipMemcpyHostToDevice) != hipSuccess) {
+            fail("fused upload b");
+            return;
+        }
+    }
+
+    TpSumTarget target_a;
+    target_a.ptr = buffer_a;
+    target_a.rows = rows;
+    target_a.row_stride = features;
+    target_a.feature_count = features;
+    target_a.dtype = ValueDType::BF16;
+    TpSumTarget target_b = target_a;
+    target_b.ptr = buffer_b;
+
+    const std::string tag = "fused rows=" + std::to_string(rows);
+    Status st = transport->sum_hidden_fused(0, target_a, stream_a, false);
+    check(st.ok(), tag + " rank0: " + st.message());
+    if (!st.ok()) return;
+    st = transport->sum_hidden_fused(1, target_b, stream_b, false);
+    check(st.ok(), tag + " rank1: " + st.message());
+    if (!st.ok()) return;
+    {
+        auto scope = shelf::gpu::ScopedDevice::create(0);
+        if (scope.ok() && hipStreamSynchronize(stream_a) != hipSuccess) fail("fused sync a");
+    }
+    {
+        auto scope = shelf::gpu::ScopedDevice::create(1);
+        if (scope.ok() && hipStreamSynchronize(stream_b) != hipSuccess) fail("fused sync b");
+    }
+
+    std::vector<std::uint16_t> got_a(elems);
+    std::vector<std::uint16_t> got_b(elems);
+    {
+        auto scope = shelf::gpu::ScopedDevice::create(0);
+        if (scope.ok() && hipMemcpy(got_a.data(), buffer_a, bytes,
+                                    hipMemcpyDeviceToHost) != hipSuccess)
+            fail("fused download a");
+    }
+    {
+        auto scope = shelf::gpu::ScopedDevice::create(1);
+        if (scope.ok() && hipMemcpy(got_b.data(), buffer_b, bytes,
+                                    hipMemcpyDeviceToHost) != hipSuccess)
+            fail("fused download b");
+    }
+    for (std::size_t i = 0; i < elems; ++i) {
+        const std::uint16_t want =
+            shelf::f32_to_bf16_rne(bf16_to_f32_host(ba[i]) +
+                                   bf16_to_f32_host(bb[i]));
+        if (got_a[i] != want || got_b[i] != want) {
+            fail(tag + " result mismatch at " + std::to_string(i));
+            return;
+        }
+    }
+}
+
 int main() {
     int device_count = 0;
     if (hipGetDeviceCount(&device_count) != hipSuccess || device_count < 2) {
@@ -223,6 +312,10 @@ int main() {
 
     const Status verify_status = transport->verify();
     const bool peer_usable = verify_status.ok();
+    if (peer_usable) {
+        const Status reserve_status = transport->reserve(kMaxBytes);
+        check(reserve_status.ok(), "reserve tp inbox: " + reserve_status.message());
+    }
     if (!peer_usable) {
         std::printf(
             "[tp] peer transport self-test failed (%s); using host-mediated "
@@ -242,9 +335,16 @@ int main() {
                  kFeatures, ValueDType::F32, transport->name());
         run_case(transport, buffer_a, stream_a, ready_a, buffer_b, stream_b, ready_b, 64,
                  kFeatures, ValueDType::BF16, transport->name(), kFeatures + 16);
+        if (transport->fused_barrier_ready()) {
+            for (std::uint64_t rows : {1ull, 64ull, 1024ull, 2048ull}) {
+                run_case_fused(transport, buffer_a, stream_a, buffer_b, stream_b, rows,
+                               kFeatures);
+            }
+        }
     }
 
     HostMediatedTpTransport host_transport(devices);
+    check(host_transport.reserve(kMaxBytes).ok(), "reserve host transport staging");
     for (std::uint64_t rows : {1ull, 7ull, 64ull, 513ull, 1024ull, 2048ull}) {
         run_case(&host_transport, buffer_a, stream_a, ready_a, buffer_b, stream_b,
                  ready_b, rows, kFeatures, ValueDType::BF16, "host-mediated");

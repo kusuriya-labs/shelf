@@ -35,6 +35,34 @@ std::uint32_t count_attention_layers(const shelf::qwen_hybrid::QwenHybridConfig&
         shelf::qwen_hybrid::count_layer_topology(tc).attention_layers);
 }
 
+std::size_t tp_inbox_bytes(const Executor& executor) {
+    std::size_t max_bytes = 0;
+    const std::size_t count =
+        std::min(executor.tp_schedules.size(),
+                 static_cast<std::size_t>(::shelf::runtime::ProgramSet::kRowBucketCount));
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto& program = executor.program_set.programs[i];
+        const std::uint32_t bucket_rows =
+            ::shelf::runtime::row_bucket_rows(program.row_bucket);
+        const std::uint32_t token_rows =
+            std::min(bucket_rows, executor.config.max_batch_rows);
+        for (const auto& segment : executor.tp_schedules[i].segments) {
+            if (segment.barrier_after == ::shelf::runtime::TpBarrierKind::None) continue;
+            const auto* value = program.find_value(segment.combine_value);
+            if (value == nullptr) continue;
+            const std::uint32_t rows =
+                value->row_domain == ::shelf::runtime::ValueRowDomain::OUTPUT_ROWS
+                    ? executor.config.max_scheduled_output_rows
+                    : token_rows;
+            const std::size_t bytes =
+                static_cast<std::size_t>(rows) * value->row_stride *
+                ::shelf::runtime::value_dtype_bytes(value->dtype);
+            max_bytes = std::max(max_bytes, bytes);
+        }
+    }
+    return max_bytes;
+}
+
 }
 
 TpRankRuntime::~TpRankRuntime() noexcept {
@@ -586,6 +614,23 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
         }
     }
 
+    std::size_t reserve_bytes = 0;
+    for (auto& rank : ranks_) {
+        reserve_bytes = std::max(reserve_bytes, tp_inbox_bytes(rank->executor()));
+    }
+    if (reserve_bytes != 0) {
+        std::fprintf(stderr, "TP_WORKSPACE inbox_bytes=%zu groups=%zu\n", reserve_bytes,
+                     tp_groups_.size() + ep_groups_.size());
+        for (auto& group : tp_groups_) {
+            Status st = group.barrier->reserve(reserve_bytes);
+            if (!st.ok()) return st;
+        }
+        for (auto& group : ep_groups_) {
+            Status st = group.barrier->reserve(reserve_bytes);
+            if (!st.ok()) return st;
+        }
+    }
+
     workers_.reserve(ranks_.size());
     for (std::size_t r = 0; r < ranks_.size(); ++r) {
         auto worker = std::make_unique<Worker>();
@@ -756,6 +801,15 @@ Status TpCoordinator::attach_aux_executor(Executor& executor, std::uint32_t rank
     } else {
         executor.tp_barrier = tp_groups_.front().barrier.get();
         executor.tp_rank = static_cast<int>(coord.tp);
+    }
+    const std::size_t reserve_bytes = tp_inbox_bytes(executor);
+    if (reserve_bytes != 0 && executor.tp_barrier != nullptr) {
+        Status st = executor.tp_barrier->reserve(reserve_bytes);
+        if (!st.ok()) return st;
+        if (executor.ep_barrier != nullptr && executor.ep_barrier != executor.tp_barrier) {
+            st = executor.ep_barrier->reserve(reserve_bytes);
+            if (!st.ok()) return st;
+        }
     }
     return Status::make_ok();
 }

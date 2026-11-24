@@ -4,9 +4,11 @@
 #include <shelf/runtime/tp/tp_execution.h>
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <memory>
 #include <mutex>
+#include <utility>
 #include <vector>
 
 namespace shelf::runtime {
@@ -21,6 +23,11 @@ public:
     Status verify() override;
     Status sum_hidden(const TpSumInvocation& invocation) override;
     bool supports_combine_fusion() const noexcept override;
+    bool fused_barrier_ready() const noexcept override;
+    std::size_t inbox_capacity() const noexcept override;
+    Status reserve(std::size_t bytes) override;
+    Status sum_hidden_fused(int rank, const TpSumTarget& target, hipStream_t stream,
+                            bool peer_written) override;
     Status peer_write_target(int rank, std::size_t bytes, void*& peer_out) override;
 
 private:
@@ -28,6 +35,7 @@ private:
 
     Status enable_peer_access();
     Status ensure_buffers(std::size_t bytes, std::size_t rank_count);
+    Status ensure_fused_state();
     Status enqueue_sum(const TpSumInvocation& invocation);
     shelf::gpu::DebugRingDevice debug_ring_view(std::size_t rank) const noexcept;
     void report_debug_rings() noexcept;
@@ -38,8 +46,12 @@ private:
     std::vector<std::vector<std::array<char, 2>>> consumed_recorded_;
     std::vector<std::vector<std::array<void*, 2>>> inbox_;
     std::vector<std::array<void*, 2>> inbox_ptrs_dev_;
-    std::size_t inbox_bytes_ = 0;
-    std::size_t parity_ = 0;
+    std::atomic<std::size_t> inbox_bytes_{0};
+    std::vector<std::size_t> parity_;    std::vector<std::pair<int, void*>> retired_inbox_;
+    int* fused_flags_ = nullptr;
+    std::array<int*, 2> fused_arrive_{{nullptr, nullptr}};
+    std::array<int, 2> fused_epoch_{{0, 0}};
+    bool fused_allocated_ = false;
     std::vector<void*> probe_buffers_;
     std::vector<hipStream_t> probe_streams_;
     std::vector<hipEvent_t> probe_ready_;
@@ -56,6 +68,7 @@ public:
 
     const char* name() const noexcept override { return "host-mediated"; }
     Status sum_hidden(const TpSumInvocation& invocation) override;
+    Status reserve(std::size_t bytes) override;
 
 private:
     Status ensure_staging(std::size_t bytes, std::size_t count);

@@ -1607,6 +1607,29 @@ prefill は 1556 token で **3043.9 t/s**（TTFT 511.5 ms）。8000 以上は
 「1 から 20 まで数える」prompt（CLI 計測で mean accepted 2.0）より大幅に低い。
 draft 2 の verify コストがそのまま残るため、実タスクでは MTP の利得が小さい。
 
+## 2026-11-24 27B EXL3 TP=2 fused barrier（reference run）
+
+`SHELF_TP_FUSED_BARRIER=1` の device-side barrier を測った reference run。
+qualified baseline ではない。
+
+- measurement revision: `feat/tp-fused-barrier` の作業 tree（commit 前）
+- GPU: Radeon AI PRO R9700 × 2（`--device 0,1`）、bf16 KV
+- command: `shelf-bench tg --mode greedy --model-dir
+  models/kusuriya-labs/Qwen3.8-27B-EXL3-INT8-4bpw --device 0,1 --tensor-parallel 2
+  --context 64 --tokens 8 --warmup 2`
+- 3 run の `gpu_tokens_per_sec_p50`。graph は既定の ON。
+- 生成一致アンカー: `GENERATED_IDS` sha1
+  `4e388741b1907399476d0be660bf9cadddc700e3`（`shelf-compute`、8 token、greedy、TP=2）
+
+| graph | fused off | fused on | 差 |
+| --- | ---: | ---: | ---: |
+| ON | 36.42 | **41.33** | +13.5% |
+| OFF | 26.74 | **30.26** | +13.2% |
+
+serve 4 並列（`shelf-compute --serve-stdio`、4 request × 64 token、warmup 後）は
+off 2.29 / 2.29 / 2.28 s、on 2.29 / 2.29 / 2.30 s で差がない。飽和時は host の
+barrier 待ちが隠れる。
+
 ## 記録規則
 
 - 新しい計測をしていない数値は更新しない。

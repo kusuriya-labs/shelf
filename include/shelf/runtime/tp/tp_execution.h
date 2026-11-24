@@ -89,6 +89,24 @@ public:
 
     virtual Status sum_hidden(const TpSumInvocation& invocation) = 0;
 
+    virtual bool fused_barrier_ready() const noexcept { return false; }
+
+    virtual std::size_t inbox_capacity() const noexcept { return 0; }
+
+    virtual Status reserve(std::size_t bytes) {
+        (void)bytes;
+        return Status::make_ok();
+    }
+
+    virtual Status sum_hidden_fused(int rank, const TpSumTarget& target, hipStream_t stream,
+                                    bool peer_written) {
+        (void)rank;
+        (void)target;
+        (void)stream;
+        (void)peer_written;
+        return Status::unsupported("fused barrier is not supported", __FILE__, __LINE__);
+    }
+
     virtual bool supports_combine_fusion() const noexcept { return false; }
 
     virtual Status peer_write_target(int rank, std::size_t bytes, void*& peer_out) {
@@ -110,6 +128,22 @@ public:
                           bool peer_written) = 0;
 
     virtual bool supports_combine_fusion() const noexcept { return false; }
+
+    virtual bool fused_barrier_ready() const noexcept { return false; }
+
+    virtual Status reserve(std::size_t bytes) {
+        (void)bytes;
+        return Status::make_ok();
+    }
+
+    virtual Status sum_hidden_fused(int rank, const TpSumTarget& target, hipStream_t stream,
+                                    bool peer_written) {
+        (void)rank;
+        (void)target;
+        (void)stream;
+        (void)peer_written;
+        return Status::unsupported("fused barrier is not supported", __FILE__, __LINE__);
+    }
 
     virtual Status peer_write_target(int rank, std::size_t bytes, void*& peer_out) {
         (void)rank;

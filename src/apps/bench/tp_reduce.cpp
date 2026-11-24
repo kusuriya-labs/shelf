@@ -1,10 +1,13 @@
 #include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/gpu/scoped_device.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/runtime/tp/tp_barrier_group.h>
 #include <shelf/runtime/tp/tp_transports.h>
 
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -12,6 +15,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 using shelf::Status;
@@ -24,6 +28,13 @@ using shelf::runtime::ValueDType;
 using shelf::runtime::create_tp_transport;
 
 namespace {
+
+float bf16_to_f32_host(std::uint16_t v) {
+    const std::uint32_t u = static_cast<std::uint32_t>(v) << 16;
+    float f = 0.0f;
+    std::memcpy(&f, &u, sizeof(f));
+    return f;
+}
 
 struct BenchTarget {
     double min_gbps_large = 0.0;
@@ -43,12 +54,15 @@ BenchTarget target_for(const std::string& backend) {
 
 void usage() {
     std::printf("usage: shelf-bench tp-reduce [--rows 1,2,...] [--features N] "
-                "[--iters N] [--backend auto|p2p|host] [--check]\n");
+                "[--iters N] [--backend auto|p2p|host] [--fused] [--group] [--check]\n");
     std::printf("  measures tp sum_hidden latency for the implemented transports\n");
     std::printf("  default rows: 1,2,4,8,16,32,64,128,256,512,1024,2048\n");
     std::printf("  default features: 5120 (Qwen3.8 hidden), dtype bf16\n");
     std::printf("  bandwidth definition: 2 * payload_bytes / elapsed (one read + one write)\n");
     std::printf("  --check enforces the backend target and fails when it is missed\n");
+    std::printf("  --group measures TpBarrierGroup arrive throughput on two host threads\n");
+    std::printf("  --fused uses the device-side barrier reduction (requires "
+                "SHELF_TP_FUSED_BARRIER=1)\n");
     std::printf("  targets: hip-p2p >= 20.0 GB/s (large rows) and <= 150 us (rows=1)\n");
     std::printf("           host-mediated >= 1.2 GB/s (large rows) and <= 400 us (rows=1)\n");
 }
@@ -129,7 +143,7 @@ struct RowResult {
 RowResult run_row(TpTransport* transport, BenchPair& pair,
                   const std::vector<std::uint8_t>& host_a,
                   const std::vector<std::uint8_t>& host_b, uint64_t rows,
-                  uint32_t features, int iters) {
+                  uint32_t features, int iters, bool fused) {
     RowResult result;
     result.rows = rows;
     const std::size_t bytes = static_cast<std::size_t>(rows) * features * 2u;
@@ -159,7 +173,14 @@ RowResult run_row(TpTransport* transport, BenchPair& pair,
         return Status::make_ok();
     };
     const auto run_sum = [&]() -> Status {
-        Status st = transport->sum_hidden(invocation);
+        Status st = Status::make_ok();
+        if (fused) {
+            st = transport->sum_hidden_fused(0, target_a, pair.stream_a, false);
+            if (st.ok())
+                st = transport->sum_hidden_fused(1, target_b, pair.stream_b, false);
+        } else {
+            st = transport->sum_hidden(invocation);
+        }
         if (!st.ok()) return st;
         if (hipStreamSynchronize(pair.stream_a) != hipSuccess ||
             hipStreamSynchronize(pair.stream_b) != hipSuccess) {
@@ -173,6 +194,39 @@ RowResult run_row(TpTransport* transport, BenchPair& pair,
     if (!st.ok()) return result;
     st = run_sum();
     if (!st.ok()) return result;
+    if (fused) {
+        const std::size_t count = static_cast<std::size_t>(rows) * features;
+        std::vector<std::uint16_t> got_a(count);
+        std::vector<std::uint16_t> got_b(count);
+        {
+            auto scope = shelf::gpu::ScopedDevice::create(0);
+            if (!scope.ok()) return result;
+            if (hipMemcpy(got_a.data(), pair.buffer_a, count * sizeof(std::uint16_t),
+                          hipMemcpyDeviceToHost) != hipSuccess)
+                return result;
+        }
+        {
+            auto scope = shelf::gpu::ScopedDevice::create(1);
+            if (!scope.ok()) return result;
+            if (hipMemcpy(got_b.data(), pair.buffer_b, count * sizeof(std::uint16_t),
+                          hipMemcpyDeviceToHost) != hipSuccess)
+                return result;
+        }
+        const auto* host_a16 = reinterpret_cast<const std::uint16_t*>(host_a.data());
+        const auto* host_b16 = reinterpret_cast<const std::uint16_t*>(host_b.data());
+        bool mismatch = false;
+        for (std::size_t i = 0; i < count && !mismatch; ++i) {
+            const float va = bf16_to_f32_host(host_a16[i]);
+            const float vb = bf16_to_f32_host(host_b16[i]);
+            const std::uint16_t want = shelf::f32_to_bf16_rne(va + vb);
+            if (got_a[i] != want || got_b[i] != want) mismatch = true;
+        }
+        if (mismatch) {
+            std::printf("fused barrier result mismatch rows=%llu\n",
+                        static_cast<unsigned long long>(rows));
+            return result;
+        }
+    }
     result.ok = true;
 
     double total_us = 0.0;
@@ -190,18 +244,72 @@ RowResult run_row(TpTransport* transport, BenchPair& pair,
     return result;
 }
 
+bool run_group(TpTransport* transport, BenchPair& pair, uint64_t rows, uint32_t features,
+               int iters) {
+    shelf::runtime::TpBarrierGroup group(2, {0, 1}, transport);
+    Status st = group.initialize();
+    if (!st.ok()) {
+        std::printf(" group init failed: %s\n", st.message().c_str());
+        return false;
+    }
+    std::atomic<int> failed{0};
+    auto worker = [&](int rank, void* buffer, hipStream_t stream) {
+        auto scope = shelf::gpu::ScopedDevice::create(rank);
+        if (!scope.ok()) {
+            failed.store(1);
+            return;
+        }
+        TpSumTarget target;
+        target.ptr = buffer;
+        target.rows = rows;
+        target.row_stride = features;
+        target.feature_count = features;
+        target.dtype = ValueDType::BF16;
+        for (int i = 0; i < iters; ++i) {
+            Status result = group.arrive(rank, target, stream, false);
+            if (!result.ok()) {
+                failed.store(1);
+                group.abort(result);
+                return;
+            }
+        }
+    };
+    const auto start = std::chrono::steady_clock::now();
+    std::thread rank0(worker, 0, pair.buffer_a, pair.stream_a);
+    std::thread rank1(worker, 1, pair.buffer_b, pair.stream_b);
+    rank0.join();
+    rank1.join();
+    {
+        auto scope = shelf::gpu::ScopedDevice::create(0);
+        if (!scope.ok() || hipStreamSynchronize(pair.stream_a) != hipSuccess) failed.store(1);
+    }
+    {
+        auto scope = shelf::gpu::ScopedDevice::create(1);
+        if (!scope.ok() || hipStreamSynchronize(pair.stream_b) != hipSuccess) failed.store(1);
+    }
+    const auto stop = std::chrono::steady_clock::now();
+    const double total_us =
+        std::chrono::duration<double, std::micro>(stop - start).count();
+    const double us = total_us / static_cast<double>(iters);
+    std::printf(" group rows=%llu features=%u barriers=%d us/barrier=%.1f\n",
+                static_cast<unsigned long long>(rows), features, iters, us);
+    group.shutdown();
+    return failed.load() == 0;
+}
+
 bool run_backend(TpTransport* transport, BenchPair& pair,
                  const std::vector<std::uint8_t>& host_a,
                  const std::vector<std::uint8_t>& host_b,
                  const std::vector<uint64_t>& rows, uint32_t features, int iters,
-                 bool check) {
+                 bool check, bool fused) {
     const std::string backend = transport->name();
     std::printf("backend: %s\n", backend.c_str());
     BenchTarget target = target_for(backend);
     double us_rows1 = 0.0;
     double gbps_large = 0.0;
     for (uint64_t r : rows) {
-        RowResult result = run_row(transport, pair, host_a, host_b, r, features, iters);
+        RowResult result = run_row(transport, pair, host_a, host_b, r, features, iters,
+                                   fused);
         std::printf("  %-14s rows=%-5llu payload=%-9llu us=%.1f GB/s=%.2f\n",
                     backend.c_str(), static_cast<unsigned long long>(r),
                     static_cast<unsigned long long>(r) * features * 2u, result.us,
@@ -232,6 +340,8 @@ int run_tp_reduce(int argc, char** argv) {
     int iters = 50;
     std::string backend = "auto";
     bool check = false;
+    bool fused = false;
+    bool group_bench = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -248,6 +358,10 @@ int run_tp_reduce(int argc, char** argv) {
             backend = argv[++i];
         } else if (arg == "--check") {
             check = true;
+        } else if (arg == "--fused") {
+            fused = true;
+        } else if (arg == "--group") {
+            group_bench = true;
         } else {
             std::fprintf(stderr, "unknown option: %s\n", arg.c_str());
             usage();
@@ -317,20 +431,43 @@ int run_tp_reduce(int argc, char** argv) {
             }
         }
         if (peer != nullptr) {
+            const Status reserve_status = peer->reserve(max_bytes);
+            if (!reserve_status.ok()) {
+                std::printf("tp inbox reserve failed: %s\n",
+                            reserve_status.message().c_str());
+                free_pair(pair);
+                return 1;
+            }
+            if (fused && !peer->fused_barrier_ready()) {
+                std::printf("hip-p2p fused barrier is not available\n");
+                free_pair(pair);
+                return 1;
+            }
             measured = true;
-            all_ok = run_backend(peer.get(), pair, host_a, host_b, rows, features, iters,
-                                 check) &&
-                     all_ok;
+            if (group_bench) {
+                all_ok = run_group(peer.get(), pair, rows.front(), features, iters) && all_ok;
+            } else {
+                all_ok = run_backend(peer.get(), pair, host_a, host_b, rows, features,
+                                     iters, check, fused) &&
+                         all_ok;
+            }
         }
     }
 
-    if (backend == "auto" || backend == "host" || !measured) {
+    if (!group_bench && (backend == "auto" || backend == "host" || !measured)) {
         HostMediatedTpTransport host_transport(devices);
+        const Status host_reserve = host_transport.reserve(max_bytes);
+        if (!host_reserve.ok()) {
+            std::printf("host transport reserve failed: %s\n",
+                        host_reserve.message().c_str());
+            free_pair(pair);
+            return 1;
+        }
         if (check && backend == "p2p") {
             std::printf("skipping host-mediated measurement for --backend p2p\n");
         } else {
             all_ok = run_backend(&host_transport, pair, host_a, host_b, rows, features,
-                                 iters, check) &&
+                                 iters, check, false) &&
                      all_ok;
         }
     }

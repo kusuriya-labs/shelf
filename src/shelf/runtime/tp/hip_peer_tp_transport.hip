@@ -179,6 +179,190 @@ bool tp_reduce_legacy() {
     return env != nullptr && std::strcmp(env, "legacy") == 0;
 }
 
+bool tp_fused_debug() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("SHELF_TP_FUSED_DEBUG");
+        return env != nullptr && env[0] != '\0' && env[0] != '0';
+    }();
+    return enabled;
+}
+
+
+struct TpFusedBarrierArgs {
+    const void* own;
+    void* out;
+    const void* residual;
+    void* peer_dst;
+    const void* inbox;
+    int* peer_flag;
+    int* own_flag;
+    int epoch;
+    int* arrive_ctr;
+    uint32_t rows;
+    uint32_t features;
+    uint32_t stride;
+    uint32_t residual_stride;
+    uint32_t out_stride;
+    uint32_t fused;
+    uint32_t copy_own;
+};
+
+constexpr int kTpFusedSpinLimit = 1 << 28;
+
+__device__ __forceinline__ bool tp_fused_arrive_wait(TpFusedBarrierArgs& a) {
+    __threadfence_system();
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        const int arrived = __hip_atomic_fetch_add(a.arrive_ctr, 1, __ATOMIC_ACQ_REL,
+                                                   __HIP_MEMORY_SCOPE_AGENT);
+        if (arrived == static_cast<int>(gridDim.x) - 1) {
+            __threadfence_system();
+            __hip_atomic_store(a.peer_flag, a.epoch, __ATOMIC_RELEASE,
+                               __HIP_MEMORY_SCOPE_SYSTEM);
+            __hip_atomic_store(a.arrive_ctr, 0, __ATOMIC_RELAXED,
+                               __HIP_MEMORY_SCOPE_AGENT);
+        }
+    }
+    __syncthreads();
+    __shared__ int ready;
+    if (threadIdx.x == 0) {
+        int spins = 0;
+        int flag = __hip_atomic_load(a.own_flag, __ATOMIC_ACQUIRE,
+                                     __HIP_MEMORY_SCOPE_SYSTEM);
+        while (flag < a.epoch && spins < kTpFusedSpinLimit) {
+            ++spins;
+            __builtin_amdgcn_s_sleep(64);
+            flag = __hip_atomic_load(a.own_flag, __ATOMIC_ACQUIRE,
+                                     __HIP_MEMORY_SCOPE_SYSTEM);
+        }
+        if (flag >= a.epoch) __threadfence_system();
+        ready = flag >= a.epoch ? 1 : 0;
+    }
+    __syncthreads();
+    return ready != 0;
+}
+
+__device__ __forceinline__ uint4 tp_fused_add8_bf16(uint4 own4, uint4 peer4) {
+    const uint32_t own_words[4] = {own4.x, own4.y, own4.z, own4.w};
+    const uint32_t peer_words[4] = {peer4.x, peer4.y, peer4.z, peer4.w};
+    uint4 result;
+    uint32_t* out_words = reinterpret_cast<uint32_t*>(&result);
+    #pragma unroll
+    for (uint32_t w = 0; w < 4u; ++w) {
+        const float lo = tp_bf16_to_f32(static_cast<uint16_t>(own_words[w] & 0xFFFFu)) +
+                         tp_bf16_to_f32(static_cast<uint16_t>(peer_words[w] & 0xFFFFu));
+        const float hi = tp_bf16_to_f32(static_cast<uint16_t>(own_words[w] >> 16u)) +
+                         tp_bf16_to_f32(static_cast<uint16_t>(peer_words[w] >> 16u));
+        out_words[w] = static_cast<uint32_t>(tp_f32_to_bf16(lo)) |
+                       (static_cast<uint32_t>(tp_f32_to_bf16(hi)) << 16u);
+    }
+    return result;
+}
+
+__device__ __forceinline__ void tp_fused_copy_bf16(uint16_t* dst, const uint16_t* src,
+                                                   uint64_t count) {
+    const uint64_t step = static_cast<uint64_t>(blockDim.x) * gridDim.x;
+    const uint64_t base = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const uint64_t vectors = count >> 3u;
+    for (uint64_t v = base; v < vectors; v += step)
+        reinterpret_cast<uint4*>(dst)[v] = reinterpret_cast<const uint4*>(src)[v];
+    for (uint64_t i = (vectors << 3u) + base; i < count; i += step) dst[i] = src[i];
+}
+
+__device__ __forceinline__ void tp_fused_add_bf16(uint16_t* out, const uint16_t* own,
+                                                  const uint16_t* inbox, uint64_t count) {
+    const uint64_t step = static_cast<uint64_t>(blockDim.x) * gridDim.x;
+    const uint64_t base = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const uint64_t vectors = count >> 3u;
+    for (uint64_t v = base; v < vectors; v += step)
+        reinterpret_cast<uint4*>(out)[v] = tp_fused_add8_bf16(
+            reinterpret_cast<const uint4*>(own)[v], reinterpret_cast<const uint4*>(inbox)[v]);
+    for (uint64_t i = (vectors << 3u) + base; i < count; i += step)
+        out[i] = tp_f32_to_bf16(tp_bf16_to_f32(own[i]) + tp_bf16_to_f32(inbox[i]));
+}
+
+__device__ __forceinline__ void tp_fused_copy_f32(float* dst, const float* src,
+                                                  uint64_t count) {
+    const uint64_t step = static_cast<uint64_t>(blockDim.x) * gridDim.x;
+    const uint64_t base = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const uint64_t vectors = count >> 2u;
+    for (uint64_t v = base; v < vectors; v += step)
+        reinterpret_cast<uint4*>(dst)[v] = reinterpret_cast<const uint4*>(src)[v];
+    for (uint64_t i = (vectors << 2u) + base; i < count; i += step) dst[i] = src[i];
+}
+
+__device__ __forceinline__ void tp_fused_add_f32(float* out, const float* own,
+                                                 const float* inbox, uint64_t count) {
+    const uint64_t step = static_cast<uint64_t>(blockDim.x) * gridDim.x;
+    const uint64_t base = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const uint64_t vectors = count >> 2u;
+    for (uint64_t v = base; v < vectors; v += step) {
+        const uint4 a4 = reinterpret_cast<const uint4*>(own)[v];
+        const uint4 b4 = reinterpret_cast<const uint4*>(inbox)[v];
+        reinterpret_cast<uint4*>(out)[v] =
+            make_uint4(__float_as_uint(__uint_as_float(a4.x) + __uint_as_float(b4.x)),
+                       __float_as_uint(__uint_as_float(a4.y) + __uint_as_float(b4.y)),
+                       __float_as_uint(__uint_as_float(a4.z) + __uint_as_float(b4.z)),
+                       __float_as_uint(__uint_as_float(a4.w) + __uint_as_float(b4.w)));
+    }
+    for (uint64_t i = (vectors << 2u) + base; i < count; i += step)
+        out[i] = own[i] + inbox[i];
+}
+
+__global__ void tp_fused_bf16_kernel(TpFusedBarrierArgs a) {
+    const uint16_t* own = static_cast<const uint16_t*>(a.own);
+    const uint16_t* inbox = static_cast<const uint16_t*>(a.inbox);
+    const uint64_t elems = static_cast<uint64_t>(a.rows) * a.stride;
+    const uint64_t step = static_cast<uint64_t>(blockDim.x) * gridDim.x;
+    const uint64_t base = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (a.copy_own != 0u)
+        tp_fused_copy_bf16(static_cast<uint16_t*>(a.peer_dst), own, elems);
+    if (!tp_fused_arrive_wait(a)) return;
+    uint16_t* out = static_cast<uint16_t*>(a.out);
+    if (a.fused == 0u) {
+        tp_fused_add_bf16(out, own, inbox, elems);
+        return;
+    }
+    const uint16_t* residual = static_cast<const uint16_t*>(a.residual);
+    for (uint32_t r = 0; r < a.rows; ++r) {
+        const uint64_t src = static_cast<uint64_t>(r) * a.stride;
+        const uint64_t res = static_cast<uint64_t>(r) * a.residual_stride;
+        const uint64_t dst = static_cast<uint64_t>(r) * a.out_stride;
+        for (uint64_t c = base; c < a.features; c += step) {
+            float v = tp_bf16_to_f32(own[src + c]) + tp_bf16_to_f32(inbox[src + c]);
+            if (residual != nullptr) v += tp_bf16_to_f32(residual[res + c]);
+            out[dst + c] = tp_f32_to_bf16(v);
+        }
+    }
+}
+
+__global__ void tp_fused_f32_kernel(TpFusedBarrierArgs a) {
+    const float* own = static_cast<const float*>(a.own);
+    const float* inbox = static_cast<const float*>(a.inbox);
+    const uint64_t elems = static_cast<uint64_t>(a.rows) * a.stride;
+    const uint64_t step = static_cast<uint64_t>(blockDim.x) * gridDim.x;
+    const uint64_t base = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (a.copy_own != 0u)
+        tp_fused_copy_f32(static_cast<float*>(a.peer_dst), own, elems);
+    if (!tp_fused_arrive_wait(a)) return;
+    float* out = static_cast<float*>(a.out);
+    if (a.fused == 0u) {
+        tp_fused_add_f32(out, own, inbox, elems);
+        return;
+    }
+    const float* residual = static_cast<const float*>(a.residual);
+    for (uint32_t r = 0; r < a.rows; ++r) {
+        const uint64_t src = static_cast<uint64_t>(r) * a.stride;
+        const uint64_t res = static_cast<uint64_t>(r) * a.residual_stride;
+        const uint64_t dst = static_cast<uint64_t>(r) * a.out_stride;
+        for (uint64_t c = base; c < a.features; c += step) {
+            float v = own[src + c] + inbox[src + c];
+            if (residual != nullptr) v += residual[res + c];
+            out[dst + c] = v;
+        }
+    }
+}
+
 uint32_t tp_grid_for(uint64_t count) {
     const uint64_t blocks = (count + 255u) / 256u;
     if (blocks == 0) return 1;
@@ -327,6 +511,10 @@ HipPeerTpTransport::~HipPeerTpTransport() {
                 }
             }
         }
+        if (r < fused_arrive_.size() && fused_arrive_[r] != nullptr) {
+            shelf::gpu::discard_cleanup_result(hipFree(fused_arrive_[r]));
+            fused_arrive_[r] = nullptr;
+        }
         if (r < probe_buffers_.size() && probe_buffers_[r] != nullptr) {
             shelf::gpu::discard_cleanup_result(hipFree(probe_buffers_[r]));
             probe_buffers_[r] = nullptr;
@@ -339,6 +527,15 @@ HipPeerTpTransport::~HipPeerTpTransport() {
             shelf::gpu::discard_cleanup_result(hipEventDestroy(probe_ready_[r]));
             probe_ready_[r] = nullptr;
         }
+    }
+    for (auto& retired : retired_inbox_) {
+        auto scope = shelf::gpu::ScopedDevice::create(retired.first);
+        if (scope.ok()) shelf::gpu::discard_cleanup_result(hipFree(retired.second));
+    }
+    retired_inbox_.clear();
+    if (fused_flags_ != nullptr) {
+        shelf::gpu::discard_cleanup_result(hipHostFree(fused_flags_));
+        fused_flags_ = nullptr;
     }
 }
 
@@ -369,6 +566,7 @@ Result<std::unique_ptr<HipPeerTpTransport>> HipPeerTpTransport::create(
         transport->inbox_[r].assign(rank_count, {nullptr, nullptr});
         transport->inbox_ptrs_dev_[r] = {nullptr, nullptr};
     }
+    transport->parity_.assign(rank_count, 0);
     transport->probe_buffers_.assign(rank_count, nullptr);
     transport->probe_streams_.assign(rank_count, nullptr);
     transport->probe_ready_.assign(rank_count, nullptr);
@@ -419,6 +617,10 @@ Result<std::unique_ptr<HipPeerTpTransport>> HipPeerTpTransport::create(
             transport->debug_rings_[r] = ring.release();
         }
     }
+    if (transport->fused_barrier_ready()) {
+        Status st = transport->verify();
+        if (!st.ok()) return st;
+    }
     return transport;
 }
 
@@ -442,7 +644,11 @@ Status HipPeerTpTransport::enable_peer_access() {
 }
 
 Status HipPeerTpTransport::ensure_buffers(std::size_t bytes, std::size_t rank_count) {
-    if (inbox_bytes_ >= bytes && inbox_.size() == rank_count) return Status::make_ok();
+    if (inbox_bytes_.load(std::memory_order_relaxed) >= bytes && inbox_.size() == rank_count)
+        return Status::make_ok();
+    if (tp_fused_debug())
+        std::fprintf(stderr, "ENSURE_GROW bytes=%zu was=%zu\n", bytes,
+                     inbox_bytes_.load(std::memory_order_relaxed));
     const std::size_t peer_count = rank_count - 1;
     for (std::size_t r = 0; r < rank_count; ++r) {
         auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
@@ -451,7 +657,7 @@ Status HipPeerTpTransport::ensure_buffers(std::size_t bytes, std::size_t rank_co
             if (q == r) continue;
             for (void*& slot : inbox_[r][q]) {
                 if (slot != nullptr) {
-                    shelf::gpu::discard_cleanup_result(hipFree(slot));
+                    retired_inbox_.emplace_back(devices_[r], slot);
                     slot = nullptr;
                 }
                 if (hipMalloc(&slot, bytes) != hipSuccess) {
@@ -463,7 +669,7 @@ Status HipPeerTpTransport::ensure_buffers(std::size_t bytes, std::size_t rank_co
         }
         for (void*& ptrs : inbox_ptrs_dev_[r]) {
             if (ptrs != nullptr) {
-                shelf::gpu::discard_cleanup_result(hipFree(ptrs));
+                retired_inbox_.emplace_back(devices_[r], ptrs);
                 ptrs = nullptr;
             }
             if (hipMalloc(&ptrs, peer_count * sizeof(void*)) != hipSuccess) {
@@ -487,7 +693,7 @@ Status HipPeerTpTransport::ensure_buffers(std::size_t bytes, std::size_t rank_co
             }
         }
     }
-    inbox_bytes_ = bytes;
+    inbox_bytes_.store(bytes, std::memory_order_relaxed);
     return Status::make_ok();
 }
 
@@ -542,9 +748,10 @@ Status HipPeerTpTransport::enqueue_sum(const TpSumInvocation& invocation) {
     if (!st.ok()) return st;
 
     std::lock_guard<std::mutex> lock(mutex_);
-    st = ensure_buffers(bytes, rank_count);
-    if (!st.ok()) return st;
-    const std::size_t parity = parity_;
+    if (inbox_bytes_.load(std::memory_order_relaxed) < bytes) {
+        return Status::unsupported("tp inbox is not reserved", __FILE__, __LINE__);
+    }
+    const std::size_t parity = parity_[0];
 
     if (!invocation.peer_write_complete) {
         for (std::size_t r = 0; r < rank_count; ++r) {
@@ -610,12 +817,173 @@ Status HipPeerTpTransport::enqueue_sum(const TpSumInvocation& invocation) {
             consumed_recorded_[r][q][parity] = 1;
         }
     }
-    parity_ ^= 1u;
+    for (std::size_t& p : parity_) p ^= 1u;
+    return Status::make_ok();
+}
+
+
+bool HipPeerTpTransport::fused_barrier_ready() const noexcept {
+    static const bool enabled = [] {
+        const char* env = std::getenv("SHELF_TP_FUSED_BARRIER");
+        return env != nullptr && env[0] != '\0' && env[0] != '0';
+    }();
+    return enabled && devices_.size() == 2;
+}
+
+std::size_t HipPeerTpTransport::inbox_capacity() const noexcept {
+    return inbox_bytes_.load(std::memory_order_relaxed);
+}
+
+Status HipPeerTpTransport::reserve(std::size_t bytes) {
+    if (tp_fused_debug())
+        std::fprintf(stderr, "TP_RESERVE bytes=%zu\n", bytes);
+    std::lock_guard<std::mutex> lock(mutex_);
+    Status st = ensure_buffers(bytes, devices_.size());
+    if (!st.ok()) return st;
+    if (fused_barrier_ready()) return ensure_fused_state();
+    return Status::make_ok();
+}
+
+Status HipPeerTpTransport::ensure_fused_state() {
+    if (fused_allocated_) return Status::make_ok();
+    const std::size_t rank_count = devices_.size();
+    if (hipHostMalloc(reinterpret_cast<void**>(&fused_flags_), rank_count * sizeof(int),
+                      hipHostMallocMapped) != hipSuccess) {
+        fused_flags_ = nullptr;
+        return Status::hip_error("hipHostMalloc tp fused flags",
+                                 hipGetErrorString(hipGetLastError()), __FILE__, __LINE__);
+    }
+    for (std::size_t r = 0; r < rank_count; ++r) fused_flags_[r] = 0;
+    Status st = Status::make_ok();
+    bool allocated = true;
+    for (std::size_t d = 0; d < rank_count && allocated; ++d) {
+        auto dscope = shelf::gpu::ScopedDevice::create(devices_[d]);
+        if (!dscope.ok()) {
+            st = dscope.status();
+            allocated = false;
+            break;
+        }
+        if (hipMalloc(reinterpret_cast<void**>(&fused_arrive_[d]), sizeof(int)) !=
+            hipSuccess) {
+            st = Status::hip_error("hipMalloc tp fused state",
+                                   hipGetErrorString(hipGetLastError()), __FILE__,
+                                   __LINE__);
+            allocated = false;
+            break;
+        }
+        if (hipMemset(fused_arrive_[d], 0, sizeof(int)) != hipSuccess) {
+            st = Status::hip_error("hipMemset tp fused state",
+                                   hipGetErrorString(hipGetLastError()), __FILE__,
+                                   __LINE__);
+            allocated = false;
+        }
+    }
+    if (!allocated) {
+        for (std::size_t d = 0; d < rank_count; ++d) {
+            if (fused_arrive_[d] == nullptr) continue;
+            auto dscope = shelf::gpu::ScopedDevice::create(devices_[d]);
+            if (dscope.ok()) shelf::gpu::discard_cleanup_result(hipFree(fused_arrive_[d]));
+            fused_arrive_[d] = nullptr;
+        }
+        shelf::gpu::discard_cleanup_result(hipHostFree(fused_flags_));
+        fused_flags_ = nullptr;
+        return st;
+    }
+    fused_allocated_ = true;
+    return Status::make_ok();
+}
+
+Status HipPeerTpTransport::sum_hidden_fused(int rank, const TpSumTarget& target,
+                                            hipStream_t stream, bool peer_written) {
+    const std::size_t rank_count = devices_.size();
+    if (rank_count != 2)
+        return Status::unsupported("fused barrier requires two ranks", __FILE__, __LINE__);
+    if (rank < 0 || static_cast<std::size_t>(rank) >= rank_count)
+        return Status::invalid_argument("fused barrier rank out of range", __FILE__,
+                                        __LINE__);
+    if (target.rows != 0u &&
+        (target.ptr == nullptr || target.row_stride == 0u || target.feature_count == 0u))
+        return Status::invalid_argument("fused barrier target is empty", __FILE__, __LINE__);
+    if (target.fusion != TpCombineFusion::None &&
+        target.fusion != TpCombineFusion::ResidualAdd)
+        return Status::unsupported("fused barrier fusion is not supported", __FILE__,
+                                   __LINE__);
+
+    const std::size_t bytes = static_cast<std::size_t>(target.rows) * target.row_stride *
+                              ::shelf::runtime::value_dtype_bytes(target.dtype);
+    if (tp_fused_debug())
+        std::fprintf(stderr, "TRANSPORT_FUSED_ENTER rank=%d bytes=%zu\n", rank, bytes);
+    std::size_t parity = 0;
+    int epoch = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (tp_fused_debug())
+            std::fprintf(stderr, "TRANSPORT_FUSED_LOCKED rank=%d\n", rank);
+        Status st = Status::make_ok();
+        if (bytes != 0u &&
+            inbox_bytes_.load(std::memory_order_relaxed) < bytes) {
+            st = Status::unsupported("tp fused inbox is not reserved", __FILE__, __LINE__);
+        }
+        if (!st.ok()) return st;
+        if (tp_fused_debug())
+            std::fprintf(stderr, "TRANSPORT_FUSED_BUFFERS rank=%d\n", rank);
+        if (!fused_allocated_)
+            return Status::invalid_state("tp fused state is not initialized", __FILE__,
+                                         __LINE__);
+        parity = static_cast<std::size_t>(fused_epoch_[static_cast<std::size_t>(rank)] & 1);
+        epoch = ++fused_epoch_[static_cast<std::size_t>(rank)];
+    }
+    auto scope = shelf::gpu::ScopedDevice::create(devices_[static_cast<std::size_t>(rank)]);
+    if (!scope.ok()) return scope.status();
+    if (tp_fused_debug())
+        std::fprintf(stderr, "TRANSPORT_FUSED_DEVICE rank=%d\n", rank);
+    const std::size_t peer_index = rank_count - 1u - static_cast<std::size_t>(rank);
+    TpFusedBarrierArgs args{};
+    args.own = target.ptr;
+    args.out = target.fusion == TpCombineFusion::ResidualAdd ? target.fusion_output
+                                                             : target.ptr;
+    args.residual = target.fusion == TpCombineFusion::ResidualAdd ? target.residual : nullptr;
+    args.peer_dst = inbox_[peer_index][static_cast<std::size_t>(rank)][parity];
+    args.inbox = inbox_[static_cast<std::size_t>(rank)][peer_index][parity];
+    args.peer_flag = fused_flags_ + peer_index;
+    args.own_flag = fused_flags_ + static_cast<std::size_t>(rank);
+    args.epoch = epoch;
+    args.arrive_ctr = fused_arrive_[static_cast<std::size_t>(rank)];
+    args.rows = static_cast<uint32_t>(target.rows);
+    args.features = target.feature_count;
+    args.stride = target.row_stride;
+    args.residual_stride = target.residual_row_stride;
+    args.out_stride = target.fusion == TpCombineFusion::ResidualAdd
+                          ? target.output_row_stride
+                          : target.row_stride;
+    args.fused = target.fusion == TpCombineFusion::ResidualAdd ? 1u : 0u;
+    args.copy_own = peer_written ? 0u : 1u;
+
+    const uint64_t elems = static_cast<uint64_t>(target.rows) * target.row_stride;
+    uint32_t grid = tp_grid_for(elems);
+    if (grid > 64u) grid = 64u;
+    if (target.dtype == ValueDType::F32)
+        tp_fused_f32_kernel<<<grid, 256, 0, stream>>>(args);
+    else
+        tp_fused_bf16_kernel<<<grid, 256, 0, stream>>>(args);
+    const hipError_t err = hipGetLastError();
+    if (tp_fused_debug())
+        std::fprintf(stderr,
+                     "FUSED_LAUNCH rank=%d epoch=%d parity=%zu grid=%u rows=%llu "
+                     "stride=%u copy=%u err=%d\n",
+                     rank, epoch, parity, grid,
+                     static_cast<unsigned long long>(target.rows), target.row_stride,
+                     args.copy_own, static_cast<int>(err));
+    if (err != hipSuccess)
+        return Status::hip_error("tp fused barrier launch", hipGetErrorString(err),
+                                 __FILE__, __LINE__);
     return Status::make_ok();
 }
 
 Status HipPeerTpTransport::peer_write_target(int rank, std::size_t bytes, void*& peer_out) {
     peer_out = nullptr;
+    if (tp_fused_debug())
+        std::fprintf(stderr, "PEER_WRITE_ENTER rank=%d bytes=%zu\n", rank, bytes);
     std::lock_guard<std::mutex> lock(mutex_);
     const std::size_t rank_count = devices_.size();
     if (rank_count != 2) return Status::make_ok();
@@ -626,10 +994,12 @@ Status HipPeerTpTransport::peer_write_target(int rank, std::size_t bytes, void*&
     if (bytes == 0) {
         return Status::invalid_argument("tp peer write target is empty", __FILE__, __LINE__);
     }
-    Status st = ensure_buffers(bytes, rank_count);
-    if (!st.ok()) return st;
+    if (inbox_bytes_.load(std::memory_order_relaxed) < bytes) return Status::make_ok();
+    if (tp_fused_debug())
+        std::fprintf(stderr, "PEER_WRITE_READY rank=%d\n", rank);
     const std::size_t peer = static_cast<std::size_t>(rank) == 0 ? 1 : 0;
-    peer_out = inbox_[peer][static_cast<std::size_t>(rank)][parity_];
+    peer_out = inbox_[peer][static_cast<std::size_t>(rank)]
+                        [parity_[static_cast<std::size_t>(rank)]];
     return Status::make_ok();
 }
 
@@ -728,6 +1098,7 @@ Status HipPeerTpTransport::verify() {
         }
     }
     verified_ = true;
+    if (fused_barrier_ready()) return ensure_fused_state();
     return Status::make_ok();
 }
 
@@ -743,12 +1114,11 @@ Status HipPeerTpTransport::sum_hidden(const TpSumInvocation& invocation) {
     std::size_t bytes = 0;
     Status st = validate_tp_sum_invocation(invocation, devices_.size(), bytes);
     if (!st.ok()) return st;
-    if (!verified_) {
-        st = verify();
-        if (!st.ok()) return st;
+    if (!verified_)
+        return Status::invalid_state("tp transport is not verified", __FILE__, __LINE__);
+    if (inbox_bytes_.load(std::memory_order_relaxed) < bytes) {
+        return Status::unsupported("tp inbox is not reserved", __FILE__, __LINE__);
     }
-    st = ensure_buffers(bytes, devices_.size());
-    if (!st.ok()) return st;
     return enqueue_sum(invocation);
 }
 

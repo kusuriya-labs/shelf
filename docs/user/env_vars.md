@@ -35,6 +35,8 @@ embedding、prefix checkpoint、offload 用バッファもドライバの GTT �
 | `SHELF_LM_HEAD_INT8` | `1` | compute / bench / runtime | `1` で BF16 の `lm_head` をロード時に INT8 W32 へ量子化する（`--lm-head-int8` と同等） |
 | `SHELF_TP_TRANSPORT` | `auto` | compute / server / bench | TP 通信の transport を強制選択する（`auto` / `p2p` / `host`、`--tp-transport` と同等） |
 | `SHELF_TP_FUSE` | `1` | runtime | `0` で HIP peer TP transport の融合を無効にする |
+| `SHELF_TP_FUSED_BARRIER` | 未設定 | compute / server / bench / tests | `1` で 2 rank TP の combine barrier を device-side fused barrier に置き換える（実験的） |
+| `SHELF_TP_FUSED_DEBUG` | 未設定 | runtime | `1` で fused barrier の経路・確保・launch を stderr に出す |
 | `SHELF_PCIE_FRAC` | `0.25` | compute / server / bench | ランタイムが使用してよい PCIe 帯域の割合（`--pcie-frac` と同等） |
 | `SHELF_PCIE_GBPS` | `25` | compute / server / bench | 想定する PCIe 帯域 GB/s（`--pcie-gbps` と同等） |
 | `SHELF_NO_WORKSPACE_REUSE` | `0` | runtime | `1` で executor の workspace 再利用を無効にする（メモリ調査用） |
