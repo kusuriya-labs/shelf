@@ -604,11 +604,24 @@ static TpSegmentGraphKey tp_segment_graph_key(const HostExecutionContext& ctx) {
     return key;
 }
 
+static void tp_graph_note_run(TpSegmentGraphCache& cache, const HostExecutionContext& ctx) {
+    constexpr uint32_t kCaptureThreshold = 2u;
+    const TpSegmentGraphKey key = tp_segment_graph_key(ctx);
+    if (cache.stable_runs != 0u && cache.run_key == key)
+        ++cache.stable_runs;
+    else {
+        cache.run_key = key;
+        cache.stable_runs = 1u;
+    }
+    cache.capture_allowed = cache.stable_runs >= kCaptureThreshold;
+}
+
 static Status execute_tp_segment(const ::shelf::runtime::Program& program,
                                  HostExecutionContext& ctx, hipStream_t stream,
                                  uint32_t begin, uint32_t end, std::size_t segment_index) {
     TpSegmentGraphCache* cache = ctx.tp_segment_graphs;
-    if (cache == nullptr || segment_index >= cache->slots.size())
+    if (cache == nullptr || segment_index >= cache->slots.size() ||
+        ctx.tp_graph_policy == TpGraphPolicy::Disabled)
         return execute_program_range(program, ctx, stream, begin, end);
     TpSegmentGraphSlot& slot = cache->slots[segment_index];
     static const bool graph_debug = std::getenv("SHELF_TP_GRAPH_DEBUG") != nullptr;
@@ -623,7 +636,8 @@ static Status execute_tp_segment(const ::shelf::runtime::Program& program,
         return execute_program_range(program, ctx, stream, begin, end);
     }
     const bool warm = tp_segment_pool_warm(ctx, program);
-    if (slot.failed || !warm)
+    if (slot.failed || !warm || !cache->capture_allowed ||
+        ctx.tp_graph_policy != TpGraphPolicy::CaptureAndReplay)
         return execute_program_range(program, ctx, stream, begin, end);
     hipGraph_t graph = nullptr;
     const hipError_t begin_error =
@@ -708,6 +722,7 @@ Status execute_program_tp_ranges(
         return Status::invalid_argument(
             "tp execution schedule does not cover the program", __FILE__, __LINE__);
     }
+    if (ctx.tp_segment_graphs != nullptr) tp_graph_note_run(*ctx.tp_segment_graphs, ctx);
     uint32_t next_begin = 0;
     for (std::size_t segment_index = 0; segment_index < schedule.segments.size();
          ++segment_index) {

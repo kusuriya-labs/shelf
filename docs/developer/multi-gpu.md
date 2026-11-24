@@ -280,9 +280,13 @@ CPU 側の `arrive()` が担う。
 - 値が変わり得る入力（row 数 / request 数 / device pointer 群）を key にし、
   一致しない run は eager に落とす。`SHELF_TP_HIP_GRAPH=0` で無効化できる。
 - 対象は `ExecutionRole::Decode` の run のみ。verify / prefill は eager のまま。
-- Executor が一度でも `ExecutionRole::Verify` を実行したら、その Executor では segment graph を
-  恒久的に止めて cache を解放する。speculative decode は target の decode run が少なく、
-  131 segment の capture 費用を償却できないため。`SHELF_TP_HIP_GRAPH=0` でも無効化できる。
+- 実行方針は `TpGraphPolicy` の 3 値。
+  - `Disabled`: 常に eager。非 decode、`SHELF_TP_HIP_GRAPH=0`、graph 失敗時。
+  - `ReplayOnly`: 登録済み graph のみ replay し、未登録なら eager。DFlash2 の単発 target
+    decode (`run_single_target`) が `ExecuteBatchOptions::tp_graph_replay_only` で指定する。
+  - `CaptureAndReplay`: 未登録なら capture。通常の decode。
+- capture は同じ key の run が 2 回続いた後にだけ許可する。短い要求で 131 segment の
+  capture 費用を払わないため。
 - collective（`tp_copy` / `tp_sum_*`）と zero fill は graph の外に残る。graph 内へ
   閉じ込めるには cross-device 同期を kernel で表現する必要があり、現行 transport では
   可視性を保証できない（`docs/research/20261124/tp_hip_graph.md`）。

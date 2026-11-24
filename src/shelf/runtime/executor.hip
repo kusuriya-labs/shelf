@@ -193,6 +193,7 @@ Status build_host_execution_context(
     ctx.batch_context = executor.batch_context;
     ctx.value_trace = executor.value_trace;
     ctx.role = role;
+    ctx.tp_graph_replay_only = options.tp_graph_replay_only;
     ctx.spec.gdn_spec_history = options.gdn_spec_history;
     ctx.spec.gdn_compact = options.gdn_compact;
     ctx.spec.qsa_spec_history = options.qsa_spec_history;
@@ -423,15 +424,7 @@ static bool tp_segment_graph_enabled() {
     return env == nullptr || env[0] == '\0' || env[0] != '0';
 }
 
-static void release_tp_segment_graphs(Executor& executor) {
-    for (auto& cache : executor.tp_segment_graphs) {
-        for (auto& slot : cache.slots) {
-            if (!slot.valid) continue;
-            shelf::gpu::discard_cleanup_result(hipGraphExecDestroy(slot.exec));
-            slot = ::shelf::execution::TpSegmentGraphSlot{};
-        }
-    }
-}
+
 
 // One program run starts here, whichever execution path it then takes. The plan scratch of a
 // grouped expert FFN is accumulated into by the router, so the run has to be prepared before
@@ -498,17 +491,18 @@ Status launch_program_run(
                 "tp execution schedule is active but cannot be launched",
                 __FILE__, __LINE__);
         }
-        if (ctx.role == ::shelf::runtime::ExecutionRole::Verify &&
-            !executor.tp_segment_graph_off) {
-            executor.tp_segment_graph_off = true;
-            release_tp_segment_graphs(executor);
-        }
-        if (tp_segment_graph_enabled() && !executor.graph_failed &&
-            !executor.tp_segment_graph_off &&
+        const bool tp_graph_ready =
+            tp_segment_graph_enabled() && !executor.graph_failed &&
             ctx.value_trace == nullptr && executor.external_input_preparer == nullptr &&
             ctx.role == ::shelf::runtime::ExecutionRole::Decode &&
-            program_index < executor.tp_segment_graphs.size()) {
+            program_index < executor.tp_segment_graphs.size();
+        if (tp_graph_ready) {
             ctx.tp_segment_graphs = &executor.tp_segment_graphs[program_index];
+            ctx.tp_graph_policy = ctx.tp_graph_replay_only
+                                      ? ::shelf::execution::TpGraphPolicy::ReplayOnly
+                                      : ::shelf::execution::TpGraphPolicy::CaptureAndReplay;
+        } else {
+            ctx.tp_graph_policy = ::shelf::execution::TpGraphPolicy::Disabled;
         }
         run = runtime::execute_program_tp_ranges(
             program, ctx, stream, executor.tp_schedules[program_index],
@@ -1469,7 +1463,6 @@ Executor::Executor(Executor&& other) noexcept
       program_set_ready(other.program_set_ready),
       tp_schedules(std::move(other.tp_schedules)),
       tp_segment_graphs(std::move(other.tp_segment_graphs)),
-      tp_segment_graph_off(other.tp_segment_graph_off),
       tp_barrier(other.tp_barrier),
       tp_rank(other.tp_rank),
       ep_barrier(other.ep_barrier),
@@ -1628,8 +1621,6 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         other.tp_schedules.clear();
         tp_segment_graphs = std::move(other.tp_segment_graphs);
         other.tp_segment_graphs.clear();
-        tp_segment_graph_off = other.tp_segment_graph_off;
-        other.tp_segment_graph_off = false;
         tp_barrier = other.tp_barrier;
         other.tp_barrier = nullptr;
         tp_rank = other.tp_rank;

@@ -52,9 +52,18 @@ off 145.63 / 145.62 tok/s で **on が 15 % 遅い**。生成列は一致。原�
 spec decode は target の decode run が少なく償却できない。verify が支配的な flow なので
 decode 区間の短縮も小さい。
 
-そこで Executor が `ExecutionRole::Verify` を 1 度でも実行したら segment graph を止め、
-cache を解放する方式にした。27B + DFlash2 は 145.0 tok/s（off と同等）、27B dense の
-decode は 39.6 tok/s（off 26.0）を維持する。
+原因は capture 費用そのもの（131 segment で 200 ms 程度、1 segment 約 1.5 ms）で、
+spec decode は target の decode run が少なく償却できない。そこで graph の実行方針を
+`Disabled` / `ReplayOnly` / `CaptureAndReplay` の 3 値にし、DFlash2 の単発 target decode
+(`run_single_target`) は `ReplayOnly` を指定する。加えて同じ key の run が 2 回続くまで
+capture を許可しない。
+
+27B + DFlash2 は 145.5 tok/s（off 145.6）、capture 0 回。27B dense の decode は
+39.3 tok/s（off 26.0）を維持する。
+
+Verify の segment graph 化は行っていない。verify 1 round は約 10 ms で、131 segment の
+capture に 200 ms かかるため、64 token 程度の生成では償却できない。capture を複数 run に
+分割して 1 run あたり数 segment ずつ登録する案は残っているが、本調査では扱わない。
 
 rocprofv3 の kernel dispatch 数は graph on / off で同一（25,984 / 2 agent）。
 graph は GPU の kernel 数を減らすのではなく、host 側の投入待ちで生じる GPU idle を

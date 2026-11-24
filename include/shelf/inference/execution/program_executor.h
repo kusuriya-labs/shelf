@@ -60,6 +60,12 @@ struct TpSegmentGraphKey {
     }
 };
 
+enum class TpGraphPolicy : uint8_t {
+    Disabled = 0,
+    ReplayOnly = 1,
+    CaptureAndReplay = 2,
+};
+
 struct TpSegmentGraphSlot {
     hipGraphExec_t exec = nullptr;
     TpSegmentGraphKey key{};
@@ -69,6 +75,9 @@ struct TpSegmentGraphSlot {
 
 struct TpSegmentGraphCache {
     std::vector<TpSegmentGraphSlot> slots;
+    TpSegmentGraphKey run_key{};
+    uint32_t stable_runs = 0;
+    bool capture_allowed = false;
 };
 
 struct HostExecutionContext {
@@ -140,6 +149,8 @@ struct HostExecutionContext {
     uint32_t* stochastic_topk_active_counts = nullptr;
     ::shelf::runtime::DispatchStagingPool* staging_pool = nullptr;
     TpSegmentGraphCache* tp_segment_graphs = nullptr;
+    TpGraphPolicy tp_graph_policy = TpGraphPolicy::CaptureAndReplay;
+    bool tp_graph_replay_only = false;
     const ::shelf::runtime::ProgramStagingMeta* program_meta = nullptr;
     ValueTraceSink* value_trace = nullptr;
     ::shelf::runtime::ExecutionRole role = ::shelf::runtime::ExecutionRole::Decode;

@@ -1157,7 +1157,8 @@ Status run_single_target(
         *decoder.sequence, requests, &single, 1u, position, 1u, false,
         TokenIdsLocation::Host, &decoder.sampling, decoder.sample_index);
     requests[0].token_bitmask = token_bitmask;
-    const std::vector<ExecuteBatchOptions> soptions = build_gdn_options(decoder, 1u);
+    std::vector<ExecuteBatchOptions> soptions = build_gdn_options(decoder, 1u);
+    for (ExecuteBatchOptions& option : soptions) option.tp_graph_replay_only = true;
     auto executed = run_target_batch(decoder, batch, soptions);
     if (!executed.ok()) return executed.status();
     BatchExecutionOutput output = executed.release();
