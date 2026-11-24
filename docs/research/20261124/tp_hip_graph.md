@@ -108,6 +108,32 @@ replay の失敗も 0 だった。したがって「ACS 無効化で graph が c
   消費を待つぶん、graph が本来稼ぐ host 待ちの削減を食っている。
 - どの組み合わせでも 39.5 tok/s は出ず、最大でも 27.22 だった。
 
+### 39.5 tok/s の再現と原因（撤回の取り消し）
+
+`1d1f9bcc`（segment graph を入れた時点）を worktree でビルドし直して同じグリッドを回すと、
+TP=2 の graph on は **39.75 tok/s**、off は 27.63 だった。TP=1 は両ビルドとも 25.5 で一致し、
+CMakeCache の差も 0 だった。したがって 39.5 は環境ではなく、その後のコミットによる退行である。
+
+原因は 2 つ。どちらも `4359002c` で入れた。
+
+1. `tp_segment_graph_key` を **segment ごとに** 呼んでいた。key には
+   `paged_attention_plan_signature` が入るため、1 run あたり 131 回 × attention 数の
+   解決が走っていた。key は run 先頭の `tp_graph_note_run` で 1 回だけ作り、
+   segment では `cache->run_key` を参照するように直した。
+2. `SHELF_TP_GRAPH_CAPTURE_BUDGET` の既定が 8 で、131 segment を 1 run 8 個ずつしか
+   登録しなかった。decode が 10 run 程度で終わる benchmark では全 segment が揃わず、
+   毎 run capture 費用だけを払っていた。既定を 1024（実質無制限）にした。
+
+修正後（`reduce=default`、3 回中央値）:
+
+| tp | graph | 中央値 tok/s |
+| --- | --- | ---: |
+| 2 | off | 27.59 |
+| 2 | on | **36.47** |
+
+旧 build の 39.75 との差（約 8 %）は、`4e848d9e` の consumed 待ち（実測 3.8 %）と
+run ごとの key 計算・閾値の分。既定は graph on に戻した。
+
 ### 39.5 tok/s の撤回（旧バイナリでの再測定）
 
 `4359002c` を worktree に取り、同じ build 設定で `shelf-bench` を作り直して

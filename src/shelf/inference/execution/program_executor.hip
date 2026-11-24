@@ -649,7 +649,7 @@ static TpSegmentGraphKey tp_segment_graph_key(const ::shelf::runtime::Program& p
 
 static uint32_t tp_graph_capture_budget() {
     const char* env = std::getenv("SHELF_TP_GRAPH_CAPTURE_BUDGET");
-    if (env == nullptr || env[0] == '\0') return 8u;
+    if (env == nullptr || env[0] == '\0') return 1024u;
     const long value = std::strtol(env, nullptr, 10);
     return value <= 0 ? 0u : static_cast<uint32_t>(value);
 }
@@ -702,7 +702,7 @@ static Status execute_tp_segment(const ::shelf::runtime::Program& program,
         return execute_program_range(program, ctx, stream, begin, end);
     TpSegmentGraphSlot& slot = cache->slots[segment_index];
     static const bool graph_debug = std::getenv("SHELF_TP_GRAPH_DEBUG") != nullptr;
-    const TpSegmentGraphKey key = tp_segment_graph_key(program, ctx);
+    const TpSegmentGraphKey& key = cache->run_key;
     if (slot.valid && !(slot.key == key))
         return execute_program_range(program, ctx, stream, begin, end);
     if (slot.valid) {
