@@ -29,7 +29,7 @@ __global__ void tp_argmax_pack_kernel(const float* logits, TpArgmaxPair* pairs, 
     const float* src = logits + static_cast<uint64_t>(row) * row_stride;
     float best = -3.4e38f;
     int best_id = INT_MAX;
-    for (uint32_t c = tid; c < local_cols; c += blockDim.x) {
+    for (uint32_t c = blockIdx.y * blockDim.x + tid; c < local_cols; c += gridDim.y * blockDim.x) {
         const float value = src[c];
         const int id = static_cast<int>(local_offset + c);
         if (value > best || (value == best && (best_id < 0 || id < best_id))) {
@@ -53,9 +53,32 @@ __global__ void tp_argmax_pack_kernel(const float* logits, TpArgmaxPair* pairs, 
         __syncthreads();
     }
     if (tid == 0u) {
-        pairs[row].value = shared_value[0];
-        pairs[row].id = shared_id[0] == INT_MAX ? -1 : shared_id[0];
+        pairs[static_cast<size_t>(blockIdx.y) * rows + row] =
+            {shared_value[0], shared_id[0] == INT_MAX ? -1 : shared_id[0]};
     }
+}
+
+__global__ void tp_argmax_finish_pack(const TpArgmaxPair* partials, TpArgmaxPair* pairs, uint32_t rows) {
+    const auto row = blockIdx.x;
+    const auto lane = threadIdx.x;
+    float best = -3.4e38f;
+    int id = INT_MAX;
+    for (uint32_t part = lane; part < kTpArgmaxPartitions; part += 32u) {
+        const auto p = partials[static_cast<size_t>(part) * rows + row];
+        if (p.id >= 0 && (p.value > best || (p.value == best && p.id < id))) {
+            best = p.value;
+            id = p.id;
+        }
+    }
+    for (unsigned offset = 16; offset != 0; offset >>= 1) {
+        const float other = __shfl_down(best, offset, 32);
+        const int other_id = __shfl_down(id, offset, 32);
+        if (other > best || (other == best && other_id < id)) {
+            best = other;
+            id = other_id;
+        }
+    }
+    if (lane == 0u) pairs[row] = {best, id == INT_MAX ? -1 : id};
 }
 
 __global__ void tp_argmax_reduce_kernel(const TpArgmaxPair* pairs, uint32_t pair_stride,
@@ -72,30 +95,6 @@ __global__ void tp_argmax_reduce_kernel(const TpArgmaxPair* pairs, uint32_t pair
         }
     }
     out_ids[row] = best_id == INT_MAX ? -1 : best_id;
-}
-
-__global__ void tp_sum_bf16_4_kernel(uint16_t* dst, const uint16_t* s0, const uint16_t* s1,
-                                     const uint16_t* s2, const uint16_t* s3, uint64_t count) {
-    const uint64_t stride = static_cast<uint64_t>(blockDim.x) * gridDim.x;
-    for (uint64_t i = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x; i < count;
-         i += stride) {
-        const __hip_bfloat16 a = *reinterpret_cast<const __hip_bfloat16*>(&s0[i]);
-        const __hip_bfloat16 b = *reinterpret_cast<const __hip_bfloat16*>(&s1[i]);
-        const __hip_bfloat16 c = *reinterpret_cast<const __hip_bfloat16*>(&s2[i]);
-        const __hip_bfloat16 d = *reinterpret_cast<const __hip_bfloat16*>(&s3[i]);
-        const float acc = __bfloat162float(a) + __bfloat162float(b) +
-                          __bfloat162float(c) + __bfloat162float(d);
-        dst[i] = __bfloat16_as_ushort(__float2bfloat16(acc));
-    }
-}
-
-__global__ void tp_sum_f32_4_kernel(float* dst, const float* s0, const float* s1,
-                                    const float* s2, const float* s3, uint64_t count) {
-    const uint64_t stride = static_cast<uint64_t>(blockDim.x) * gridDim.x;
-    for (uint64_t i = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x; i < count;
-         i += stride) {
-        dst[i] = s0[i] + s1[i] + s2[i] + s3[i];
-    }
 }
 
 __global__ void tp_sum_f32_to_bf16_4_kernel(uint16_t* dst, const float* s0, const float* s1,
@@ -172,12 +171,19 @@ void tp_sum_f32_4_host(float* dst, const float* s0, const float* s1, const float
 
 hipError_t launch_tp_argmax_pack(const float* logits, TpArgmaxPair* pairs, uint32_t rows,
                                  uint32_t row_stride, uint32_t local_cols,
-                                 uint32_t local_offset, hipStream_t stream) {
+                                 uint32_t local_offset, hipStream_t stream, TpArgmaxPair* partials) {
     if (rows == 0u) return hipSuccess;
     if (logits == nullptr || pairs == nullptr || local_cols == 0u || row_stride < local_cols ||
         static_cast<uint64_t>(local_offset) + local_cols > static_cast<uint64_t>(INT_MAX)) return hipErrorInvalidValue;
-    tp_argmax_pack_kernel<<<rows, kPackThreads, 0, stream>>>(
-        logits, pairs, rows, row_stride, local_cols, local_offset);
+    const bool split = partials != nullptr && local_cols >= kTpArgmaxPartitions * kPackThreads;
+    const uint32_t parts = split ? kTpArgmaxPartitions : 1u;
+    tp_argmax_pack_kernel<<<dim3(rows, parts), kPackThreads, 0, stream>>>(
+        logits, split ? partials : pairs, rows, row_stride, local_cols, local_offset);
+    if (split) {
+        const auto err = hipGetLastError();
+        if (err != hipSuccess) return err;
+        tp_argmax_finish_pack<<<rows, 32, 0, stream>>>(partials, pairs, rows);
+    }
     return hipGetLastError();
 }
 
@@ -190,29 +196,6 @@ hipError_t launch_tp_argmax_reduce(const TpArgmaxPair* pairs, uint32_t pair_stri
     const uint32_t blocks = grid_for(rows, threads);
     tp_argmax_reduce_kernel<<<blocks, threads, 0, stream>>>(pairs, pair_stride, ranks, rows,
                                                             out_ids);
-    return hipGetLastError();
-}
-
-hipError_t launch_tp_sum_bf16_4(uint16_t* dst, const uint16_t* s0, const uint16_t* s1,
-                                const uint16_t* s2, const uint16_t* s3, std::size_t count,
-                                hipStream_t stream) {
-    if (count == 0u) return hipSuccess;
-    if (dst == nullptr || s0 == nullptr || s1 == nullptr || s2 == nullptr || s3 == nullptr)
-        return hipErrorInvalidValue;
-    const uint32_t threads = 256u;
-    tp_sum_bf16_4_kernel<<<grid_for(count, threads), threads, 0, stream>>>(
-        dst, s0, s1, s2, s3, static_cast<uint64_t>(count));
-    return hipGetLastError();
-}
-
-hipError_t launch_tp_sum_f32_4(float* dst, const float* s0, const float* s1, const float* s2,
-                               const float* s3, std::size_t count, hipStream_t stream) {
-    if (count == 0u) return hipSuccess;
-    if (dst == nullptr || s0 == nullptr || s1 == nullptr || s2 == nullptr || s3 == nullptr)
-        return hipErrorInvalidValue;
-    const uint32_t threads = 256u;
-    tp_sum_f32_4_kernel<<<grid_for(count, threads), threads, 0, stream>>>(
-        dst, s0, s1, s2, s3, static_cast<uint64_t>(count));
     return hipGetLastError();
 }
 

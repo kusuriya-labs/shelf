@@ -95,6 +95,7 @@ public:
     virtual const char* name() const noexcept = 0;
 
     virtual Status verify() { return Status::make_ok(); }
+    virtual Status shutdown() { return Status::make_ok(); }
 
     virtual Status sum_hidden(const TpSumInvocation& invocation) = 0;
 

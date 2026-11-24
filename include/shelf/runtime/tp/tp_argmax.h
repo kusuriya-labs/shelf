@@ -17,6 +17,7 @@ struct alignas(8) TpArgmaxPair {
 static_assert(sizeof(TpArgmaxPair) == 8);
 
 constexpr std::size_t kTpArgmaxPairBytes = 8u;
+constexpr uint32_t kTpArgmaxPartitions = 64u;
 constexpr std::size_t kTpPeerProbeBytes = 4096u;
 
 struct TpGreedyProbe {
@@ -53,7 +54,7 @@ void tp_sum_f32_4_host(float* dst, const float* s0, const float* s1, const float
 
 hipError_t launch_tp_argmax_pack(const float* logits, TpArgmaxPair* pairs, uint32_t rows,
                                  uint32_t row_stride, uint32_t local_cols,
-                                 uint32_t local_offset, hipStream_t stream);
+                                 uint32_t local_offset, hipStream_t stream, TpArgmaxPair* partials = nullptr);
 hipError_t launch_tp_argmax_reduce(const TpArgmaxPair* pairs, uint32_t pair_stride,
                                    uint32_t ranks, uint32_t rows, int32_t* out_ids,
                                    hipStream_t stream);

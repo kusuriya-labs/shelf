@@ -29,6 +29,7 @@ public:
         const std::vector<int>& devices, TpCombineBackend backend,
         const TpPeerLinkMap& links);
     ~HipPeerTpTransport() override;
+    Status shutdown() override;
 
     const char* name() const noexcept override { return "hip-p2p"; }
     Status verify() override;
@@ -94,6 +95,7 @@ class HostMediatedTpTransport final : public TpTransport {
 public:
     explicit HostMediatedTpTransport(std::vector<int> devices);
     ~HostMediatedTpTransport() override;
+    Status shutdown() override;
 
     const char* name() const noexcept override { return "host-mediated"; }
     Status sum_hidden(const TpSumInvocation& invocation) override;

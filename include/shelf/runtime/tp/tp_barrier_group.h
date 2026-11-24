@@ -16,7 +16,7 @@ public:
     ~TpBarrierGroup() override;
 
     Status initialize();
-    void shutdown() noexcept;
+    Status shutdown();
 
     void abort(const Status& reason) noexcept;
     bool aborted() const noexcept;

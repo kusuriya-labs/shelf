@@ -196,7 +196,7 @@ group_body(const int8_t *__restrict__ codes, const float *__restrict__ scales,
         }
     }
 
-    __shared__ float epi[FUSED ? MT * 16 * 128 : 1];
+    __shared__ __align__(16) float epi[FUSED ? MT * 16 * 128 : 1];
 #pragma unroll
     for (int mt = 0; mt < MT; ++mt) {
 #pragma unroll

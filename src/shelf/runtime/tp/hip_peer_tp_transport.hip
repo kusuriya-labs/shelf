@@ -62,11 +62,18 @@ __device__ __forceinline__ void tp_publish_block_writes(uint32_t* arrive,
     __hip_atomic_store(arrive, 0, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM);
 }
 
-__global__ void tp_add_peers_bf16_kernel(const uint16_t* own,
-                                         const uint16_t* const* peers,
-                                         uint32_t npeers, uint16_t* out, uint64_t count) {
+template <class T>
+struct ThreePeerInputs {
+    const T* addresses[3];
+    __device__ const T* operator[](uint32_t peer) const { return addresses[peer]; }
+};
+
+template <unsigned FixedPeers = 0u, class PeerList>
+__global__ void tp_add_peers_bf16_kernel(const uint16_t* own, PeerList peers, uint32_t peer_count,
+                                    uint16_t* out, uint64_t count, bool vectorized) {
+    const uint32_t npeers = FixedPeers == 0u ? peer_count : FixedPeers;
     const uint64_t stride = static_cast<uint64_t>(blockDim.x) * gridDim.x;
-    const uint64_t vectors = count >> 3u;
+    const uint64_t vectors = (FixedPeers == 0u || vectorized) ? count >> 3u : 0u;
     for (uint64_t v = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
          v < vectors; v += stride) {
         const uint4 own4 = reinterpret_cast<const uint4*>(own)[v];
@@ -109,10 +116,12 @@ __global__ void tp_add_peers_bf16_kernel(const uint16_t* own,
     }
 }
 
-__global__ void tp_add_peers_f32_kernel(const float* own, const float* const* peers,
-                                        uint32_t npeers, float* out, uint64_t count) {
+template <unsigned FixedPeers = 0u, class PeerList>
+__global__ void tp_add_peers_f32_kernel(const float* own, PeerList peers, uint32_t peer_count,
+                                    float* out, uint64_t count, bool vectorized) {
+    const uint32_t npeers = FixedPeers == 0u ? peer_count : FixedPeers;
     const uint64_t stride = static_cast<uint64_t>(blockDim.x) * gridDim.x;
-    const uint64_t vectors = count >> 2u;
+    const uint64_t vectors = (FixedPeers == 0u || vectorized) ? count >> 2u : 0u;
     for (uint64_t v = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
          v < vectors; v += stride) {
         const uint4 own4 = reinterpret_cast<const uint4*>(own)[v];
@@ -325,13 +334,13 @@ Status launch_add(const TpSumTarget& target, const void* peers_device, uint32_t 
         tp_add_peers_f32_kernel<<<tp_grid_for(count), 256, 0, stream>>>(
             static_cast<const float*>(target.ptr),
             reinterpret_cast<const float* const*>(peers_device), npeers,
-            static_cast<float*>(target.ptr), count);
+            static_cast<float*>(target.ptr), count, true);
     } else {
         const uint64_t count = bytes / sizeof(uint16_t);
         tp_add_peers_bf16_kernel<<<tp_grid_for(count), 256, 0, stream>>>(
             static_cast<const uint16_t*>(target.ptr),
             reinterpret_cast<const uint16_t* const*>(peers_device), npeers,
-            static_cast<uint16_t*>(target.ptr), count);
+            static_cast<uint16_t*>(target.ptr), count, true);
     }
     const hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
@@ -341,6 +350,33 @@ Status launch_add(const TpSumTarget& target, const void* peers_device, uint32_t 
     return Status::make_ok();
 }
 
+}
+
+hipError_t launch_tp_sum_bf16_4(uint16_t* dst, const uint16_t* s0, const uint16_t* s1,
+                                const uint16_t* s2, const uint16_t* s3, std::size_t count,
+                                hipStream_t stream) {
+    if (count == 0u) return hipSuccess;
+    if (dst == nullptr || s0 == nullptr || s1 == nullptr || s2 == nullptr || s3 == nullptr)
+        return hipErrorInvalidValue;
+    const uintptr_t addresses = reinterpret_cast<uintptr_t>(dst) | reinterpret_cast<uintptr_t>(s0) |
+        reinterpret_cast<uintptr_t>(s1) | reinterpret_cast<uintptr_t>(s2) | reinterpret_cast<uintptr_t>(s3);
+    const ThreePeerInputs<uint16_t> peers{{s1, s2, s3}};
+    tp_add_peers_bf16_kernel<3u><<<tp_grid_for(count), 256, 0, stream>>>(s0, peers, 3u, dst, count,
+                                                                    (addresses & 15u) == 0u);
+    return hipGetLastError();
+}
+
+hipError_t launch_tp_sum_f32_4(float* dst, const float* s0, const float* s1, const float* s2,
+                               const float* s3, std::size_t count, hipStream_t stream) {
+    if (count == 0u) return hipSuccess;
+    if (dst == nullptr || s0 == nullptr || s1 == nullptr || s2 == nullptr || s3 == nullptr)
+        return hipErrorInvalidValue;
+    const uintptr_t addresses = reinterpret_cast<uintptr_t>(dst) | reinterpret_cast<uintptr_t>(s0) |
+        reinterpret_cast<uintptr_t>(s1) | reinterpret_cast<uintptr_t>(s2) | reinterpret_cast<uintptr_t>(s3);
+    const ThreePeerInputs<float> peers{{s1, s2, s3}};
+    tp_add_peers_f32_kernel<3u><<<tp_grid_for(count), 256, 0, stream>>>(s0, peers, 3u, dst, count,
+                                                                    (addresses & 15u) == 0u);
+    return hipGetLastError();
 }
 
 hipError_t launch_tp_peer_probe_copy(void* dst, const void* src, std::size_t bytes,
@@ -361,97 +397,53 @@ HipPeerTpTransport::HipPeerTpTransport(std::vector<int> devices,
     : devices_(std::move(devices)), backend_(backend) {}
 
 HipPeerTpTransport::~HipPeerTpTransport() {
+    (void)shutdown();
+}
+
+Status HipPeerTpTransport::shutdown() {
+    if (devices_.empty()) return Status::make_ok();
+    Status first = Status::make_ok();
+    auto record = [&](hipError_t err, const char* operation) {
+        if (err != hipSuccess && first.ok())
+            first = Status::hip_error(operation, hipGetErrorString(err), __FILE__, __LINE__);
+    };
     report_debug_rings();
     debug_rings_.clear();
-    const std::size_t rank_count = devices_.size();
-    for (std::size_t r = 0; r < rank_count; ++r) {
+    for (std::size_t r = 0; r < devices_.size(); ++r) {
         auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
-        if (!scope.ok()) continue;
-        if (r < inbox_.size()) {
-            for (std::size_t q = 0; q < rank_count; ++q) {
-                if (q == r) continue;
-                for (void*& slot : inbox_[r][q]) {
-                    if (slot != nullptr) {
-                        shelf::gpu::discard_cleanup_result(hipFree(slot));
-                        slot = nullptr;
-                    }
-                }
-            }
+        if (!scope.ok()) {
+            if (first.ok()) first = scope.status();
+            continue;
         }
-        if (r < inbox_ptrs_dev_.size()) {
-            for (void*& ptrs : inbox_ptrs_dev_[r]) {
-                if (ptrs != nullptr) {
-                    shelf::gpu::discard_cleanup_result(hipFree(ptrs));
-                    ptrs = nullptr;
-                }
-            }
+        if (r < inbox_.size())
+            for (auto& direction : inbox_[r])
+                for (void* slot : direction) if (slot) record(hipFree(slot), "tp inbox release");
+        if (r < inbox_ptrs_dev_.size())
+            for (void* ptrs : inbox_ptrs_dev_[r]) if (ptrs) record(hipFree(ptrs), "tp pointer release");
+        for (const auto* events : {&sent_, &consumed_}) {
+            if (r >= events->size()) continue;
+            for (const auto& direction : (*events)[r])
+                for (auto event : direction) if (event) record(hipEventDestroy(event), "tp event release");
         }
-        if (r < sent_.size()) {
-            for (std::size_t q = 0; q < rank_count; ++q) {
-                if (q == r) continue;
-                for (hipEvent_t& event : sent_[r][q]) {
-                    if (event != nullptr) {
-                        shelf::gpu::discard_cleanup_result(hipEventDestroy(event));
-                        event = nullptr;
-                    }
-                }
-                for (hipEvent_t& event : consumed_[r][q]) {
-                    if (event != nullptr) {
-                        shelf::gpu::discard_cleanup_result(hipEventDestroy(event));
-                        event = nullptr;
-                    }
-                }
-            }
-        }
-        if (r < probe_buffers_.size() && probe_buffers_[r] != nullptr) {
-            shelf::gpu::discard_cleanup_result(hipFree(probe_buffers_[r]));
-            probe_buffers_[r] = nullptr;
-        }
-        if (r < probe_streams_.size() && probe_streams_[r] != nullptr) {
-            shelf::gpu::discard_cleanup_result(hipStreamDestroy(probe_streams_[r]));
-            probe_streams_[r] = nullptr;
-        }
-        if (r < probe_ready_.size() && probe_ready_[r] != nullptr) {
-            shelf::gpu::discard_cleanup_result(hipEventDestroy(probe_ready_[r]));
-            probe_ready_[r] = nullptr;
-        }
+        if (r < probe_buffers_.size() && probe_buffers_[r]) record(hipFree(probe_buffers_[r]), "tp probe release");
+        if (r < probe_streams_.size() && probe_streams_[r]) record(hipStreamDestroy(probe_streams_[r]), "tp probe stream release");
+        if (r < probe_ready_.size() && probe_ready_[r]) record(hipEventDestroy(probe_ready_[r]), "tp probe event release");
+        if (r < stream_arrive_.size() && stream_arrive_[r]) record(hipFree(stream_arrive_[r]), "tp arrival release");
+        if (r < lm_recv_.size() && lm_recv_[r]) record(hipFree(lm_recv_[r]), "argmax buffer release");
+        if (r < lm_sent_.size() && lm_sent_[r]) record(hipEventDestroy(lm_sent_[r]), "argmax send event release");
+        if (r < lm_done_.size() && lm_done_[r]) record(hipEventDestroy(lm_done_[r]), "argmax receive event release");
     }
-    for (auto& retired : retired_inbox_) {
+    for (const auto& retired : retired_inbox_) {
         auto scope = shelf::gpu::ScopedDevice::create(retired.first);
-        if (scope.ok()) shelf::gpu::discard_cleanup_result(hipFree(retired.second));
+        if (scope.ok()) record(hipFree(retired.second), "retired tp inbox release");
+        else if (first.ok()) first = scope.status();
     }
-    retired_inbox_.clear();
-    for (std::size_t r = 0; r < stream_arrive_.size(); ++r) {
-        if (stream_arrive_[r] == nullptr) continue;
-        auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
-        if (scope.ok()) shelf::gpu::discard_cleanup_result(hipFree(stream_arrive_[r]));
-        stream_arrive_[r] = nullptr;
-    }
-    for (void* buffer : link_staging_) {
-        if (buffer != nullptr) shelf::gpu::discard_cleanup_result(hipHostFree(buffer));
-    }
-    link_staging_.clear();
-    for (std::size_t r = 0; r < lm_recv_.size(); ++r) {
-        if (lm_recv_[r] != nullptr) {
-            auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
-            if (scope.ok()) shelf::gpu::discard_cleanup_result(hipFree(lm_recv_[r]));
-        }
-        if (lm_host_[r] != nullptr) shelf::gpu::discard_cleanup_result(hipHostFree(lm_host_[r]));
-        auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
-        if (scope.ok()) {
-            if (lm_sent_[r]) shelf::gpu::discard_cleanup_result(hipEventDestroy(lm_sent_[r]));
-            if (lm_done_[r]) shelf::gpu::discard_cleanup_result(hipEventDestroy(lm_done_[r]));
-        }
-    }
-    lm_recv_.clear();
-    lm_host_.clear();
-    lm_sent_.clear();
-    if (stream_signal_host_ != nullptr) {
-        shelf::gpu::discard_cleanup_result(hipHostFree(stream_signal_host_));
-        stream_signal_host_ = nullptr;
-        stream_signal_dev_ = {nullptr, nullptr};
-        stream_signal_allocated_ = false;
-    }
+    for (void* p : link_staging_) if (p) record(hipHostFree(p), "tp staging release");
+    for (void* p : lm_host_) if (p) record(hipHostFree(p), "argmax staging release");
+    if (stream_signal_host_) record(hipHostFree(stream_signal_host_), "tp stream signal release");
+    devices_.clear();
+    verified_ = false;
+    return first;
 }
 
 Result<std::unique_ptr<HipPeerTpTransport>> HipPeerTpTransport::create(
@@ -997,7 +989,7 @@ Status HipPeerTpTransport::ensure_lm_buffers(std::size_t rows, std::size_t rank_
         if (lm_recv_[r]) err = hipFree(lm_recv_[r]);
         if (err == hipSuccess) {
             lm_recv_[r] = nullptr;
-            err = hipMalloc(&lm_recv_[r], bytes * rank_count);
+            err = hipMalloc(&lm_recv_[r], bytes * (rank_count + kTpArgmaxPartitions));
         }
         if (err != hipSuccess) return Status::hip_error("argmax device storage", hipGetErrorString(err), __FILE__, __LINE__);
         if (lm_host_[r]) err = hipHostFree(lm_host_[r]);
@@ -1040,7 +1032,8 @@ Status HipPeerTpTransport::begin_argmax(int rank, const TpArgmaxInvocation& invo
     const hipError_t pack_err =
         launch_tp_argmax_pack(invocation.local_logits, own, invocation.rows,
                               invocation.row_stride, invocation.local_cols,
-                              invocation.local_offset, invocation.stream);
+                              invocation.local_offset, invocation.stream,
+                              static_cast<TpArgmaxPair*>(lm_recv_[r]) + rank_count * lm_rows_);
     if (pack_err != hipSuccess) {
         return Status::hip_error("argmax pack launch", hipGetErrorString(pack_err), __FILE__,
                                   __LINE__);

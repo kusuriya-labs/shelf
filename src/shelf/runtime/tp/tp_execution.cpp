@@ -110,7 +110,8 @@ Result<TpExecutionSchedule> build_tp_execution_schedule(
                     "tp_combine node has no output value", __FILE__, __LINE__);
             }
             const ValueId combine = node.outputs[0];
-            if (program.find_value(combine) == nullptr) {
+            const auto* value = program.find_value(combine);
+            if (value == nullptr) {
                 return Status::invalid_argument(
                     "tp_combine output value is not bound in the program",
                     __FILE__, __LINE__);
@@ -121,10 +122,12 @@ Result<TpExecutionSchedule> build_tp_execution_schedule(
             current.combine_value = combine;
             current.combine_local_cols = node.tp_combine_local_cols;
             try_fuse_combine_consumer(graph, program, group_end, combine, current);
-            try_bind_argmax_consumer(program, group_end, combine, current);
             const uint32_t next_begin = current.dispatch_end;
             const bool ep_reduce = ep_enabled && node.ep_combine != 0u && ep_size > 1u;
             const bool tp_reduce = node.tp_combine != 0u && tp_size != 1u;
+            if (tp_reduce && !ep_reduce && tp_size > 1u && current.combine_local_cols != 0u &&
+                static_cast<uint64_t>(current.combine_local_cols) * tp_size == value->feature_count)
+                try_bind_argmax_consumer(program, group_end, combine, current);
             bool pushed = false;
             if (ep_reduce && !tp_reduce) {
                 current.ep_scope = true;

@@ -36,11 +36,10 @@ static void check(bool cond, const char* msg) {
     if (!cond) fail(msg);
 }
 
-static void test_kernel_argmax(int device) {
+static void test_kernel_argmax(int device, uint32_t vocab) {
     constexpr uint32_t rows = 5u;
-    constexpr uint32_t vocab = 40u;
     constexpr uint32_t ranks = 4u;
-    constexpr uint32_t local_cols = vocab / ranks;
+    const uint32_t local_cols = vocab / ranks;
     constexpr uint32_t stride = rows + 2u;
     auto scope = shelf::gpu::ScopedDevice::create(device);
     if (!scope.ok()) {
@@ -68,6 +67,8 @@ static void test_kernel_argmax(int device) {
     std::vector<void*> logits_dev(ranks, nullptr);
     void* pairs_dev = nullptr;
     void* ids_dev = nullptr;
+    TpArgmaxPair* partials = nullptr;
+    check(hipMalloc(&partials, rows * shelf::runtime::kTpArgmaxPartitions * sizeof(TpArgmaxPair)) == hipSuccess, "allocate argmax partials");
     for (uint32_t r = 0u; r < ranks; ++r) {
         if (hipMalloc(&logits_dev[r], rows * vocab * sizeof(float)) != hipSuccess) {
             fail("hipMalloc argmax logits");
@@ -93,7 +94,7 @@ static void test_kernel_argmax(int device) {
         const hipError_t err =
             launch_tp_argmax_pack(static_cast<const float*>(logits_dev[r]),
                                   static_cast<TpArgmaxPair*>(pairs_dev) + r * stride, rows,
-                                  vocab, local_cols, r * local_cols, stream);
+                                  vocab, local_cols, r * local_cols, stream, partials);
         check(err == hipSuccess, "launch argmax pack");
     }
     const hipError_t reduce_err = launch_tp_argmax_reduce(
@@ -132,11 +133,12 @@ static void test_kernel_argmax(int device) {
     for (uint32_t row = 0u; row < rows; ++row) {
         check(got_ids[row] == want_ids[row], "device argmax reduce matches host reference");
     }
-    check(got_ids[2] == 14, "tie breaks toward the smaller global token id on device");
+    check(got_ids[2] == static_cast<int32_t>(local_cols + 4u), "tie breaks toward the smaller global token id on device");
 
     for (void* ptr : logits_dev) shelf::gpu::discard_cleanup_result(hipFree(ptr));
     shelf::gpu::discard_cleanup_result(hipFree(pairs_dev));
     shelf::gpu::discard_cleanup_result(hipFree(ids_dev));
+    shelf::gpu::discard_cleanup_result(hipFree(partials));
     shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
 }
 
@@ -347,6 +349,8 @@ static void test_staged_collective() {
     a.join();
     b.join();
     check(first && second, "two staged ranks retain their inputs and agree on sampled IDs");
+    check(group.shutdown().ok() && transport.value()->shutdown().ok() &&
+          transport.value()->shutdown().ok(), "staged argmax shutdown is idempotent");
 }
 
 static void test_four_rank_order() {
@@ -383,6 +387,7 @@ static void test_four_rank_order() {
         if (streams[r]) shelf::gpu::discard_cleanup_result(hipStreamDestroy(streams[r]));
     }
     check(valid, "four ranks sum in the same order under cancellation");
+    check(peer.value()->shutdown().ok(), "four-rank transport shutdown");
 }
 
 int main() {
@@ -393,7 +398,8 @@ int main() {
     }
     test_four_rank_order();
     test_staged_collective();
-    test_kernel_argmax(0);
+    test_kernel_argmax(0, 40u);
+    test_kernel_argmax(0, 248320u);
     test_kernel_four_input_sum(0);
     test_large_four_input_sum(0);
     std::printf(g_fail == 0 ? "PASS\n" : "FAIL (%d)\n", g_fail);

@@ -748,7 +748,7 @@ __global__ __launch_bounds__(kQsaTopkMaxThreads) void qsa_topk_kernel(QsaTopkArg
     const uint32_t t = threadIdx.x;
 
     __shared__ QsaRadixScratch radix_scratch;
-    extern __shared__ uint8_t qsa_topk_dynamic[];
+    extern __shared__ __align__(16) uint8_t qsa_topk_dynamic[];
 
     const uint32_t top_k =
         args.top_k < kQsaSelectMaxTopK ? args.top_k : kQsaSelectMaxTopK;

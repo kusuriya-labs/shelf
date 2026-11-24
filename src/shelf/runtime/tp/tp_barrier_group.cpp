@@ -35,7 +35,7 @@ TpBarrierGroup::TpBarrierGroup(int rank_count, std::vector<int> devices,
       abort_status_(Status::make_ok()) {}
 
 TpBarrierGroup::~TpBarrierGroup() {
-    shutdown();
+    (void)shutdown();
 }
 
 Status TpBarrierGroup::initialize() {
@@ -65,15 +65,19 @@ Status TpBarrierGroup::initialize() {
     return Status::make_ok();
 }
 
-void TpBarrierGroup::shutdown() noexcept {
+Status TpBarrierGroup::shutdown() {
+    Status first = Status::make_ok();
     for (std::size_t r = 0; r < ready_.size(); ++r) {
         if (ready_[r] == nullptr) continue;
         auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
         if (scope.ok()) {
-            shelf::gpu::discard_cleanup_result(hipEventDestroy(ready_[r]));
-        }
+            const auto err = hipEventDestroy(ready_[r]);
+            if (err != hipSuccess && first.ok())
+                first = Status::hip_error("tp barrier event release", hipGetErrorString(err), __FILE__, __LINE__);
+        } else if (first.ok()) first = scope.status();
         ready_[r] = nullptr;
     }
+    return first;
 }
 
 void TpBarrierGroup::abort(const Status& reason) noexcept {

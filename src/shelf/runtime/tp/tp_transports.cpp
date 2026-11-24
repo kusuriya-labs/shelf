@@ -145,9 +145,20 @@ HostMediatedTpTransport::HostMediatedTpTransport(std::vector<int> devices)
     : devices_(std::move(devices)) {}
 
 HostMediatedTpTransport::~HostMediatedTpTransport() {
+    (void)shutdown();
+}
+
+Status HostMediatedTpTransport::shutdown() {
+    Status first = Status::make_ok();
     for (void* buffer : staging_) {
-        if (buffer != nullptr) shelf::gpu::discard_cleanup_result(hipHostFree(buffer));
+        if (!buffer) continue;
+        const auto err = hipHostFree(buffer);
+        if (!first.ok() || err == hipSuccess) continue;
+        first = Status::hip_error("tp host staging release", hipGetErrorString(err), __FILE__, __LINE__);
     }
+    staging_.clear();
+    staging_bytes_ = 0;
+    return first;
 }
 
 Status HostMediatedTpTransport::ensure_staging(std::size_t bytes, std::size_t count) {

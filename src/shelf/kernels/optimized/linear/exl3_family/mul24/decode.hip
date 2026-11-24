@@ -251,7 +251,7 @@ __global__ void __launch_bounds__(256) exl3_mul24_fused_linear_kernel(
     const uint16_t* suh, const uint16_t* svh,
     const uint32_t* trellis, uint16_t* out, uint32_t out_row_stride,
     uint32_t rows, uint32_t k, uint32_t n) {
-    extern __shared__ uint8_t shared[];
+    extern __shared__ __align__(16) uint8_t shared[];
     const uint32_t groups = k / kBlock;
     int8_t* codes = reinterpret_cast<int8_t*>(shared);
     float* scales = reinterpret_cast<float*>(shared + size_t(ROW_CHUNK) * k);

@@ -1175,6 +1175,10 @@ Status ComputeSession::shutdown() {
     state.tp_kv_ = nullptr;
     state.tp_arena_ = nullptr;
     state.tp_stream_ = nullptr;
+    if (state.tp_coordinator_) {
+        auto st = state.tp_coordinator_->shutdown();
+        if (!st.ok() && first_error.ok()) first_error = st;
+    }
     state.tp_coordinator_ = nullptr;
     state.tp_group_.reset();
     state.pp_model_ = nullptr;

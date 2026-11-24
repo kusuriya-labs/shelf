@@ -652,6 +652,11 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
 }
 
 TpCoordinator::~TpCoordinator() noexcept {
+    (void)shutdown();
+}
+
+Status TpCoordinator::shutdown() {
+    Status first = Status::make_ok();
     abort(Status::invalid_state("tp coordinator shutting down", __FILE__, __LINE__));
     for (auto& worker : workers_) {
         if (!worker->thread.joinable()) continue;
@@ -663,11 +668,35 @@ TpCoordinator::~TpCoordinator() noexcept {
         worker->thread.join();
     }
     workers_.clear();
+    for (const auto& rank : ranks_) {
+        if (!rank || !rank->stream()) continue;
+        auto scope = shelf::gpu::ScopedDevice::create(rank->device_id());
+        if (!scope.ok()) {
+            if (first.ok()) first = scope.status();
+            continue;
+        }
+        const auto err = hipStreamSynchronize(rank->stream());
+        if (err != hipSuccess && first.ok())
+            first = Status::hip_error("tp shutdown stream", hipGetErrorString(err), __FILE__, __LINE__);
+    }
     mirrors_.clear();
+    for (auto* groups : {&tp_groups_, &ep_groups_}) {
+        for (auto& group : *groups) {
+            if (group.barrier) {
+                auto st = group.barrier->shutdown();
+                if (!st.ok() && first.ok()) first = st;
+                group.barrier.reset();
+            }
+            if (!group.transport) continue;
+            auto st = group.transport->shutdown();
+            if (!st.ok() && first.ok()) first = st;
+        }
+    }
     tp_groups_.clear();
     ep_groups_.clear();
     for (auto& rank : ranks_) rank.reset();
     ranks_.clear();
+    return first;
 }
 
 void TpCoordinator::abort(const Status& reason) noexcept {

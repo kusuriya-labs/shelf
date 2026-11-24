@@ -48,7 +48,7 @@ embedding、prefix checkpoint、offload 用バッファもドライバの GTT �
 | 変数名 | 既定値 | 対象範囲 | 用途 |
 | --- | --- | --- | --- |
 | `SHELF_EXL3_MUL24_PREFILL_AB` | `A`（gfx1201） | runtime | EXL3-INT8（mul24）の 256 行以上 prefill 経路を切り替える。`A`（既定）は hipBLASLt INT8 経路、`B` は自前 gfx12 iu8 WMMA 経路（K128 group scale、行再量子化なし）。PLaMo 3 は未指定時に独自 prefill 経路を維持する |
-| `SHELF_EXL3_MUL24_FUSED_SMALL_BATCH` | 未設定 | runtime | 既定では4ビットの1行投影（入力5120、出力17408）だけで単一カーネルを使う。`0` で無効、`1` で16行以下の対応形状に広げて比較計測する |
+| `SHELF_EXL3_MUL24_FUSED_SMALL_BATCH` | `0` | runtime | `1` で16行以下の対応形状を単一カーネルで処理する。split-K と加算順が異なるため、形状別の比較計測に使う |
 | `SHELF_EXL3_INT8_DENSE` | `256` | runtime | EXL3-INT8（mul24）で dense prefill 経路（A / B）を使う最小行数。`0` で無効化し全行を融合 decode 経路で実行する |
 | `SHELF_EXL3_INT8_FLAG` | `0.5` | runtime | A 経路（hipBLASLt INT8）で行再量子化を避けて group scale 融合経路へ退避する massive activation 行のエネルギー比しきい値 |
 | `SHELF_EXL3_INT8_TUNE` | `0` | runtime | `1` で A 経路の hipBLASLt INT8 候補（最大 16 個）を初回実行時に実測選択する（行数ごとに約 0.15 s 増加） |
