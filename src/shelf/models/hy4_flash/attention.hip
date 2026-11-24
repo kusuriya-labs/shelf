@@ -396,7 +396,7 @@ __global__ void index_topk(const float *scores, int first, int start, int stride
     ::shelf::kernel::detail::radix_select<3>(scores + size_t(row) * stride, count, 511, histogram, state,
                                              selected + row * 511, nullptr, 0);
 }
-__global__ void index_bounds(Mat q, Mat w, const float *scores, int first, int start, int stride, float *bounds) {
+__global__ void index_bounds(Mat q, Mat w, const float *scores, int first, int start, int stride, float *bounds, const unsigned *key_peak) {
     __shared__ uint32_t histogram[256], state[4];
     unsigned rank = 511;
     int row = blockIdx.x, count = min(stride, (start + first + row) / 4);
@@ -409,7 +409,7 @@ __global__ void index_bounds(Mat q, Mat w, const float *scores, int first, int s
         float weight = 0;
         for (int h = 0; h < 16; ++h)
             weight += fabsf(bv(w, first + row, h));
-        float key = bf16_bits_to_f32(reinterpret_cast<unsigned *>(bounds)[2 * gridDim.x]);
+        float key = bf16_bits_to_f32(*key_peak);
         float margin = ldexpf(128.f * weight * peak * key, -14);
         auto value = [](unsigned bits) { return __uint_as_float((bits & 0x80000000u) ? bits ^ 0x80000000u : ~bits); };
         bounds[2 * row] = value(prefix) - margin;
@@ -608,10 +608,17 @@ Selection select(Ops &op, const std::string &p, int layer, int start, Mat x, Mat
             }
             auto top = op.gpu.sparse_top[op.rank][layer];
             op.sparse_last_layer[layer] = x.rows - 1;
+            unsigned *shared_peak = nullptr;
+            if (op.gpu.index_wmma && !op.params && q.rows > 6 && end > 4096) {
+                shared_peak = static_cast<unsigned *>(op.arena.next(sizeof(unsigned)));
+                checked(hipMemsetAsync(shared_peak, 0, sizeof(unsigned), op.stream));
+                int elements = std::min(stride, (end - 1) / 4) * 128;
+                index_key_peak<<<std::min(256, (elements + 255) / 256), 256, 0, op.stream>>>(groups, shared_peak, elements);
+            }
             for (int row = begin; row < x.rows; row += batch) {
                 int rows = std::min(batch, x.rows - row);
                 index_select(q, w, groups, row, rows, start, stride, buffer, top + size_t(row) * 511,
-                             op.params, op.gpu.index_wmma && !op.params && q.rows > 6 && start + row >= 4096, op.stream);
+                             op.params, op.gpu.index_wmma && !op.params && q.rows > 6 && start + row >= 4096, op.stream, shared_peak);
             }
         }
     }
@@ -624,15 +631,19 @@ Selection select(Ops &op, const std::string &p, int layer, int start, Mat x, Mat
 }
 }
 void index_select(Mat q, Mat weights, const uint16_t *groups, int first, int rows, int start, int stride,
-                  float *scores, int *selected, const Hy4StepParams *params, bool wmma, hipStream_t stream) {
+                  float *scores, int *selected, const Hy4StepParams *params, bool wmma, hipStream_t stream, const unsigned *shared_peak) {
     if (wmma) {
         auto bounds = scores + size_t(rows) * stride;
-        auto peak = reinterpret_cast<unsigned *>(bounds + 2 * rows);
-        checked(hipMemsetAsync(peak, 0, sizeof(unsigned), stream));
-        int elements = std::min(stride, (start + first + rows - 1) / 4) * 128;
-        index_key_peak<<<std::min(256, (elements + 255) / 256), 256, 0, stream>>>(groups, peak, elements);
+        auto peak = shared_peak;
+        if (!peak) {
+            auto local_peak = reinterpret_cast<unsigned *>(bounds + 2 * rows);
+            checked(hipMemsetAsync(local_peak, 0, sizeof(unsigned), stream));
+            int elements = std::min(stride, (start + first + rows - 1) / 4) * 128;
+            index_key_peak<<<std::min(256, (elements + 255) / 256), 256, 0, stream>>>(groups, local_peak, elements);
+            peak = local_peak;
+        }
         index_scores_wmma<<<dim3((stride + 63) / 64, rows), 128, 0, stream>>>(q, weights, groups, first, start, stride, scores);
-        index_bounds<<<rows, 256, 0, stream>>>(q, weights, scores, first, start, stride, bounds);
+        index_bounds<<<rows, 256, 0, stream>>>(q, weights, scores, first, start, stride, bounds, peak);
         index_scores<true><<<dim3((stride + 3) / 4, rows), 128, 0, stream>>>(
             q, weights, groups, first, start, stride, scores, nullptr, bounds);
     } else {
