@@ -345,6 +345,19 @@ def main() -> int:
                 checker.check("verify-forwards-per-round",
                               max_verify_per_round <= drafts + 1,
                               match.group(0))
+        eos_prompt = [248044, 2523, 513, 3133, 303, 411, 12182, 13, 4310, 279, 2450,
+                      3559, 11, 1179, 4072, 279, 709, 7246, 303, 279, 41559, 3644, 13,
+                      3301, 1132, 279, 491, 1970, 440, 264, 2716, 3847, 200]
+        endings = []
+        for rid, ignore in ((1000, False), (1001, True)):
+            harness.send(dict(op="generate", request_id=rid, input_ids=eos_prompt,
+                              max_new_tokens=6, temperature=0.0, ignore_eos=ignore))
+            endings.append(collect(harness, [rid])[rid])
+        normal, ignored = endings
+        checker.check("ignore-eos-length", ignored["finish_reason"] == "length" and
+                      len(ignored["generated_ids"]) == 6, repr(ignored))
+        checker.check("ignore-eos-prefix", ignored["generated_ids"][:len(normal["generated_ids"])] ==
+                      normal["generated_ids"], repr(endings))
     except Exception as exc:  # noqa: BLE001 - the harness reports failures as text
         checker.check("exception", False, repr(exc))
     finally:

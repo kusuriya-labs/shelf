@@ -1023,7 +1023,7 @@ struct ServeController::Impl {
             return outcome;
         }
         if (state.prefix_cache_.has_value()) {
-            auto capture = state.prefix_cache_->begin_capture(*admitted->sequence);
+            auto capture = state.prefix_cache_->begin_capture(*admitted->sequence, state.stream());
             if (capture.ok()) admitted->prefix_capture = capture.value();
         }
         mtp.active.push_back(std::move(admitted));

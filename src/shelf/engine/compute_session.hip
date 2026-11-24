@@ -369,6 +369,7 @@ Status ComputeSession::initialize(const ComputeConfig& config) {
     const uint32_t required_pages = ceil_div(max_seq + 1u, state.config_.page_tokens) + 1u;
     const std::size_t kv_required_bytes = required_pages * kv_page_bytes;
 
+    const bool explicit_workspace = state.config_.working_set_reserve_bytes != 0u;
     apply_auto_working_set_reserve();
     const std::size_t drafter_total_bytes = drafter_reserve_bytes(*state.gdn_pool_);
     std::size_t drafter_runtime_bytes = drafter_total_bytes > state.config_.draft_bytes
@@ -481,8 +482,10 @@ Status ComputeSession::initialize(const ComputeConfig& config) {
     }
 
     const std::size_t arena_free = state.arena_->capacity() - state.arena_->used();
-    const std::size_t base_reserve =
-        prefix_bytes.total() + prefix_capture_bytes + drafter_total_bytes;
+    const std::size_t workspace_remaining = explicit_workspace
+        ? state.config_.working_set_reserve_bytes - executor_bytes : 0u;
+    const std::size_t base_reserve = workspace_remaining + prefix_bytes.total() +
+        prefix_capture_bytes + drafter_total_bytes;
     const char* coarse = std::getenv("SHELF_DFLASH2_COARSE_HEAD");
     if (state.config_.draft_config_ready && state.config_.tp == 1 &&
         (coarse == nullptr || std::strcmp(coarse, "0") != 0)) {

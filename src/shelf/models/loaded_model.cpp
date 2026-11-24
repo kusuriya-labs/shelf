@@ -367,14 +367,15 @@ struct MtpExecutorTerms {
     bool exl3_linear_workspace = false;
 };
 
-MtpExecutorTerms mtp_executor_terms(const LoadedModel& model, std::size_t rows) {
+MtpExecutorTerms mtp_executor_terms(const LoadedModel& model, std::size_t rows,
+                                    std::uint32_t context_tokens) {
     MtpExecutorTerms terms;
     if (model.qwen4exp_model() != nullptr) {
         const auto& q4 = *model.qwen4exp_model();
         terms.token_row_intermediate =
             q4.text_config().ffn.shared_expert_intermediate_size;
         terms.grouped_executor_bytes = shelf::qwen4exp::mtp_grouped_executor_bytes(
-            q4.text_config(), rows, 0u);
+            q4.text_config(), rows, context_tokens);
         terms.exl3_linear_workspace = true;
     } else if (model.qsa_model() != nullptr) {
         terms.token_row_intermediate =
@@ -415,7 +416,7 @@ std::size_t LoadedModel::mtp_drafter_reserve_bytes(
     const shelf::runtime::mtp::MtpDrafterConfig& options) const {
     if (!has_mtp_block()) return 0u;
     const std::size_t rows = shelf::runtime::mtp::mtp_drafter_rows(options);
-    const MtpExecutorTerms terms = mtp_executor_terms(*this, rows);
+    const MtpExecutorTerms terms = mtp_executor_terms(*this, rows, options.max_seq_len + 1u);
     shelf::weights::Exl3LinearShape shape;
     if (qwen4exp_ != nullptr) {
         shape = shelf::qwen4exp::mtp_exl3_linear_shape(qwen4exp_->weights());
@@ -429,26 +430,32 @@ std::size_t LoadedModel::mtp_spec_batch_reserve_bytes(
     const shelf::runtime::mtp::MtpDrafterConfig& options,
     std::size_t max_requests) const {
     if (!has_mtp_block()) return 0u;
-    const std::size_t rows = shelf::runtime::mtp::mtp_drafter_rows(options);
-    const MtpExecutorTerms terms = mtp_executor_terms(*this, rows);
+    const auto requests = static_cast<std::uint32_t>(max_requests);
+    const auto spec_rows = shelf::runtime::mtp::mtp_spec_rows(requests, options.num_drafts);
+    const std::size_t rows = qwen4exp_ != nullptr
+        ? std::max(options.max_batch_rows, spec_rows)
+        : shelf::runtime::mtp::mtp_drafter_rows(options);
+    const MtpExecutorTerms terms = mtp_executor_terms(*this, rows, options.max_seq_len + 1u);
     shelf::runtime::mtp::MtpDrafterConfig per_request = options;
     per_request.allocate_spec_buffers = false;
     shelf::weights::Exl3LinearShape shape;
     if (qwen4exp_ != nullptr) {
         shape = shelf::qwen4exp::mtp_exl3_linear_shape(qwen4exp_->weights());
-        return shelf::runtime::mtp::mtp_shared_draft_reserve_bytes(
+        const auto shared = shelf::runtime::mtp::mtp_shared_draft_reserve_bytes(
             hybrid_config(), per_request, terms.token_row_intermediate,
             terms.grouped_executor_bytes, terms.exl3_linear_workspace, shape,
-            static_cast<std::uint32_t>(max_requests));
+            requests);
+        const char* fused = std::getenv("SHELF_MTP_FUSED_VERIFY");
+        if (fused != nullptr && (*fused == '0' || *fused == '\0')) return shared;
+        return shared + shelf::runtime::mtp::mtp_batch_rank_state_reserve_bytes(
+            shelf::qwen35::make_qwen35_gdn_state_layout(hybrid_config()), spec_rows, requests);
     }
     const std::size_t drafter = shelf::runtime::mtp::mtp_drafter_reserve_bytes(
         hybrid_config(), per_request, terms.token_row_intermediate,
         terms.grouped_executor_bytes, terms.exl3_linear_workspace, shape);
     const std::size_t state = shelf::runtime::mtp::mtp_batch_rank_state_reserve_bytes(
         shelf::qwen35::make_qwen35_gdn_state_layout(hybrid_config()),
-        shelf::runtime::mtp::mtp_spec_rows(
-            static_cast<std::uint32_t>(max_requests), options.num_drafts),
-        static_cast<std::uint32_t>(max_requests));
+        spec_rows, requests);
     return drafter * max_requests + state;
 }
 
@@ -464,7 +471,7 @@ Result<shelf::runtime::mtp::MtpDrafterInput> LoadedModel::mtp_drafter_input(
     input.config = &hybrid_config();
     input.embed_tokens = &embed_tokens();
     const std::size_t rows = shelf::runtime::mtp::mtp_drafter_rows(options);
-    const MtpExecutorTerms terms = mtp_executor_terms(*this, rows);
+    const MtpExecutorTerms terms = mtp_executor_terms(*this, rows, options.max_seq_len + 1u);
     input.token_row_intermediate = terms.token_row_intermediate;
     input.grouped_executor_bytes = terms.grouped_executor_bytes;
 
