@@ -12,6 +12,7 @@
 #include <mutex>
 #include <numeric>
 #include <shelf/models/hy4_flash/target.h>
+#include <cstring>
 #include <exception>
 #include <deque>
 
@@ -181,6 +182,80 @@ GraphPlan *capture_cached(Ops &op, std::array<GraphPlan, N> &slots, size_t &vict
 bool graph_enabled(const char *name) {
     auto value = std::getenv(name);
     return !value || std::string_view(value) != "0";
+}
+
+size_t swa_window_slots(const Residency &gpu) {
+    return std::min(gpu.tokens, size_t(518));
+}
+
+size_t swa_layer_count() {
+    size_t count = 0;
+    for (int layer = 0; layer < 42; ++layer)
+        if (layer != 0 && layer % 4 != 1) ++count;
+    return count;
+}
+
+bool swa_range_intact(size_t pos, size_t max_written, size_t swa_slots) {
+    size_t min_swa = pos > 511 ? pos - 511 : 0;
+    return max_written <= min_swa + swa_slots;
+}
+
+size_t align_hy4_prefix(size_t common, size_t input_size) {
+    size_t capped = std::min(common, input_size > 1 ? input_size - 1 : size_t(0));
+    return (capped / 4) * 4;
+}
+
+size_t match_hy4_prefix(const Hy4PrefixSlot &entry, const std::vector<int> &input,
+                        const Residency &gpu, bool &use_snap) {
+    use_snap = false;
+    if (!entry.valid || entry.tokens.empty() || input.size() <= 1) return 0;
+    size_t common = 0;
+    size_t limit = std::min(entry.tokens.size(), input.size() - 1);
+    while (common < limit && entry.tokens[common] == input[common]) ++common;
+    const size_t swa_slots = swa_window_slots(gpu);
+    size_t live_pos = (common / 4) * 4;
+    if (live_pos > 0 && swa_range_intact(live_pos, entry.max_written, swa_slots))
+        return live_pos;
+    if (entry.snap_valid) {
+        size_t snap_limit = std::min(common, entry.snap_pos);
+        size_t snap_pos = (snap_limit / 4) * 4;
+        if (snap_pos > 0 && swa_range_intact(snap_pos, entry.snap_max_written, swa_slots)) {
+            use_snap = true;
+            return snap_pos;
+        }
+    }
+    return 0;
+}
+
+void save_swa_snapshot(Residency &gpu, int slot, int rank, hipStream_t stream,
+                       std::vector<uint8_t> &dst) {
+    if (!gpu.cache[rank][2]) return;
+    const size_t slot_bytes = swa_window_slots(gpu) * 294;
+    dst.resize(swa_layer_count() * slot_bytes);
+    size_t idx = 0;
+    for (int layer = 0; layer < 42; ++layer) {
+        if (layer == 0 || layer % 4 == 1) continue;
+        checked(hipMemcpyAsync(dst.data() + idx * slot_bytes,
+                               gpu.cache[rank][layer] + size_t(slot) * slot_bytes,
+                               slot_bytes, hipMemcpyDeviceToHost, stream));
+        ++idx;
+    }
+    checked(hipStreamSynchronize(stream));
+}
+
+void restore_swa_snapshot(Residency &gpu, int slot, int rank, hipStream_t stream,
+                          const std::vector<uint8_t> &src) {
+    if (!gpu.cache[rank][2] || src.empty()) return;
+    const size_t slot_bytes = swa_window_slots(gpu) * 294;
+    if (src.size() != swa_layer_count() * slot_bytes) return;
+    size_t idx = 0;
+    for (int layer = 0; layer < 42; ++layer) {
+        if (layer == 0 || layer % 4 == 1) continue;
+        checked(hipMemcpyAsync(gpu.cache[rank][layer] + size_t(slot) * slot_bytes,
+                               src.data() + idx * slot_bytes,
+                               slot_bytes, hipMemcpyHostToDevice, stream));
+        ++idx;
+    }
 }
 }
 
@@ -587,6 +662,7 @@ void decoder_layer(Ops &op, int layer, int start, Mat x, const std::vector<int> 
 }
 std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count, int chunk, float temperature,
               uint64_t seed, const Path &logits_file, int top_k, float top_p, const std::function<void(int)> &emit,
+              bool ignore_eos, Hy4PrefixSlot *prefix_slot, Hy4PrefixStats *prefix_stats, size_t *restored_out,
               int draft_tokens) {
     if (ids.empty() || !count || ids.size() + count > gpu.tokens || gpu.tokens > 1048576 || chunk < 1 ||
         chunk > max_prefill_chunk)
@@ -596,8 +672,41 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
     if (top_k < 0 || top_k > 64 || !(top_p > 0 && top_p <= 1) || (temperature > 0 && top_p < 1 && !top_k))
         throw std::invalid_argument("top_k は 0〜64、top_p を使う場合は top_k が必要です");
     const int resolved_drafts = Residency::resolve_draft_tokens(draft_tokens ? draft_tokens : gpu.draft_tokens);
+    size_t restored = 0;
+    bool use_snap = false;
+    std::vector<std::vector<uint8_t>> pending_restore;
+    if (prefix_slot) {
+        if (prefix_stats && prefix_stats->enabled) {
+            restored = match_hy4_prefix(*prefix_slot, ids, gpu, use_snap);
+            if (restored > 0) {
+                ++prefix_stats->hits;
+                ++prefix_stats->restores;
+                if (use_snap)
+                    pending_restore = std::move(prefix_slot->swa_snap);
+            } else {
+                ++prefix_stats->misses;
+            }
+            prefix_stats->reuse_slots = gpu.max_slots;
+            prefix_stats->entries = prefix_slot->valid ? 1 : 0;
+        }
+        prefix_slot->valid = false;
+        prefix_slot->snap_valid = false;
+        prefix_slot->tokens.clear();
+        prefix_slot->max_written = 0;
+        prefix_slot->snap_pos = 0;
+        prefix_slot->snap_max_written = 0;
+        if (prefix_stats && prefix_stats->enabled && gpu.cache[0][2])
+            prefix_slot->swa_snap.resize(gpu.ranks);
+        else
+            prefix_slot->swa_snap.clear();
+        if (prefix_stats)
+            prefix_stats->entries = 0;
+    }
+    if (restored_out) *restored_out = restored;
     struct Lane {
         std::vector<int> generated;
+        std::vector<int> history;
+        size_t max_written = 0;
         double prefill = 0, decode = 0, draft = 0, head = 0;
         double pp_attn = 0, pp_ffn = 0, pp_transfer = 0, pp_head = 0;
         uint64_t pp_routes = 0;
@@ -619,15 +728,23 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
             checked(hipSetDevice(gpu.physical[rank]));
             auto now = std::chrono::steady_clock::now;
             Target target(gpu, temperature, seed, top_k, top_p, rank, resolved_drafts);
+            if (use_snap && restored > 0 && size_t(rank) < pending_restore.size())
+                restore_swa_snapshot(gpu, 0, rank, target.op.stream, pending_restore[rank]);
+            if (restored > 0)
+                target.history.assign(ids.begin(), ids.begin() + restored);
             auto begin = now();
             int next = 0;
-            for (size_t first = 0; first < ids.size(); first += chunk) {
+            for (size_t first = restored; first < ids.size(); first += chunk) {
                 auto end = std::min(first + chunk, ids.size());
                 auto output = target.forward({ids.begin() + first, ids.begin() + end}, false,
                                              end == ids.size(), rank == 0 ? logits_file : Path{});
                 if (!output.empty())
                     next = output.back();
             }
+            size_t max_written = ids.size();
+            if (prefix_slot && prefix_stats && prefix_stats->enabled &&
+                size_t(rank) < prefix_slot->swa_snap.size() && align_hy4_prefix(ids.size(), ids.size() + 1) > 0)
+                save_swa_snapshot(gpu, 0, rank, target.op.stream, prefix_slot->swa_snap[rank]);
             gpu.collect_route_counts(rank);
             auto prefill = now();
             lane[rank].pp_attn = gpu.attention_ms;
@@ -663,10 +780,11 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
             auto &stats = lane[rank];
             const int drafts = target.draft_tokens;
             const int block_rows = drafts + 1;
-            while (int(generated.size()) < count && generated.back() != 120025) {
+            while (int(generated.size()) < count && (ignore_eos || generated.back() != 120025)) {
                 int anchor = generated.back();
                 if (!gpu.model.has_draft || target.history.size() + block_rows > gpu.tokens ||
                     int(generated.size()) + 1 == count) {
+                    max_written = std::max(max_written, target.history.size() + 1);
                     auto output = target.forward({anchor}, false);
                     if (rank == 0 && emit) emit(output[0]);
                     broadcast(output, shared_value);
@@ -682,6 +800,7 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
                 broadcast(draft, shared_value);
                 std::vector<int> block{anchor};
                 block.insert(block.end(), draft.begin(), draft.end());
+                max_written = std::max(max_written, target.history.size() + size_t(block_rows));
                 auto actual = target.forward(block, true);
                 int keep = verify_speculation(target.op, target.target_probs, target.draft_probs,
                                               target.history.size() - drafts, seed, draft, actual);
@@ -692,12 +811,14 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
                 target.accept(keep, block_rows);
                 for (int i = 0; i < keep && int(generated.size()) < count; ++i) {
                     append(actual[i]);
-                    if (actual[i] == 120025)
+                    if (!ignore_eos && actual[i] == 120025)
                         break;
                 }
             }
             gpu.collect_route_counts(rank);
             stats.generated = std::move(generated);
+            stats.history = std::move(target.history);
+            stats.max_written = max_written;
             stats.head = target.head_ms;
             stats.prefill = std::chrono::duration<double>(prefill - begin).count();
             stats.decode = std::chrono::duration<double>(now() - prefill).count();
@@ -734,6 +855,17 @@ std::vector<int> generate(Residency &gpu, const std::vector<int> &ids, int count
     }
     if (failure)
         std::rethrow_exception(failure);
+    if (prefix_slot && prefix_stats && prefix_stats->enabled) {
+        prefix_slot->tokens = lane[0].history;
+        prefix_slot->max_written = lane[0].max_written;
+        prefix_slot->valid = !prefix_slot->tokens.empty();
+        prefix_slot->snap_pos = align_hy4_prefix(ids.size(), ids.size() + 1);
+        prefix_slot->snap_max_written = ids.size();
+        prefix_slot->snap_valid = prefix_slot->snap_pos > 0 && !prefix_slot->swa_snap.empty() &&
+                                  !prefix_slot->swa_snap[0].empty();
+        prefix_stats->entries = prefix_slot->valid ? 1 : 0;
+        if (prefix_slot->valid) ++prefix_stats->saves;
+    }
     const auto &stats = lane[0];
     fprintf(stderr,
             "prefill_tokens=%zu prefill_s=%.6f decode_tokens=%zu decode_s=%.6f draft_rounds=%d accepted=%d\n",
@@ -768,6 +900,8 @@ struct BatchLane {
     std::vector<int> &history;
     std::vector<int> &generated;
     const Hy4BatchOptions &options;
+    size_t &max_written;
+    bool ignore_eos = false;
     float *target_probs = nullptr;
     float *draft_probs = nullptr;
 };
@@ -1090,6 +1224,7 @@ void decode_batch(Target &target, std::vector<BatchLane> &lanes, BatchStats &sta
         throw std::runtime_error("有効な出力 logit がありません");
     for (size_t r = 0; r < lanes.size(); ++r) {
         auto &lane = lanes[r];
+        lane.max_written = std::max(lane.max_written, lane.history.size() + size_t(rows));
         int first = r * rows, keep = 1;
         std::vector<int> actual(next.begin() + first, next.begin() + first + rows);
         if (speculative) {
@@ -1099,8 +1234,10 @@ void decode_batch(Target &target, std::vector<BatchLane> &lanes, BatchStats &sta
             stats.accepted += keep - 1;
         }
         keep = std::min(keep, lane.limit - int(lane.generated.size()));
-        auto stop = std::find(actual.begin(), actual.begin() + keep, 120025);
-        if (stop != actual.begin() + keep) keep = int(stop - actual.begin()) + 1;
+        if (!lane.ignore_eos) {
+            auto stop = std::find(actual.begin(), actual.begin() + keep, 120025);
+            if (stop != actual.begin() + keep) keep = int(stop - actual.begin()) + 1;
+        }
         if (gpu.batch_draft) {
             Mat state = target.state.row(lane.slot * max_verify_rows, rows);
             checked(hipMemcpyAsync(state.p, h.row(first).p, state.bytes(), hipMemcpyDeviceToDevice, op.stream));
@@ -1134,7 +1271,7 @@ std::vector<std::vector<int>> generate_batch(Residency &gpu, const std::vector<s
     if (batch == 1) {
         auto output = generate(gpu, prompts.front(), counts.front(), options.chunk, options.temperature,
                                options.seed, {}, options.top_k, options.top_p, [&](int id) { if (emit) emit(0, id); },
-                               resolved_drafts);
+                               options.ignore_eos, nullptr, nullptr, nullptr, resolved_drafts);
         return {std::move(output)};
     }
     auto now = std::chrono::steady_clock::now;
@@ -1142,6 +1279,7 @@ std::vector<std::vector<int>> generate_batch(Residency &gpu, const std::vector<s
     Target target(gpu, options.temperature, options.seed, options.top_k, options.top_p, 0, resolved_drafts);
     target.op.slot_draft = gpu.batch_draft;
     std::vector<std::vector<int>> histories(batch), generated(batch);
+    std::vector<size_t> written(batch, 0);
     for (size_t s = 0; s < batch; ++s) {
         target.history.clear();
         target.op.slot = int(s);
@@ -1153,6 +1291,7 @@ std::vector<std::vector<int>> generate_batch(Residency &gpu, const std::vector<s
             if (!result.empty()) next = result.back();
         }
         histories[s] = target.history;
+        written[s] = prompts[s].size();
         generated[s].push_back(next);
         if (emit) emit(int(s), next);
     }
@@ -1162,8 +1301,8 @@ std::vector<std::vector<int>> generate_batch(Residency &gpu, const std::vector<s
     for (;;) {
         std::vector<BatchLane> lanes;
         for (size_t s = 0; s < batch; ++s)
-            if (generated[s].size() < size_t(counts[s]) && generated[s].back() != 120025)
-                lanes.push_back({int(s), int(s), counts[s], histories[s], generated[s], options});
+            if (generated[s].size() < size_t(counts[s]) && (options.ignore_eos || generated[s].back() != 120025))
+                lanes.push_back({int(s), int(s), counts[s], histories[s], generated[s], options, written[s], options.ignore_eos});
         if (lanes.empty()) break;
         decode_batch(target, lanes, stats, emit);
     }
@@ -1182,6 +1321,12 @@ struct Hy4BatchSession::Impl {
         Hy4Request request;
         std::vector<int> history, generated;
         size_t prefetched = 0;
+        size_t restored_tokens = 0;
+        size_t max_written = 0;
+        size_t snap_pos = 0;
+        size_t snap_max_written = 0;
+        std::vector<uint8_t> swa_snap_buf;
+        std::vector<uint8_t> swa_pending;
     };
     Residency &gpu;
     int draft_tokens;
@@ -1189,27 +1334,101 @@ struct Hy4BatchSession::Impl {
     Emit emit;
     Done done;
     std::vector<std::optional<State>> states;
+    std::vector<Hy4PrefixSlot> slot_caches;
     std::deque<Hy4Request> waiting;
     BatchStats stats;
+    Hy4PrefixStats prefix;
+    uint64_t use_clock = 0;
+    size_t last_prompt = 0;
+    size_t last_restored = 0;
     Impl(Residency &gpu, Emit emit, Done done, int drafts)
         : gpu(gpu), draft_tokens(Residency::resolve_draft_tokens(drafts ? drafts : gpu.draft_tokens)),
-          emit(std::move(emit)), done(std::move(done)), states(gpu.max_slots) {
+          emit(std::move(emit)), done(std::move(done)), states(gpu.max_slots), slot_caches(gpu.max_slots) {
         if (gpu.tp_size > 1)
             throw std::invalid_argument("バッチセッションは TP=1 で使用してください");
+        prefix.enabled = true;
+        prefix.reuse_slots = gpu.max_slots;
     }
     void fill() {
-        for (auto &state : states) {
-            if (waiting.empty()) break;
-            if (!state) {
-                state.emplace();
-                state->request = std::move(waiting.front());
-                waiting.pop_front();
+        while (!waiting.empty()) {
+            const auto &req = waiting.front();
+            int chosen = -1;
+            size_t best_match = 0;
+            bool best_snap = false;
+            if (prefix.enabled) {
+                uint64_t best_clock = 0;
+                for (size_t s = 0; s < states.size(); ++s) {
+                    if (states[s]) continue;
+                    bool snap = false;
+                    size_t m = match_hy4_prefix(slot_caches[s], req.input_ids, gpu, snap);
+                    if (m > 0 && (chosen < 0 || m > best_match || (m == best_match && slot_caches[s].last_used > best_clock))) {
+                        chosen = int(s);
+                        best_match = m;
+                        best_snap = snap;
+                        best_clock = slot_caches[s].last_used;
+                    }
+                }
             }
+            if (chosen < 0) {
+                uint64_t oldest = UINT64_MAX;
+                for (size_t s = 0; s < states.size(); ++s) {
+                    if (states[s]) continue;
+                    if (!slot_caches[s].valid) {
+                        chosen = int(s);
+                        break;
+                    }
+                    if (slot_caches[s].last_used < oldest) {
+                        oldest = slot_caches[s].last_used;
+                        chosen = int(s);
+                    }
+                }
+            }
+            if (chosen < 0) break;
+            auto &slot_cache = slot_caches[chosen];
+            auto &state = states[chosen].emplace();
+            state.request = std::move(waiting.front());
+            waiting.pop_front();
+            if (prefix.enabled) {
+                if (best_match > 0) {
+                    ++prefix.hits;
+                    ++prefix.restores;
+                    if (best_snap && !slot_cache.swa_snap.empty())
+                        state.swa_pending = std::move(slot_cache.swa_snap[0]);
+                    state.prefetched = best_match;
+                    state.restored_tokens = best_match;
+                    state.max_written = best_match;
+                    state.history.assign(state.request.input_ids.begin(), state.request.input_ids.begin() + best_match);
+                } else {
+                    if (slot_cache.valid) ++prefix.evictions;
+                    ++prefix.misses;
+                }
+            }
+            slot_cache = {};
         }
     }
     void finish(int slot, const char *reason) {
         auto state = std::move(*states[slot]);
         states[slot].reset();
+        if (prefix.enabled && reason &&
+            (std::string_view(reason) == "stop" || std::string_view(reason) == "length")) {
+            auto &cache = slot_caches[slot];
+            cache.tokens = std::move(state.history);
+            cache.max_written = state.max_written;
+            cache.last_used = ++use_clock;
+            cache.valid = !cache.tokens.empty();
+            cache.snap_pos = state.snap_pos;
+            cache.snap_max_written = state.snap_max_written;
+            cache.snap_valid = !state.swa_snap_buf.empty() && cache.snap_pos > 0;
+            if (cache.snap_valid) {
+                cache.swa_snap.resize(1);
+                cache.swa_snap[0] = std::move(state.swa_snap_buf);
+            }
+            if (cache.valid) ++prefix.saves;
+        } else {
+            slot_caches[slot] = {};
+        }
+        last_prompt = state.request.input_ids.size();
+        last_restored = state.restored_tokens;
         done(state.request.id, state.generated, reason);
     }
     void step() {
@@ -1225,6 +1444,10 @@ struct Hy4BatchSession::Impl {
             if (!states[s] || states[s]->prefetched == states[s]->request.input_ids.size()) continue;
             auto &state = *states[s];
             auto &request = state.request;
+            if (!state.swa_pending.empty()) {
+                restore_swa_snapshot(gpu, int(s), 0, target->op.stream, state.swa_pending);
+                state.swa_pending.clear();
+            }
             auto end = std::min(state.prefetched + size_t(request.options.chunk), request.input_ids.size());
             target->op.batch_decode = false;
             target->op.slot = int(s);
@@ -1236,12 +1459,20 @@ struct Hy4BatchSession::Impl {
             auto result = target->forward({request.input_ids.begin() + state.prefetched, request.input_ids.begin() + end},
                                          false, end == request.input_ids.size());
             state.history = std::move(target->history);
+            state.max_written = std::max(state.max_written, end);
             state.prefetched = end;
+            if (end == request.input_ids.size() && prefix.enabled && gpu.cache[0][2]) {
+                state.snap_pos = align_hy4_prefix(end, end + 1);
+                state.snap_max_written = end;
+                if (state.snap_pos > 0)
+                    save_swa_snapshot(gpu, int(s), 0, target->op.stream, state.swa_snap_buf);
+            }
             if (!result.empty()) {
                 state.generated.push_back(result.back());
-                emit(request.id, result.back());
-                if (result.back() == 120025 || state.generated.size() == size_t(request.count))
-                    finish(int(s), result.back() == 120025 ? "stop" : "length");
+                if (emit) emit(request.id, result.back());
+                const bool hit_eos = !request.options.ignore_eos && result.back() == 120025;
+                if (hit_eos || state.generated.size() == size_t(request.count))
+                    finish(int(s), hit_eos ? "stop" : "length");
             }
             return;
         }
@@ -1249,7 +1480,7 @@ struct Hy4BatchSession::Impl {
         for (size_t s = 0; s < states.size(); ++s) if (states[s]) {
             auto &state = *states[s];
             lanes.push_back({int(s), state.request.id, state.request.count, state.history, state.generated,
-                             state.request.options});
+                             state.request.options, state.max_written, state.request.options.ignore_eos});
         }
         if (lanes.empty()) return;
         target->draft_tokens = draft_tokens;
@@ -1257,8 +1488,9 @@ struct Hy4BatchSession::Impl {
         for (auto &lane : lanes) {
             int slot = lane.slot;
             auto &state = *states[slot];
-            if (state.generated.back() == 120025 || state.generated.size() == size_t(state.request.count))
-                finish(slot, state.generated.back() == 120025 ? "stop" : "length");
+            const bool hit_eos = !state.request.options.ignore_eos && state.generated.back() == 120025;
+            if (hit_eos || state.generated.size() == size_t(state.request.count))
+                finish(slot, hit_eos ? "stop" : "length");
         }
     }
 };
@@ -1293,12 +1525,27 @@ void Hy4BatchSession::cancel(int id) {
         }
     for (auto it = impl->waiting.begin(); it != impl->waiting.end(); ++it)
         if (it->id == id) {
+            impl->last_prompt = it->input_ids.size();
+            impl->last_restored = 0;
             impl->waiting.erase(it);
             impl->done(id, {}, "cancelled");
             return;
         }
 }
 void Hy4BatchSession::step() { impl->step(); }
+void Hy4BatchSession::set_prefix_cache(bool enabled) {
+    impl->prefix.enabled = enabled;
+    if (!enabled)
+        for (auto &cache : impl->slot_caches) cache = {};
+}
+Hy4PrefixStats Hy4BatchSession::prefix_stats() const {
+    Hy4PrefixStats copy = impl->prefix;
+    copy.entries = std::count_if(impl->slot_caches.begin(), impl->slot_caches.end(),
+                                 [](const Hy4PrefixSlot &c) { return c.valid; });
+    return copy;
+}
+size_t Hy4BatchSession::last_prompt_tokens() const { return impl->last_prompt; }
+size_t Hy4BatchSession::last_restored_tokens() const { return impl->last_restored; }
 size_t Hy4BatchSession::active() const {
     return std::count_if(impl->states.begin(), impl->states.end(), [](const auto &s) { return bool(s); });
 }

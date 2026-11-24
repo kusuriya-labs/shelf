@@ -4,8 +4,13 @@
 from __future__ import annotations
 
 import os
+import site
 import sys
 from pathlib import Path
+
+user_site = site.getusersitepackages()
+if user_site and user_site not in sys.path:
+    sys.path.append(user_site)
 
 SERVER_DIR = Path(__file__).resolve().parents[2] / "src" / "apps" / "server"
 sys.path.insert(0, str(SERVER_DIR))

@@ -93,6 +93,8 @@ def build_compute_argv(opts) -> list[str]:
             argv += ["--tensor-parallel", str(opts.tensor_parallel)]
         if opts.dfly_dir:
             argv += ["--dfly-dir", opts.dfly_dir, "--dfly-drafts", str(opts.dfly_drafts)]
+        if not opts.prefix_cache:
+            argv += ["--prefix-cache", "0"]
         return argv
     argv = [
         opts.compute,
@@ -111,7 +113,7 @@ def build_compute_argv(opts) -> list[str]:
         "--rope-factor", opts.rope_factor,
         "--prefix-cache", str(opts.prefix_cache),
         "--prefix-cache-checkpoints", str(opts.prefix_cache_checkpoints),
-        "--prefix-cache-strategy", opts.prefix_cache_strategy,
+        "--prefix-cache-strategy", opts.prefix_cache_strategy if opts.prefix_cache_strategy != "off" else "radix",
         "--prefix-cache-save-interval", str(opts.prefix_cache_save_interval),
     ]
     if opts.prefill_chunk is not None:
@@ -601,7 +603,7 @@ def parse_args(argv=None):
     parser.add_argument("--prefix-cache-checkpoints", type=int, default=16,
                         help="ホストに保存する prefix checkpoint 数（既定 %(default)s）")
     parser.add_argument("--prefix-cache-strategy", default="radix",
-                        choices=("radix", "slot"),
+                        choices=("radix", "slot", "off"),
                         help="prefix cache entry strategy (default radix)")
     parser.add_argument("--prefix-cache-save-interval", type=int, default=16384,
                         help="periodic prefix checkpoint spacing in tokens; "
@@ -657,6 +659,8 @@ def parse_args(argv=None):
     parser.add_argument("--verify-weights", action="store_true",
                         help="verify quantized payload CRC32 on load")
     opts = parser.parse_args(argv)
+    if opts.prefix_cache_strategy == "off":
+        opts.prefix_cache = 0
     if opts.prefill_chunk is None:
         opts.prefill_chunk = 1024 if opts.placement else 4096
     if opts.placement and not 1 <= opts.prefill_chunk <= 4096:

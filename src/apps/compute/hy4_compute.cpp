@@ -25,10 +25,14 @@ void reply(const Json &event) {
     std::cout << event.dump() << std::endl;
 }
 
-void reply_stats(const Residency &gpu, size_t active, size_t queued, size_t draft_rounds) {
+void reply_stats(const Residency &gpu, size_t active, size_t queued, size_t draft_rounds, const Hy4PrefixStats &prefix) {
     size_t free_slots = gpu.max_slots - active;
     reply({{"event", "stats"}, {"max_concurrent_requests", gpu.max_slots}, {"slot_tokens", gpu.tokens},
            {"active_requests", active}, {"queued_requests", queued}, {"batch_draft_rounds", draft_rounds},
+           {"prefix", {{"enabled", prefix.enabled}, {"reuse_slots", prefix.reuse_slots},
+                       {"entries", prefix.entries}, {"saves", prefix.saves},
+                       {"hits", prefix.hits}, {"misses", prefix.misses},
+                       {"restores", prefix.restores}, {"evictions", prefix.evictions}}},
            {"kv", {{"page_tokens", gpu.tokens}, {"total_pages", gpu.max_slots}, {"used_pages", active},
                    {"free_pages", free_slots}, {"capacity_tokens", gpu.max_slots * gpu.tokens},
                    {"free_tokens", free_slots * gpu.tokens}, {"active_requests", active},
@@ -54,15 +58,40 @@ std::array<unsigned long long, 2> page_faults() {
     return faults;
 }
 
-void serve(Residency &gpu, int chunk) {
+void validate_hy4_serve_request(const Json &request, bool &ignore_eos) {
+    if (request.at("op") != "generate" || request.value("grammar", false) ||
+        request.value("reasoning_budget_tokens", 0) || request.value("min_p", 0.f) != 0)
+        throw std::invalid_argument("Hy4 の生成経路が対応していない指定です");
+    if (request.contains("prefix_cache_checkpoint_position")) {
+        const auto &cp = request.at("prefix_cache_checkpoint_position");
+        if (!cp.is_number_integer())
+            throw std::invalid_argument("prefix_cache_checkpoint_position must be an integer");
+        if (cp.get<long long>() != 0)
+            throw std::invalid_argument(
+                "prefix_cache_checkpoint_position must be 0; prefix reuse is resolved by the compute-side prefix cache");
+    }
+    ignore_eos = false;
+    if (request.contains("ignore_eos")) {
+        const auto &ie = request.at("ignore_eos");
+        if (!ie.is_boolean())
+            throw std::invalid_argument("ignore_eos must be a boolean");
+        ignore_eos = ie.get<bool>();
+    }
+}
+
+void serve(Residency &gpu, int chunk, bool prefix_cache) {
     struct Interrupted {};
     bool stopping = false;
+    Hy4PrefixSlot prefix_slot;
+    Hy4PrefixStats prefix_stats;
+    prefix_stats.enabled = prefix_cache;
+    prefix_stats.reuse_slots = gpu.max_slots;
     auto control = [&](const Json &request, int active) {
         const auto op = request.at("op").get<std::string>();
         if (op == "ping")
-            reply({{"event", "pong"}});
+            reply({{"event", "pong"}, {"protocol_version", 1}, {"capabilities", {{"prefix_cache", prefix_cache}}}});
         else if (op == "stats")
-            reply_stats(gpu, active >= 0, 0, 0);
+            reply_stats(gpu, active >= 0, 0, 0, prefix_stats);
         else if (op == "shutdown") {
             stopping = true;
             reply({{"event", "shutdown"}});
@@ -81,9 +110,8 @@ void serve(Residency &gpu, int chunk) {
             const auto request = Json::parse(line);
             if (control(request, -1)) continue;
             id = request.at("request_id").get<int>();
-            if (request.at("op") != "generate" || request.value("grammar", false) ||
-                request.value("reasoning_budget_tokens", 0) || request.value("min_p", 0.f) != 0)
-                throw std::invalid_argument("Hy4 の生成経路が対応していない指定です");
+            bool ignore_eos = false;
+            validate_hy4_serve_request(request, ignore_eos);
             auto ids = request.at("input_ids").get<std::vector<int>>();
             int count = request.at("max_new_tokens").get<int>();
             float temp = request.value("temperature", 0.f);
@@ -102,8 +130,9 @@ void serve(Residency &gpu, int chunk) {
                 }
                 reply({{"event", "token"}, {"request_id", id}, {"token_id", token}});
             };
-            fprintf(stderr, "hy4_request=%d input=%zu limit=%d temperature=%.3f top_p=%.3f top_k=%d\n",
-                    id, ids.size(), count, temp, request.value("top_p", 1.f), request.value("top_k", 0));
+            fprintf(stderr, "hy4_request=%d input=%zu limit=%d temperature=%.3f top_p=%.3f top_k=%d ignore_eos=%d\n",
+                    id, ids.size(), count, temp, request.value("top_p", 1.f), request.value("top_k", 0),
+                    static_cast<int>(ignore_eos));
             const auto profile = std::getenv("SHELF_HY4_PROFILE_EP");
             bool profiling = profile && std::string_view(profile) == "1";
             std::array<unsigned long long, 2> before{};
@@ -111,8 +140,10 @@ void serve(Residency &gpu, int chunk) {
                 gpu.model.report_engram_residency("request_before");
                 before = page_faults();
             }
+            size_t restored = 0;
             auto result = generate(gpu, ids, count, chunk, temp, request.value("seed", uint64_t{}), {},
-                                   request.value("top_k", 0), request.value("top_p", 1.f), emit);
+                                   request.value("top_k", 0), request.value("top_p", 1.f), emit,
+                                   ignore_eos, &prefix_slot, &prefix_stats, &restored);
             if (profiling) {
                 auto after = page_faults();
                 fprintf(stderr, "hy4_faults request=%d minor=%llu major=%llu\n", id,
@@ -120,9 +151,12 @@ void serve(Residency &gpu, int chunk) {
                 gpu.model.report_engram_residency("request_after");
             }
             reply({{"event", "done"}, {"request_id", id}, {"generated_ids", result},
-                   {"finish_reason", result.back() == 120025 ? "stop" : "length"}});
+                   {"prompt_tokens", ids.size()}, {"restored_tokens", restored},
+                   {"prefill_tokens", ids.size() - restored}, {"cache_checkpoint_tokens", 0},
+                   {"finish_reason", (ignore_eos || result.back() != 120025) ? "length" : "stop"}});
         } catch (const Interrupted &) {
-            reply({{"event", "done"}, {"request_id", id}, {"finish_reason", "cancelled"}});
+            reply({{"event", "done"}, {"request_id", id}, {"restored_tokens", 0},
+                   {"prefill_tokens", 0}, {"cache_checkpoint_tokens", 0}, {"finish_reason", "cancelled"}});
         } catch (const std::invalid_argument &e) {
             reply({{"event", "error"}, {"request_id", id}, {"code", "invalid_argument"}, {"message", e.what()}});
         } catch (const Json::exception &e) {
@@ -130,33 +164,41 @@ void serve(Residency &gpu, int chunk) {
         }
     }
 }
-void serve_batch(Residency &gpu, int chunk) {
+void serve_batch(Residency &gpu, int chunk, bool prefix_cache) {
     bool stopping = false, eof = false;
     std::string pending;
+    Hy4BatchSession *session_ptr = nullptr;
     Hy4BatchSession session(gpu,
         [](int id, int token) { reply({{"event", "token"}, {"request_id", id}, {"token_id", token}}); },
-        [](int id, const std::vector<int> &ids, const char *reason) {
-            reply({{"event", "done"}, {"request_id", id}, {"generated_ids", ids}, {"finish_reason", reason}});
+        [&](int id, const std::vector<int> &ids, const char *reason) {
+            size_t prompt = session_ptr ? session_ptr->last_prompt_tokens() : 0;
+            size_t restored = session_ptr ? session_ptr->last_restored_tokens() : 0;
+            reply({{"event", "done"}, {"request_id", id}, {"generated_ids", ids},
+                   {"prompt_tokens", prompt}, {"restored_tokens", restored},
+                   {"prefill_tokens", prompt >= restored ? prompt - restored : 0},
+                   {"cache_checkpoint_tokens", 0}, {"finish_reason", reason}});
         });
+    session_ptr = &session;
+    session.set_prefix_cache(prefix_cache);
     auto handle = [&](const std::string &line) {
         int id = -1;
         try {
             auto request = Json::parse(line);
             auto op = request.at("op").get<std::string>();
-            if (op == "ping") reply({{"event", "pong"}});
+            if (op == "ping")
+                reply({{"event", "pong"}, {"protocol_version", 1}, {"capabilities", {{"prefix_cache", prefix_cache}}}});
             else if (op == "stats")
-                reply_stats(gpu, session.active(), session.queued(), session.draft_rounds());
+                reply_stats(gpu, session.active(), session.queued(), session.draft_rounds(), session.prefix_stats());
             else if (op == "shutdown") { stopping = true; reply({{"event", "shutdown"}}); }
             else if (op == "cancel") session.cancel(request.at("request_id").get<int>());
             else {
                 id = request.at("request_id").get<int>();
-                if (op != "generate" || request.value("grammar", false) || request.value("reasoning_budget_tokens", 0) ||
-                    request.value("min_p", 0.f) != 0)
-                    throw std::invalid_argument("Hy4 の生成経路が対応していない指定です");
+                bool ignore_eos = false;
+                validate_hy4_serve_request(request, ignore_eos);
                 Hy4Request item{id, request.at("input_ids").get<std::vector<int>>(),
                     request.at("max_new_tokens").get<int>(),
                     {chunk, request.value("temperature", 0.f), request.value("seed", uint64_t{}),
-                     request.value("top_k", 0), request.value("top_p", 1.f)}};
+                     request.value("top_k", 0), request.value("top_p", 1.f), ignore_eos}};
                 session.admit(std::move(item));
             }
         } catch (const std::invalid_argument &e) {
@@ -202,7 +244,7 @@ int compute(int argc, char **argv) {
                 "PATH [--dfly-dir PATH] [--dfly-drafts N] [--max-seq-len N] [--input-ids-file PATH] [--max-new-tokens N] "
                 "[--chunk N] [--temperature T] [--seed N] [--dump-logits PATH] [--repeats N] "
                 "[--expert-parallel N] [--tensor-parallel N] [--max-concurrent-requests N] [--batch-size N] "
-                "[--batch-input-files PATH1,PATH2,...] [--batch-max-new-tokens N1,N2,...]");
+                "[--batch-input-files PATH1,PATH2,...] [--batch-max-new-tokens N1,N2,...] [--prefix-cache 0|1]");
             return 0;
         }
         bool implicit = std::string_view(argv[1]).starts_with("--");
@@ -210,7 +252,7 @@ int compute(int argc, char **argv) {
         Path model, engram, draft, placement;
         size_t tokens = mode == "reserve" ? 2097152 : 4096;
         Path input, logits_file;
-        int count = 32, chunk = 64, repeats = 1, ep = 0, tp = 1, batch_size = 1, max_concurrent = 1, dfly_drafts = 0;
+        int count = 32, chunk = 64, repeats = 1, ep = 0, tp = 1, batch_size = 1, max_concurrent = 1, dfly_drafts = 0, prefix_cache = 1;
         std::string batch_files, batch_counts;
         float temperature = 0;
         uint64_t seed = 0;
@@ -254,6 +296,10 @@ int compute(int argc, char **argv) {
                 auto [p, err] = std::from_chars(value.data(), value.data() + value.size(), dest);
                 if (p != value.data() + value.size() || err != std::errc{} || dest <= 0)
                     throw std::runtime_error("長さが不正です");
+            } else if (key == "--prefix-cache") {
+                auto [p, err] = std::from_chars(value.data(), value.data() + value.size(), prefix_cache);
+                if (p != value.data() + value.size() || err != std::errc{} || (prefix_cache != 0 && prefix_cache != 1))
+                    throw std::runtime_error("prefix-cache の値が不正です");
             } else if (key == "--placement")
                 placement = value;
             else if (key == "--max-seq-len") {
@@ -354,8 +400,8 @@ int compute(int argc, char **argv) {
                     if (auto profile = std::getenv("SHELF_HY4_PROFILE_EP");
                         profile && std::string_view(profile) == "1")
                         checkpoint.report_engram_residency("ready");
-                    if (max_concurrent == 1) serve(gpu, chunk);
-                    else serve_batch(gpu, chunk);
+                    if (max_concurrent == 1) serve(gpu, chunk, prefix_cache != 0);
+                    else serve_batch(gpu, chunk, prefix_cache != 0);
                 } else if (mode == "generate") {
                     gpu.upload();
                     for (int pass = 0; pass < repeats; ++pass) {
