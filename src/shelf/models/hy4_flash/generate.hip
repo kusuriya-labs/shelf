@@ -190,6 +190,7 @@ GraphPlan *capture_cached(Ops &op, std::array<GraphPlan, N> &slots, size_t &vict
             return &slot;
         }
     auto &slot = slots[victim % N];
+    gpu.all_barrier->arrive_and_wait();
     std::string errors;
     if (op.rank == 0) {
         if (!slot.tp_steps.empty() || slot.tail)
@@ -226,6 +227,7 @@ GraphPlan *capture_cached(Ops &op, std::array<GraphPlan, N> &slots, size_t &vict
     if (op.rank == 0) {
         ++victim;
         if (any_failed) {
+            failed = true;
             slot.release(gpu, errors);
             gpu.reset_collectives();
         } else {
@@ -233,8 +235,6 @@ GraphPlan *capture_cached(Ops &op, std::array<GraphPlan, N> &slots, size_t &vict
             slot.key = key;
         }
     }
-    if (any_failed)
-        failed = true;
     gpu.capture_barrier->arrive_and_wait();
     if (key.batch) op.slot = 0;
     op.params = nullptr;
@@ -695,8 +695,12 @@ std::vector<int> Target::forward(const std::vector<int> &ids, bool verify, bool 
     if (std::any_of(ids.begin(), ids.end(), [](int id) { return id < 0 || id >= 120832; }))
         throw std::runtime_error("token ID が範囲外です");
     auto &gpu = op.gpu;
-    if (gpu.kv_pages_total > 0 && !gpu.allocate_slot_pages(op.slot, size_t(start) + size_t(rows)))
-        throw std::runtime_error("KV ページが不足しています");
+    if (gpu.kv_pages_total > 0) {
+        if (op.rank == 0 && !gpu.allocate_slot_pages(op.slot, size_t(start) + size_t(rows)))
+            throw std::runtime_error("KV ページが不足しています");
+        if (gpu.tp_size > 1)
+            gpu.all_barrier->arrive_and_wait();
+    }
     op.arena.cursor = base;
     if (gpu.graph_input[op.rank] && target_graph && !gpu.target_capture_failed && need_head && dump.empty() &&
         Hy4MoePlan::supports(rows) && (verify || rows == 1)) {
@@ -1542,10 +1546,12 @@ void decode_batch(Target &target, std::vector<BatchLane> &lanes, BatchStats &sta
         });
     int rows = speculative ? block_rows : 1;
     if (gpu.kv_pages_total > 0) {
-        for (const auto &lane : lanes) {
-            if (!gpu.allocate_slot_pages(lane.slot, lane.history.size() + size_t(rows)))
-                throw std::runtime_error("decode_batch の KV ページ割当に失敗しました");
-        }
+        if (op.rank == 0)
+            for (const auto &lane : lanes)
+                if (!gpu.allocate_slot_pages(lane.slot, lane.history.size() + size_t(rows)))
+                    throw std::runtime_error("decode_batch の KV ページ割当に失敗しました");
+        if (gpu.tp_size > 1)
+            gpu.all_barrier->arrive_and_wait();
     }
     BatchLayout layout(op, lanes, rows);
     std::vector<int> ids;

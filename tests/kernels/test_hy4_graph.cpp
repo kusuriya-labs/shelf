@@ -1377,6 +1377,13 @@ void compare_tp(const Path &body, const Path &engram, const Path &draft) {
                 if (graph && (gpu.target_replays == target_before || gpu.draft_replays == draft_before))
                     throw std::runtime_error("TP 疎な attention でバッチ Graph が起動しませんでした");
             }
+            auto free_pages = gpu.kv_free_pages;
+            std::sort(free_pages.begin(), free_pages.end());
+            if (free_pages.size() != gpu.kv_pages_total)
+                throw std::runtime_error("TP セッションの終了後に未解放の KV ページがあります");
+            for (size_t i = 0; i < free_pages.size(); ++i)
+                if (free_pages[i] != int32_t(i) || gpu.kv_page_refs[i] != 0)
+                    throw std::runtime_error("TP セッションの終了後に KV ページの所有状態が一致しません");
             gpu.shutdown();
             printf("ep=%d tp=%d sparse_2047_2053=pass ids0=", ep, tp);
             for (size_t i = 0; i < expected[0].size(); ++i)
