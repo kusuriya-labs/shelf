@@ -12,9 +12,9 @@ namespace shelf::runtime {
 
 namespace {
 
-bool tp_fused_debug() {
+bool tp_debug_enabled() {
     static const bool enabled = [] {
-        const char* e = std::getenv("SHELF_TP_FUSED_DEBUG");
+        const char* e = std::getenv("SHELF_TP_DEBUG");
         return e != nullptr && e[0] != '\0' && e[0] != '0';
     }();
     return enabled;
@@ -100,25 +100,20 @@ Status TpBarrierGroup::arrive(int rank, const TpSumTarget& target, hipStream_t s
     if (rank < 0 || rank >= rank_count_) {
         return Status::invalid_argument("tp barrier rank out of range", __FILE__, __LINE__);
     }
-    const bool fused_fusion =
+    const bool combine_fusion =
         target.fusion == TpCombineFusion::None ||
         target.fusion == TpCombineFusion::ResidualAdd ||
         (target.fusion == TpCombineFusion::HyperApply &&
          target.dtype == ValueDType::BF16);
-    if (transport_ != nullptr && transport_->fused_barrier_ready() && fused_fusion &&
+    if (transport_ != nullptr && transport_->stream_signal_ready() && combine_fusion &&
         tp_target_bytes(target) <= transport_->inbox_capacity()) {
-        if (tp_fused_debug())
-            std::fprintf(stderr, "ARRIVE_FUSED rank=%d rows=%llu fusion=%d\n", rank,
-                         static_cast<unsigned long long>(target.rows),
-                         static_cast<int>(target.fusion));
-        Status st = sum_hidden_fused(rank, target, stream, peer_written);
-        if (st.ok() && transport_ != nullptr) transport_->advance_barrier(rank);
-        if (tp_fused_debug())
-            std::fprintf(stderr, "ARRIVE_FUSED_DONE rank=%d ok=%d\n", rank, st.ok() ? 1 : 0);
+        Status st = transport_->sum_hidden_stream_signal(rank, target, stream,
+                                                         peer_written);
+        if (st.ok()) transport_->advance_barrier(rank);
         return st;
     }
     const std::size_t index = static_cast<std::size_t>(rank);
-    if (tp_fused_debug())
+    if (tp_debug_enabled())
         std::fprintf(stderr, "ARRIVE_CPU rank=%d rows=%llu fusion=%d\n", rank,
                      static_cast<unsigned long long>(target.rows),
                      static_cast<int>(target.fusion));
@@ -170,33 +165,12 @@ Status TpBarrierGroup::arrive(int rank, const TpSumTarget& target, hipStream_t s
         return Status::make_ok();
     }
     cv_.wait(lock, [&] { return completed_barriers_ > seq || aborted_; });
-    if (tp_fused_debug())
+    if (tp_debug_enabled())
         std::fprintf(stderr, "ARRIVE_CPU_DONE rank=%d aborted=%d\n", rank,
                      aborted_ ? 1 : 0);
     Status result = aborted_ ? abort_status_ : Status::make_ok();
     if (result.ok() && transport_ != nullptr) transport_->advance_barrier(rank);
     return result;
-}
-
-bool TpBarrierGroup::fused_barrier_ready() const noexcept {
-    return transport_ != nullptr && transport_->fused_barrier_ready();
-}
-
-Status TpBarrierGroup::sum_hidden_fused(int rank, const TpSumTarget& target,
-                                        hipStream_t stream, bool peer_written) {
-    if (tp_fused_debug())
-        std::fprintf(stderr, "GROUP_FUSED_ENTER rank=%d\n", rank);
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (tp_fused_debug())
-        std::fprintf(stderr, "GROUP_FUSED_LOCKED rank=%d\n", rank);
-    if (aborted_) return abort_status_;
-    if (transport_ == nullptr) {
-        return Status::invalid_state("tp barrier group has no transport", __FILE__, __LINE__);
-    }
-    Status st = transport_->sum_hidden_fused(rank, target, stream, peer_written);
-    if (tp_fused_debug())
-        std::fprintf(stderr, "GROUP_FUSED_EXIT rank=%d ok=%d\n", rank, st.ok() ? 1 : 0);
-    return st;
 }
 
 Status TpBarrierGroup::reserve(std::size_t bytes) {
@@ -216,10 +190,10 @@ Status TpBarrierGroup::peer_write_target(int rank, std::size_t bytes, void*& pee
     if (rank < 0 || rank >= rank_count_) {
         return Status::invalid_argument("tp barrier rank out of range", __FILE__, __LINE__);
     }
-    if (tp_fused_debug())
+    if (tp_debug_enabled())
         std::fprintf(stderr, "GROUP_PEER_WRITE_ENTER rank=%d bytes=%zu\n", rank, bytes);
     std::lock_guard<std::mutex> lock(mutex_);
-    if (tp_fused_debug())
+    if (tp_debug_enabled())
         std::fprintf(stderr, "GROUP_PEER_WRITE_LOCKED rank=%d\n", rank);
     if (aborted_) return abort_status_;
     if (transport_ == nullptr) {

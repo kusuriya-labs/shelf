@@ -37,7 +37,7 @@ void usage(FILE* f) {
         "                         (default 0; e.g. --device 0,2)\n"
         "  --tensor-parallel N    tensor parallel degree 1 | 2 | 4 (default 1)\n"
         "  --page-tokens N        (default 16)\n"
-        "  --arena-gib N          (default auto = free VRAM minus 0.5 GiB)\n"
+        "  --arena-gib N          (default auto = free VRAM minus 0.8 GiB)\n"
         "  --prefix-tokens N      shared prefix length (default 512)\n"
         "  --suffix-tokens N      per-request suffix length (default 8)\n"
         "  --max-new-tokens N     decode tokens per request (default 8)\n"
@@ -228,7 +228,7 @@ int run_batch(int argc, char** argv) {
             std::fprintf(stderr, "hipMemGetInfo failed: %s\n", hipGetErrorString(arena_err));
             return 1;
         }
-        const std::size_t margin = 512ull * 1024ull * 1024ull;
+        const std::size_t margin = 820ull * 1024ull * 1024ull;
         arena_bytes = free_bytes > margin ? free_bytes - margin : free_bytes / 2u;
         if (arena_bytes == 0) {
             std::fprintf(stderr, "no VRAM available for the arena\n");

@@ -238,6 +238,8 @@ struct TpCoordinatorConfig {
     std::array<std::uint32_t, kMaxTargetHiddenTaps> target_hidden_taps{};
     std::uint32_t target_hidden_tap_count = 0;
     std::uint32_t tp_combine_f32 = 0;
+    TpCombineBackend combine_backend = TpCombineBackend::Event;
+    TpCombinePolicy combine_policy{};
     bool emit_normed_token_hidden = false;
     ::shelf::runtime::EffectiveRopeProfile rope_profile;
     ::shelf::qwen_hybrid::HybridLoadOptions load_options;

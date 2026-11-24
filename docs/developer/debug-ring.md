@@ -138,9 +138,10 @@ device memory の ring ではこの経路が使えない。
 - ring はホスト VA にあるため、プロセスがハングしても `/proc/<pid>/mem` から
   読める（本節の実測はプロセス内 drain。外部読み出しは未検証）。
 
-### 8.5 次の対象
+### 8.5 StreamSignal との関係
 
-`SHELF_TP_FUSED_BARRIER` の device-side barrier を再評価するときは、同じ形で
-fused kernel から `epoch` / `parity` / `own` / `peer_dst` を push する。
-同期を入れずに、停止した状態から原因を確定できる。
+StreamSignal の copy 送信は `kind=1` で同じ ring に記録される。
+`hipStreamWriteValue32` / `hipStreamWaitValue32` は stream の node であり、
+DebugRing の push 対象ではない。graph capture の確認は `docs/research/` の
+signal graph probe を参照する。
 

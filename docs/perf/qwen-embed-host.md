@@ -132,7 +132,7 @@ embedding の H2D は token あたり 10 KiB で、ピーク VRAM は arena 14 G
 コード確認の結果 (`gpu_memory_manager.hip:15-42`, `compute_runtime.hip:367-399`):
 
 - `auto` は `hipMemGetInfo` の空き VRAM から **512 MiB** (`kAutoMarginBytes`) を引いた値を
-  arena capacity にする。16 GiB カードで表示に 0.5 GiB 使われていれば arena ≈ 15 GiB となり、
+  arena capacity にする。16 GiB カードで表示に 0.8 GiB 使われていれば arena ≈ 15 GiB となり、
   KV が arena いっぱいまで自動拡張されるためピークは 15 GiB を超える。
 - `-N` は total VRAM から N GiB を引く (`TotalMinus`)。
 - 数値 `N` は固定容量。128Ki では KV が 131,073 token 分必要なため、

@@ -38,7 +38,7 @@ Shelf がビルド・実行対象とするのは **`gfx1201`（RDNA4）のみ**�
 
 ### `--arena-gib` と KV キャッシュの消費量
 
-- `--arena-gib auto`（既定）: 起動時の空き VRAM（`hipMemGetInfo`）から **0.5 GiB**（512 MiB）を引いた値を arena 容量とする。
+- `--arena-gib auto`（既定）: 起動時の空き VRAM（`hipMemGetInfo`）から **0.8 GiB**（820 MiB）を引いた値を arena 容量とする。
 - `--arena-gib -N`: 総 VRAM から `N + 0.3` GiB を引いた値を使う。
 - `--arena-gib N`: arena 容量を `N - 0.3` GiB に固定する（`N > 0.3`）（再現測定や 16 GiB 運用向け）。
 - arena 内では model weights → drafter（使用時）→ working set reserve（`--prefill-chunk` / `--max-num-batched-tokens` に応じて決まる）→ prefix cache capture slot を確保した**残りをすべて KV pool に割り当てる**。`embed_tokens` と prefix checkpoint 本体は pinned host RAM に置くため VRAM を消費しない。起動時の `MEMORY_PLAN`（stderr）で実際の内訳と収容可能 token 数を確認できる。

@@ -1219,7 +1219,15 @@ Result<PendingBatch> submit_co_batch(
                         "external input preparer returned a wrong row count", __FILE__,
                         __LINE__);
                 }
-                src = host.data();
+                if (executor.external_input_staging == nullptr ||
+                    executor.external_input_staging_bytes <
+                        expected * sizeof(bf16_t)) {
+                    return Status::invalid_state(
+                        "external input staging is not allocated", __FILE__, __LINE__);
+                }
+                std::memcpy(executor.external_input_staging, host.data(),
+                            expected * sizeof(bf16_t));
+                src = static_cast<const bf16_t*>(executor.external_input_staging);
             }
             const hipError_t copy_error =
                 hipMemcpyAsync(executor.input_hidden.data<void>(), src,
@@ -1504,6 +1512,8 @@ Executor::Executor(Executor&& other) noexcept
       graph_failed(other.graph_failed),
       input_ids(std::move(other.input_ids)),
       input_hidden(std::move(other.input_hidden)),
+      external_input_staging(other.external_input_staging),
+      external_input_staging_bytes(other.external_input_staging_bytes),
       input_mask(std::move(other.input_mask)),
       rope_inv_freq(std::move(other.rope_inv_freq)),
       rope_table_stride(other.rope_table_stride),
@@ -1573,6 +1583,8 @@ Executor::Executor(Executor&& other) noexcept
     other.batch_context_storage = ::shelf::runtime::DeviceBatchContextStorage{};
     other.input_ids = gpu::Tensor{};
     other.input_hidden = gpu::Tensor{};
+    other.external_input_staging = nullptr;
+    other.external_input_staging_bytes = 0;
     other.input_mask = gpu::Tensor{};
     other.rope_inv_freq = gpu::Tensor{};
     other.output_hidden = gpu::Tensor{};
@@ -1673,6 +1685,10 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         execution_workspace = std::move(other.execution_workspace);
         input_ids = std::move(other.input_ids);
         input_hidden = std::move(other.input_hidden);
+        external_input_staging = other.external_input_staging;
+        external_input_staging_bytes = other.external_input_staging_bytes;
+        other.external_input_staging = nullptr;
+        other.external_input_staging_bytes = 0;
         input_mask = std::move(other.input_mask);
         rope_inv_freq = std::move(other.rope_inv_freq);
         rope_table_stride = other.rope_table_stride;
@@ -1944,6 +1960,15 @@ Status executor_shutdown(Executor& ex) noexcept {
     for (auto& tap : ex.dflash_target_hidden) tap = gpu::Tensor{};
     ex.input_ids = gpu::Tensor{};
     ex.input_hidden = gpu::Tensor{};
+    if (ex.external_input_staging != nullptr) {
+        const hipError_t err = hipHostFree(ex.external_input_staging);
+        if (first_error.ok() && err != hipSuccess) {
+            first_error = Status::hip_error("hipHostFree external input staging",
+                                            hipGetErrorString(err), __FILE__, __LINE__);
+        }
+        ex.external_input_staging = nullptr;
+        ex.external_input_staging_bytes = 0;
+    }
     ex.input_mask = gpu::Tensor{};
     ex.rope_inv_freq = gpu::Tensor{};
     ex.model = RuntimeModelView{};
@@ -2286,6 +2311,16 @@ Result<Executor> create_executor(
         st = allocate_contiguous_tensor<bf16_t>(arena, {Npad, external_width},
                                                 ex.input_hidden);
         if (!st.ok()) return st;
+        const std::size_t staging_bytes =
+            static_cast<std::size_t>(Npad) * external_width * sizeof(bf16_t);
+        const hipError_t staging_error = hipHostMalloc(
+            &ex.external_input_staging, staging_bytes, hipHostMallocDefault);
+        if (staging_error != hipSuccess) {
+            return Status::hip_error("hipHostMalloc external input staging",
+                                     hipGetErrorString(staging_error), __FILE__,
+                                     __LINE__);
+        }
+        ex.external_input_staging_bytes = staging_bytes;
     }
     if (input.lowered.graph.external_inputs.size() > 2u) {
         if (config.external_mask_bytes == 0u) {

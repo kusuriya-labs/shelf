@@ -1607,28 +1607,50 @@ prefill は 1556 token で **3043.9 t/s**（TTFT 511.5 ms）。8000 以上は
 「1 から 20 まで数える」prompt（CLI 計測で mean accepted 2.0）より大幅に低い。
 draft 2 の verify コストがそのまま残るため、実タスクでは MTP の利得が小さい。
 
-## 2026-11-24 27B EXL3 TP=2 fused barrier（reference run）
+## 2026-11-24 TP combine backend（StreamSignal / Event）
 
-`SHELF_TP_FUSED_BARRIER=1` の device-side barrier を測った reference run。
-qualified baseline ではない。
+`TpCombineBackend::StreamSignal` の reference run。qualified baseline ではない。
+絶対値は GPU の温度・クロックで動くため、同一 boot の交互測定を正本にする。
+StreamSignal の 78.5 tok/s / 40.1 tok/s は **fused ではなく StreamSignal** の値である。
 
-- measurement revision: `feat/tp-fused-barrier` の作業 tree（commit 前）
-- GPU: Radeon AI PRO R9700 × 2（`--device 0,1`）、bf16 KV
-- command: `shelf-bench tg --mode greedy --model-dir
-  models/kusuriya-labs/Qwen3.8-27B-EXL3-INT8-4bpw --device 0,1 --tensor-parallel 2
-  --context 64 --tokens 8 --warmup 2`
-- 3 run の `gpu_tokens_per_sec_p50`。graph は既定の ON。
-- 生成一致アンカー: `GENERATED_IDS` sha1
-  `4e388741b1907399476d0be660bf9cadddc700e3`（`shelf-compute`、8 token、greedy、TP=2）
+### 27B EXL3 TP=2 decode
 
-| graph | fused off | fused on | 差 |
-| --- | ---: | ---: | ---: |
-| ON | 36.42 | **41.33** | +13.5% |
-| OFF | 26.74 | **30.26** | +13.2% |
+`shelf-bench tg --mode greedy --context 64 --tokens 8 --warmup 2`。
 
-serve 4 並列（`shelf-compute --serve-stdio`、4 request × 64 token、warmup 後）は
-off 2.29 / 2.29 / 2.28 s、on 2.29 / 2.29 / 2.30 s で差がない。飽和時は host の
-barrier 待ちが隠れる。
+同一 boot（遅い状態）:
+
+| backend | gpu_tokens_per_sec_p50 |
+| --- | ---: |
+| Event | 35.2 |
+| StreamSignal | **38.4** |
+
++9.1%。別 boot（速い状態）では Event 36.5 / StreamSignal 40.1 で +9.9%。
+生成一致アンカー: `GENERATED_IDS` sha1
+`c75f3eea6473dd56b6e927ca29b4dbe18e5c4597`（`shelf-compute`、64 token、greedy、TP=2）。
+StreamSignal は同じ入力で 20/20 一致した。
+
+### 27B + DFlash2（16 token）
+
+同一 boot（遅い状態）:
+
+| backend | decode tok/s | verify_ms（5 round 合計） |
+| --- | ---: | ---: |
+| Event | 67.5 | 138.7 |
+| StreamSignal | **70.3** | 134〜135 |
+
++4.2%。採択率は両方 `DFLASH2_MEAN_ACCEPTED=2.000`、`DFLASH2_EMITTED_PER_ROUND=3.000`、
+生成列は一致した。別 boot（速い状態、fence なし）では StreamSignal が
+78.5 tok/s、verify 112.2 ms、round 190.6 ms だった。
+
+### Flash-Next EXL3 EP=2
+
+| backend | decode tok/s | 一致 |
+| --- | ---: | --- |
+| Event | 31.7 | 基準 |
+| StreamSignal | **33.8** | 10/10 |
+
+fence は `fence_copy=true` / `fence_add=false`。7,000 barrier 規模の 64 token 生成で
+生成列が一致した。
 
 ## 記録規則
 

@@ -1,5 +1,7 @@
 # TP fused barrier（device-side barrier）
 
+> Status: REJECTED。後継は [tp_stream_signal.md](tp_stream_signal.md)。
+
 対象: `TpBarrierGroup::arrive` / `HipPeerTpTransport::sum_hidden_fused` / `TpCoordinator::initialize`
 
 ## 目的
@@ -93,11 +95,10 @@ GROUP_FUSED_ENTER rank=0
 
 ## 採否
 
-ACCEPT（opt-in）。
+REJECTED。
 
-- 低並列の decode では +13% 前後。主 target の EXL3 で再現する。
-- 飽和した serve では差がない。出力経路の改善として期待しない。
-- DFlash2 併用（TP=2、16 token）は `GENERATED_IDS` が一致した。decode は
-  74.23 → 70.34 tok/s で、verify が支配的なため fused barrier の利点は出ない。
-- 2 rank 限定。Flash-Next EP2 / MoE の正しさは未確認のため、既定は off のまま。
-- 実行中の TP メモリ確保禁止の contract は `docs/developer/multi-gpu.md` に置く。
+- EP2 で 64 token 中 2/10 の割合で生成列が分岐した。fence、uncached inbox、
+  host-mapped counter、DebugRing で確率は変わるが 0 にできない。
+- DebugRing を有効にすると一致する。観測の system-scope アクセスが race を隠している。
+- verify（rows=8）では grid-wide barrier の latency が 84 µs になり、event の 40 µs に負ける。
+- TC workspace の事前確保と DebugRing の知見は後継の StreamSignal でも使う。

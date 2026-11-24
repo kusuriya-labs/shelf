@@ -86,7 +86,7 @@ void compute_usage(const char* prog) {
     printf("  --max-new-tokens N     max tokens to generate (default 32)\n");
     printf("  --max-seq-len N        max sequence length (default 512)\n");
     printf("  --arena-gib N|auto|-N  arena GiB: N - 0.3 (N > 0.3); -N = total VRAM\n"
-           "                         minus (N + 0.3); auto = free VRAM minus 0.5 GiB\n");
+           "                         minus (N + 0.3); auto = free VRAM minus 0.8 GiB\n");
     printf("                         (default auto)\n");
     printf("  --page-tokens N        paged KV page size in tokens (default 16)\n");
     printf("  --max-concurrent-requests N  max in-flight requests (default 4)\n");

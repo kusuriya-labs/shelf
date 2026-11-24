@@ -24,9 +24,6 @@ public:
     Status arrive(int rank, const TpSumTarget& target, hipStream_t stream,
                     bool peer_written) override;
     bool supports_combine_fusion() const noexcept override;
-    bool fused_barrier_ready() const noexcept override;
-    Status sum_hidden_fused(int rank, const TpSumTarget& target, hipStream_t stream,
-                            bool peer_written) override;
     Status peer_write_target(int rank, std::size_t bytes, void*& peer_out) override;
     Status reserve(std::size_t bytes) override;
 

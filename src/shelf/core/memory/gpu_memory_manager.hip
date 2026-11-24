@@ -12,7 +12,7 @@ namespace gpu {
 
 namespace {
 
-constexpr std::size_t kAutoMarginBytes = 512ull * 1024ull * 1024ull;
+constexpr std::size_t kAutoMarginBytes = 820ull * 1024ull * 1024ull;
 
 Result<std::size_t> resolve_capacity(int physical_device, std::size_t capacity_bytes) {
     if (capacity_bytes != 0u) {

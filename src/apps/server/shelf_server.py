@@ -535,7 +535,7 @@ def parse_args(argv=None):
     parser.add_argument("--arena-gib", type=arena_gib_value, default="auto",
                         metavar="N|auto|-N",
                         help="arena GiB: N - 0.3 (N > 0.3); -N = total VRAM minus "
-                             "(N + 0.3); auto = free VRAM minus 0.5 GiB (default auto)")
+                             "(N + 0.3); auto = free VRAM minus 0.8 GiB (default auto)")
     parser.add_argument("--device", default="0",
                         help="comma separated GPU devices, one per rank; "
                              "count must match pipeline_parallel * expert_parallel * "

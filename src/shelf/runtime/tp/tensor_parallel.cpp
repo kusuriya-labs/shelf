@@ -559,9 +559,11 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
             group.devices.push_back(topology_->device(member));
         }
         if (group.devices.size() < 2u) return group;
-        auto transport_result = ::shelf::runtime::create_tp_transport(group.devices);
+        auto transport_result = ::shelf::runtime::create_tp_transport(
+            group.devices, config.combine_backend);
         if (!transport_result.ok()) return transport_result.status();
         group.transport = std::move(transport_result.value().transport);
+        group.transport->set_combine_policy(config.combine_policy);
         auto verify_status = group.transport->verify();
         if (!verify_status.ok()) {
             std::fprintf(stderr,

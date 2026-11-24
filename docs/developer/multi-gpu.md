@@ -163,28 +163,30 @@ TP の inbox は `TpCoordinator::initialize` で確保する。推論中の `hip
 
 - `tp_inbox_bytes()` が全 program / TP schedule の combine 値から最大 byte 数を求める。
   起動時に `TP_WORKSPACE inbox_bytes=... groups=...` を stderr に出す。
-- `TpTransport::reserve(bytes)` が `verify()` の後、worker 起動前に inbox を確保する。
-  `fused barrier` の host flag と arrival counter も同じ時点で確保する。
-- 実行中の `sum_hidden` / `sum_hidden_fused` / `peer_write_target` は容量を検査するだけで、
-  確保も拡張もしない。容量不足は `Status::unsupported` で返す。
+- `TpTransport::reserve(bytes)` が `verify()` の後、worker 起動前に inbox と
+  StreamSignal の host coherent signal を確保する。
+- 実行中の `sum_hidden` / `sum_hidden_stream_signal` / `peer_write_target` は容量を
+  検査するだけで、確保も拡張もしない。容量不足は `Status::unsupported` で返す。
 - `TpCoordinator::attach_aux_executor` は drafter の program から必要量を再計算し、
   worker 起動前に reserve する。
 
-### Fused barrier（2 rank、opt-in）
+### StreamSignal combine（2 rank）
 
-`SHELF_TP_FUSED_BARRIER=1` では、`TpCombineFusion::None` と `ResidualAdd` の combine を
-1 kernel で実行する。
+`TpCombineBackend::StreamSignal` では、combine を次の順で stream に積む。
 
 1. 自分の部分和を peer の inbox へ copy
-2. system scope の fence と arrival counter
-3. peer の host-mapped flag を spin
+2. `hipStreamWriteValue32` で peer の signal を書く
+3. `hipStreamWaitValue32` で自分の signal を待つ
 4. inbox を読んで sum / residual add
 
-- host thread は barrier で rendezvous しない。`TpBarrierGroup::arrive` は kernel を
-  enqueue して返る。
-- `HyperApply` と、inbox 容量を超える combine は CPU barrier 経路を使う。
-- 対象は 2 rank のみである。3 rank 以上では `fused_barrier_ready()` が false になる。
-- flag は host-mapped memory に置く。device memory の flag は peer から見えない。
+- host thread は barrier で rendezvous しない。kernel は spin しない。
+- copy と add は full grid で走る。`TpCombinePolicy::fence_copy` が copy kernel の
+  末尾に system fence を入れる。`fence_add` は add kernel の先頭に入れる。
+- qwen35 dense / qwen4exp は `StreamSignal`、その他は `Event` を既定にする。
+  fence は既定 `{copy=true, add=false}`。
+- 対象は 2 rank のみ。3 rank 以上では `stream_signal_ready()` が false になる。
+- signal は host coherent mapped memory に置く。`hipStreamWriteValue32` /
+  `WaitValue32` は HIP graph の node として capture できる。
 
 ## 5. Pipeline parallel
 

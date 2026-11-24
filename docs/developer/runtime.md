@@ -98,7 +98,7 @@ coordinator/executor の破棄 → `GpuMemoryManager::shutdown`）。
 生成も破棄もしない。
 
 - `GpuMemoryManager::create(devices, capacity_bytes)` が全 device の arena と stream を
-  まとめて生成する。`capacity_bytes == 0` は device ごとの空き VRAM から 0.5 GiB を
+  まとめて生成する。`capacity_bytes == 0` は device ごとの空き VRAM から 0.8 GiB を
   引いた auto。
 - `arena_for(device)` / `stream_for(device)` は所有権を移さないハンドルを返す。
 - `shutdown()` は stream → arena の順で全リソースを解放し、最初の失敗を返す。
@@ -125,7 +125,7 @@ allocationのlifetimeを追跡しないため）。
 
 `Qwen35RuntimeConfig::arena_bytes == 0` は auto である。compute は起動時に
 `GpuMemoryManager` を作り、manager が device ごとに `hipMemGetInfo` を 1 回呼んで
-空き VRAM から 0.5 GiB を引いた値を arena の容量にする。同じ容量が PP / TP の
+空き VRAM から 0.8 GiB を引いた値を arena の容量にする。同じ容量が PP / TP の
 全 stage / rank に貸し出される（device ごとの空きが違えば容量も違う）。
 
 起動時 plan は stderr にだけ出す（`--serve-stdio` の stdout を汚さない）。

@@ -422,6 +422,8 @@ struct Executor {
 
     gpu::Tensor input_ids;
     gpu::Tensor input_hidden;
+    void* external_input_staging = nullptr;
+    size_t external_input_staging_bytes = 0;
     // Optional per-row block mask for the drafter-wide attention (MTP sliding window).
     gpu::Tensor input_mask;
 

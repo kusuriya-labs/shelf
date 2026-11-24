@@ -109,7 +109,8 @@ Status HostMediatedTpTransport::sum_hidden(const TpSumInvocation& invocation) {
     return Status::make_ok();
 }
 
-Result<TpTransportSelection> create_tp_transport(const std::vector<int>& devices) {
+Result<TpTransportSelection> create_tp_transport(const std::vector<int>& devices,
+                                                 TpCombineBackend backend) {
     if (devices.size() < 2) {
         return Status::invalid_argument("tp transport requires at least 2 devices",
                                         __FILE__, __LINE__);
@@ -139,7 +140,7 @@ Result<TpTransportSelection> create_tp_transport(const std::vector<int>& devices
             }
         }
     }
-    auto peer = HipPeerTpTransport::create(devices);
+    auto peer = HipPeerTpTransport::create(devices, backend);
     if (!peer.ok()) return peer.status();
     TpTransportSelection selection;
     selection.peer_access_available = true;

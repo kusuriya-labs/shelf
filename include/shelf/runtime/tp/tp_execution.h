@@ -19,6 +19,16 @@ enum class TpBarrierKind : uint8_t {
     SumHidden = 1,
 };
 
+struct TpCombinePolicy {
+    bool fence_copy = true;
+    bool fence_add = true;
+};
+
+enum class TpCombineBackend : uint8_t {
+    Event = 0,
+    StreamSignal = 1,
+};
+
 enum class TpCombineFusion : uint8_t {
     None = 0,
     ResidualAdd = 1,
@@ -89,24 +99,27 @@ public:
 
     virtual Status sum_hidden(const TpSumInvocation& invocation) = 0;
 
-    virtual bool fused_barrier_ready() const noexcept { return false; }
-
     virtual std::size_t inbox_capacity() const noexcept { return 0; }
 
     virtual void advance_barrier(int rank) { (void)rank; }
 
-    virtual Status reserve(std::size_t bytes) {
-        (void)bytes;
-        return Status::make_ok();
-    }
+    virtual void set_combine_policy(const TpCombinePolicy& policy) { (void)policy; }
 
-    virtual Status sum_hidden_fused(int rank, const TpSumTarget& target, hipStream_t stream,
-                                    bool peer_written) {
+    virtual bool stream_signal_ready() const noexcept { return false; }
+
+    virtual Status sum_hidden_stream_signal(int rank, const TpSumTarget& target,
+                                            hipStream_t stream, bool peer_written) {
         (void)rank;
         (void)target;
         (void)stream;
         (void)peer_written;
-        return Status::unsupported("fused barrier is not supported", __FILE__, __LINE__);
+        return Status::unsupported("stream signal barrier is not supported", __FILE__,
+                                   __LINE__);
+    }
+
+    virtual Status reserve(std::size_t bytes) {
+        (void)bytes;
+        return Status::make_ok();
     }
 
     virtual bool supports_combine_fusion() const noexcept { return false; }
@@ -131,20 +144,9 @@ public:
 
     virtual bool supports_combine_fusion() const noexcept { return false; }
 
-    virtual bool fused_barrier_ready() const noexcept { return false; }
-
     virtual Status reserve(std::size_t bytes) {
         (void)bytes;
         return Status::make_ok();
-    }
-
-    virtual Status sum_hidden_fused(int rank, const TpSumTarget& target, hipStream_t stream,
-                                    bool peer_written) {
-        (void)rank;
-        (void)target;
-        (void)stream;
-        (void)peer_written;
-        return Status::unsupported("fused barrier is not supported", __FILE__, __LINE__);
     }
 
     virtual Status peer_write_target(int rank, std::size_t bytes, void*& peer_out) {

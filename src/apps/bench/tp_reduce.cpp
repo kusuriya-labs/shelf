@@ -54,15 +54,14 @@ BenchTarget target_for(const std::string& backend) {
 
 void usage() {
     std::printf("usage: shelf-bench tp-reduce [--rows 1,2,...] [--features N] "
-                "[--iters N] [--backend auto|p2p|host] [--fused] [--group] [--check]\n");
+                "[--iters N] [--backend auto|p2p|host] [--signal] [--group] [--check]\n");
     std::printf("  measures tp sum_hidden latency for the implemented transports\n");
     std::printf("  default rows: 1,2,4,8,16,32,64,128,256,512,1024,2048\n");
     std::printf("  default features: 5120 (Qwen3.8 hidden), dtype bf16\n");
     std::printf("  bandwidth definition: 2 * payload_bytes / elapsed (one read + one write)\n");
     std::printf("  --check enforces the backend target and fails when it is missed\n");
     std::printf("  --group measures TpBarrierGroup arrive throughput on two host threads\n");
-    std::printf("  --fused uses the device-side barrier reduction (requires "
-                "SHELF_TP_FUSED_BARRIER=1)\n");
+    std::printf("  --signal uses the stream-signal barrier\n");
     std::printf("  targets: hip-p2p >= 20.0 GB/s (large rows) and <= 150 us (rows=1)\n");
     std::printf("           host-mediated >= 1.2 GB/s (large rows) and <= 400 us (rows=1)\n");
 }
@@ -143,7 +142,7 @@ struct RowResult {
 RowResult run_row(TpTransport* transport, BenchPair& pair,
                   const std::vector<std::uint8_t>& host_a,
                   const std::vector<std::uint8_t>& host_b, uint64_t rows,
-                  uint32_t features, int iters, bool fused) {
+                  uint32_t features, int iters, bool signal) {
     RowResult result;
     result.rows = rows;
     const std::size_t bytes = static_cast<std::size_t>(rows) * features * 2u;
@@ -174,10 +173,12 @@ RowResult run_row(TpTransport* transport, BenchPair& pair,
     };
     const auto run_sum = [&]() -> Status {
         Status st = Status::make_ok();
-        if (fused) {
-            st = transport->sum_hidden_fused(0, target_a, pair.stream_a, false);
+        if (signal) {
+            st = transport->sum_hidden_stream_signal(0, target_a, pair.stream_a, false);
             if (st.ok())
-                st = transport->sum_hidden_fused(1, target_b, pair.stream_b, false);
+                st = transport->sum_hidden_stream_signal(1, target_b, pair.stream_b, false);
+            transport->advance_barrier(0);
+            transport->advance_barrier(1);
         } else {
             st = transport->sum_hidden(invocation);
         }
@@ -194,7 +195,7 @@ RowResult run_row(TpTransport* transport, BenchPair& pair,
     if (!st.ok()) return result;
     st = run_sum();
     if (!st.ok()) return result;
-    if (fused) {
+    if (signal) {
         const std::size_t count = static_cast<std::size_t>(rows) * features;
         std::vector<std::uint16_t> got_a(count);
         std::vector<std::uint16_t> got_b(count);
@@ -222,7 +223,7 @@ RowResult run_row(TpTransport* transport, BenchPair& pair,
             if (got_a[i] != want || got_b[i] != want) mismatch = true;
         }
         if (mismatch) {
-            std::printf("fused barrier result mismatch rows=%llu\n",
+            std::printf("signal barrier result mismatch rows=%llu\n",
                         static_cast<unsigned long long>(rows));
             return result;
         }
@@ -301,7 +302,7 @@ bool run_backend(TpTransport* transport, BenchPair& pair,
                  const std::vector<std::uint8_t>& host_a,
                  const std::vector<std::uint8_t>& host_b,
                  const std::vector<uint64_t>& rows, uint32_t features, int iters,
-                 bool check, bool fused) {
+                 bool check, bool signal) {
     const std::string backend = transport->name();
     std::printf("backend: %s\n", backend.c_str());
     BenchTarget target = target_for(backend);
@@ -309,7 +310,7 @@ bool run_backend(TpTransport* transport, BenchPair& pair,
     double gbps_large = 0.0;
     for (uint64_t r : rows) {
         RowResult result = run_row(transport, pair, host_a, host_b, r, features, iters,
-                                   fused);
+                                   signal);
         std::printf("  %-14s rows=%-5llu payload=%-9llu us=%.1f GB/s=%.2f\n",
                     backend.c_str(), static_cast<unsigned long long>(r),
                     static_cast<unsigned long long>(r) * features * 2u, result.us,
@@ -340,7 +341,7 @@ int run_tp_reduce(int argc, char** argv) {
     int iters = 50;
     std::string backend = "auto";
     bool check = false;
-    bool fused = false;
+    bool signal = false;
     bool group_bench = false;
 
     for (int i = 1; i < argc; ++i) {
@@ -358,8 +359,8 @@ int run_tp_reduce(int argc, char** argv) {
             backend = argv[++i];
         } else if (arg == "--check") {
             check = true;
-        } else if (arg == "--fused") {
-            fused = true;
+        } else if (arg == "--signal") {
+            signal = true;
         } else if (arg == "--group") {
             group_bench = true;
         } else {
@@ -415,7 +416,9 @@ int run_tp_reduce(int argc, char** argv) {
         if (backend == "p2p") {
             ::setenv("SHELF_TP_TRANSPORT", "p2p", 1);
         }
-        auto selection = create_tp_transport(devices);
+        auto selection = create_tp_transport(
+            devices, signal ? shelf::runtime::TpCombineBackend::StreamSignal
+                            : shelf::runtime::TpCombineBackend::Event);
         if (selection.ok() && std::string(selection.value().transport->name()) == "hip-p2p") {
             const Status verify = selection.value().transport->verify();
             if (verify.ok()) {
@@ -438,8 +441,8 @@ int run_tp_reduce(int argc, char** argv) {
                 free_pair(pair);
                 return 1;
             }
-            if (fused && !peer->fused_barrier_ready()) {
-                std::printf("hip-p2p fused barrier is not available\n");
+            if (signal && !peer->stream_signal_ready()) {
+                std::printf("hip-p2p stream signal barrier is not available\n");
                 free_pair(pair);
                 return 1;
             }
@@ -448,7 +451,7 @@ int run_tp_reduce(int argc, char** argv) {
                 all_ok = run_group(peer.get(), pair, rows.front(), features, iters) && all_ok;
             } else {
                 all_ok = run_backend(peer.get(), pair, host_a, host_b, rows, features,
-                                     iters, check, fused) &&
+                                     iters, check, signal) &&
                          all_ok;
             }
         }

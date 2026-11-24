@@ -64,7 +64,7 @@ detail and is not a `--variant` value.
 | `--page-tokens N` | (default 16) |
 | `--kv-cache-dtype bf16\|fp8\|octave:FORMAT (default bf16)` |  |
 | `--rope-factor auto \| 1 \| 2 \| 4 (default auto)` |  |
-| `--arena-gib N` | (default auto = free VRAM minus 0.5 GiB) |
+| `--arena-gib N` | (default auto = free VRAM minus 0.8 GiB) |
 | `--moe-host-experts N` | routed experts per layer kept in host memory (default 0) |
 | `--moe-cache-swap-budget N` | expert cache swap budget (default 96) |
 | `--moe-cache-min-gain N` | minimum frequency gain to swap (default 150) |
@@ -131,7 +131,7 @@ backbone kernel の allowlist に登録済みで、prefill の throughput は TP
 | `--page-tokens N` | (default 16) |
 | `--kv-cache-dtype bf16\|fp8\|octave:FORMAT (default bf16)` |  |
 | `--rope-factor auto \| 1 \| 2 \| 4 (default auto)` |  |
-| `--arena-gib N` | (default auto = free VRAM minus 0.5 GiB) |
+| `--arena-gib N` | (default auto = free VRAM minus 0.8 GiB) |
 | `--moe-host-experts N` | routed experts per layer kept in host memory (default 0) |
 | `--moe-cache-swap-budget N` | expert cache swap budget (default 96) |
 | `--moe-cache-min-gain N` | minimum frequency gain to swap (default 150) |

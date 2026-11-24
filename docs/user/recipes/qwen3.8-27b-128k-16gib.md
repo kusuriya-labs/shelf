@@ -21,7 +21,7 @@ shelf-compute --model-dir <3.05bpw model dir> --input-ids-file <ids> \
   --kv-cache-dtype octave:c5v5 --page-tokens 16 --device 0
 ```
 
-- `--arena-gib 14` では arena は 13.7 GiB になる。下記の測定は変更前の arena 14 GiB で行ったもので、この指定値での 128Ki context は未検証。`auto` は空き VRAM から 0.5 GiB を差し引いて使う。
+- `--arena-gib 14` では arena は 13.7 GiB になる。下記の測定は変更前の arena 14 GiB で行ったもので、この指定値での 128Ki context は未検証。`auto` は空き VRAM から 0.8 GiB を差し引いて使う。
 - `--prefill-chunk 512`。4096 だと workspace が 0.52 → 2.40 GiB に増えて KV が足りなくなる。
 - `shelf-server` も同じ引数名を持つ ([server.md](../server.md))。server 経由での確認はしていない。
 

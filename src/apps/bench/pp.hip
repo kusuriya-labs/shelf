@@ -84,7 +84,7 @@ void print_usage(FILE* out) {
         "  --page-tokens N              (default 16)\n"
         "  --kv-cache-dtype bf16|fp8|octave:FORMAT (default bf16)\n"
         "  --rope-factor auto | 1 | 2 | 4 (default auto)\n"
-        "  --arena-gib N                (default auto = free VRAM minus 0.5 GiB)\n"
+        "  --arena-gib N                (default auto = free VRAM minus 0.8 GiB)\n"
         "  --moe-host-experts N       routed experts per layer kept in host memory (default 0)\n"
         "  --moe-cache-swap-budget N  expert cache swap budget (default 96)\n"
         "  --moe-cache-min-gain N     minimum frequency gain to swap (default 150)\n"
@@ -441,7 +441,7 @@ int run_pp(int argc, char** argv) {
             fprintf(stderr, "hipMemGetInfo failed: %s\n", hipGetErrorString(arena_err));
             return 1;
         }
-        const std::size_t margin = 512ull * 1024ull * 1024ull;
+        const std::size_t margin = 820ull * 1024ull * 1024ull;
         arena_bytes = free_bytes > margin ? free_bytes - margin : free_bytes / 2u;
         if (arena_bytes == 0) {
             fprintf(stderr, "no VRAM available for the arena\n");

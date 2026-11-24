@@ -33,7 +33,7 @@ prefill の chunk 境界や prefix cache の有無によって、同じ入力の
 | `--input-ids-file PATH` | whitespace separated or PSKLDTOK binary prompt token ids |
 | `--max-new-tokens N` | max tokens to generate (default 32) |
 | `--max-seq-len N` | max sequence length (default 512) |
-| `--arena-gib N\|auto\|-N` | arena GiB: N - 0.3 (N > 0.3); -N = total VRAM minus (N + 0.3); auto = free VRAM minus 0.5 GiB (default auto) |
+| `--arena-gib N\|auto\|-N` | arena GiB: N - 0.3 (N > 0.3); -N = total VRAM minus (N + 0.3); auto = free VRAM minus 0.8 GiB (default auto) |
 | `--page-tokens N` | paged KV page size in tokens (default 16) |
 | `--max-concurrent-requests N` | max in-flight requests (default 4) |
 | `--max-num-batched-tokens N` | token budget per scheduled step; also sets the executor row bucket (default 2048) |
@@ -91,7 +91,7 @@ prefill の chunk 境界や prefix cache の有無によって、同じ入力の
 | `--help` | show this help |
 <!-- /cli:compute -->
 
-`--arena-gib auto` は起動時の空き VRAM から 0.5 GiB を引いた容量を arena に使う。
+`--arena-gib auto` は起動時の空き VRAM から 0.8 GiB を引いた容量を arena に使う。
 `--arena-gib N`（N > 0.3）は arena 外の消費を見込んで N - 0.3 GiB を使う。
 `--arena-gib -N` は VRAM の総容量から N + 0.3 GiB を引いた容量を使う。
 KV の物理容量は個別に指定できない。model weight、`--working-set-reserve-gib`、

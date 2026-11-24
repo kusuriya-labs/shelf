@@ -60,7 +60,7 @@ void print_usage(FILE* out) {
         "  --kv-cache-dtype bf16|fp8|octave:FORMAT (default bf16)\n"
         "  --rope-factor auto | 1 | 2 | 4 (default auto)\n"
         "  --page-tokens N              (default 16)\n"
-        "  --arena-gib N|auto           (default auto = free VRAM minus 0.5 GiB)\n"
+        "  --arena-gib N|auto           (default auto = free VRAM minus 0.8 GiB)\n"
         "  --device LIST                comma separated GPUs, one per --tensor-parallel rank\n"
         "                                (default 0; e.g. --device 0,2)\n"
         "  --tensor-parallel N          1 | 2 | 4 (default 1)\n"
@@ -320,7 +320,7 @@ int run_quality(int argc, char** argv) {
             fprintf(stderr, "hipMemGetInfo failed: %s\n", hipGetErrorString(hip_err));
             return 1;
         }
-        const std::size_t margin = 512ull * 1024ull * 1024ull;
+        const std::size_t margin = 820ull * 1024ull * 1024ull;
         arena_bytes = free_bytes > margin ? free_bytes - margin : free_bytes / 2u;
         if (arena_bytes == 0) {
             fprintf(stderr, "no VRAM available for the arena\n");
