@@ -424,6 +424,11 @@ static bool tp_segment_graph_enabled() {
     return env == nullptr || env[0] == '\0' || env[0] != '0';
 }
 
+static bool tp_segment_graph_verify_enabled() {
+    const char* env = std::getenv("SHELF_TP_HIP_GRAPH_VERIFY");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
 
 
 // One program run starts here, whichever execution path it then takes. The plan scratch of a
@@ -491,10 +496,13 @@ Status launch_program_run(
                 "tp execution schedule is active but cannot be launched",
                 __FILE__, __LINE__);
         }
+        const bool tp_graph_role =
+            ctx.role == ::shelf::runtime::ExecutionRole::Decode ||
+            (ctx.role == ::shelf::runtime::ExecutionRole::Verify &&
+             tp_segment_graph_verify_enabled());
         const bool tp_graph_ready =
-            tp_segment_graph_enabled() && !executor.graph_failed &&
-            ctx.value_trace == nullptr && executor.external_input_preparer == nullptr &&
-            ctx.role == ::shelf::runtime::ExecutionRole::Decode &&
+            tp_segment_graph_enabled() && !executor.graph_failed && tp_graph_role &&
+            ctx.value_trace == nullptr &&
             program_index < executor.tp_segment_graphs.size();
         if (tp_graph_ready) {
             ctx.tp_segment_graphs = &executor.tp_segment_graphs[program_index];

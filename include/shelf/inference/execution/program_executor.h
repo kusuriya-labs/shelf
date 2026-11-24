@@ -40,23 +40,50 @@ struct LayerInputOverride {
 };
 
 struct TpSegmentGraphKey {
+    uint32_t role = 0;
     uint32_t actual_rows = 0;
     uint32_t num_requests = 0;
     uint32_t bucket_m = 0;
+    uint32_t dispatch_signature = 0;
+    uint32_t tree_committed_end = 0;
+    uint32_t gdn_capture_rows = 0;
     const void* row_positions = nullptr;
     const void* rope_positions = nullptr;
     const void* device_requests = nullptr;
     const void* sampling_params = nullptr;
     const void* staged_requests = nullptr;
     const void* output_rows = nullptr;
+    const void* tree_anc_offsets = nullptr;
+    const void* tree_anc_positions = nullptr;
+    const void* tree_committed_end_rows = nullptr;
+    const void* tree_row_parent = nullptr;
+    const void* gdn_conv_history = nullptr;
+    const void* gdn_recurrent_history = nullptr;
+    const void* gdn_capture_mask = nullptr;
+    const void* qsa_partial = nullptr;
+    const void* qsa_counts = nullptr;
+    const void* qsa_journal = nullptr;
+    const void* ple_store = nullptr;
 
     bool operator==(const TpSegmentGraphKey& o) const noexcept {
-        return actual_rows == o.actual_rows && num_requests == o.num_requests &&
-               bucket_m == o.bucket_m && row_positions == o.row_positions &&
-               rope_positions == o.rope_positions &&
+        return role == o.role && actual_rows == o.actual_rows &&
+               num_requests == o.num_requests && bucket_m == o.bucket_m &&
+               dispatch_signature == o.dispatch_signature &&
+               tree_committed_end == o.tree_committed_end &&
+               gdn_capture_rows == o.gdn_capture_rows &&
+               row_positions == o.row_positions && rope_positions == o.rope_positions &&
                device_requests == o.device_requests &&
                sampling_params == o.sampling_params &&
-               staged_requests == o.staged_requests && output_rows == o.output_rows;
+               staged_requests == o.staged_requests && output_rows == o.output_rows &&
+               tree_anc_offsets == o.tree_anc_offsets &&
+               tree_anc_positions == o.tree_anc_positions &&
+               tree_committed_end_rows == o.tree_committed_end_rows &&
+               tree_row_parent == o.tree_row_parent &&
+               gdn_conv_history == o.gdn_conv_history &&
+               gdn_recurrent_history == o.gdn_recurrent_history &&
+               gdn_capture_mask == o.gdn_capture_mask && qsa_partial == o.qsa_partial &&
+               qsa_counts == o.qsa_counts && qsa_journal == o.qsa_journal &&
+               ple_store == o.ple_store;
     }
 };
 
@@ -75,8 +102,10 @@ struct TpSegmentGraphSlot {
 
 struct TpSegmentGraphCache {
     std::vector<TpSegmentGraphSlot> slots;
+    std::vector<uint32_t> capture_rank;
     TpSegmentGraphKey run_key{};
     uint32_t stable_runs = 0;
+    uint32_t capture_progress = 0;
     bool capture_allowed = false;
 };
 

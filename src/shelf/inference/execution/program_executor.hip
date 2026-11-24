@@ -5,9 +5,12 @@
 #include <shelf/inference/execution/kv_calib_dump.h>
 #include <shelf/inference/execution/linear_input_dump.h>
 #include <shelf/inference/execution/moe_dispatch.h>
+#include <shelf/inference/execution/paged_attention_dispatch.h>
 #include <shelf/inference/execution/weight_slot_validation.h>
+#include <shelf/kernels/optimized/attention/qsa_sparse.h>
 #include <shelf/kernels/correctness/model_dispatch_correctness.h>
 #include <hip/hip_runtime.h>
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <chrono>
@@ -590,30 +593,104 @@ static bool tp_segment_pool_warm(const HostExecutionContext& ctx,
            ctx.staging_pool->bucket_ran[index] != 0;
 }
 
-static TpSegmentGraphKey tp_segment_graph_key(const HostExecutionContext& ctx) {
+static bool tp_graph_dispatch_signature(const ::shelf::runtime::Program& program,
+                                        HostExecutionContext& ctx, uint32_t& out) {
+    uint32_t hash = 2166136261u;
+    for (std::size_t i = 0; i < program.dispatches.size(); ++i) {
+        const ::shelf::runtime::KernelId kind = program.dispatches[i].kernel_id;
+        if (kind == ::shelf::runtime::KernelId::PAGED_ATTENTION) {
+            auto signature = paged_attention_plan_signature(program, i, ctx, false);
+            if (!signature.ok()) return false;
+            hash = (hash ^ signature.value()) * 16777619u;
+        } else if (kind == ::shelf::runtime::KernelId::QSA_SELECT) {
+            const auto& binding = program.dispatches[i];
+            const bool within_budget =
+                binding.compute_spec != 0u && ctx.spec.max_visible_tokens != 0u &&
+                (ctx.spec.max_visible_tokens + ::shelf::kernel::kQsaSparseBlockTokens - 1u) /
+                        ::shelf::kernel::kQsaSparseBlockTokens <=
+                    binding.compute_spec;
+            hash = (hash ^ (within_budget ? 0x9E37u : 0x85EBu)) * 16777619u;
+        }
+    }
+    out = hash;
+    return true;
+}
+
+static TpSegmentGraphKey tp_segment_graph_key(const ::shelf::runtime::Program& program,
+                                              HostExecutionContext& ctx) {
     TpSegmentGraphKey key{};
+    key.role = static_cast<uint32_t>(ctx.role);
     key.actual_rows = ctx.actual_rows;
     key.num_requests = ctx.num_requests;
     key.bucket_m = ctx.bucket_m;
+    if (!tp_graph_dispatch_signature(program, ctx, key.dispatch_signature))
+        key.dispatch_signature = 0xFFFFFFFFu;
+    key.tree_committed_end = ctx.spec.tree_committed_end;
+    key.gdn_capture_rows = ctx.spec.gdn_spec_history.capture_rows;
     key.row_positions = ctx.row_positions;
     key.rope_positions = ctx.rope_positions;
     key.device_requests = ctx.device_requests;
     key.sampling_params = ctx.output_sampling_params;
     key.staged_requests = ctx.staged_requests;
     key.output_rows = ctx.device_output_rows;
+    key.tree_anc_offsets = ctx.spec.tree_anc_offsets;
+    key.tree_anc_positions = ctx.spec.tree_anc_positions;
+    key.tree_committed_end_rows = ctx.spec.tree_committed_end_rows;
+    key.tree_row_parent = ctx.spec.tree_row_parent;
+    key.gdn_conv_history = ctx.spec.gdn_spec_history.conv_history;
+    key.gdn_recurrent_history = ctx.spec.gdn_spec_history.recurrent_history;
+    key.gdn_capture_mask = ctx.spec.gdn_spec_history.recurrent_capture_mask;
+    key.qsa_partial = ctx.spec.qsa_spec_history.partial;
+    key.qsa_counts = ctx.spec.qsa_spec_history.counts;
+    key.qsa_journal = ctx.spec.qsa_spec_history.key_journal;
+    key.ple_store = ctx.spec.ple_conv_history.store;
     return key;
 }
 
-static void tp_graph_note_run(TpSegmentGraphCache& cache, const HostExecutionContext& ctx) {
+static uint32_t tp_graph_capture_budget() {
+    const char* env = std::getenv("SHELF_TP_GRAPH_CAPTURE_BUDGET");
+    if (env == nullptr || env[0] == '\0') return 8u;
+    const long value = std::strtol(env, nullptr, 10);
+    return value <= 0 ? 0u : static_cast<uint32_t>(value);
+}
+
+static void tp_graph_note_run(TpSegmentGraphCache& cache,
+                              const ::shelf::runtime::Program& program,
+                              HostExecutionContext& ctx,
+                              const ::shelf::runtime::TpExecutionSchedule& schedule) {
     constexpr uint32_t kCaptureThreshold = 2u;
-    const TpSegmentGraphKey key = tp_segment_graph_key(ctx);
-    if (cache.stable_runs != 0u && cache.run_key == key)
+    const TpSegmentGraphKey key = tp_segment_graph_key(program, ctx);
+    if (cache.stable_runs != 0u && cache.run_key == key) {
         ++cache.stable_runs;
-    else {
+    } else {
         cache.run_key = key;
         cache.stable_runs = 1u;
+        cache.capture_progress = 0u;
     }
     cache.capture_allowed = cache.stable_runs >= kCaptureThreshold;
+    if (!cache.capture_allowed) return;
+    if (cache.capture_rank.size() != schedule.segments.size()) {
+        cache.capture_rank.resize(schedule.segments.size());
+        std::vector<uint32_t> order(schedule.segments.size());
+        for (uint32_t i = 0; i < order.size(); ++i) order[i] = i;
+        std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) {
+            const uint32_t sa =
+                schedule.segments[a].dispatch_end - schedule.segments[a].dispatch_begin;
+            const uint32_t sb =
+                schedule.segments[b].dispatch_end - schedule.segments[b].dispatch_begin;
+            return sa != sb ? sa > sb : a < b;
+        });
+        for (uint32_t rank = 0; rank < order.size(); ++rank)
+            cache.capture_rank[order[rank]] = rank;
+    }
+    const uint32_t budget = tp_graph_capture_budget();
+    const uint32_t total = static_cast<uint32_t>(cache.capture_rank.size());
+    cache.capture_progress = std::min(cache.capture_progress + budget, total);
+}
+
+static bool tp_graph_capture_due(const TpSegmentGraphCache& cache, std::size_t segment_index) {
+    return segment_index < cache.capture_rank.size() &&
+           cache.capture_rank[segment_index] < cache.capture_progress;
 }
 
 static Status execute_tp_segment(const ::shelf::runtime::Program& program,
@@ -625,7 +702,7 @@ static Status execute_tp_segment(const ::shelf::runtime::Program& program,
         return execute_program_range(program, ctx, stream, begin, end);
     TpSegmentGraphSlot& slot = cache->slots[segment_index];
     static const bool graph_debug = std::getenv("SHELF_TP_GRAPH_DEBUG") != nullptr;
-    const TpSegmentGraphKey key = tp_segment_graph_key(ctx);
+    const TpSegmentGraphKey key = tp_segment_graph_key(program, ctx);
     if (slot.valid && !(slot.key == key))
         return execute_program_range(program, ctx, stream, begin, end);
     if (slot.valid) {
@@ -637,6 +714,7 @@ static Status execute_tp_segment(const ::shelf::runtime::Program& program,
     }
     const bool warm = tp_segment_pool_warm(ctx, program);
     if (slot.failed || !warm || !cache->capture_allowed ||
+        !tp_graph_capture_due(*cache, segment_index) ||
         ctx.tp_graph_policy != TpGraphPolicy::CaptureAndReplay)
         return execute_program_range(program, ctx, stream, begin, end);
     hipGraph_t graph = nullptr;
@@ -722,7 +800,8 @@ Status execute_program_tp_ranges(
         return Status::invalid_argument(
             "tp execution schedule does not cover the program", __FILE__, __LINE__);
     }
-    if (ctx.tp_segment_graphs != nullptr) tp_graph_note_run(*ctx.tp_segment_graphs, ctx);
+    if (ctx.tp_segment_graphs != nullptr)
+        tp_graph_note_run(*ctx.tp_segment_graphs, program, ctx, schedule);
     uint32_t next_begin = 0;
     for (std::size_t segment_index = 0; segment_index < schedule.segments.size();
          ++segment_index) {

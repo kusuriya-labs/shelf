@@ -279,14 +279,22 @@ CPU 側の `arrive()` が担う。
 - node が 0 の segment は capture せず eager で実行する。
 - 値が変わり得る入力（row 数 / request 数 / device pointer 群）を key にし、
   一致しない run は eager に落とす。`SHELF_TP_HIP_GRAPH=0` で無効化できる。
-- 対象は `ExecutionRole::Decode` の run のみ。verify / prefill は eager のまま。
+- 対象は `ExecutionRole::Decode` の run。`SHELF_TP_HIP_GRAPH_VERIFY=1` で
+  `ExecutionRole::Verify` も対象になる（既定 off）。prefill は常に eager。
 - 実行方針は `TpGraphPolicy` の 3 値。
   - `Disabled`: 常に eager。非 decode、`SHELF_TP_HIP_GRAPH=0`、graph 失敗時。
   - `ReplayOnly`: 登録済み graph のみ replay し、未登録なら eager。DFlash2 の単発 target
     decode (`run_single_target`) が `ExecuteBatchOptions::tp_graph_replay_only` で指定する。
   - `CaptureAndReplay`: 未登録なら capture。通常の decode。
-- capture は同じ key の run が 2 回続いた後にだけ許可する。短い要求で 131 segment の
-  capture 費用を払わないため。
+- capture は同じ key の run が 2 回続いた後にだけ許可し、1 run あたりの登録数を
+  `SHELF_TP_GRAPH_CAPTURE_BUDGET`（既定 8）に制限する。dispatch 数の多い segment から
+  登録するので、途中の run でも効き始める。
+- key は role / 行数 / request 数 / slot の device pointer / tree metadata /
+  GDN history / QSA history / PLE conv state と、program 内の attention plan 署名
+  (`paged_attention_plan_signature` と QSA select の分岐) から作る。context 長そのものは
+  含めない。含めると毎 round 変わり replay できないため。
+- PLE の external input は graph の外で毎 step upload されるので、`external_input_preparer`
+  を持っていても section graph は使える。
 - collective（`tp_copy` / `tp_sum_*`）と zero fill は graph の外に残る。graph 内へ
   閉じ込めるには cross-device 同期を kernel で表現する必要があり、現行 transport では
   可視性を保証できない（`docs/research/20261124/tp_hip_graph.md`）。

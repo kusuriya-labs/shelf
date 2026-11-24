@@ -61,9 +61,24 @@ capture を許可しない。
 27B + DFlash2 は 145.5 tok/s（off 145.6）、capture 0 回。27B dense の decode は
 39.3 tok/s（off 26.0）を維持する。
 
-Verify の segment graph 化は行っていない。verify 1 round は約 10 ms で、131 segment の
-capture に 200 ms かかるため、64 token 程度の生成では償却できない。capture を複数 run に
-分割して 1 run あたり数 segment ずつ登録する案は残っているが、本調査では扱わない。
+### Verify の segment graph（実装・opt-in）
+
+`SHELF_TP_HIP_GRAPH_VERIFY=1` で verify も capture する。key からは context 長
+(`min/max_visible_tokens`) を外し、代わりに program 内の attention plan 署名
+(`paged_attention_plan_signature` と QSA select の分岐) を入れた。Flash-Next EP2 の
+verify では署名が round を通して一定 (2599116421) で、変わるのは request 数と行数だけで
+あった。capture は 1 run あたり 8 segment までに制限し、dispatch 数の多い順に登録する。
+
+Flash-Next-EXL3-INT8-3.05bpw + DFlash2、生成列一致:
+
+| 条件 | verify graph off | on |
+| --- | ---: | ---: |
+| conc 1、160 token | 112.28 tok/s | **128.86（+15 %）** |
+| conc 8、128 token（全要求継続） | 398.52 | 387.86（−2.7 %） |
+| conc 8、8 token | 68.32 | 68.70 |
+
+低並列では host 投入が律速なので効く。並列度が上がると GPU が埋まり、capture 費用だけが
+残るため既定 off とし、`SHELF_TP_HIP_GRAPH_VERIFY=1` で選択する。
 
 rocprofv3 の kernel dispatch 数は graph on / off で同一（25,984 / 2 agent）。
 graph は GPU の kernel 数を減らすのではなく、host 側の投入待ちで生じる GPU idle を
