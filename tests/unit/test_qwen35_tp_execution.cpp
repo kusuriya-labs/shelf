@@ -183,6 +183,20 @@ int main() {
             check(tp2.capture.logits_row0 == tp2.rank1_capture.logits_row0,
                   "tp2 rank0 and rank1 logits are identical");
         }
+
+        setenv("SHELF_TP_HIP_GRAPH", "0", 1);
+        tp_harness::RunResult tp2_eager = tp_harness::run_tp2(opts);
+        unsetenv("SHELF_TP_HIP_GRAPH");
+        tp_harness::RunResult tp2_graph = tp_harness::run_tp2(opts);
+        check(tp2_eager.ok, "tp2 eager run: " + tp2_eager.error);
+        check(tp2_graph.ok, "tp2 segment graph run: " + tp2_graph.error);
+        if (tp2_eager.ok && tp2_graph.ok) {
+            check(!tp2_graph.tokens.empty(), "segment graph produced tokens");
+            check(tp2_eager.tokens == tp2_graph.tokens,
+                  "segment graph greedy tokens match the eager path");
+            check(tp2_eager.capture.logits_row0 == tp2_graph.capture.logits_row0,
+                  "segment graph logits match the eager path");
+        }
     }
 
     fs::remove_all(dir, ec);

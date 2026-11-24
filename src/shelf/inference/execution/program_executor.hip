@@ -580,6 +580,108 @@ Status execute_program_range(
     return Status::make_ok();
 }
 
+static bool tp_segment_pool_warm(const HostExecutionContext& ctx,
+                                 const ::shelf::runtime::Program& program) {
+    if (ctx.staging_pool == nullptr) return false;
+    const int bidx = bucket_to_index(program.row_bucket);
+    if (bidx < 0) return false;
+    const std::size_t index = static_cast<std::size_t>(bidx);
+    return index < ctx.staging_pool->bucket_ran.size() &&
+           ctx.staging_pool->bucket_ran[index] != 0;
+}
+
+static TpSegmentGraphKey tp_segment_graph_key(const HostExecutionContext& ctx) {
+    TpSegmentGraphKey key{};
+    key.actual_rows = ctx.actual_rows;
+    key.num_requests = ctx.num_requests;
+    key.bucket_m = ctx.bucket_m;
+    key.row_positions = ctx.row_positions;
+    key.rope_positions = ctx.rope_positions;
+    key.device_requests = ctx.device_requests;
+    key.sampling_params = ctx.output_sampling_params;
+    key.staged_requests = ctx.staged_requests;
+    key.output_rows = ctx.device_output_rows;
+    return key;
+}
+
+static Status execute_tp_segment(const ::shelf::runtime::Program& program,
+                                 HostExecutionContext& ctx, hipStream_t stream,
+                                 uint32_t begin, uint32_t end, std::size_t segment_index) {
+    TpSegmentGraphCache* cache = ctx.tp_segment_graphs;
+    if (cache == nullptr || segment_index >= cache->slots.size())
+        return execute_program_range(program, ctx, stream, begin, end);
+    TpSegmentGraphSlot& slot = cache->slots[segment_index];
+    static const bool graph_debug = std::getenv("SHELF_TP_GRAPH_DEBUG") != nullptr;
+    const TpSegmentGraphKey key = tp_segment_graph_key(ctx);
+    if (slot.valid && !(slot.key == key))
+        return execute_program_range(program, ctx, stream, begin, end);
+    if (slot.valid) {
+        if (hipGraphLaunch(slot.exec, stream) == hipSuccess) return Status::make_ok();
+        shelf::gpu::discard_cleanup_result(hipGraphExecDestroy(slot.exec));
+        slot = TpSegmentGraphSlot{};
+        slot.failed = true;
+        return execute_program_range(program, ctx, stream, begin, end);
+    }
+    const bool warm = tp_segment_pool_warm(ctx, program);
+    if (slot.failed || !warm)
+        return execute_program_range(program, ctx, stream, begin, end);
+    hipGraph_t graph = nullptr;
+    const hipError_t begin_error =
+        hipStreamBeginCapture(stream, hipStreamCaptureModeThreadLocal);
+    if (begin_error != hipSuccess) {
+        if (graph_debug)
+            std::fprintf(stderr, "[tp-graph] begin failed seg=%zu err=%s\n", segment_index,
+                         hipGetErrorString(begin_error));
+        slot.failed = true;
+        return execute_program_range(program, ctx, stream, begin, end);
+    }
+    const bool previous_capture = ctx.capturing_graph;
+    ctx.capturing_graph = true;
+    Status captured = execute_program_range(program, ctx, stream, begin, end);
+    ctx.capturing_graph = previous_capture;
+    const hipError_t end_error = hipStreamEndCapture(stream, &graph);
+    if (!captured.ok() || end_error != hipSuccess || graph == nullptr) {
+        if (graph_debug)
+            std::fprintf(stderr, "[tp-graph] capture failed seg=%zu cap=%s end=%s graph=%p\n",
+                         segment_index, captured.ok() ? "ok" : captured.message().c_str(),
+                         hipGetErrorString(end_error), static_cast<void*>(graph));
+        if (graph != nullptr) shelf::gpu::discard_cleanup_result(hipGraphDestroy(graph));
+        slot.failed = true;
+        return captured.ok() ? execute_program_range(program, ctx, stream, begin, end)
+                             : captured;
+    }
+    size_t captured_nodes = 0u;
+    (void)hipGraphGetNodes(graph, nullptr, &captured_nodes);
+    if (captured_nodes == 0u) {
+        shelf::gpu::discard_cleanup_result(hipGraphDestroy(graph));
+        slot.failed = true;
+        if (graph_debug)
+            std::fprintf(stderr, "[tp-graph] empty seg=%zu\n", segment_index);
+        return execute_program_range(program, ctx, stream, begin, end);
+    }
+    hipGraphExec_t exec = nullptr;
+    const hipError_t instantiate = hipGraphInstantiate(&exec, graph, nullptr, nullptr, 0);
+    shelf::gpu::discard_cleanup_result(hipGraphDestroy(graph));
+    if (instantiate != hipSuccess || exec == nullptr) {
+        if (graph_debug)
+            std::fprintf(stderr, "[tp-graph] instantiate failed seg=%zu err=%s\n",
+                         segment_index, hipGetErrorString(instantiate));
+        slot.failed = true;
+        return execute_program_range(program, ctx, stream, begin, end);
+    }
+    slot.exec = exec;
+    slot.key = key;
+    slot.valid = true;
+    if (graph_debug)
+        std::fprintf(stderr, "[tp-graph] capture seg=%zu nodes=%zu\n", segment_index,
+                     captured_nodes);
+    if (hipGraphLaunch(exec, stream) == hipSuccess) return Status::make_ok();
+    shelf::gpu::discard_cleanup_result(hipGraphExecDestroy(exec));
+    slot = TpSegmentGraphSlot{};
+    slot.failed = true;
+    return execute_program_range(program, ctx, stream, begin, end);
+}
+
 Status execute_program_tp_ranges(
     const ::shelf::runtime::Program& program,
     HostExecutionContext& ctx,
@@ -607,7 +709,9 @@ Status execute_program_tp_ranges(
             "tp execution schedule does not cover the program", __FILE__, __LINE__);
     }
     uint32_t next_begin = 0;
-    for (const ::shelf::runtime::TpProgramSegment& segment : schedule.segments) {
+    for (std::size_t segment_index = 0; segment_index < schedule.segments.size();
+         ++segment_index) {
+        const ::shelf::runtime::TpProgramSegment& segment = schedule.segments[segment_index];
         if (segment.dispatch_begin != next_begin ||
             segment.dispatch_end < segment.dispatch_begin ||
             segment.dispatch_end > program.dispatches.size()) {
@@ -697,7 +801,8 @@ Status execute_program_tp_ranges(
             segment.fusion != ::shelf::runtime::TpCombineFusion::None
                 ? segment.producer_end
                 : segment.dispatch_end;
-        Status st = execute_program_range(program, ctx, stream, producer_begin, run_end);
+        Status st = execute_tp_segment(program, ctx, stream, producer_begin, run_end,
+                                       segment_index);
         if (!st.ok()) return st;
         if (!combines) continue;
         ::shelf::runtime::TpSumTarget target;

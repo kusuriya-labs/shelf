@@ -268,11 +268,30 @@ plane の row reference が一致しない。MXFP4 の drift は FP8 と同じ�
 GPU2 テストは `ctest -L gpu2` で実行する。GPU 不足時は exit 77 で skip し、required
 acceptance には含まれない。
 
-## 10. 非目標
+## 10. TP / EP decode の segment graph
+
+`tp_schedules` を持つ Executor でも、decode の compute 区間は HIP graph に capture される。
+単位は program 全体ではなく `TpExecutionSchedule` の segment で、collective は従来どおり
+CPU 側の `arrive()` が担う。
+
+- cache は `Executor::tp_segment_graphs`（program index × segment index）。
+- capture は staging pool が warm になった後の run から。`ctx.capturing_graph` を立てる。
+- node が 0 の segment は capture せず eager で実行する。
+- 値が変わり得る入力（row 数 / request 数 / device pointer 群）を key にし、
+  一致しない run は eager に落とす。`SHELF_TP_HIP_GRAPH=0` で無効化できる。
+- 対象は `ExecutionRole::Decode` かつ output を計算する run。verify / prefill は eager のまま。
+- collective（`tp_copy` / `tp_sum_*`）と zero fill は graph の外に残る。graph 内へ
+  閉じ込めるには cross-device 同期を kernel で表現する必要があり、現行 transport では
+  可視性を保証できない（`docs/research/20261124/tp_hip_graph.md`）。
+
+graph は GPU の kernel 数を減らさない。消えるのは host 側の投入待ちで生じる GPU idle で
+ある。dispatch 数そのものを減らすには kernel 融合が別途必要になる。
+
+## 11. 非目標
 
 - Multi-GPU Executor の一般化
 - RCCL backend（AllReduce / AllGather / AllToAll）
 - all-to-all expert dispatch
 - 通信と計算の本格的な overlap
-- TP schedule と HIP graph の併用
+- collective を graph 内に閉じ込めた full decode graph
 - distributed sampling / structured generation

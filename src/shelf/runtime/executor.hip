@@ -418,6 +418,11 @@ bool layer_output_dump_enabled() {
     return dir != nullptr && dir[0] != '\0';
 }
 
+static bool tp_segment_graph_enabled() {
+    const char* env = std::getenv("SHELF_TP_HIP_GRAPH");
+    return env == nullptr || env[0] == '\0' || env[0] != '0';
+}
+
 // One program run starts here, whichever execution path it then takes. The plan scratch of a
 // grouped expert FFN is accumulated into by the router, so the run has to be prepared before
 // the first op: a multi-rank run is not allowed to skip it, and a rank prepares its own scratch
@@ -483,10 +488,17 @@ Status launch_program_run(
                 "tp execution schedule is active but cannot be launched",
                 __FILE__, __LINE__);
         }
+        if (tp_segment_graph_enabled() && !executor.graph_failed &&
+            ctx.value_trace == nullptr && executor.external_input_preparer == nullptr &&
+            ctx.role == ::shelf::runtime::ExecutionRole::Decode &&
+            program_index < executor.tp_segment_graphs.size()) {
+            ctx.tp_segment_graphs = &executor.tp_segment_graphs[program_index];
+        }
         run = runtime::execute_program_tp_ranges(
             program, ctx, stream, executor.tp_schedules[program_index],
             executor.tp_barrier, executor.tp_rank,
             executor.ep_barrier, executor.ep_rank);
+        ctx.tp_segment_graphs = nullptr;
     } else {
         run = runtime::execute_program_range(program, ctx, stream, 0u, dispatch_count);
     }
@@ -1440,6 +1452,7 @@ Executor::Executor(Executor&& other) noexcept
       program_set(std::move(other.program_set)),
       program_set_ready(other.program_set_ready),
       tp_schedules(std::move(other.tp_schedules)),
+      tp_segment_graphs(std::move(other.tp_segment_graphs)),
       tp_barrier(other.tp_barrier),
       tp_rank(other.tp_rank),
       ep_barrier(other.ep_barrier),
@@ -1596,6 +1609,8 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         program_set_ready = other.program_set_ready;
         tp_schedules = std::move(other.tp_schedules);
         other.tp_schedules.clear();
+        tp_segment_graphs = std::move(other.tp_segment_graphs);
+        other.tp_segment_graphs.clear();
         tp_barrier = other.tp_barrier;
         other.tp_barrier = nullptr;
         tp_rank = other.tp_rank;
@@ -1813,6 +1828,19 @@ Status executor_shutdown(Executor& ex) noexcept {
             slot = GraphCacheSlot{};
         }
     }
+    for (auto& cache : ex.tp_segment_graphs) {
+        for (auto& slot : cache.slots) {
+            if (!slot.valid) continue;
+            hipError_t err = hipGraphExecDestroy(slot.exec);
+            if (first_error.ok() && err != hipSuccess) {
+                first_error = Status::hip_error("hipGraphExecDestroy tp_segment_graphs",
+                                                 hipGetErrorString(err), __FILE__, __LINE__);
+            }
+            slot = ::shelf::execution::TpSegmentGraphSlot{};
+        }
+        cache.slots.clear();
+    }
+    ex.tp_segment_graphs.clear();
 #endif
     if (ex.graph_token_bitmask_staging != nullptr) {
         const hipError_t err = hipFree(ex.graph_token_bitmask_staging);
@@ -2495,6 +2523,9 @@ Result<Executor> create_executor(
                             "tp execution schedule has no segments", __FILE__, __LINE__);
                     }
                     ex.tp_schedules.push_back(schedule_res.release());
+                    ex.tp_segment_graphs.emplace_back();
+                    ex.tp_segment_graphs.back().slots.resize(
+                        ex.tp_schedules.back().segments.size());
                 }
                 ex.tp_rank = static_cast<int>(config.tp->tp_rank);
             }

@@ -39,6 +39,38 @@ struct LayerInputOverride {
     std::uint32_t hidden = 0;
 };
 
+struct TpSegmentGraphKey {
+    uint32_t actual_rows = 0;
+    uint32_t num_requests = 0;
+    uint32_t bucket_m = 0;
+    const void* row_positions = nullptr;
+    const void* rope_positions = nullptr;
+    const void* device_requests = nullptr;
+    const void* sampling_params = nullptr;
+    const void* staged_requests = nullptr;
+    const void* output_rows = nullptr;
+
+    bool operator==(const TpSegmentGraphKey& o) const noexcept {
+        return actual_rows == o.actual_rows && num_requests == o.num_requests &&
+               bucket_m == o.bucket_m && row_positions == o.row_positions &&
+               rope_positions == o.rope_positions &&
+               device_requests == o.device_requests &&
+               sampling_params == o.sampling_params &&
+               staged_requests == o.staged_requests && output_rows == o.output_rows;
+    }
+};
+
+struct TpSegmentGraphSlot {
+    hipGraphExec_t exec = nullptr;
+    TpSegmentGraphKey key{};
+    bool valid = false;
+    bool failed = false;
+};
+
+struct TpSegmentGraphCache {
+    std::vector<TpSegmentGraphSlot> slots;
+};
+
 struct HostExecutionContext {
     ::shelf::runtime::DeviceBatchContext* batch_context = nullptr;    ::shelf::kernel::ModelDispatchStateView model_state{};
     const ::shelf::runtime::WeightSlot* weights = nullptr;
@@ -107,6 +139,7 @@ struct HostExecutionContext {
     uint32_t stochastic_topk_scratch_bytes = 0;
     uint32_t* stochastic_topk_active_counts = nullptr;
     ::shelf::runtime::DispatchStagingPool* staging_pool = nullptr;
+    TpSegmentGraphCache* tp_segment_graphs = nullptr;
     const ::shelf::runtime::ProgramStagingMeta* program_meta = nullptr;
     ValueTraceSink* value_trace = nullptr;
     ::shelf::runtime::ExecutionRole role = ::shelf::runtime::ExecutionRole::Decode;

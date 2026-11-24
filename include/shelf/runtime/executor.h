@@ -396,6 +396,7 @@ struct Executor {
     ::shelf::runtime::ProgramSet program_set;
     bool program_set_ready = false;
     std::vector<::shelf::runtime::TpExecutionSchedule> tp_schedules;
+    std::vector<::shelf::execution::TpSegmentGraphCache> tp_segment_graphs;
     ::shelf::runtime::TpBarrierHook* tp_barrier = nullptr;
     int tp_rank = 0;
     ::shelf::runtime::TpBarrierHook* ep_barrier = nullptr;
