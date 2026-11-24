@@ -316,6 +316,27 @@ void check_cmake_target_edges(const fs::path& root) {
     else ++passed;
 }
 
+// Every production .cpp/.hip under the model layer must be listed by a CMake target. A
+// file left behind after a move is not compiled, but it is still edited and reviewed as
+// if it were live code.
+void check_no_orphan_model_sources(const fs::path& root) {
+    const std::string cmake = read_file(root / "cmake/targets.cmake");
+    if (cmake.empty()) {
+        fail("cmake/targets.cmake could not be read");
+        return;
+    }
+    for (const auto& file : scan(root / "src/shelf/models")) {
+        const std::string extension = file.extension().string();
+        if (extension != ".cpp" && extension != ".hip") continue;
+        const std::string relative = fs::relative(file, root).generic_string();
+        if (!contains(cmake, relative.c_str())) {
+            fail(relative + " is not listed by any CMake target");
+        } else {
+            ++passed;
+        }
+    }
+}
+
 // src/apps/compute is a token-in / token-out driver. It may print a model name in a help
 // string, but it may not include a family header or reach a concrete model / rank runtime.
 void check_compute_app_boundaries(const fs::path& root) {
@@ -498,19 +519,9 @@ int main() {
                 "MoeExpert", "MoeFfn", "DenseFfn", "load_qwen35"});
 
     check_cmake_target_edges(root);
+    check_no_orphan_model_sources(root);
     check_compute_app_boundaries(root);
     check_engine_boundaries(root);
-
-    const std::vector<fs::path> kernel_dirs = {
-        root / "include/shelf/models/qwen35/kernels",
-        root / "src/shelf/models/qwen35/kernels",
-    };
-    for (const auto& dir : kernel_dirs) {
-        scan_clean(dir,
-                   {"models/qwen35/runtime", "Executor", "HostExecutionContext",
-                    "ContinuousBatcher"});
-    }
-
 
     check_correctness_location(root);
     check_correctness_layout(root);

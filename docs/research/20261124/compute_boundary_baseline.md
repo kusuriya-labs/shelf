@@ -160,6 +160,51 @@ negative test: `main.hip` に `#include <shelf/models/qwen35/model/qwen35_model.
   debug capture は呼ばれたときだけ copy する。
 - 演算、量子化、tensor shape、GDN recurrence、KV format は変更していない。
 
+## Dead code 削除（レビュー反映）
+
+2026-11-24 のレビューで、共通 runtime へ移した後も
+`src/shelf/models/qwen35/` に旧実装が残っていることを確認した。
+CMake の production target には共通側だけが登録されており、旧側は未コンパイルだった。
+
+参照検査:
+
+```bash
+find src/shelf/models/qwen35 -type f \( -name '*.cpp' -o -name '*.hip' \) | while read f; do
+  grep -Rq --exclude-dir=.git --exclude-dir=build -- "$f" cmake src include tests tools \
+    || echo "$f"
+done
+```
+
+削除:
+
+- `src/shelf/models/qwen35/dflash2/**`
+- `src/shelf/models/qwen35/kernels/**`
+- `src/shelf/models/qwen35/runtime/dflash2_footprint.cpp`
+- `src/shelf/models/qwen35/runtime/dflash2_session_pool.cpp`
+- `src/shelf/models/qwen35/runtime/dflash2_spec_batch.cpp`
+- `src/shelf/models/qwen35/runtime/dflash2_spec_decoder.cpp`
+- `src/shelf/models/qwen35/runtime/gdn_spec_history.hip`
+- `src/shelf/models/qwen35/runtime/pipeline_parallel.cpp`
+- `src/shelf/models/qwen35/runtime/runtime_request.cpp`
+- `src/shelf/models/qwen35/runtime/spec_decode.cpp`
+- `src/shelf/models/qwen35/runtime/token_budget_scheduler.cpp`
+- 未参照だった `include/shelf/models/qwen35/kernels/**` と
+  `include/shelf/models/qwen35/state/**`
+
+残したもの:
+
+- `src/shelf/models/qwen35/runtime/{executor_model,tp_rank_model_dense,pipeline_stage_model_dense}.cpp`
+  （`shelf_qwen35_runtime` の production source）
+- `include/shelf/models/qwen35/dflash2/**`
+  （`tests/support/dflash2_tp_harness.h` が使う alias header）
+- `include/shelf/models/qwen35/runtime/**` の alias header
+  （他 family / テストが使う）
+
+再発防止として `test_architecture_boundaries` に
+`check_no_orphan_model_sources` を追加した。
+`src/shelf/models` 配下の `.cpp` / `.hip` が `cmake/targets.cmake` の
+どの target にも現れない場合に FAIL する。
+
 ## 残る課題
 
 - MTP 単発はこの GPU/モデル組み合わせで arena が不足し、変更前後とも完走しない。

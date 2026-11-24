@@ -1206,13 +1206,16 @@ target tap は層の完了出力を stream 方向に平均した `[rows, hidden=
 
 ### drafter
 
-- `include/shelf/models/qwen35/dflash2/{config.h,weights.h,executor.h,context_state.h}`
-- `src/shelf/models/qwen35/dflash2/{config.cpp,weights.cpp,executor.hip,context_state.hip}`
+- `include/shelf/runtime/dflash2_config.h`
+- `include/shelf/runtime/dflash2/{weights.h,executor.h,context_state.h}`
+- `src/shelf/runtime/dflash2_config.cpp`
+- `src/shelf/runtime/dflash2/{weights.cpp,executor.hip,context_state.hip,proposal_shard.cpp,tp_proposal.hip}`
+
+`include/shelf/models/qwen35/dflash2/` は test harness 向けの alias header だけを持つ。
 
 ### kernels
 
-- `include/shelf/models/qwen35/kernels/dflash2/` と
-  `src/shelf/models/qwen35/kernels/dflash2/`
+- `include/shelf/kernels/dflash2/` と `src/shelf/kernels/dflash2/`
   - `feature_concat` / `grouped_dynamic_conv` / `rmsnorm` / `rope` /
     `swiglu` / `attention` / `kv_ring` / `noise_input`
   - `candidate_selector` / `topk` / `topk_optimized`
@@ -1222,17 +1225,25 @@ target tap は層の完了出力を stream 方向に平均した `[rows, hidden=
 
 ### runtime
 
-- `include/shelf/models/qwen35/runtime/dflash2_spec_decoder.h`
-- `src/shelf/models/qwen35/runtime/dflash2_spec_decoder.cpp`
-- `src/shelf/models/qwen35/runtime/gdn_spec_history.hip` と
-  `include/shelf/models/qwen35/runtime/gdn_spec_history.h`
-- `src/shelf/models/qwen35/runtime/spec_decode.{h,cpp}`
+- `include/shelf/runtime/dflash2_spec_decoder.h`
+- `src/shelf/runtime/dflash2_spec_decoder.cpp`
+- `src/shelf/runtime/gdn_spec_history.hip` と
+  `include/shelf/runtime/gdn_spec_history.h`
+- `src/shelf/runtime/spec_decode.{h,cpp}`
 - `include/shelf/inference/scheduling/scheduled_batch.h`
+
+### engine
+
+- `include/shelf/engine/compute_session.h`
+- `src/shelf/engine/speculation.hip`（単発 DFlash2）
+- `src/shelf/engine/serve.hip`（DFlash2 session / batcher binding）
 
 ### apps
 
-- `src/apps/compute/main.hip`（`run_dflash2_shot`）
-- `src/apps/compute/compute_runtime.{h,hip}`（tap / max output rows の引き継ぎ）
+- `src/apps/compute/main.hip`（mode 選択）
+- `src/apps/compute/single_request.hip`（表示のみ）
+- `src/shelf/engine/speculation.hip`（DFlash2 の実行編成）
+- `src/shelf/engine/compute_session.hip`（max output rows / tap の引き継ぎ）
 
 ### build / tests
 

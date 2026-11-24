@@ -4,17 +4,16 @@ model 非依存の最適化済み kernel は `src/shelf/kernels/optimized/`（pu
 `include/shelf/kernels/optimized/`）に置く。Qwen35 が使う。
 複数の論理演算を 1 launch で行う融合 kernel は `src/shelf/kernels/fused/`（public は
 `include/shelf/kernels/fused/`）に置く。
-Qwen35 固有 kernel（correctness / dflash2）は
-`src/shelf/models/qwen35/kernels/` に置く。
-配置と分割の詳細は `src/shelf/models/qwen35/kernels/README.md` を参照。
+Qwen35 が使う correctness reference は `src/shelf/kernels/correctness/`、
+DFlash2 固有 kernel は `src/shelf/kernels/dflash2/` に置く。
+`src/shelf/models/qwen35/kernels/` は持たない。
 
 ```text
 shelf/
 ├── kernels/fused/              # 複数の論理演算を 1 launch で行う融合 kernel
 ├── kernels/optimized/          # model 非依存の単一演算の gfx1201 向け高速実装
-└── models/qwen35/kernels/
-    ├── correctness/            # 遅いが正確な参照実装（E2E token exactness の基準）
-    └── dflash2/                # DFlash2 固有 kernel
+├── kernels/correctness/        # 遅いが正確な参照実装（E2E token exactness の基準）
+└── kernels/dflash2/            # DFlash2 固有 kernel
 ```
 
 `fused/` は最下層で、`optimized/` と `runtime/` からリンクされる。`fused/` から
