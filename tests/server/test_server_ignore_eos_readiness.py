@@ -17,9 +17,9 @@ from aiohttp.test_utils import TestClient, TestServer
 SERVER_DIR = Path(__file__).resolve().parents[2] / "src" / "apps" / "server"
 sys.path.insert(0, str(SERVER_DIR))
 
-import shelf_server  # noqa: E402
-from serverlib import chat_service, openai_protocol  # noqa: E402
-from serverlib.compute_client import ComputeCapabilities, ComputeKVStats  # noqa: E402
+import shelf_server
+from serverlib import chat_service, openai_protocol, responses_protocol
+from serverlib.compute_client import ComputeCapabilities, ComputeKVStats
 
 
 class FakeProcessor:
@@ -114,6 +114,13 @@ class IgnoreEosAndReadinessTests(unittest.IsolatedAsyncioTestCase):
         return shelf_server.create_app(service, compute, meta), compute
 
     def test_parse_ignore_eos(self):
+        response = responses_protocol.parse_responses_request(
+            {"model": "m", "input": "hello", "ignore_eos": True}, inference_budget_tokens=32)
+        self.assertTrue(response.ignore_eos)
+        with self.assertRaises(openai_protocol.OpenAIProtocolError):
+            responses_protocol.parse_responses_request(
+                {"model": "m", "input": "hello", "ignore_eos": 1}, inference_budget_tokens=32)
+
         req_default = openai_protocol.parse_chat_request({
             "model": "m",
             "messages": [{"role": "user", "content": "hi"}],

@@ -569,6 +569,8 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
                          "[tp] transport %s failed verification (%s); falling back to "
                          "host-mediated reference transport\n",
                          group.transport->name(), verify_status.message().c_str());
+            auto cleanup = group.transport->shutdown();
+            if (!cleanup.ok()) return cleanup;
             group.transport =
                 std::make_unique<::shelf::runtime::HostMediatedTpTransport>(group.devices);
         }

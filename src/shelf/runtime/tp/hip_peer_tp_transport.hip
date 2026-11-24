@@ -510,16 +510,14 @@ Result<std::unique_ptr<HipPeerTpTransport>> HipPeerTpTransport::create(
             unsigned event_flags = hipEventDisableTiming;
             if (!tp_reduce_legacy()) event_flags |= hipEventReleaseToSystem;
             for (int p = 0; p < 2; ++p) {
-                if (hipEventCreateWithFlags(&transport->sent_[r][q][p], event_flags) !=
-                    hipSuccess) {
+                if (const auto err = hipEventCreateWithFlags(&transport->sent_[r][q][p], event_flags); err != hipSuccess) {
                     return Status::hip_error("hipEventCreate tp send",
-                                             hipGetErrorString(hipGetLastError()), __FILE__,
+                                             hipGetErrorString(err), __FILE__,
                                              __LINE__);
                 }
-                if (hipEventCreateWithFlags(&transport->consumed_[r][q][p], event_flags) !=
-                    hipSuccess) {
+                if (const auto err = hipEventCreateWithFlags(&transport->consumed_[r][q][p], event_flags); err != hipSuccess) {
                     return Status::hip_error("hipEventCreate tp consumed",
-                                             hipGetErrorString(hipGetLastError()), __FILE__,
+                                             hipGetErrorString(err), __FILE__,
                                              __LINE__);
                 }
             }
@@ -533,10 +531,10 @@ Result<std::unique_ptr<HipPeerTpTransport>> HipPeerTpTransport::create(
                                      hipGetErrorString(hipGetLastError()), __FILE__,
                                      __LINE__);
         }
-        if (hipEventCreateWithFlags(&transport->probe_ready_[r],
-                                    hipEventDisableTiming) != hipSuccess) {
+        if (const auto err = hipEventCreateWithFlags(&transport->probe_ready_[r],
+                                    hipEventDisableTiming); err != hipSuccess) {
             return Status::hip_error("hipEventCreate tp probe",
-                                     hipGetErrorString(hipGetLastError()), __FILE__,
+                                     hipGetErrorString(err), __FILE__,
                                      __LINE__);
         }
     }
@@ -582,6 +580,7 @@ Status HipPeerTpTransport::enable_peer_access() {
 Status HipPeerTpTransport::ensure_link_staging(std::size_t bytes, std::size_t rank_count) {
     if (link_staging_bytes_ >= bytes && link_staging_.size() == 2u * rank_count * rank_count)
         return Status::make_ok();
+    link_staging_bytes_ = 0u;
     for (std::size_t slot = 0; slot < link_staging_.size(); ++slot) {
         if (!link_staging_[slot]) continue;
         const auto dst = slot / 2u % rank_count;
@@ -597,7 +596,6 @@ Status HipPeerTpTransport::ensure_link_staging(std::size_t bytes, std::size_t ra
         if (err != hipSuccess) return Status::hip_error("tp staging release", hipGetErrorString(err), __FILE__, __LINE__);
         link_staging_[slot] = nullptr;
     }
-    link_staging_bytes_ = 0u;
     link_staging_.assign(2u * rank_count * rank_count, nullptr);
     for (std::size_t r = 0; r < link_staging_.size(); ++r) {
         const auto src = r / 2u / rank_count;
@@ -621,6 +619,7 @@ Status HipPeerTpTransport::ensure_buffers(std::size_t bytes, std::size_t rank_co
     if (tp_debug_enabled())
         std::fprintf(stderr, "ENSURE_GROW bytes=%zu was=%zu\n", bytes,
                      inbox_bytes_.load(std::memory_order_relaxed));
+    inbox_bytes_.store(0u, std::memory_order_relaxed);
     const std::size_t peer_count = rank_count - 1;
     for (std::size_t r = 0; r < rank_count; ++r) {
         auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
@@ -734,10 +733,10 @@ Status HipPeerTpTransport::enqueue_sum(const TpSumInvocation& invocation) {
             for (std::size_t q = 0; q < rank_count; ++q) {
                 if (q == r) continue;
                 if ((!tp_reduce_legacy() || need_link_staging) && consumed_recorded_[q][r][parity] != 0) {
-                    if (hipStreamWaitEvent(invocation.streams[r],
-                                           consumed_[q][r][parity], 0) != hipSuccess) {
+                    if (const auto err = hipStreamWaitEvent(invocation.streams[r],
+                                           consumed_[q][r][parity], 0); err != hipSuccess) {
                         return Status::hip_error("hipStreamWaitEvent tp consumed",
-                                                 hipGetErrorString(hipGetLastError()),
+                                                 hipGetErrorString(err),
                                                  __FILE__, __LINE__);
                     }
                 }
@@ -756,9 +755,9 @@ Status HipPeerTpTransport::enqueue_sum(const TpSumInvocation& invocation) {
                                      static_cast<uint32_t>(parity));
                     if (!st.ok()) return st;
                 }
-                if (hipEventRecord(sent_[r][q][parity], invocation.streams[r]) != hipSuccess) {
+                if (const auto err = hipEventRecord(sent_[r][q][parity], invocation.streams[r]); err != hipSuccess) {
                     return Status::hip_error("hipEventRecord tp send",
-                                             hipGetErrorString(hipGetLastError()), __FILE__,
+                                             hipGetErrorString(err), __FILE__,
                                              __LINE__);
                 }
             }
@@ -769,9 +768,9 @@ Status HipPeerTpTransport::enqueue_sum(const TpSumInvocation& invocation) {
             if (!scope.ok()) return scope.status();
             for (std::size_t q = 0; q < rank_count; ++q) {
                 if (q == r) continue;
-                if (hipEventRecord(sent_[r][q][parity], invocation.streams[r]) != hipSuccess) {
+                if (const auto err = hipEventRecord(sent_[r][q][parity], invocation.streams[r]); err != hipSuccess) {
                     return Status::hip_error("hipEventRecord tp send",
-                                             hipGetErrorString(hipGetLastError()), __FILE__,
+                                             hipGetErrorString(err), __FILE__,
                                              __LINE__);
                 }
             }
@@ -782,9 +781,9 @@ Status HipPeerTpTransport::enqueue_sum(const TpSumInvocation& invocation) {
         if (!scope.ok()) return scope.status();
         for (std::size_t q = 0; q < rank_count; ++q) {
             if (q == r) continue;
-            if (hipStreamWaitEvent(invocation.streams[r], sent_[q][r][parity], 0) != hipSuccess) {
+            if (const auto err = hipStreamWaitEvent(invocation.streams[r], sent_[q][r][parity], 0); err != hipSuccess) {
                 return Status::hip_error("hipStreamWaitEvent tp receive",
-                                         hipGetErrorString(hipGetLastError()), __FILE__,
+                                         hipGetErrorString(err), __FILE__,
                                          __LINE__);
             }
         }
@@ -813,9 +812,9 @@ Status HipPeerTpTransport::enqueue_sum(const TpSumInvocation& invocation) {
         if (!st.ok()) return st;
         for (std::size_t q = 0; q < rank_count; ++q) {
             if (q == r) continue;
-            if (hipEventRecord(consumed_[r][q][parity], invocation.streams[r]) != hipSuccess) {
+            if (const auto err = hipEventRecord(consumed_[r][q][parity], invocation.streams[r]); err != hipSuccess) {
                 return Status::hip_error("hipEventRecord tp consumed",
-                                         hipGetErrorString(hipGetLastError()), __FILE__,
+                                         hipGetErrorString(err), __FILE__,
                                          __LINE__);
             }
             consumed_recorded_[r][q][parity] = 1;
@@ -1070,9 +1069,9 @@ Status HipPeerTpTransport::finish_argmax(int rank, const TpArgmaxInvocation& inv
     const std::size_t bytes = static_cast<std::size_t>(invocation.rows) * kTpArgmaxPairBytes;
     for (std::size_t q = 0; q < rank_count; ++q) {
         if (q == r) continue;
-        if (hipStreamWaitEvent(invocation.stream, lm_sent_[q], 0) != hipSuccess) {
+        if (const auto err = hipStreamWaitEvent(invocation.stream, lm_sent_[q], 0); err != hipSuccess) {
             return Status::hip_error("hipStreamWaitEvent lm sent",
-                                      hipGetErrorString(hipGetLastError()), __FILE__, __LINE__);
+                                      hipGetErrorString(err), __FILE__, __LINE__);
         }
         if (peer_link_[q][r] == 0u) {
             const hipError_t copy_err = hipMemcpyAsync(
@@ -1180,9 +1179,9 @@ Status HipPeerTpTransport::verify() {
                                              hipGetErrorString(hipGetLastError()), __FILE__,
                                              __LINE__);
                 }
-                if (hipEventRecord(probe_ready_[r], probe_streams_[r]) != hipSuccess) {
+                if (const auto err = hipEventRecord(probe_ready_[r], probe_streams_[r]); err != hipSuccess) {
                     return Status::hip_error("tp probe record",
-                                             hipGetErrorString(hipGetLastError()), __FILE__,
+                                             hipGetErrorString(err), __FILE__,
                                              __LINE__);
                 }
             }

@@ -261,7 +261,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 `ignore_eos: true` を指定すると、停止トークンが生成されても生成を継続し、
 `max_tokens` に達した時点で `finish_reason: "length"` として終了する。
 既定は `false` で、従来どおり停止トークンで `finish_reason: "stop"` になる。
-ストリーミングでも同じ値が compute 側へ転送される。
+ストリーミングと `/v1/responses` でも同じ値が compute 側へ転送される。
 
 ### streaming
 
