@@ -2293,14 +2293,8 @@ Result<Executor> create_executor(
     if (last_stage) {
         st = allocate_contiguous_tensor<bf16_t>(arena, {MO, H}, ex.output_hidden);
         if (!st.ok()) return st;
-        const std::size_t logits_stride = (logits_width + 3u) & ~std::size_t(3);
-        auto logits_alloc = arena.allocate_aligned(
-            static_cast<std::size_t>(MO) * logits_stride * sizeof(float), 256u);
-        if (!logits_alloc.ok()) return logits_alloc.status();
-        auto logits_tensor = gpu::Tensor::create<float>(
-            logits_alloc.value(), {MO, logits_width}, {logits_stride, 1});
-        if (!logits_tensor.ok()) return logits_tensor.status();
-        ex.logits = logits_tensor.release();
+        st = allocate_contiguous_tensor<float>(arena, {MO, logits_width}, ex.logits);
+        if (!st.ok()) return st;
     }
     if (V > 0u && MO > 0u && last_stage) {
         ex.stochastic_topk_partitions = shelf::kernel::dflash2_radix_default_partitions(V);
