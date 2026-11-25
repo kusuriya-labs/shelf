@@ -7,7 +7,6 @@
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/projection.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
 #include <vector>
-#include <shelf/inference/execution/exl3_dense_gemm.h>
 
 namespace {
 void check(hipError_t e) {
@@ -24,6 +23,20 @@ template <class T> struct Buffer {
             check(hipFree(p));
     }
 };
+// Exact int8 dot product over the decoded weight plane: the reference the deleted
+// hipBLASLt dense path used to provide.
+__global__ void ref_int8_gemm_kernel(const int8_t *codes, const int8_t *weights, int32_t *out,
+                                     uint32_t rows, uint32_t n, uint32_t k) {
+    const uint32_t col = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t row = blockIdx.y;
+    if (col >= n || row >= rows) return;
+    const int8_t *c = codes + static_cast<size_t>(row) * k;
+    const int8_t *w = weights + static_cast<size_t>(col) * k;
+    int32_t acc = 0;
+    for (uint32_t i = 0; i < k; ++i)
+        acc += static_cast<int32_t>(c[i]) * static_cast<int32_t>(w[i]);
+    out[static_cast<size_t>(row) * n + col] = acc;
+}
 
 bool run(uint32_t rows, uint32_t bits, uint32_t count, uint32_t k = 1024u, uint32_t n = 384u,
          bool cached = false, bool rowscaled = false) {
@@ -98,8 +111,9 @@ bool run(uint32_t rows, uint32_t bits, uint32_t count, uint32_t k = 1024u, uint3
                 0.5f, nullptr));
             check(
                 shelf::kernel::launch_exl3_mul24_recon(p.trellis, bits, dense.p, p.n, k, nullptr));
-            check(shelf::execution::exl3_dense_gemm_int8(rows, p.n, k, dense.p, p.codes, p.yprime,
-                                                         nullptr));
+            ref_int8_gemm_kernel<<<dim3((p.n + 255u) / 256u, rows), 256, 0, nullptr>>>(
+                p.codes, dense.p, reinterpret_cast<int32_t *>(p.yprime), rows, p.n, k);
+            check(hipGetLastError());
             check(shelf::kernel::launch_plamo_exl3_flagged_gemm(
                 cf.p + size_t(cap) * k * i, sf.p + size_t(cap) * ss / 4u * i, k, ss, p.trellis,
                 bits, yf.p + size_t(cap) * n * i, cap, active.p, p.n, k, nullptr));

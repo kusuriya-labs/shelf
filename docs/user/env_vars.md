@@ -13,7 +13,6 @@ CLI オプションと環境変数の両方が用意されている項目（`--m
 | `HIP_VISIBLE_DEVICES` | 未設定 | runtime / quantize | HIP 側に見える GPU index を指定する |
 | `HSA_USERPTR_FOR_PAGED_MEM` | 標準構成では `0` | compute (`--serve-stdio`) / server | ROCr が paged host allocation に USERPTR を使うかを指定する。`1` で有効 |
 | `HSA_USE_SVM` | 標準構成では `0` | compute (`--serve-stdio`) / server | ROCr が KFD の SVM API を使うかを指定する。`0` ではホストメモリの一時登録に従来の登録・解除経路を使う |
-| `HIPBLASLT_USE_ROCROLLER` | 未設定 | runtime | `1` を指定すると EXL3-INT8 prefill の A 経路（hipBLASLt）を避け、自動で B 経路（自前 WMMA）へ切り替える |
 
 CMake オプション（`SHELF_ROCM_ROOT` / `SHELF_LIBCXX_LLVM_ROOT` / `SHELF_LOAD_LIBSTDCXX_FIRST` / `SHELF_HIP_GRAPH` 等）は [build.md](build.md) を参照する。
 

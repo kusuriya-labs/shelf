@@ -335,7 +335,7 @@ INT8 の重み行列は常駐しない。
   `producer_rotate_rows.hip`, `rotate_quantize.hip`, `rotate_out.hip`, `group_gemm.hip`）および
   MoE 用 grouped EXL3（`grouped.hip`）。
 - `src/shelf/inference/execution/` — dispatch 選択（`optimized_dispatch.hip`, `moe_dispatch.hip`,
-  `exl3_dispatch_decision.h`, `exl3_dense_gemm.hip`, `hipblaslt_abi.h`）。
+  `exl3_dispatch_decision.h`, `hipblaslt_abi.h`）。
 
 #### 復号と常駐レイアウト
 
@@ -382,8 +382,8 @@ INT8 の重み行列は常駐しない。
   （`N=512 / 1024`, `K >= 1024`）は専用タイルを選ぶ。
 - **workspace**: xrot / dense / accum / rowsum の領域は、EXL3 linear を実際に実行する program に
   対してだけ execution workspace から切り出す（`program_needs_exl3_workspace`）。
-  xrot 領域に int8 codes / scales（A 経路ではさらに flagged 行の slot / codes / scales）、
-  accum 領域に F32 出力（A 経路では int32 累積器 + flagged 行 F32 出力）を配置し、入らない行数は
+  xrot 領域に int8 codes / scales と flagged 行の slot / codes / scales、
+  accum 領域に int32 累積器と flagged 行の F32 出力を配置し、入らない行数は
   chunk 分割で実行する。EXL3 重みを持たない model では確保せず、arena の残りを KV pool へ回す
   （executor footprint の見積もりは `qwen35_executor_reserve_bytes` の `exl3_linear_workspace` 引数で制御）。
 

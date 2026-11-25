@@ -21,7 +21,7 @@ gfx1201 の EXL3-INT8（mul24）は、256 行以上の prefill を次の 1 経�
 
 出力が BF16 でない場合と PLaMo 3 は、同じ GEMM の int32 出力と既存の `rotate_out_i32` を使う。decode と verify は 256 行未満として融合 decode 経路を使う。
 
-prefill の chunk 境界や prefix cache の有無によって、同じ入力の出力が bit 単位で変わる場合がある。通常生成と DFlash2 の出力不一致は B 経路でも観測されている。BF16 比の精度と測定条件は [EXL3-INT8 prefill の品質](../perf/exl3-int8-prefill-quality.md)、関連する環境変数の一覧は [env_vars.md](env_vars.md#3-exl3--exl3-int8mul24経路制御) を参照。
+prefill の chunk 境界や prefix cache の有無によって、同じ入力の出力が bit 単位で変わる場合がある。通常生成と DFlash2 の出力不一致は以前の prefill 経路でも観測されている。BF16 比の精度と測定条件は [EXL3-INT8 prefill の品質](../perf/exl3-int8-prefill-quality.md)、関連する環境変数の一覧は [env_vars.md](env_vars.md#3-exl3--exl3-int8mul24経路制御) を参照。
 
 ## options
 

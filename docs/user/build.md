@@ -78,7 +78,7 @@ Qwen3.5 系の DFlash2 target は条件を満たす単一要求で greedy・samp
 Shelf 本体は Clang + libc++ でビルドするが、ROCm の C++ ライブラリ（`libhipblaslt` / `libtensilelite-host.so.1`）は実行時に `libstdc++.so.6` に依存する。`libc++abi.so` が `libstdc++.so.6` より先に RTTI シンボルを束縛すると、hipBLASLt 初期化時に ABI 不一致が発生する。
 
 - **ROCm 10 以降（ROCm 10.2 等）**: `cmake/options.cmake` が ROCm のメジャーバージョンを自動検出し、`SHELF_LOAD_LIBSTDCXX_FIRST=ON` を既定値として `libstdc++.so.6` を `libc++abi.so` より先に直接リンクする。
-- **既存の CMake cache を使い回した場合**: cache に古い `SHELF_LOAD_LIBSTDCXX_FIRST=OFF` が残っていると、起動時に stderr へ次のようなメッセージが出て hipBLASLt 経路（EXL3-INT8 prefill の A 経路等）が初期化エラーになる。
+- **既存の CMake cache を使い回した場合**: cache に古い `SHELF_LOAD_LIBSTDCXX_FIRST=OFF` が残っていると、起動時に stderr へ次のようなメッセージが出て hipBLASLt 経路（BF16 GEMM 等）が初期化エラーになる。
   ```text
   shelf: hipBLASLt C++ ABI 検査に失敗: ... libstdc++ を libc++abi より先に読み込んでください
   ```

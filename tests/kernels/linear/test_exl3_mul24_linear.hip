@@ -1,7 +1,6 @@
 #include <shelf/kernels/fused/exl3/rotate_out.h>
 #include <shelf/kernels/fused/exl3/rotate_quantize.h>
 #include <shelf/kernels/fused/exl3/row_prepare.h>
-#include <shelf/inference/execution/exl3_dense_gemm.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
 #include <shelf/quantization/exl3/exl3_int8.h>
 #include <shelf/core/memory/types.h>
@@ -238,162 +237,166 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits, uint32_t see
         HIP_OK(shelf::kernel::launch_exl3_mul24_rowscale_fused(
             d_codes.p, d_scales.p, d_rs.p, d_slots.p, d_count.p, d_codes_f.p, d_scales_f.p,
             rows, cap, k, code_stride, scale_stride_bytes, 0.5f, nullptr));
-        const hipError_t ge = shelf::execution::exl3_dense_gemm_int8(rows, n, k, d_dense.p, d_codes.p, d_acc.p, nullptr);
-        if (ge == hipErrorNotSupported) {
-            std::printf("  dense int8 GEMM: no hipBLASLt algorithm for this shape, skipped\n");
-        } else {
-            HIP_OK(ge);
-            HIP_OK(shelf::execution::exl3_dense_gemm_int8(rows, n, k, d_dense.p, d_codes.p, d_acc.p, nullptr));
-            // The production tile (preshuffled 64-K weight plane) must reproduce the reference int32
-            // accumulator exactly, and its fused epilogue must reproduce rotate_out_i32 + the flagged fixup.
-            // The tile needs n % 256 and k % 64; the fused form is compared where the reference rotate-out
-            // takes its float4 form (rows >= kRotateOutF4MinRows), i.e. the same epilogue.
-            const bool super64_ok = (n % 256u) == 0u && (k % 64u) == 0u;
-            const bool fused_cmp = super64_ok && rows >= 512u;
-            if (super64_ok) {
-                HIP_OK(shelf::kernel::launch_exl3_mul24_recon_super64(d_trellis.p, bits, d_dense_s.p, n, k,
-                                                                     nullptr));
-                HIP_OK(shelf::kernel::launch_exl3_mul24_prefill_super64(
-                    d_codes.p, d_dense_s.p, d_acc_s.p, rows, n, k, nullptr));
+        HIP_OK(hipDeviceSynchronize());
+        // The reference int32 accumulator is the CPU integer math on the re-rounded codes and the
+        // decoded weight plane.
+        std::vector<int8_t> dense(static_cast<size_t>(n) * k), codes2(codes.size());
+        std::vector<int32_t> acc_ref(static_cast<size_t>(rows) * n, 0), slots(rows);
+        std::vector<float> rs(rows), y2(static_cast<size_t>(rows) * n);
+        uint32_t count = 0;
+        HIP_OK(hipMemcpy(dense.data(), d_dense.p, dense.size(), hipMemcpyDeviceToHost));
+        HIP_OK(hipMemcpy(codes2.data(), d_codes.p, codes2.size(), hipMemcpyDeviceToHost));
+        HIP_OK(hipMemcpy(rs.data(), d_rs.p, rs.size() * 4, hipMemcpyDeviceToHost));
+        HIP_OK(hipMemcpy(slots.data(), d_slots.p, slots.size() * 4, hipMemcpyDeviceToHost));
+        HIP_OK(hipMemcpy(&count, d_count.p, 4, hipMemcpyDeviceToHost));
+        const size_t recon_bad = (dense == q) ? 0 : 1;
+        size_t code_bad = 0, slot_bad = 0;
+        std::vector<int8_t> codes_f(static_cast<size_t>(cap) * code_stride);
+        std::vector<float> scales_f(static_cast<size_t>(cap) * scale_stride_bytes / 4u);
+        HIP_OK(hipMemcpy(codes_f.data(), d_codes_f.p, codes_f.size(), hipMemcpyDeviceToHost));
+        HIP_OK(hipMemcpy(scales_f.data(), d_scales_f.p, scales_f.size() * 4u, hipMemcpyDeviceToHost));
+        auto row_peak = [&](uint32_t m, float& peak, float& sq) {
+            peak = 0.0f;
+            sq = 0.0f;
+            for (uint32_t g = 0; g < groups; ++g) {
+                const float sg = scales[static_cast<size_t>(m) * scale_stride_bytes / 4u + g];
+                peak = std::max(peak, sg);
+                sq += sg * sg;
             }
-            HIP_OK(shelf::kernel::launch_exl3_mul24_gemm(d_codes_f.p, d_scales_f.p, code_stride, scale_stride_bytes,
-                                                       d_trellis.p, bits, d_y2.p, cap, n, k, 1u, nullptr, d_count.p));
-            HIP_OK(shelf::kernel::launch_exl3_mul24_rotate_out_i32(
-                d_acc.p, d_rs.p, d_slots.p, d_y2.p, d_svh.p, d_out2.p, shelf::kernel::Exl3OutputDType::F32, rows, n, n,
-                nullptr));
-            if (fused_cmp) {
-                HIP_OK(shelf::kernel::launch_exl3_mul24_rotate_out_i32(
-                    d_acc.p, d_rs.p, d_slots.p, d_y2.p, d_svh.p, d_out_bf_ref.p,
-                    shelf::kernel::Exl3OutputDType::BF16, rows, n, n, nullptr));
-                HIP_OK(shelf::kernel::launch_exl3_mul24_prefill_super64_fused(
-                    d_codes.p, d_dense_s.p, d_rs.p, d_slots.p, d_svh.p, d_out_bf.p, n, rows, n, k, nullptr));
-                HIP_OK(shelf::kernel::launch_exl3_mul24_rotate_out_i32_flagged(
-                    d_rs.p, d_slots.p, d_y2.p, d_svh.p, d_out_bf.p, rows, n, n, nullptr));
-            }
-            HIP_OK(hipDeviceSynchronize());
-            std::vector<int8_t> dense(static_cast<size_t>(n) * k), codes2(codes.size());
-            std::vector<int32_t> acc(static_cast<size_t>(rows) * n), slots(rows);
-            std::vector<float> rs(rows), out2(static_cast<size_t>(rows) * n);
-            uint32_t count = 0;
-            HIP_OK(hipMemcpy(dense.data(), d_dense.p, dense.size(), hipMemcpyDeviceToHost));
-            HIP_OK(hipMemcpy(codes2.data(), d_codes.p, codes2.size(), hipMemcpyDeviceToHost));
-            HIP_OK(hipMemcpy(acc.data(), d_acc.p, acc.size() * 4, hipMemcpyDeviceToHost));
-            HIP_OK(hipMemcpy(rs.data(), d_rs.p, rs.size() * 4, hipMemcpyDeviceToHost));
-            HIP_OK(hipMemcpy(slots.data(), d_slots.p, slots.size() * 4, hipMemcpyDeviceToHost));
-            HIP_OK(hipMemcpy(&count, d_count.p, 4, hipMemcpyDeviceToHost));
-            HIP_OK(hipMemcpy(out2.data(), d_out2.p, out2.size() * 4, hipMemcpyDeviceToHost));
-            size_t recon_bad = (dense == q) ? 0 : 1, code_bad = 0, acc_bad = 0, slot_bad = 0, flagged_bad = 0;
-            size_t acc_super_bad = 0, fused_bad = 0;
-            if (super64_ok) {
-                std::vector<int32_t> acc_s(static_cast<size_t>(rows) * n);
-                HIP_OK(hipMemcpy(acc_s.data(), d_acc_s.p, acc_s.size() * 4, hipMemcpyDeviceToHost));
-                for (size_t i = 0; i < acc.size(); ++i)
-                    if (acc[i] != acc_s[i]) ++acc_super_bad;
-            }
-            if (fused_cmp) {
-                std::vector<uint16_t> out_bf(static_cast<size_t>(rows) * n), out_bf_ref(out_bf.size());
-                HIP_OK(hipMemcpy(out_bf.data(), d_out_bf.p, out_bf.size() * 2, hipMemcpyDeviceToHost));
-                HIP_OK(hipMemcpy(out_bf_ref.data(), d_out_bf_ref.p, out_bf_ref.size() * 2, hipMemcpyDeviceToHost));
-                for (size_t i = 0; i < out_bf.size(); ++i)
-                    if (out_bf[i] != out_bf_ref[i]) ++fused_bad;
-            }
-            std::vector<float> y2(static_cast<size_t>(rows) * n);
-            std::vector<int8_t> codes_f(static_cast<size_t>(cap) * code_stride);
-            std::vector<float> scales_f(static_cast<size_t>(cap) * scale_stride_bytes / 4u);
-            HIP_OK(hipMemcpy(codes_f.data(), d_codes_f.p, codes_f.size(), hipMemcpyDeviceToHost));
-            HIP_OK(hipMemcpy(scales_f.data(), d_scales_f.p, scales_f.size() * 4u, hipMemcpyDeviceToHost));
-            auto row_peak = [&](uint32_t m, float& peak, float& sq) {
-                peak = 0.0f;
-                sq = 0.0f;
-                for (uint32_t g = 0; g < groups; ++g) {
-                    const float sg = scales[static_cast<size_t>(m) * scale_stride_bytes / 4u + g];
-                    peak = std::max(peak, sg);
-                    sq += sg * sg;
-                }
-            };
-            uint32_t flagged_total = 0;
-            for (uint32_t m = 0; m < rows; ++m) {
-                float peak = 0.0f, sq = 0.0f;
-                row_peak(m, peak, sq);
-                if (rs[m] != peak) ++code_bad;
-                if (peak > 0.0f && peak * peak > 0.5f * sq) ++flagged_total;
-            }
-            const uint32_t want_count = std::min(flagged_total, cap);
-            if (count != want_count) ++slot_bad;
-            std::vector<uint8_t> seen(want_count, 0u);
-            for (uint32_t m = 0; m < rows; ++m) {
-                float peak = 0.0f, sq = 0.0f;
-                row_peak(m, peak, sq);
-                const bool want_flag = peak > 0.0f && peak * peak > 0.5f * sq;
-                const int32_t slot = slots[m];
-                if (slot >= 0) {
-                    if (!want_flag || static_cast<uint32_t>(slot) >= want_count || seen[slot]) {
-                        ++slot_bad;
-                    } else {
-                        seen[slot] = 1u;
-                        if (std::memcmp(codes_f.data() + static_cast<size_t>(slot) * code_stride,
-                                        codes.data() + static_cast<size_t>(m) * code_stride, k) != 0)
-                            ++code_bad;
-                        if (std::memcmp(scales_f.data() +
-                                            static_cast<size_t>(slot) * scale_stride_bytes / 4u,
-                                        scales.data() +
-                                            static_cast<size_t>(m) * scale_stride_bytes / 4u,
-                                        static_cast<size_t>(groups) * 4u) != 0)
-                            ++code_bad;
-                    }
-                    // Flagged: the same fused kernel as the per-group path (split-K changes only the float summation order).
-                    float row_max = 0.0f;
-                    for (uint32_t nn = 0; nn < n; ++nn) row_max = std::max(row_max, std::fabs(out[static_cast<size_t>(m) * n + nn]));
-                    for (uint32_t nn = 0; nn < n; ++nn)
-                        if (std::fabs(out2[static_cast<size_t>(m) * n + nn] - out[static_cast<size_t>(m) * n + nn]) > 1e-4f * row_max) ++flagged_bad;
-                    continue;
-                }
-                if (want_flag && count < cap) ++slot_bad;
-                if (!want_flag && slot != -1) ++slot_bad;
-                for (uint32_t i = 0; i < k; ++i) {
-                    const int8_t c0 = codes[static_cast<size_t>(m) * code_stride + i];
-                    int8_t want = c0;
-                    if (peak > 0.0f) {
-                        const float ratio = scales[static_cast<size_t>(m) * scale_stride_bytes / 4u + i / 128u] / peak;
-                        if (ratio != 1.0f) want = static_cast<int8_t>(static_cast<int>(std::nearbyintf(static_cast<float>(c0) * ratio)));
-                    }
-                    // GPU codes were re-rounded in place; the reference must match them.
-                    if (codes2[static_cast<size_t>(m) * code_stride + i] != want) ++code_bad;
-                }
-                for (uint32_t nn = 0; nn < n; ++nn) {
-                    int32_t a = 0;
-                    for (uint32_t i = 0; i < k; ++i)
-                        a += static_cast<int32_t>(codes2[static_cast<size_t>(m) * code_stride + i]) * q[static_cast<size_t>(nn) * k + i];
-                    if (a != acc[static_cast<size_t>(m) * n + nn]) ++acc_bad;
-                    y2[static_cast<size_t>(m) * n + nn] = static_cast<float>(a) * rs[m] * shelf::quantization::exl3::kExl3Int8GridStep;
-                }
-            }
-            for (uint32_t s = 0; s < want_count; ++s)
-                if (!seen[s]) ++slot_bad;
-            double d2 = 0.0, r2 = 0.0, g2 = 0.0, gn = 0.0;
-            for (uint32_t m = 0; m < rows; ++m) {
-                for (uint32_t b = 0; b < n / 128u; ++b) {
-                    float v[128];
-                    for (int t = 0; t < 128; ++t) v[t] = y2[static_cast<size_t>(m) * n + b * 128 + t];
-                    fwht128_f32(v);
-                    for (int t = 0; t < 128; ++t) {
-                        const size_t idx = static_cast<size_t>(m) * n + b * 128 + t;
-                        g2 += (out[idx] - out2[idx]) * static_cast<double>(out[idx] - out2[idx]);
-                        gn += static_cast<double>(out[idx]) * out[idx];
-                        if (slots[m] >= 0) continue;
-                        const float ref = v[t] * kInvSqrt128 * svh[b * 128 + t];
-                        d2 += (ref - out2[idx]) * static_cast<double>(ref - out2[idx]);
-                        r2 += static_cast<double>(ref) * ref;
-                    }
-                }
-            }
-            const double out_rel = std::sqrt(d2 / std::max(1e-30, r2));
-            const double vs_group = std::sqrt(g2 / std::max(1e-30, gn));
-            dense_pass = recon_bad == 0 && code_bad == 0 && acc_bad == 0 && slot_bad == 0 && flagged_bad == 0 &&
-                         acc_super_bad == 0 && fused_bad == 0 && out_rel < 1e-5 && vs_group < 0.05;
-            std::printf("  dense: recon_bad=%zu code_bad=%zu acc_bad=%zu acc_super_bad=%zu fused_bad=%zu slot_bad=%zu flagged_bad=%zu flagged_rows=%u out_rel=%.3g vs_group_rel_l2=%.4f %s\n",
-                        recon_bad, code_bad, acc_bad, acc_super_bad, fused_bad, slot_bad, flagged_bad, count, out_rel, vs_group, dense_pass ? "PASS" : "FAIL");
+        };
+        uint32_t flagged_total = 0;
+        for (uint32_t m = 0; m < rows; ++m) {
+            float peak = 0.0f, sq = 0.0f;
+            row_peak(m, peak, sq);
+            if (rs[m] != peak) ++code_bad;
+            if (peak > 0.0f && peak * peak > 0.5f * sq) ++flagged_total;
         }
+        const uint32_t want_count = std::min(flagged_total, cap);
+        if (count != want_count) ++slot_bad;
+        std::vector<uint8_t> seen(want_count, 0u);
+        auto cpu_row = [&](uint32_t m) {
+            for (uint32_t nn = 0; nn < n; ++nn) {
+                int32_t a = 0;
+                for (uint32_t i = 0; i < k; ++i)
+                    a += static_cast<int32_t>(codes2[static_cast<size_t>(m) * code_stride + i]) *
+                         q[static_cast<size_t>(nn) * k + i];
+                acc_ref[static_cast<size_t>(m) * n + nn] = a;
+                y2[static_cast<size_t>(m) * n + nn] =
+                    static_cast<float>(a) * rs[m] * shelf::quantization::exl3::kExl3Int8GridStep;
+            }
+        };
+        for (uint32_t m = 0; m < rows; ++m) {
+            float peak = 0.0f, sq = 0.0f;
+            row_peak(m, peak, sq);
+            const bool want_flag = peak > 0.0f && peak * peak > 0.5f * sq;
+            const int32_t slot = slots[m];
+            if (slot >= 0) {
+                if (!want_flag || static_cast<uint32_t>(slot) >= want_count || seen[slot]) {
+                    ++slot_bad;
+                } else {
+                    seen[slot] = 1u;
+                    if (std::memcmp(codes_f.data() + static_cast<size_t>(slot) * code_stride,
+                                    codes.data() + static_cast<size_t>(m) * code_stride, k) != 0)
+                        ++code_bad;
+                    if (std::memcmp(scales_f.data() +
+                                        static_cast<size_t>(slot) * scale_stride_bytes / 4u,
+                                    scales.data() +
+                                        static_cast<size_t>(m) * scale_stride_bytes / 4u,
+                                    static_cast<size_t>(groups) * 4u) != 0)
+                        ++code_bad;
+                }
+                cpu_row(m);
+                continue;
+            }
+            if (want_flag && count < cap) ++slot_bad;
+            if (!want_flag && slot != -1) ++slot_bad;
+            for (uint32_t i = 0; i < k; ++i) {
+                const int8_t c0 = codes[static_cast<size_t>(m) * code_stride + i];
+                int8_t want = c0;
+                if (peak > 0.0f) {
+                    const float ratio = scales[static_cast<size_t>(m) * scale_stride_bytes / 4u + i / 128u] / peak;
+                    if (ratio != 1.0f) want = static_cast<int8_t>(static_cast<int>(std::nearbyintf(static_cast<float>(c0) * ratio)));
+                }
+                // GPU codes were re-rounded in place; the reference must match them.
+                if (codes2[static_cast<size_t>(m) * code_stride + i] != want) ++code_bad;
+            }
+            cpu_row(m);
+        }
+        for (uint32_t s = 0; s < want_count; ++s)
+            if (!seen[s]) ++slot_bad;
+        HIP_OK(hipMemcpy(d_acc.p, acc_ref.data(), acc_ref.size() * 4u, hipMemcpyHostToDevice));
+        // The production tile (preshuffled 64-K weight plane) must reproduce the reference int32
+        // accumulator exactly, and its fused epilogue must reproduce rotate_out_i32 + the flagged fixup.
+        // The tile needs n % 256 and k % 64; the fused form is compared where the reference rotate-out
+        // takes its float4 form (rows >= kRotateOutF4MinRows), i.e. the same epilogue.
+        const bool super64_ok = (n % 256u) == 0u && (k % 64u) == 0u;
+        const bool fused_cmp = super64_ok && rows >= 512u;
+        if (super64_ok) {
+            HIP_OK(shelf::kernel::launch_exl3_mul24_recon_super64(d_trellis.p, bits, d_dense_s.p, n, k, nullptr));
+            HIP_OK(shelf::kernel::launch_exl3_mul24_prefill_super64(
+                d_codes.p, d_dense_s.p, d_acc_s.p, rows, n, k, nullptr));
+        }
+        HIP_OK(shelf::kernel::launch_exl3_mul24_gemm(d_codes_f.p, d_scales_f.p, code_stride, scale_stride_bytes,
+                                                   d_trellis.p, bits, d_y2.p, cap, n, k, 1u, nullptr, d_count.p));
+        HIP_OK(shelf::kernel::launch_exl3_mul24_rotate_out_i32(
+            d_acc.p, d_rs.p, d_slots.p, d_y2.p, d_svh.p, d_out2.p, shelf::kernel::Exl3OutputDType::F32, rows, n, n,
+            nullptr));
+        if (fused_cmp) {
+            HIP_OK(shelf::kernel::launch_exl3_mul24_rotate_out_i32(
+                d_acc.p, d_rs.p, d_slots.p, d_y2.p, d_svh.p, d_out_bf_ref.p,
+                shelf::kernel::Exl3OutputDType::BF16, rows, n, n, nullptr));
+            HIP_OK(shelf::kernel::launch_exl3_mul24_prefill_super64_fused(
+                d_codes.p, d_dense_s.p, d_rs.p, d_slots.p, d_svh.p, d_out_bf.p, n, rows, n, k, nullptr));
+            HIP_OK(shelf::kernel::launch_exl3_mul24_rotate_out_i32_flagged(
+                d_rs.p, d_slots.p, d_y2.p, d_svh.p, d_out_bf.p, rows, n, n, nullptr));
+        }
+        HIP_OK(hipDeviceSynchronize());
+        std::vector<float> out2(static_cast<size_t>(rows) * n);
+        HIP_OK(hipMemcpy(out2.data(), d_out2.p, out2.size() * 4, hipMemcpyDeviceToHost));
+        size_t acc_super_bad = 0, fused_bad = 0, flagged_bad = 0;
+        if (super64_ok) {
+            std::vector<int32_t> acc_s(static_cast<size_t>(rows) * n);
+            HIP_OK(hipMemcpy(acc_s.data(), d_acc_s.p, acc_s.size() * 4, hipMemcpyDeviceToHost));
+            for (size_t i = 0; i < acc_ref.size(); ++i)
+                if (acc_ref[i] != acc_s[i]) ++acc_super_bad;
+        }
+        if (fused_cmp) {
+            std::vector<uint16_t> out_bf(static_cast<size_t>(rows) * n), out_bf_ref(out_bf.size());
+            HIP_OK(hipMemcpy(out_bf.data(), d_out_bf.p, out_bf.size() * 2, hipMemcpyDeviceToHost));
+            HIP_OK(hipMemcpy(out_bf_ref.data(), d_out_bf_ref.p, out_bf_ref.size() * 2, hipMemcpyDeviceToHost));
+            for (size_t i = 0; i < out_bf.size(); ++i)
+                if (out_bf[i] != out_bf_ref[i]) ++fused_bad;
+        }
+        for (uint32_t m = 0; m < rows; ++m) {
+            if (slots[m] < 0) continue;
+            float row_max = 0.0f;
+            for (uint32_t nn = 0; nn < n; ++nn) row_max = std::max(row_max, std::fabs(out[static_cast<size_t>(m) * n + nn]));
+            for (uint32_t nn = 0; nn < n; ++nn)
+                if (std::fabs(out2[static_cast<size_t>(m) * n + nn] - out[static_cast<size_t>(m) * n + nn]) > 1e-4f * row_max) ++flagged_bad;
+        }
+        double d2 = 0.0, r2 = 0.0, g2 = 0.0, gn = 0.0;
+        for (uint32_t m = 0; m < rows; ++m) {
+            for (uint32_t b = 0; b < n / 128u; ++b) {
+                float v[128];
+                for (int t = 0; t < 128; ++t) v[t] = y2[static_cast<size_t>(m) * n + b * 128 + t];
+                fwht128_f32(v);
+                for (int t = 0; t < 128; ++t) {
+                    const size_t idx = static_cast<size_t>(m) * n + b * 128 + t;
+                    g2 += (out[idx] - out2[idx]) * static_cast<double>(out[idx] - out2[idx]);
+                    gn += static_cast<double>(out[idx]) * out[idx];
+                    if (slots[m] >= 0) continue;
+                    const float ref = v[t] * kInvSqrt128 * svh[b * 128 + t];
+                    d2 += (ref - out2[idx]) * static_cast<double>(ref - out2[idx]);
+                    r2 += static_cast<double>(ref) * ref;
+                }
+            }
+        }
+        const double out_rel = std::sqrt(d2 / std::max(1e-30, r2));
+        const double vs_group = std::sqrt(g2 / std::max(1e-30, gn));
+        dense_pass = recon_bad == 0 && code_bad == 0 && slot_bad == 0 && flagged_bad == 0 &&
+                     acc_super_bad == 0 && fused_bad == 0 && out_rel < 1e-5 && vs_group < 0.05;
+        std::printf("  dense: recon_bad=%zu code_bad=%zu acc_super_bad=%zu fused_bad=%zu slot_bad=%zu flagged_bad=%zu flagged_rows=%u out_rel=%.3g vs_group_rel_l2=%.4f %s\n",
+                    recon_bad, code_bad, acc_super_bad, fused_bad, slot_bad, flagged_bad, count, out_rel, vs_group, dense_pass ? "PASS" : "FAIL");
     }
 
     const bool ok = dense_pass && code_mismatch == 0 && worst_scale == 0.0 && worst_y < 1e-5 && worst_out < 1e-5 && worst_ideal < 0.02;

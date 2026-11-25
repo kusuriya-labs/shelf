@@ -79,10 +79,8 @@ hipError_t launch_exl3_mul24_recon(
 hipError_t launch_exl3_mul24_recon_super64(const uint16_t* trellis, uint32_t bits, int8_t* dense,
                                           uint32_t n, uint32_t k, hipStream_t stream);
 
-// Prefill dense INT8 GEMM with the same int32 accumulator contract as
-// exl3_dense_gemm_int8 (rowscale path): C_int32[rows][n] = codes[rows][k] *
-// weights[n][k]^T, weights in the super64 plane. n must be a multiple of 256 and
-// k of 64.
+// Prefill dense INT8 GEMM: C_int32[rows][n] = codes[rows][k] * weights[n][k]^T,
+// weights in the super64 plane. n must be a multiple of 256 and k of 64.
 hipError_t launch_exl3_mul24_prefill_super64(
     const int8_t* codes, const int8_t* weights_super64, int32_t* yprime,
     uint32_t rows, uint32_t n, uint32_t k, hipStream_t stream);

@@ -5,7 +5,6 @@
 #include <shelf/kernels/fused/exl3/rotate_out.h>
 #include <shelf/kernels/fused/exl3/rotate_quantize.h>
 #include <shelf/core/memory/types.h>
-#include <shelf/inference/execution/exl3_dense_gemm.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
 #include <shelf/quantization/exl3/exl3_int8.h>
 #include <shelf/weights/canonical_partition.h>
@@ -39,8 +38,8 @@ struct Dev {
 };
 
 // One INT8 linear of the shape [rows][k] x [n][k]^T through either the per-group path (decode) or the dense path
-// (prefill: row scale, flagged rows on the fused kernel, hipBLASLt int32 GEMM). `canon` is the trellis in the
-// canonical [kt][nt][16*bits] order. Returns false when the shape has no hipBLASLt int8 algorithm (dense only).
+// (prefill: row scale, flagged rows on the fused kernel, super64 int32 GEMM). `canon` is the trellis in the
+// canonical [kt][nt][16*bits] order.
 bool run_linear(bool dense, const std::vector<uint16_t>& canon, uint32_t bits, const std::vector<uint16_t>& suh_h,
                 const std::vector<uint16_t>& svh_h, const std::vector<uint16_t>& x, uint32_t rows, uint32_t n,
                 uint32_t k, std::vector<float>& out, bool& unsupported) {
@@ -76,16 +75,12 @@ bool run_linear(bool dense, const std::vector<uint16_t>& canon, uint32_t bits, c
         Dev<float> d_rs(rows), d_scales_f(static_cast<size_t>(cap) * scale_stride_bytes / 4u), d_y2(static_cast<size_t>(cap) * n);
         Dev<int32_t> d_slots(rows), d_acc(static_cast<size_t>(rows) * n);
         Dev<uint32_t> d_count(1);
-        HIP_OK(shelf::kernel::launch_exl3_mul24_recon(d_trellis.p, bits, d_dense.p, n, k, nullptr));
+        HIP_OK(shelf::kernel::launch_exl3_mul24_recon_super64(d_trellis.p, bits, d_dense.p, n, k, nullptr));
         HIP_OK(shelf::kernel::launch_exl3_mul24_rowscale(d_codes.p, d_scales.p, d_rs.p, d_slots.p, d_count.p,
                                                         d_codes_f.p, d_scales_f.p, rows, cap, k, code_stride,
                                                         scale_stride_bytes, 0.5f, nullptr));
-        const hipError_t ge = shelf::execution::exl3_dense_gemm_int8(rows, n, k, d_dense.p, d_codes.p, d_acc.p, nullptr);
-        if (ge == hipErrorNotSupported) {
-            unsupported = true;
-            return true;
-        }
-        HIP_OK(ge);
+        HIP_OK(shelf::kernel::launch_exl3_mul24_prefill_super64(d_codes.p, d_dense.p, d_acc.p, rows, n, k,
+                                                                nullptr));
         HIP_OK(shelf::kernel::launch_exl3_mul24_gemm(d_codes_f.p, d_scales_f.p, code_stride, scale_stride_bytes,
                                                    d_trellis.p, bits, d_y2.p, cap, n, k, 1u, nullptr, d_count.p));
         HIP_OK(shelf::kernel::launch_exl3_mul24_rotate_out_i32(d_acc.p, d_rs.p, d_slots.p, d_y2.p, d_svh.p, d_out.p,
@@ -228,8 +223,10 @@ int main() {
     bool ok = true;
     for (bool dense : {false, true})
         for (uint32_t tp : {2u, 4u}) {
-            ok &= run_case(dense, 0, tp, 300, 512, 1024, 4, 11u + tp);
-            ok &= run_case(dense, 1, tp, 300, 512, 1024, 4, 21u + tp);
+            // The dense path needs the rank-local n % 256 == 0; n=512 with tp=4 is 128.
+            const uint32_t small_n = dense ? 1024u : 512u;
+            ok &= run_case(dense, 0, tp, 300, small_n, 1024, 4, 11u + tp);
+            ok &= run_case(dense, 1, tp, 300, small_n, 1024, 4, 21u + tp);
         }
     // Shapes of the real model: 5120 -> 17408 (gate/up, n split) and 17408 -> 5120 (down, k split).
     ok &= run_case(true, 0, 4, 300, 17408, 5120, 4, 31u);

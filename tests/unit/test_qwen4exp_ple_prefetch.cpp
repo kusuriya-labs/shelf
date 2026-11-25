@@ -71,12 +71,12 @@ std::vector<bf16_t> baseline_prepare(const std::shared_ptr<const PleTable>& tabl
         seq.position = offset;
         ScheduledRequest req;
         req.sequence = &seq;
-        req.token_begin = offset;
+        req.token_begin = 0;
         req.num_tokens = n;
         req.prefix_tokens = offset;
         std::vector<ScheduledRequest> reqs = {req};
         ScheduledBatch batch;
-        batch.token_ids = tokens.data();
+        batch.token_ids = tokens.data() + offset;
         batch.token_ids_location = TokenIdsLocation::Host;
         batch.requests = reqs;
         batch.num_tokens = n;

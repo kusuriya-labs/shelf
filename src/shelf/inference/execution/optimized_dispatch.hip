@@ -30,7 +30,6 @@
 #include <shelf/kernels/fused/exl3/producer_rotate.h>
 #include <shelf/kernels/fused/exl3/producer_rotate_rows.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
-#include <shelf/inference/execution/exl3_dense_gemm.h>
 #include <shelf/inference/execution/gemm_lt.h>
 #include <shelf/inference/execution/kv_append_dispatch.h>
 #include <shelf/inference/execution/paged_attention_dispatch.h>

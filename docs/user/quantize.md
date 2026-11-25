@@ -79,14 +79,11 @@ python tools/quantize/shelf_quantize.py quality \
 Qwen3.8-27B 向けに保存済みの BF16 基準 logits（`cases-v1` の主 8 case・2,632 位置）と突き合わせる場合は `tools/quality/kld-vs-bf16.sh` を使う。このラッパは `/tmp/r9700.lock` を取得して GPU を排他する（すでにロックを取得した環境内では `--already-locked` を付ける）。
 
 ```bash
-# 既定の A 経路（hipBLASLt INT8 prefill）を測定
-./tools/quality/kld-vs-bf16.sh A --bench ./build/shelf-bench --model /path/to/model
-
-# B 経路（自前 WMMA prefill）を測定
-./tools/quality/kld-vs-bf16.sh B --bench ./build/shelf-bench --model /path/to/model
+# 現行の prefill 経路で測定する（構成名は JSON のラベルになる）
+./tools/quality/kld-vs-bf16.sh prefill --bench ./build/shelf-bench --model /path/to/model
 
 # 2 つの測定 JSON を位置単位で対応比較（case bootstrap 付き）
-python3 tools/quality/paired_kld.py docs/perf/quality-bf16/B.json docs/perf/quality-bf16/A.json
+python3 tools/quality/paired_kld.py docs/perf/quality-bf16/<A>.json docs/perf/quality-bf16/<B>.json
 ```
 
 ### KLD と top-1 一致率の見方
