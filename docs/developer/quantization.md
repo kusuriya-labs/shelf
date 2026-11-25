@@ -366,11 +366,11 @@ INT8 の重み行列は常駐しない。
   tile で LDS に段取りする。
 - **Projection group 統合（`try_launch_exl3_projection`）**。BF16 入出力で、同じ入力 slot を持つ
   連続した `LINEAR_EXL3_INT8` を最大 3 個まとめる。bit 幅が同一の場合は 4-bit を 64 行以下、
-  3-bit を HIP Graph の capture 中かつ 16 行以下で適用する。3/4-bit が混在する場合は、producer 融合が
-  なく prefill request がない 16 行以下の decode で、1 回の GEMM のワークグループごとに 3-bit / 4-bit を
-  選ぶ。入力回転・量子化、GEMM、出力回転をそれぞれ 1 回起動し、符号ベクトルと scale は projection ごとに
-  扱う。workspace 不足、入出力の重なり、出力列の部分書き込み、debug override、A 経路 prefill 対象時は
-  個別に実行する。
+  3-bit を 16 行以下で適用する（HIP Graph の capture 中に限らない）。3/4-bit が混在する場合は、
+  producer 融合がなく prefill request がない 16 行以下の decode で、1 回の GEMM のワークグループごとに
+  3-bit / 4-bit を選ぶ。入力回転・量子化、GEMM、出力回転をそれぞれ 1 回起動し、符号ベクトルと scale は
+  projection ごとに扱う。workspace 不足、入出力の重なり、出力列の部分書き込み、debug override、
+  A 経路 prefill 対象時は個別に実行する。
 - **Decode 融合（`src/shelf/kernels/fused/exl3/`）**: `num_prefill_requests == 0` かつ `rows <= 16` の
   条件を満たす箇所で、前段演算と入力回転・量子化（または後段の `rotate_out` と残差加算・正規化）を
   1 launch にまとめる。対象は `SWIGLU` → `down_proj`、`SIGMOID + MUL` → `o_proj`、GDN gated norm →

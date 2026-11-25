@@ -1017,7 +1017,7 @@ Result<OptimizedLaunchResult> try_launch_exl3_projection(
     const bool is_plamo = weight.plamo_exl3_linear;
     static const bool generic_enabled = std::getenv("SHELF_EXL3_INT8_ROTATE_F4") == nullptr &&
         std::getenv("SHELF_OP_DUMP") == nullptr && std::getenv("SHELF_OP_SYNC") == nullptr;
-    const bool grouped_3bit = weight.exl3_ka == 3u && ctx.capturing_graph;
+    const bool grouped_3bit = weight.exl3_ka == 3u;
     if (!is_plamo && ((!grouped_3bit && weight.exl3_ka != 4u) ||
                       ctx.layer_override_count != 0u || !generic_enabled))
         return miss;

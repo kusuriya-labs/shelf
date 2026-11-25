@@ -2,8 +2,9 @@
 
 ## 結論
 
-現行のサポート対象 checkpoint では、`grouped_3bit` から `ctx.capturing_graph` を外しても
-3-bit dense projection の grouping は発生しなかった。A は採用せず、main の条件を維持する。
+`grouped_3bit` から `ctx.capturing_graph` を外し、eager decode でも 3-bit projection を
+grouping できるようにした。現行のサポート対象 checkpoint ではこの経路は発火しないが、
+3-bit dense projection を持つ将来の checkpoint 向けに採用する。
 
 ## 背景
 
@@ -50,8 +51,14 @@ routed experts は `launch_gemm_exl3_int8_grouped` の MoE 経路であり、
 
 ## 判断
 
-A は現行モデルでは no-op であり、`ctx.capturing_graph` を外す利点がない。graph capture の
-workspace / graph key に触れる risk だけを増やすため、main では条件を維持する。
+現行モデルでは計測上の改善はない。それでも、3-bit dense projection を持つ checkpoint で
+`try_launch_exl3_projection` の同一 bit 幅の grouping を HIP Graph の capture 外でも使える
+ようにするため、A を採用する。
+
+- カーネル側の 3-bit group は `launch_group_bits<3, 1, true>` で既に実装されており、
+  `test_exl3_track1_paths` が 3/4 混在の出力一致を確認している。
+- 現行モデルで発火しないことは、既存経路の回帰がないことを意味する。
+- graph capture の workspace / graph key への影響は、graph 外の eager 経路だけに限定される。
 
 将来、3-bit の dense projection を language model 本体に持つ checkpoint（Hy4 系など）を
-導入するときに、同じ debug counter と c>1 の計測で再評価する。
+導入したときは、同じ debug counter と c>1 の計測で効果を確認する。
