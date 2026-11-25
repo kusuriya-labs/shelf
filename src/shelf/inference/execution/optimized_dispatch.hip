@@ -658,6 +658,19 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
         const char *env = std::getenv("SHELF_PLAMO_EXL3_LINEAR");
         return env == nullptr || std::strcmp(env, "0") != 0;
     }();
+    // Radiance-style prefill tile: preshuffled 64-K weight supertiles with the
+    // hand-written WMMA GEMM instead of hipBLASLt. Opt-in; the fused rotate-out
+    // epilogue is the default variant of it (SHELF_EXL3_INT8_GEMM_FUSE=0 keeps the
+    // plain int32 GEMM for A/B).
+    static const bool super64_enabled = [] {
+        const char* env = std::getenv("SHELF_EXL3_INT8_GEMM");
+        return env != nullptr && std::strcmp(env, "super64") == 0;
+    }();
+    static const bool super64_fuse = [] {
+        const char* env = std::getenv("SHELF_EXL3_INT8_GEMM_FUSE");
+        return env == nullptr || std::strtoul(env, nullptr, 10) != 0ul;
+    }();
+    const bool super64_shape = super64_enabled && (n % 256u) == 0u && (k % 64u) == 0u;
     const bool plamo_prefill = e.plamo_exl3_linear && plamo_enabled &&
                                std::getenv("SHELF_EXL3_INT8_DENSE") == nullptr &&
                                std::getenv("SHELF_EXL3_MUL24_PREFILL_AB") == nullptr;
@@ -665,6 +678,8 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
     uint32_t launches = 0;
     for (uint32_t r0 = 0; r0 < rows; r0 += chunk) {
         const uint32_t n_rows = std::min(chunk, rows - r0);
+        const bool super64 = super64_shape;
+        const bool super64_fused = super64 && super64_fuse && out_bf16;
         const bool use_dense =
             exl3_mul24_use_dense(dense_ok, n_rows, dense_min_rows, ctx.exl3_rowsum_bytes);
         const ::shelf::bf16_t* x = reinterpret_cast<const ::shelf::bf16_t*>(in.ptr) + static_cast<size_t>(r0) * in.row_stride;
@@ -715,15 +730,28 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
             }
             if (herr == hipSuccess) {
                 const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
-                herr = ::shelf::kernel::launch_exl3_mul24_recon(
-                    static_cast<const uint16_t*>(e.codes), e.exl3_ka, dense, n, k, stream);
+                herr = super64
+                    ? ::shelf::kernel::launch_exl3_mul24_recon_super64(
+                          static_cast<const uint16_t*>(e.codes), e.exl3_ka, dense, n, k, stream)
+                    : ::shelf::kernel::launch_exl3_mul24_recon(
+                          static_cast<const uint16_t*>(e.codes), e.exl3_ka, dense, n, k, stream);
                 if (semantic_timing_enabled())
                     semantic_timing_finish(stream, timing, 0xffff0002u,
                                            static_cast<uint32_t>(SemPath::Optimized), 0);
             }
             if (herr == hipSuccess) {
                 const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
-                herr = ::shelf::execution::exl3_dense_gemm_int8(n_rows, n, k, dense, codes, yprime, stream);
+                if (super64_fused)
+                    herr = ::shelf::kernel::launch_exl3_mul24_prefill_super64_fused(
+                        codes, static_cast<const int8_t*>(dense), rowscale + r0, slots + r0, svh,
+                        out_ptr, dst.row_stride, n_rows, n, k, stream);
+                else if (super64)
+                    herr = ::shelf::kernel::launch_exl3_mul24_prefill_super64(
+                        codes, static_cast<const int8_t*>(dense),
+                        reinterpret_cast<int32_t*>(yprime), n_rows, n, k, stream);
+                else
+                    herr = ::shelf::execution::exl3_dense_gemm_int8(n_rows, n, k, dense, codes,
+                                                                    yprime, stream);
                 if (herr == hipErrorNotSupported || herr == hipErrorInitializationError ||
                     herr == hipErrorOutOfMemory) {
                     static std::atomic_flag reported = ATOMIC_FLAG_INIT;
@@ -754,7 +782,11 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
             }
             if (herr == hipSuccess) {
                 const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
-                if (plamo_prefill)
+                if (super64_fused)
+                    herr = ::shelf::kernel::launch_exl3_mul24_rotate_out_i32_flagged(
+                        rowscale + r0, slots + r0, yprime2, svh, out_ptr, n_rows, n,
+                        dst.row_stride, stream);
+                else if (plamo_prefill)
                     herr = ::shelf::kernel::launch_plamo_exl3_rotate_out_i32(
                         static_cast<const int32_t *>(ctx.exl3_accum), rowscale, slots, yprime2, svh,
                         out_ptr, out_bf16, n_rows, n, dst.row_stride, stream);

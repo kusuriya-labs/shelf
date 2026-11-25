@@ -42,7 +42,7 @@ __global__ void __launch_bounds__(kBlock) exl3_mul24_rotate_out_i32_kernel(
 // Same math, float4 form: one CTA per 8 rows, 8 waves, one wave per row. int4 activation load /
 // float4 flagged-row load, H128 and svh inside one wave, one 64-bit output store.
 // Each wave walks the whole output row.
-template <bool BF16>
+template <bool BF16, bool kFlaggedOnly = false>
 __global__ void __launch_bounds__(256) exl3_mul24_rotate_out_i32_f4_kernel(
     const int32_t* __restrict__ acc,
     const float* __restrict__ rowscale,
@@ -57,56 +57,73 @@ __global__ void __launch_bounds__(256) exl3_mul24_rotate_out_i32_f4_kernel(
     if (m >= rows) return;
     const uint32_t lane = threadIdx.x & 31u;
     const int32_t slot = slots[m];
+    if constexpr (kFlaggedOnly) {
+        if (slot < 0) return;
+    }
     const float rs = rowscale[m];
     for (uint32_t cb = 0u; cb < n / kBlock; ++cb) {
         const uint32_t col = cb * kBlock + lane * 4u;
-        float v0, v1, v2, v3;
-        if (slot >= 0) {
-            const float4 y = *reinterpret_cast<const float4*>(yprime2 + static_cast<size_t>(slot) * n + col);
-            v0 = y.x;
-            v1 = y.y;
-            v2 = y.z;
-            v3 = y.w;
-        } else {
-            const int4 a = *reinterpret_cast<const int4*>(acc + static_cast<size_t>(m) * n + col);
-            v0 = (static_cast<float>(a.x) * rs) * ::shelf::quantization::exl3::kExl3Int8GridStep;
-            v1 = (static_cast<float>(a.y) * rs) * ::shelf::quantization::exl3::kExl3Int8GridStep;
-            v2 = (static_cast<float>(a.z) * rs) * ::shelf::quantization::exl3::kExl3Int8GridStep;
-            v3 = (static_cast<float>(a.w) * rs) * ::shelf::quantization::exl3::kExl3Int8GridStep;
-        }
-        exl3_detail::fwht128(v0, v1, v2, v3, lane);
-        v0 = (v0 * kInvSqrt128) * f16_bits_to_f32(svh[col + 0u]);
-        v1 = (v1 * kInvSqrt128) * f16_bits_to_f32(svh[col + 1u]);
-        v2 = (v2 * kInvSqrt128) * f16_bits_to_f32(svh[col + 2u]);
-        v3 = (v3 * kInvSqrt128) * f16_bits_to_f32(svh[col + 3u]);
         const size_t index = static_cast<size_t>(m) * out_row_stride + col;
         if constexpr (BF16) {
             uint2 packed;
-            packed.x = static_cast<uint32_t>(f32_to_bf16_rne_device(v0)) |
-                       (static_cast<uint32_t>(f32_to_bf16_rne_device(v1)) << 16u);
-            packed.y = static_cast<uint32_t>(f32_to_bf16_rne_device(v2)) |
-                       (static_cast<uint32_t>(f32_to_bf16_rne_device(v3)) << 16u);
+            if (slot >= 0) {
+                const float4 y = *reinterpret_cast<const float4*>(yprime2 + static_cast<size_t>(slot) * n + col);
+                packed = exl3_detail::mul24::rotate_f32_block_bf16(y, svh, col, lane);
+            } else {
+                const int4 a = *reinterpret_cast<const int4*>(acc + static_cast<size_t>(m) * n + col);
+                packed = exl3_detail::mul24::rotate_i32_block_bf16(a, rs, svh, col, lane);
+            }
             *reinterpret_cast<uint2*>(reinterpret_cast<::shelf::bf16_t*>(out) + index) = packed;
         } else {
+            float v0, v1, v2, v3;
+            if (slot >= 0) {
+                const float4 y = *reinterpret_cast<const float4*>(yprime2 + static_cast<size_t>(slot) * n + col);
+                v0 = y.x;
+                v1 = y.y;
+                v2 = y.z;
+                v3 = y.w;
+            } else {
+                const int4 a = *reinterpret_cast<const int4*>(acc + static_cast<size_t>(m) * n + col);
+                v0 = (static_cast<float>(a.x) * rs) * ::shelf::quantization::exl3::kExl3Int8GridStep;
+                v1 = (static_cast<float>(a.y) * rs) * ::shelf::quantization::exl3::kExl3Int8GridStep;
+                v2 = (static_cast<float>(a.z) * rs) * ::shelf::quantization::exl3::kExl3Int8GridStep;
+                v3 = (static_cast<float>(a.w) * rs) * ::shelf::quantization::exl3::kExl3Int8GridStep;
+            }
+            exl3_detail::fwht128(v0, v1, v2, v3, lane);
+            v0 = (v0 * kInvSqrt128) * f16_bits_to_f32(svh[col + 0u]);
+            v1 = (v1 * kInvSqrt128) * f16_bits_to_f32(svh[col + 1u]);
+            v2 = (v2 * kInvSqrt128) * f16_bits_to_f32(svh[col + 2u]);
+            v3 = (v3 * kInvSqrt128) * f16_bits_to_f32(svh[col + 3u]);
             *reinterpret_cast<float4*>(reinterpret_cast<float*>(out) + index) = float4{v0, v1, v2, v3};
         }
     }
 }
 }  // namespace
 
-template <bool kF4, bool kBF16>
+template <bool kF4, bool kBF16, bool kFlaggedOnly = false>
 hipError_t launch_rotate_out_i32_impl(const int32_t* acc, const float* rowscale, const int32_t* slots,
                                       const float* yprime2, const uint16_t* svh, void* out, uint32_t rows,
                                       uint32_t n, uint32_t out_row_stride, hipStream_t stream) {
     if constexpr (kF4) {
         const dim3 grid((rows + 7u) / 8u);
-        exl3_mul24_rotate_out_i32_f4_kernel<kBF16>
+        exl3_mul24_rotate_out_i32_f4_kernel<kBF16, kFlaggedOnly>
             <<<grid, 256, 0, stream>>>(acc, rowscale, slots, yprime2, svh, out, n, out_row_stride, rows);
     } else {
         const dim3 grid(rows, n / kBlock);
         exl3_mul24_rotate_out_i32_kernel<kBF16>
             <<<grid, kBlock, 0, stream>>>(acc, rowscale, slots, yprime2, svh, out, n, out_row_stride);
     }
+    return hipGetLastError();
+}
+
+hipError_t launch_exl3_mul24_rotate_out_i32_flagged(
+    const float* rowscale, const int32_t* slots, const float* yprime2, const uint16_t* svh,
+    void* out, uint32_t rows, uint32_t n, uint32_t out_row_stride, hipStream_t stream) {
+    if (rows == 0u) return hipSuccess;
+    if (n == 0u || (n % kBlock) != 0u || (out_row_stride % 4u) != 0u) return hipErrorInvalidValue;
+    const dim3 grid((rows + 7u) / 8u);
+    exl3_mul24_rotate_out_i32_f4_kernel<true, true>
+        <<<grid, 256, 0, stream>>>(nullptr, rowscale, slots, yprime2, svh, out, n, out_row_stride, rows);
     return hipGetLastError();
 }
 

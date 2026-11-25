@@ -5,6 +5,7 @@
 // this header.
 
 #include <shelf/kernels/optimized/linear/exl3_family/fwht.h>
+#include <shelf/quantization/exl3/exl3_int8.h>
 
 #include <shelf/core/memory/types.h>
 
@@ -51,6 +52,45 @@ __device__ __forceinline__ uint16_t f32_to_bf16_rne_device(float f) {
 
 __device__ __forceinline__ float f16_bits_to_f32(uint16_t bits) {
     return static_cast<float>(__builtin_bit_cast(_Float16, bits));
+}
+
+// One wave turns a 128-wide block of the int32 row-scale accumulator into four
+// BF16 pairs: rowscale * S_FIX, H128, 1/sqrt(128), svh. Both the standalone
+// rotate-out and a fused GEMM epilogue call this so the arithmetic exists once.
+__device__ __forceinline__ uint2 rotate_i32_block_bf16(int4 a, float rs, const uint16_t* svh,
+                                                       uint32_t col, uint32_t lane) {
+    float v0 = (static_cast<float>(a.x) * rs) * ::shelf::quantization::exl3::kExl3Int8GridStep;
+    float v1 = (static_cast<float>(a.y) * rs) * ::shelf::quantization::exl3::kExl3Int8GridStep;
+    float v2 = (static_cast<float>(a.z) * rs) * ::shelf::quantization::exl3::kExl3Int8GridStep;
+    float v3 = (static_cast<float>(a.w) * rs) * ::shelf::quantization::exl3::kExl3Int8GridStep;
+    fwht128(v0, v1, v2, v3, lane);
+    v0 = (v0 * kInvSqrt128) * f16_bits_to_f32(svh[col + 0u]);
+    v1 = (v1 * kInvSqrt128) * f16_bits_to_f32(svh[col + 1u]);
+    v2 = (v2 * kInvSqrt128) * f16_bits_to_f32(svh[col + 2u]);
+    v3 = (v3 * kInvSqrt128) * f16_bits_to_f32(svh[col + 3u]);
+    uint2 packed;
+    packed.x = static_cast<uint32_t>(f32_to_bf16_rne_device(v0)) |
+               (static_cast<uint32_t>(f32_to_bf16_rne_device(v1)) << 16u);
+    packed.y = static_cast<uint32_t>(f32_to_bf16_rne_device(v2)) |
+               (static_cast<uint32_t>(f32_to_bf16_rne_device(v3)) << 16u);
+    return packed;
+}
+
+// Same for the flagged rows, whose input is already the per-group F32 result.
+__device__ __forceinline__ uint2 rotate_f32_block_bf16(float4 y, const uint16_t* svh,
+                                                       uint32_t col, uint32_t lane) {
+    float v0 = y.x, v1 = y.y, v2 = y.z, v3 = y.w;
+    fwht128(v0, v1, v2, v3, lane);
+    v0 = (v0 * kInvSqrt128) * f16_bits_to_f32(svh[col + 0u]);
+    v1 = (v1 * kInvSqrt128) * f16_bits_to_f32(svh[col + 1u]);
+    v2 = (v2 * kInvSqrt128) * f16_bits_to_f32(svh[col + 2u]);
+    v3 = (v3 * kInvSqrt128) * f16_bits_to_f32(svh[col + 3u]);
+    uint2 packed;
+    packed.x = static_cast<uint32_t>(f32_to_bf16_rne_device(v0)) |
+               (static_cast<uint32_t>(f32_to_bf16_rne_device(v1)) << 16u);
+    packed.y = static_cast<uint32_t>(f32_to_bf16_rne_device(v2)) |
+               (static_cast<uint32_t>(f32_to_bf16_rne_device(v3)) << 16u);
+    return packed;
 }
 
 __device__ __forceinline__ float bf16_to_f32(::shelf::bf16_t x) {
