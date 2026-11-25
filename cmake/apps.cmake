@@ -26,7 +26,7 @@ shelf_set_rocm_rpath(shelf-compute)
 target_compile_features(shelf-compute PRIVATE cxx_std_20)
 target_include_directories(shelf-compute SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
 target_include_directories(shelf-compute PRIVATE "${CMAKE_SOURCE_DIR}/src")
-target_link_libraries(shelf-compute PRIVATE shelf_engine)
+target_link_libraries(shelf-compute PRIVATE shelf_engine shelf_hy4_model)
 shelf_set_hip_archs(shelf-compute)
 endif()
 

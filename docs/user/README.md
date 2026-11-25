@@ -62,6 +62,7 @@ Shelf がビルド・実行対象とするのは **`gfx1201`（RDNA4）のみ**�
 - [build.md](build.md) — 要件・ビルド手順・CMake オプション・ROCm 10.2 / hipBLASLt ABI トラブルシュート
 - [quantize.md](quantize.md) — EXL3-INT8（mul24）・Ngram4 / Ngram5 の変換・形式検証・品質評価（BF16 基準 KLD / top-1）
 - [compute.md](compute.md) — `shelf-compute`（単発推論・`--serve-stdio`・EXL3-INT8 prefill A/B・DFlash2 / MTP / YaRN / Prefix Cache）
+- [hy4_flash.md](hy4_flash.md) — Hy4-flash の expert 並列
 - [server.md](server.md) — `shelf-server`（OpenAI Chat Completions / Responses API・エージェント接続・構造化出力）
 - [bench.md](bench.md) — `shelf-bench`（`pp` / `tg` / `quality` / microbench）
 - [multi-gpu.md](multi-gpu.md) — PP / EP / TP によるマルチ GPU 実行とモデル別対応

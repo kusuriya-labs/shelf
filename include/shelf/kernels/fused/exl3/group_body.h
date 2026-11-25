@@ -25,6 +25,7 @@ group_body(const int8_t *__restrict__ codes, const float *__restrict__ scales,
         return;
     constexpr uint32_t kWords = 8u * BITS;
     constexpr uint32_t kBits = 256u * BITS;
+    constexpr bool kPreloadActivations = !K_MAJOR || MT <= 3;
     constexpr bool kAlignedWindows = (BITS % 4) == 0;
     constexpr bool kNeedW2 = kAlignedWindows ? ((((BITS + 16u) % 32u) + 7u * BITS + 16u) > 64u) : true;
 
@@ -87,8 +88,8 @@ group_body(const int8_t *__restrict__ codes, const float *__restrict__ scales,
                     nxt[s][2] = kNeedW2 ? wp2[(8u + s) * kt_stride] : 0u;
                 }
             }
-        int32x2_t afrag[MT <= 3 ? MT : 1][MT <= 3 ? 8 : 1];
-        if constexpr (MT <= 3) {
+        int32x2_t afrag[kPreloadActivations ? MT : 1][kPreloadActivations ? 8 : 1];
+        if constexpr (kPreloadActivations) {
 #pragma unroll
             for (int mt = 0; mt < MT; ++mt)
 #pragma unroll
@@ -108,8 +109,8 @@ group_body(const int8_t *__restrict__ codes, const float *__restrict__ scales,
                 acc[mt][i] = 0;
 #pragma unroll
         for (uint32_t s = 0u; s < 8u; ++s) {
-            int32x2_t afrag_s[MT <= 3 ? 1 : MT];
-            if constexpr (MT > 3) {
+            int32x2_t afrag_s[kPreloadActivations ? 1 : MT];
+            if constexpr (!kPreloadActivations) {
 #pragma unroll
                 for (int mt = 0; mt < MT; ++mt) {
                     afrag_s[mt] = *reinterpret_cast<const int32x2_t *>(arow[mt] + g * kBlock + s * 16u);
@@ -167,7 +168,8 @@ group_body(const int8_t *__restrict__ codes, const float *__restrict__ scales,
             b[1] = static_cast<int32_t>(packed[1] ^ 0x80808080u);
 #pragma unroll
             for (int mt = 0; mt < MT; ++mt) {
-                acc[mt] = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32_gfx12(true, afrag[mt][s], true, b, acc[mt], false);
+                const int32x2_t av = kPreloadActivations ? afrag[mt][s] : afrag_s[mt];
+                acc[mt] = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32_gfx12(true, av, true, b, acc[mt], false);
             }
         }
 

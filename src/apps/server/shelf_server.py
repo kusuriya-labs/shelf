@@ -556,12 +556,14 @@ def parse_args(argv=None):
                         help="max sequence length (default 32768; PLaMo 3: 2048)")
     parser.add_argument("--max-num-batched-tokens", type=int, default=8192,
                         help="1ステップのトークン数の上限。executor の行数もこの値から決まる（既定 8192）")
-    parser.add_argument("--prefill-chunk", type=int, default=8192,
-                        help="1ステップの prefill トークン数と executor の行数の上限（既定 8192）")
+    parser.add_argument("--prefill-chunk", type=int, default=None,
+                        help="1 ステップの prefill token 数と executor の行数上限（既定は 8192、Hy4 は 1024）")
+    parser.add_argument("--kv-pool-tokens", type=int, default=None,
+                        help="Hy4 共有 KV ページプールの総 token 容量（未指定時は VRAM から自動算出）")
     parser.add_argument("--max-concurrent-requests", type=int, default=4,
                         help="max in-flight requests (default 4)")
     parser.add_argument("--prefill-decode-interval", type=int, default=None,
-                        help="prefill が N 回連続したら decode を優先する（既定の 0 で無効）")
+                        help="prefill が N 回連続したら decode を優先する（0 で無効、既定は Hy4 が 1、ほかは 0）")
 
     parser.add_argument("--inference-budget-tokens", type=int, default=32768,
                         help="max generated tokens per request (default 32768)")
@@ -666,7 +668,7 @@ def parse_args(argv=None):
     if opts.prefix_cache_strategy == "off":
         opts.prefix_cache = 0
     if opts.prefill_chunk is None:
-        opts.prefill_chunk = 1024 if opts.placement else 4096
+        opts.prefill_chunk = 1024 if opts.placement else 8192
     if opts.placement and not 1 <= opts.prefill_chunk <= 4096:
         parser.error("Hy4 の --prefill-chunk は 1〜4096 で指定してください")
 
@@ -698,7 +700,12 @@ def parse_args(argv=None):
         parser.error("--prefill-chunk must be between 16 and 8192")
     if opts.max_concurrent_requests < 1:
         parser.error("--max-concurrent-requests must be >= 1")
-    if opts.prefill_decode_interval is not None and not 0 <= opts.prefill_decode_interval <= 1024:
+    if opts.kv_pool_tokens is not None and opts.kv_pool_tokens < 1:
+        parser.error("--kv-pool-tokens must be >= 1")
+    if opts.prefill_decode_interval is not None and (opts.prefill_decode_interval < 0 or
+            (not opts.placement and opts.prefill_decode_interval > 1024)):
+        if opts.placement:
+            parser.error("--prefill-decode-interval must be >= 0")
         parser.error("--prefill-decode-interval must be between 0 and 1024")
     if opts.inference_budget_tokens < 1:
         parser.error("--inference-budget-tokens must be >= 1")
@@ -744,6 +751,17 @@ def parse_args(argv=None):
         parser.error("--ngram-max-match must be >= --ngram-min-match")
     if opts.ngram and opts.pipeline_parallel > 1:
         parser.error("--ngram requires --pipeline-parallel 1")
+    if opts.dfly_drafts is None:
+        env_drafts = os.environ.get("SHELF_HY4_DFLY_DRAFTS")
+        if env_drafts:
+            try:
+                opts.dfly_drafts = int(env_drafts)
+            except ValueError:
+                parser.error(f"invalid SHELF_HY4_DFLY_DRAFTS: {env_drafts}")
+            if opts.dfly_drafts not in (2, 3, 4, 5):
+                parser.error("SHELF_HY4_DFLY_DRAFTS must be 2, 3, 4, or 5")
+        else:
+            opts.dfly_drafts = 4
     return opts
 
 
@@ -777,6 +795,26 @@ async def _serve(opts) -> int:
     is_plamo = model_type == "plamo3"
     is_hunyuan_dense = model_type == "hunyuan_v1_dense"
     non_reasoning = is_plamo or is_hunyuan_dense
+    is_hy4 = model_type == "hy_v4_flash"
+    if is_hy4 != bool(opts.placement) or (not is_hy4 and (opts.dfly_dir or opts.engram_dir)):
+        raise SystemExit("Hy4-flash には --placement と FP8 Engram が必要です")
+    if is_hy4:
+        if opts.ngram or opts.mtp or opts.dflash2_model_dir or opts.pipeline_parallel != 1:
+            raise SystemExit("Hy4-flash は --dfly-dir に対応します")
+        if opts.max_concurrent_requests > 32:
+            raise SystemExit("Hy4-flash の同時リクエスト数は 32 以下にしてください")
+        opts.max_num_batched_tokens = opts.prefill_chunk
+        opts.kv_cache_dtype = "octave"
+        if not opts.prefix_cache or opts.prefix_cache_strategy == "off":
+            opts.prefix_cache = 0
+            opts.prefix_cache_strategy = "off"
+            opts.prefix_cache_checkpoints = 0
+            opts.prefix_cache_save_interval = 0
+        else:
+            opts.prefix_cache_strategy = "slot"
+            opts.prefix_cache_checkpoints = opts.max_concurrent_requests
+            opts.prefix_cache_save_interval = 0
+
     if opts.max_seq_len is None:
         opts.max_seq_len = 2048 if is_plamo else 32768
     if is_plamo and opts.max_seq_len > 2048:
@@ -784,10 +822,18 @@ async def _serve(opts) -> int:
         return 2
     processor = await asyncio.to_thread(
         codec.load_processor, opts.model_dir, max_seq_len=opts.max_seq_len)
-    reasoning_capability = ({"thinking": False, "effort": False, "close_token": -1}
-                            if non_reasoning else await asyncio.to_thread(
-                                codec.reasoning_capability, processor))
-    if not non_reasoning and not (reasoning_capability["thinking"] and reasoning_capability["effort"]):
+    if is_hy4:
+        processor._shelf_hy4 = True
+        close_ids = processor.encode("</think:opensource>", add_special_tokens=False)
+        if len(close_ids) != 1:
+            raise SystemExit("Hy4 の思考終了 token が見つかりません")
+        processor._shelf_reasoning_close_ids = tuple(close_ids)
+        reasoning_capability = {"thinking": True, "effort": True, "close_token": -1}
+    elif non_reasoning:
+        reasoning_capability = {"thinking": False, "effort": False, "close_token": -1}
+    else:
+        reasoning_capability = await asyncio.to_thread(codec.reasoning_capability, processor)
+    if not non_reasoning and not is_hy4 and not (reasoning_capability["thinking"] and reasoning_capability["effort"]):
         _log("Reasoning is part of the Chat Completions contract, but the "
              "loaded chat template does not support it.")
         _log(f"  probe: {reasoning_capability}")

@@ -1621,7 +1621,7 @@ Result<MtpIterationOutput> accept_verified(
     SpecVerifyResult accepted_result;
     Status accepted = spec_greedy_accept(proposals, drafts, sampled, true, accepted_result);
     if (!accepted.ok()) return accepted;
-    const qwen_hybrid::StopTokens empty_stops;
+    // Cut at the first stop token before the state commit, so rows past it are not committed.
     const bool stopped = spec_bound_result(accepted_result, remaining_tokens,
         stop_tokens);
     const uint32_t accepted_drafts = accepted_result.num_accepted_drafts;

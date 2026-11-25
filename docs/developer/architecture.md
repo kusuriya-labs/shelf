@@ -93,6 +93,7 @@ root namespace は `shelf`。`include/shelf/**` と `src/shelf/**` のディレ�
 | `shelf/models/qwen4exp/**` | `shelf::qwen4exp` |
 | `shelf/models/plamo3/**` | `shelf::plamo3` |
 | `shelf/models/hunyuan_dense/**` | `shelf::hunyuan_dense` |
+| `shelf/models/hy4_flash/**` | `shelf::hy4` |
 | `shelf/models/model_weights_factory.h` / `loaded_model.h` / `tp_rank_model.h` / `pipeline_stage_model.h` | `shelf::models` |
 | `shelf/engine/**` | `shelf::engine` |
 | `src/apps/**` | `shelf::app` / `shelf::bench::quality` |

@@ -11,7 +11,6 @@
 #include <stdexcept>
 
 namespace shelf::hy4 {
-void verify_hy4_upload(Residency &gpu);
 void benchmark_hy4_decode(Residency &gpu);
 void benchmark_hy4_index(Residency &gpu);
 void check_hy4_prefill_capacity(Residency &gpu, int rows);
@@ -19,8 +18,8 @@ void benchmark_hy4_prefill(Residency &gpu, int rows);
 void benchmark_hy4_moe(Residency &gpu);
 void benchmark_hy4_router(Residency &gpu);
 void benchmark_hy4_steps(Residency &gpu);
-void verify_hy4_layers(Residency &gpu, const Path &input, const Path &dump);
-bool trace_hy4_prefill(Residency &gpu, const Path &input, int chunk, const Path &dump);
+void benchmark_hy4_ctx(Residency &gpu, int ctx);
+void benchmark_hy4_bits3(Residency &gpu);
 }
 
 namespace {
@@ -48,53 +47,6 @@ void share_expert_weights(Checkpoint &model, bool allow_mixed = false) {
             weight.offset = src.offset;
             weight.bytes = src.bytes;
             weight.spec.shape = src.spec.shape;
-        }
-    }
-}
-
-void logical_ranks(Residency &gpu, int ranks) {
-    gpu.ranks = gpu.ep_size = ranks;
-    for (int r = 1; r < ranks; ++r) {
-        gpu.physical[r] = 0;
-        gpu.matrices[r] = gpu.matrices[0];
-        auto result = gpu::GpuArena::create(0, 512 << 20);
-        if (!result.ok())
-            throw std::runtime_error(result.status().message());
-        gpu.arenas.push_back(result.release());
-        auto memory = gpu.arenas.back().allocate_aligned(512 << 20, 256);
-        if (!memory.ok())
-            throw std::runtime_error(memory.status().message());
-        gpu.workspace[r] = {static_cast<uint8_t *>(memory.value().data()), 512 << 20};
-        checked(hipStreamCreateWithFlags(&gpu.compute[r], hipStreamNonBlocking));
-    }
-    const auto transport = std::getenv("SHELF_HY4_EP_TRANSPORT");
-    const bool host = transport && std::string_view(transport) == "host";
-    for (int r = 0; r < ranks; ++r)
-        for (int other = 0; other < ranks; ++other)
-            if (other != r) {
-                gpu.peer[r][other] = !host;
-                if (host)
-                    checked(hipHostMalloc(&gpu.small_staging[r][other], gpu.transfer_packet_bytes(), hipHostMallocPortable));
-                for (int p = 0; p < 2; ++p) {
-                    constexpr unsigned flags = hipEventDisableTiming | hipEventReleaseToSystem;
-                    checked(hipEventCreateWithFlags(&gpu.ready[r][other][p], flags));
-                    checked(hipEventCreateWithFlags(&gpu.ack[r][other][p], flags));
-                }
-            }
-    for (auto &layer : gpu.model.owners)
-        for (int e = 0; e < 512; ++e)
-            layer[e] = e % ranks;
-    checked(hipMemcpy(gpu.moe_owners[0], gpu.model.owners.data(), sizeof(Owners), hipMemcpyHostToDevice));
-    if (ranks > 1) {
-        std::vector<Hy4ExpertProjection> all(Residency::matrix_bytes / sizeof(Hy4ExpertProjection));
-        checked(hipMemcpy(all.data(), gpu.matrices[0], Residency::matrix_bytes, hipMemcpyDeviceToHost));
-        for (int r = 0; r < ranks; ++r) {
-            auto table = all;
-            for (size_t layer = 0; layer < gpu.model.owners.size(); ++layer)
-                for (int e = 0; e < 512; ++e)
-                    if (gpu.model.owners[layer][e] != r)
-                        std::fill_n(table.data() + (layer * 512 + e) * 3, 3, Hy4ExpertProjection{});
-            checked(hipMemcpy(gpu.matrices[r], table.data(), Residency::matrix_bytes, hipMemcpyHostToDevice));
         }
     }
 }
@@ -965,47 +917,7 @@ int main(int argc, char **argv) {
             gpu.shutdown();
             return 0;
         }
-        if (argc == 7 && std::string_view(argv[3]) == "layers") {
-            auto owners = read_owners(argv[4]);
-            int ranks = 1;
-            for (const auto &layer : owners)
-                ranks = std::max(ranks, 1 + *std::max_element(layer.begin(), layer.end()));
-            Checkpoint model(argv[1], argv[1], argv[2], Owners{}, 1, 1);
-            share_expert_weights(model);
-            Residency gpu(model, 64);
-            auto status = gpu.reserve();
-            if (!status.ok())
-                throw std::runtime_error(status.message());
-            gpu.upload();
-            logical_ranks(gpu, ranks);
-            model.owners = owners;
-            checked(hipMemcpy(gpu.moe_owners[0], owners.data(), sizeof(owners), hipMemcpyHostToDevice));
-            verify_hy4_layers(gpu, argv[5], argv[6]);
-            gpu.shutdown();
-            return 0;
-        }
-        if ((argc == 4 || argc == 5 || argc == 8) && std::string_view(argv[3]) == "upload") {
-            int count = 1;
-            checked(hipGetDeviceCount(&count));
-            bool shared = argc == 4 || std::string_view(argv[4]) == "-";
-            if (shared && count != 1)
-                throw std::runtime_error("複数 GPU の検証には配置表を指定してください");
-            Owners owners = shared ? Owners{} : read_owners(argv[4]);
-            Checkpoint model(argv[1], argv[1], argv[2], owners, count, 1);
-            if (shared)
-                share_expert_weights(model);
-            Residency gpu(model, argc == 8 ? 4096 : 64);
-            auto status = gpu.reserve();
-            if (!status.ok())
-                throw std::runtime_error(status.message());
-            gpu.upload();
-            bool match = argc != 8 || trace_hy4_prefill(gpu, argv[5], std::stoi(argv[6]), argv[7]);
-            verify_hy4_upload(gpu);
-            gpu.shutdown();
-            if (!match)
-                throw std::runtime_error("初回の logits と層別照合時の logits が異なります");
-            return 0;
-        }
+
         if ((argc == 4 || argc == 5) && std::string_view(argv[3]) == "transport") {
             if (argc == 5) {
                 int count = 0;

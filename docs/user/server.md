@@ -78,16 +78,17 @@ Ready.
 | `--compute COMPUTE` | shelf-compute path |
 | `--max-seq-len MAX_SEQ_LEN` | max sequence length (default 32768; PLaMo 3: 2048) |
 | `--max-num-batched-tokens MAX_NUM_BATCHED_TOKENS` | 1ステップのトークン数の上限。executor の行数もこの値から決まる（既定 8192） |
-| `--prefill-chunk PREFILL_CHUNK` | 1ステップの prefill トークン数と executor の行数の上限（既定 8192） |
+| `--prefill-chunk PREFILL_CHUNK` | 1 ステップの prefill token 数と executor の行数上限（既定は 8192、Hy4 は 1024） |
+| `--kv-pool-tokens KV_POOL_TOKENS` | Hy4 共有 KV ページプールの総 token 容量（未指定時は VRAM から自動算出） |
 | `--max-concurrent-requests MAX_CONCURRENT_REQUESTS` | max in-flight requests (default 4) |
-| `--prefill-decode-interval PREFILL_DECODE_INTERVAL` | prefill が N 回連続したら decode を優先する（既定の 0 で無効） |
+| `--prefill-decode-interval PREFILL_DECODE_INTERVAL` | prefill が N 回連続したら decode を優先する（0 で無効、既定は Hy4 が 1、ほかは 0） |
 | `--inference-budget-tokens INFERENCE_BUDGET_TOKENS` | max generated tokens per request (default 32768) |
 | `--large-context-tokens LARGE_CONTEXT_TOKENS` | prompt tokens above which the larger inference budget applies (default 262144) |
 | `--large-context-inference-budget-tokens LARGE_CONTEXT_INFERENCE_BUDGET_TOKENS` | max generated tokens for a request whose prompt is longer than --large-context-tokens (default 65536) |
 | `--arena-gib N\|auto\|-N` | arena GiB: N - 0.3 (N > 0.3); -N = total VRAM minus (N + 0.3); auto = free VRAM minus 0.8 GiB (default auto) |
 | `--device DEVICE` | comma separated GPU devices, one per rank; count must match pipeline_parallel * expert_parallel * tensor_parallel (default 0) |
 | `--tensor-parallel {1,2}` | tensor parallel size forwarded to compute (default 1) |
-| `--expert-parallel {1,2,4}` | expert parallel size forwarded to compute (default 1) |
+| `--expert-parallel {1,2,3,4}` | expert parallel size forwarded to compute (default 1) |
 | `--pipeline-parallel {1,2,4}` | pipeline parallel size forwarded to compute (default 1) |
 | `--kv-cache-dtype KV_CACHE_DTYPE` | KV cache dtype (default bf16) |
 | `--page-tokens PAGE_TOKENS` | paged KV page size in tokens (default 16) |
@@ -97,7 +98,7 @@ Ready.
 | `--rope-factor {auto,1,2,4}` | static YaRN rope factor forwarded to compute (default auto) |
 | `--prefix-cache {0,1}` | enable prefix cache (default 1) |
 | `--prefix-cache-checkpoints PREFIX_CACHE_CHECKPOINTS` | ホストに保存する prefix checkpoint 数（既定 16） |
-| `--prefix-cache-strategy {radix,slot}` | prefix cache entry strategy (default radix) |
+| `--prefix-cache-strategy {radix,slot,off}` | prefix cache entry strategy (default radix) |
 | `--prefix-cache-save-interval PREFIX_CACHE_SAVE_INTERVAL` | periodic prefix checkpoint spacing in tokens; 0 disables periodic checkpoints (default 16384) |
 | `--dflash2-model-dir DFLASH2_MODEL_DIR` | DFlash2 draft model directory (enables speculative decoding) |
 | `--dflash2-drafts DFLASH2_DRAFTS` | speculative draft tokens per round (default 7) |

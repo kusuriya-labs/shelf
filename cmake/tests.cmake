@@ -922,3 +922,39 @@ shelf_add_test(NAME test_token_mask_scheduler SOURCE unit/test_token_mask_schedu
 shelf_add_test(NAME test_ngram_quantization SOURCE unit/test_ngram_quantization.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES shelf_quant_ngram)
 shelf_add_test(NAME test_qwen4exp_ngram SOURCE unit/test_qwen4exp_ngram.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES shelf_qwen4exp shelf_quant_ngram)
 shelf_add_test(NAME test_ple_batch_gather SOURCE unit/test_ple_batch_gather.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES shelf_qwen4exp shelf_quant_ngram)
+shelf_add_test(NAME test_hy4_session SOURCE unit/test_hy4_session.cpp LABELS "cpu;required" LIBRARIES shelf_hy4_model)
+shelf_add_test(NAME test_hy4_routes SOURCE unit/test_hy4_routes.cpp LABELS "cpu;required" LIBRARIES shelf_core hip::host)
+shelf_add_test(NAME test_hy4_peer_transfer SOURCE unit/test_hy4_peer_transfer.cpp LABELS "gpu1;optional" GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_hy4_model)
+target_link_options(test_hy4_peer_transfer PRIVATE "LINKER:--wrap=hipEventRecord")
+set_property(TARGET test_hy4_peer_transfer APPEND PROPERTY BUILD_RPATH "${SHELF_LIBCXX_LLVM_ROOT}/lib")
+
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME test_hy4_flash_cpu
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/unit/test_hy4_flash.py)
+    set_tests_properties(test_hy4_flash_cpu PROPERTIES LABELS "cpu;optional")
+endif()
+
+add_executable(test_hy4_reduce ${CMAKE_SOURCE_DIR}/tests/unit/test_hy4_reduce.cpp)
+target_link_libraries(test_hy4_reduce PRIVATE shelf_hy4_model)
+shelf_set_rocm_rpath(test_hy4_reduce)
+set_property(TARGET test_hy4_reduce APPEND PROPERTY BUILD_RPATH "${SHELF_LIBCXX_LLVM_ROOT}/lib")
+add_test(NAME hy4_reduce COMMAND test_hy4_reduce)
+
+add_executable(test_hy4_flash_layer EXCLUDE_FROM_ALL ${CMAKE_SOURCE_DIR}/tests/kernels/test_hy4_flash_layer.cpp)
+target_link_libraries(test_hy4_flash_layer PRIVATE shelf_hy4_model)
+target_include_directories(test_hy4_flash_layer SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
+shelf_set_rocm_rpath(test_hy4_flash_layer)
+set_property(TARGET test_hy4_flash_layer APPEND PROPERTY BUILD_RPATH "${SHELF_LIBCXX_LLVM_ROOT}/lib")
+
+add_executable(test_hy4_graph EXCLUDE_FROM_ALL ${CMAKE_SOURCE_DIR}/tests/kernels/test_hy4_graph.cpp
+    ${CMAKE_SOURCE_DIR}/tests/kernels/hy4_decode_bench.cpp)
+target_link_libraries(test_hy4_graph PRIVATE shelf_hy4_model shelf_quant_reference)
+target_link_options(test_hy4_graph PRIVATE "LINKER:--wrap=hipGraphInstantiate" "LINKER:--wrap=hipEventRecord")
+shelf_set_rocm_rpath(test_hy4_graph)
+set_property(TARGET test_hy4_graph APPEND PROPERTY BUILD_RPATH "${SHELF_LIBCXX_LLVM_ROOT}/lib")
+
+add_executable(test_hy4_prefix_cache EXCLUDE_FROM_ALL ${CMAKE_SOURCE_DIR}/tests/unit/test_hy4_prefix_cache.cpp)
+target_link_libraries(test_hy4_prefix_cache PRIVATE shelf_hy4_model)
+shelf_set_rocm_rpath(test_hy4_prefix_cache)
+set_property(TARGET test_hy4_prefix_cache APPEND PROPERTY BUILD_RPATH "${SHELF_LIBCXX_LLVM_ROOT}/lib")

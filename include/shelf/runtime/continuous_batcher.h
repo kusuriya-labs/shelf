@@ -162,8 +162,6 @@ class ContinuousBatcher {
     Status set_external_request_id(uint64_t id, int64_t external_request_id);
     Status set_ignore_eos(uint64_t id, bool ignore_eos);
 
-    Status set_ignore_eos(uint64_t id, bool ignore_eos);
-
     std::size_t queued_count() const noexcept;
     std::size_t active_count() const noexcept;
     std::size_t finished_count() const noexcept;

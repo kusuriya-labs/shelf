@@ -637,8 +637,9 @@ void Residency::transfer(void *dst, int destination, const void *src, int source
     if (!host && !(push ? peer[source][destination] : peer[destination][source]))
         throw std::runtime_error("転送作業域の範囲外です");
     const int p = parity[source][destination];
-    hipEvent_t ready_event = ready[source][destination][p];
-    hipEvent_t ack_event = ack[destination][source][p];
+    const auto &ready_event = ready[source][destination][p];
+    const auto &ack_event = ack[destination][source][p];
+    check(hipEventSynchronize(push && !host ? ready_event : ack_event));
     parity[source][destination] = p ^ 1;
     if (!host && push) {
         check(hipSetDevice(physical[destination]));

@@ -74,6 +74,7 @@ class ChatRequest:
     response_schema: dict | None = None
     template_kwargs: dict[str, Any] | None = None
     reserve_answer_tokens: bool = True
+    effort_given: bool = False
 
 
 def error_body(message: str, *, param: str | None = None,
@@ -494,6 +495,7 @@ def parse_chat_request(body: Any,
         enable_thinking=enable_thinking,
         reasoning_effort=reasoning_effort,
         reserve_answer_tokens=reserve_answer_tokens,
+        effort_given=effort_given,
         preserve_thinking=preserve_thinking,
         response_schema=response_schema,
         template_kwargs=template_kwargs,

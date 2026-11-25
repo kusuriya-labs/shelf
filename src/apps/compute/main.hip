@@ -6,6 +6,8 @@
 
 #include <shelf/engine/compute_session.h>
 #include <shelf/models/model_policy.h>
+#include <shelf/models/hy4_flash/cli.h>
+#include <string_view>
 #include <shelf/runtime/decode_backend.h>
 #include <shelf/runtime/dflash2/dflash2_footprint.h>
 #include <shelf/runtime/dflash2_config.h>

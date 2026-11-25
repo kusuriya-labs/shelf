@@ -138,6 +138,86 @@ def main() -> int:
     checker.check("既定では decode 割り込みを転送しない",
                   "--prefill-decode-interval" not in default_argv,
                   repr(default_argv))
+    hy4 = shelf_server.parse_args([
+        "--model-dir", "body", "--placement", "owners.json", "--engram-dir", "fp8",
+        "--dfly-dir", "draft", "--max-seq-len", "2304", "--compute", "shelf-compute",
+    ])
+    checker.check("hy4-ep3", shelf_server.build_compute_argv(hy4) == [
+        "shelf-compute", "hy4", "serve", "--model-dir", "body", "--engram-dir", "fp8",
+        "--placement", "owners.json", "--max-seq-len", "2304", "--chunk", "1024",
+        "--max-concurrent-requests", "4", "--dfly-dir", "draft", "--dfly-drafts", "4",
+    ])
+    checker.check("hy4-meta-default", shelf_server.speculative_meta(hy4) == {"method": "dfly2", "drafts": 4})
+    for k in (2, 3, 4, 5):
+        opts = shelf_server.parse_args([
+            "--model-dir", "body", "--placement", "owners.json", "--dfly-dir", "draft",
+            "--dfly-drafts", str(k),
+        ])
+        checker.check(f"hy4-drafts-argv-{k}", value_of(shelf_server.build_compute_argv(opts), "--dfly-drafts") == str(k))
+        checker.check(f"hy4-meta-{k}", shelf_server.speculative_meta(opts) == {"method": "dfly2", "drafts": k})
+    old_env = os.environ.get("SHELF_HY4_DFLY_DRAFTS")
+    try:
+        os.environ["SHELF_HY4_DFLY_DRAFTS"] = "3"
+        env_opts = shelf_server.parse_args(["--model-dir", "body", "--placement", "owners.json", "--dfly-dir", "draft"])
+        checker.check("hy4-env-drafts", value_of(shelf_server.build_compute_argv(env_opts), "--dfly-drafts") == "3")
+        checker.check("hy4-env-meta", shelf_server.speculative_meta(env_opts) == {"method": "dfly2", "drafts": 3})
+        os.environ["SHELF_HY4_DFLY_DRAFTS"] = "6"
+        try:
+            shelf_server.parse_args(["--model-dir", "body", "--placement", "owners.json"])
+            checker.check("hy4-env-reject-6", False)
+        except SystemExit:
+            checker.check("hy4-env-reject-6", True)
+    finally:
+        if old_env is None:
+            os.environ.pop("SHELF_HY4_DFLY_DRAFTS", None)
+        else:
+            os.environ["SHELF_HY4_DFLY_DRAFTS"] = old_env
+    for bad in ("0", "1", "6", "-1", "abc"):
+        try:
+            shelf_server.parse_args(["--model-dir", "body", "--placement", "owners.json", "--dfly-drafts", bad])
+            checker.check(f"hy4-reject-{bad}", False)
+        except SystemExit:
+            checker.check(f"hy4-reject-{bad}", True)
+    hy4_pc_off = shelf_server.parse_args([
+        "--model-dir", "body", "--placement", "owners.json", "--engram-dir", "fp8",
+        "--dfly-dir", "draft", "--max-seq-len", "2304", "--compute", "shelf-compute",
+        "--prefix-cache", "0",
+    ])
+    checker.check("hy4-prefix-cache-off",
+                  value_of(shelf_server.build_compute_argv(hy4_pc_off), "--prefix-cache") == "0")
+    hy4_strat_off = shelf_server.parse_args([
+        "--model-dir", "body", "--placement", "owners.json", "--prefix-cache-strategy", "off",
+    ])
+    checker.check("hy4-strategy-off",
+                  value_of(shelf_server.build_compute_argv(hy4_strat_off), "--prefix-cache") == "0")
+    qwen_strat_off = shelf_server.parse_args([
+        "--model-dir", "models/unused", "--device", "0", "--prefix-cache-strategy", "off",
+    ])
+    qwen_strat_off_argv = shelf_server.build_compute_argv(qwen_strat_off)
+    checker.check("qwen-strategy-off-disables-cache",
+                  value_of(qwen_strat_off_argv, "--prefix-cache") == "0")
+    checker.check("qwen-strategy-off-compute-strategy",
+                  value_of(qwen_strat_off_argv, "--prefix-cache-strategy") == "radix")
+    hy4_opts = shelf_server.parse_args([
+        "--model-dir", "body", "--placement", "owners.json", "--kv-pool-tokens", "65536",
+        "--prefill-decode-interval", "2",
+    ])
+    hy4_opts_argv = shelf_server.build_compute_argv(hy4_opts)
+    checker.check("hy4-kv-pool-tokens", value_of(hy4_opts_argv, "--kv-pool-tokens") == "65536")
+    checker.check("hy4-prefill-decode-interval", value_of(hy4_opts_argv, "--prefill-decode-interval") == "2")
+    for chunk in (2048, 4096):
+        opts = shelf_server.parse_args(["--model-dir", "body", "--placement", "owners.json", "--prefill-chunk", str(chunk)])
+        checker.check("hy4-chunk", value_of(shelf_server.build_compute_argv(opts), "--chunk") == str(chunk))
+    for ep, tp, slots in ((3, 1, 16), (4, 1, 4), (2, 2, 1)):
+        opts = shelf_server.parse_args([
+            "--model-dir", "body", "--placement", "owners.json", "--expert-parallel", str(ep),
+            "--tensor-parallel", str(tp), "--device", ",".join(map(str, range(ep * tp))),
+            "--max-concurrent-requests", str(slots),
+        ])
+        argv = shelf_server.build_compute_argv(opts)
+        checker.check("hy4-parallel", value_of(argv, "--expert-parallel") == str(ep))
+        checker.check("hy4-tp", value_of(argv, "--tensor-parallel") == (str(tp) if tp > 1 else None))
+        checker.check("hy4-slots", value_of(argv, "--max-concurrent-requests") == str(slots))
     return checker.done()
 
 
