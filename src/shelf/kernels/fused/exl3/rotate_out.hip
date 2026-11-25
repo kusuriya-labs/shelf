@@ -39,11 +39,11 @@ __global__ void __launch_bounds__(kBlock) exl3_mul24_rotate_out_i32_kernel(
     }
 }
 
-// Same math, float4 form: one CTA per 8 rows, 8 waves, one wave per row. int4 activation load /
-// float4 flagged-row load, H128 and svh inside one wave, one 64-bit output store.
-// Each wave walks the whole output row, or with kTiled every (8 * gridDim.y)-th 128-column block
-// of the single row the CTA owns.
-template <bool BF16, bool kFlaggedOnly = false, bool kTiled = false>
+// Standalone rotate-out: same math as the historical separated kernel. The
+// optimized dispatch path and the focused test compare this against the
+// plamo_out_i32 kernel, so keep its arithmetic separate from the fused prefill
+// epilogue below.
+template <bool BF16>
 __global__ void __launch_bounds__(256) exl3_mul24_rotate_out_i32_f4_kernel(
     const int32_t* __restrict__ acc,
     const float* __restrict__ rowscale,
@@ -54,19 +54,12 @@ __global__ void __launch_bounds__(256) exl3_mul24_rotate_out_i32_f4_kernel(
     const uint32_t n,
     const uint32_t out_row_stride,
     const uint32_t rows) {
-    const uint32_t m = kTiled ? blockIdx.x : blockIdx.x * 8u + (threadIdx.x >> 5u);
+    const uint32_t m = blockIdx.x * 8u + (threadIdx.x >> 5u);
     if (m >= rows) return;
     const uint32_t lane = threadIdx.x & 31u;
-    const uint32_t wave = threadIdx.x >> 5u;
     const int32_t slot = slots[m];
-    if constexpr (kFlaggedOnly) {
-        if (slot < 0) return;
-    }
     const float rs = rowscale[m];
-    const uint32_t col_blocks = n / kBlock;
-    const uint32_t first = kTiled ? blockIdx.y * 8u + wave : 0u;
-    const uint32_t stride = kTiled ? 8u * gridDim.y : 1u;
-    for (uint32_t cb = first; cb < col_blocks; cb += stride) {
+    for (uint32_t cb = 0u; cb < n / kBlock; ++cb) {
         const uint32_t col = cb * kBlock + lane * 4u;
         float v0, v1, v2, v3;
         if (slot >= 0) {
@@ -100,15 +93,57 @@ __global__ void __launch_bounds__(256) exl3_mul24_rotate_out_i32_f4_kernel(
         }
     }
 }
+
+// Fused prefill epilogue's flagged-row fixup. One CTA per row and up to
+// kColumnTilesBudget column tiles; a wave walks every (8 * tiles)-th 128-column
+// block. The math uses the same rotate helper as the fused super64 epilogue,
+// so this path deliberately differs from the standalone kernel above.
+template <bool BF16>
+__global__ void __launch_bounds__(256) exl3_mul24_rotate_out_i32_fused_f4_kernel(
+    const int32_t* __restrict__ slots,
+    const float* __restrict__ yprime2,
+    const uint16_t* __restrict__ svh,
+    void* __restrict__ out,
+    const uint32_t n,
+    const uint32_t out_row_stride,
+    const uint32_t rows) {
+    const uint32_t m = blockIdx.x;
+    if (m >= rows) return;
+    const int32_t slot = slots[m];
+    if (slot < 0) return;
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t wave = threadIdx.x >> 5u;
+    const uint32_t col_blocks = n / kBlock;
+    const uint32_t first = blockIdx.y * 8u + wave;
+    const uint32_t stride = 8u * gridDim.y;
+    for (uint32_t cb = first; cb < col_blocks; cb += stride) {
+        const uint32_t col = cb * kBlock + lane * 4u;
+        const size_t index = static_cast<size_t>(m) * out_row_stride + col;
+        const float4 y = *reinterpret_cast<const float4*>(yprime2 + static_cast<size_t>(slot) * n + col);
+        if constexpr (BF16) {
+            const uint2 packed = exl3_detail::mul24::rotate_f32_block_bf16(y, svh, col, lane);
+            *reinterpret_cast<uint2*>(reinterpret_cast<::shelf::bf16_t*>(out) + index) = packed;
+        } else {
+            float v0 = y.x, v1 = y.y, v2 = y.z, v3 = y.w;
+            exl3_detail::fwht128(v0, v1, v2, v3, lane);
+            v0 = (v0 * kInvSqrt128) * f16_bits_to_f32(svh[col + 0u]);
+            v1 = (v1 * kInvSqrt128) * f16_bits_to_f32(svh[col + 1u]);
+            v2 = (v2 * kInvSqrt128) * f16_bits_to_f32(svh[col + 2u]);
+            v3 = (v3 * kInvSqrt128) * f16_bits_to_f32(svh[col + 3u]);
+            *reinterpret_cast<float4*>(reinterpret_cast<float*>(out) + index) = float4{v0, v1, v2, v3};
+        }
+    }
+}
+
 }  // namespace
 
-template <bool kF4, bool kBF16, bool kFlaggedOnly = false>
+template <bool kF4, bool kBF16>
 hipError_t launch_rotate_out_i32_impl(const int32_t* acc, const float* rowscale, const int32_t* slots,
                                       const float* yprime2, const uint16_t* svh, void* out, uint32_t rows,
                                       uint32_t n, uint32_t out_row_stride, hipStream_t stream) {
     if constexpr (kF4) {
         const dim3 grid((rows + 7u) / 8u);
-        exl3_mul24_rotate_out_i32_f4_kernel<kBF16, kFlaggedOnly, false>
+        exl3_mul24_rotate_out_i32_f4_kernel<kBF16>
             <<<grid, 256, 0, stream>>>(acc, rowscale, slots, yprime2, svh, out, n, out_row_stride, rows);
     } else {
         const dim3 grid(rows, n / kBlock);
@@ -121,6 +156,7 @@ hipError_t launch_rotate_out_i32_impl(const int32_t* acc, const float* rowscale,
 hipError_t launch_exl3_mul24_rotate_out_i32_flagged(
     const float* rowscale, const int32_t* slots, const float* yprime2, const uint16_t* svh,
     void* out, uint32_t rows, uint32_t n, uint32_t out_row_stride, hipStream_t stream) {
+    (void)rowscale;
     if (rows == 0u) return hipSuccess;
     if (n == 0u || (n % kBlock) != 0u || (out_row_stride % 4u) != 0u) return hipErrorInvalidValue;
     // One CTA per row and up to kColumnTiles column tiles: a wave walks every (8 * tiles)-th
@@ -128,8 +164,8 @@ hipError_t launch_exl3_mul24_rotate_out_i32_flagged(
     constexpr uint32_t kColumnTilesBudget = 16384u;
     const uint32_t tiles = min((n / kBlock + 7u) / 8u, max(1u, kColumnTilesBudget / rows));
     const dim3 grid(rows, tiles);
-    exl3_mul24_rotate_out_i32_f4_kernel<true, true, true>
-        <<<grid, 256, 0, stream>>>(nullptr, rowscale, slots, yprime2, svh, out, n, out_row_stride, rows);
+    exl3_mul24_rotate_out_i32_fused_f4_kernel<true>
+        <<<grid, 256, 0, stream>>>(slots, yprime2, svh, out, n, out_row_stride, rows);
     return hipGetLastError();
 }
 
