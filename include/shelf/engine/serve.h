@@ -33,6 +33,7 @@ struct ServeRequestSpec {
     bool grammar_delayed = false;
     int32_t grammar_close_token = -1;
     bool has_token_bitmask = false;
+    bool ignore_eos = false;
     std::vector<uint32_t> token_bitmask;
 };
 

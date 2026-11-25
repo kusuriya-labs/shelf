@@ -1105,7 +1105,7 @@ Status PrefixCache::save_input_boundary(
     return Status::make_ok();
 }
 
-Result<CaptureId> PrefixCache::begin_capture(const PagedSequenceState& seq) {
+Result<CaptureId> PrefixCache::begin_capture(const PagedSequenceState& seq, hipStream_t stream) {
     if (!state_) {
         return Status::invalid_state("prefix cache is not ready", __FILE__, __LINE__);
     }
@@ -1133,7 +1133,11 @@ Result<CaptureId> PrefixCache::begin_capture(const PagedSequenceState& seq) {
     ++stats_.captures_started;
     const CaptureId id = static_cast<CaptureId>((state.generation << 16) | index);
     if (seq.position != 0u && seq.position % page_tokens_ == 0u) {
-        (void)capture_boundary(id, seq, 0);
+        auto st = capture_boundary(id, seq, stream);
+        if (!st.ok()) {
+            (void)cancel_capture(id);
+            return st;
+        }
     }
     return id;
 }

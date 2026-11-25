@@ -23,6 +23,7 @@ struct ComputeOptions {
     unsigned long max_num_batched_tokens = 2048;
     unsigned long prefill_chunk = 512;
     bool prefill_chunk_set = false;
+    unsigned long prefill_decode_interval = 0;
     std::vector<int> devices = {0};
     unsigned long tp = 1;
     unsigned long expert_parallel = 1;

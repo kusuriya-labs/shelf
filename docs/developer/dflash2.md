@@ -1304,17 +1304,11 @@ DFlash2 有効時の構造化出力付き request は通常 decode へ退避せ�
 
 ### 投機の適応制御（実験段階）
 
-`--dflash2-adaptive` は K を細かく変更せず、batch と request の状態から投機の
-有無を選ぶ。既定 K は 7 である。生成上限、系列長、thinking budget に応じて検証する draft 数を短くする。
-prefix capture 中の制約は [prefix cache の DFlash2 経路](prefix_cache.md#dflash2-経路) に従う。
+`--dflash2-adaptive` は TP=1 のバッチャーで、要求ごとの受理率（受理した draft 数を検証した draft 数で割った値）を平滑化する。設定幅をすべて検証したラウンドから EMA を更新し、切り替えは8ラウンド以上の間隔で一段ずつ行う。利用できる K と同時投機数は [compute の操作方法](../user/compute.md) と [環境変数一覧](../user/env_vars.md) を参照。
 
-- 投機候補と、セッション枠が足りず通常 decode 中の request の合計が
-  `SHELF_DFLASH2_POLICY_MAX_SESSIONS`（既定 12）を超える場合、
-  その batch は全員を通常 decode にする。0 を指定すると batch 投機を停止する。
-- 各 request の 1 round 当たり受理 draft 数の EMA（初期値 2、係数 0.03）が
-  0.6 を下回ると、その request は通常 decode に移る。停止中は 64 round ごとに
-  一度だけ投機を試し、受理率が回復したら再開する。短い残り長に伴う打ち切り
-  round は EMA に含めない。
+- 生成上限、系列の空き、thinking budget に応じて実際の検証幅を短くする。線形の適応型 verify は、draft 数がゼロのセッションもターゲットの1行として同じバッチに含める。バッチ検証で共有した中間結果は、単独 forward によって上書きされる前に各要求が消費する。
+- prefix の境界で保存できるセッションは、受理した区間の途中でも境界時点の状態を保存する。経路別の条件は [prefix cache の DFlash2 経路](prefix_cache.md#dflash2-経路) を参照。
+- `DFLASH2_ACCEPTANCE_RATE` は受理した提案数を検証した提案数で割った値である。`DFLASH2_FULL_ACCEPT_RATE` は全提案を受理した要求ラウンドの割合で、提案数ゼロの要求は分母に含めない。
 - DFlash2 の serve における compact verify は request 数と draft 数に関係なく、
   既定で lossy chunk を使う。`SHELF_GDN_VERIFY_CHUNKED=0` で serial に戻せる。
   `SHELF_GDN_VERIFY_CHUNKED_EXACT=1` を指定すると exact chunk を使う。

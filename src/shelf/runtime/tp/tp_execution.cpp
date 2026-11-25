@@ -62,6 +62,18 @@ void try_fuse_combine_consumer(const PrimitiveGraph& graph, const Program& progr
     segment.dispatch_end = static_cast<uint32_t>(consumer_dispatch + 1u);
 }
 
+void try_bind_argmax_consumer(const Program& program,
+                              uint32_t group_end, ValueId combine, TpProgramSegment& segment) {
+    if (segment.combine_local_cols == 0u || group_end + 1u != program.dispatches.size()) return;
+    const auto& binding = program.dispatches[group_end];
+    if (binding.kernel_id != KernelId::SAMPLING || binding.input_count != 1u ||
+        binding.output_count != 1u || binding.input_slots[0] != combine.id) return;
+    const ValueId output{binding.output_slots[0]};
+    if (program.find_value(output) == nullptr) return;
+    segment.argmax_output = output;
+    segment.argmax_dispatch = group_end;
+}
+
 }  // namespace
 
 Result<TpExecutionSchedule> build_tp_execution_schedule(
@@ -98,7 +110,8 @@ Result<TpExecutionSchedule> build_tp_execution_schedule(
                     "tp_combine node has no output value", __FILE__, __LINE__);
             }
             const ValueId combine = node.outputs[0];
-            if (program.find_value(combine) == nullptr) {
+            const auto* value = program.find_value(combine);
+            if (value == nullptr) {
                 return Status::invalid_argument(
                     "tp_combine output value is not bound in the program",
                     __FILE__, __LINE__);
@@ -112,6 +125,9 @@ Result<TpExecutionSchedule> build_tp_execution_schedule(
             const uint32_t next_begin = current.dispatch_end;
             const bool ep_reduce = ep_enabled && node.ep_combine != 0u && ep_size > 1u;
             const bool tp_reduce = node.tp_combine != 0u && tp_size != 1u;
+            if (tp_reduce && !ep_reduce && tp_size > 1u && current.combine_local_cols != 0u &&
+                static_cast<uint64_t>(current.combine_local_cols) * tp_size == value->feature_count)
+                try_bind_argmax_consumer(program, group_end, combine, current);
             bool pushed = false;
             if (ep_reduce && !tp_reduce) {
                 current.ep_scope = true;

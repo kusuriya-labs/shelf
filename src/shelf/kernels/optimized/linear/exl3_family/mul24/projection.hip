@@ -104,10 +104,17 @@ group_gemm(PlamoExl3ProjectionGroup args) {
         const auto p = args.p[i];
         const uint32_t blocks = p.n / 64u * rb, total = blocks * p.splits;
         if (tile < total) {
-            group_body<B, MT, PIPE>(p.codes, p.scales, args.k, args.scale_stride_bytes / 4u,
-                                    reinterpret_cast<const uint32_t *>(p.trellis), p.yprime, args.rows,
-                                    nullptr, p.n, args.k, (args.k / 128u + p.splits - 1u) / p.splits, rb,
-                                    tile % blocks, tile / blocks);
+            const auto run = [&]<int Bits>() {
+                group_body<Bits, MT, PIPE>(p.codes, p.scales, args.k, args.scale_stride_bytes / 4u,
+                    reinterpret_cast<const uint32_t *>(p.trellis), p.yprime, args.rows, nullptr,
+                    p.n, args.k, (args.k / 128u + p.splits - 1u) / p.splits, rb, tile % blocks, tile / blocks);
+            };
+            if constexpr (B == 0) {
+                if (args.three_bit_mask & (1u << i)) run.template operator()<3>();
+                else run.template operator()<4>();
+            } else {
+                run.template operator()<B>();
+            }
             return;
         }
         tile -= total;
@@ -215,6 +222,9 @@ hipError_t launch_plamo_exl3_projection(const PlamoExl3ProjectionGroup &args, ui
         args.input_stride < args.k || args.scale_stride_bytes < args.k / 128u * 4u ||
         (!grouped_3bit && bits != 4u && bits != 5u && bits != 8u))
         return hipErrorInvalidValue;
+    if (args.three_bit_mask && (args.rows > 16u || allow_shape_fusion ||
+        args.three_bit_mask >= (1u << args.count) || (bits != 3u && bits != 4u)))
+        return hipErrorInvalidValue;
     uint32_t n = 0u;
     for (uint32_t i = 0; i < args.count; ++i) {
         const auto &p = args.p[i];
@@ -251,7 +261,9 @@ hipError_t launch_plamo_exl3_projection(const PlamoExl3ProjectionGroup &args, ui
             *launch_count = input_rotated ? 1u : 2u;
         return launch_fused_output(args, bits, stream);
     }
-    if (bits == 3u)
+    if (args.three_bit_mask)
+        err = launch_group_bits<0, 1, true>(args, stream);
+    else if (bits == 3u)
         err = launch_group_bits<3, 1, true>(args, stream);
     else if (bits == 4u)
         err = args.rows <= 16u    ? launch_group_bits<4, 1, true>(args, stream)

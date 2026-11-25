@@ -27,4 +27,6 @@ bool exl3_mul24_use_dense(bool dense_ok, uint32_t n_rows, uint32_t dense_min_row
                           uint64_t rowsum_bytes);
 bool exl3_mul24_use_a_prefill(bool a_selected, uint32_t num_prefill_requests);
 
+bool exl3_grouped_projection_bits_match(uint32_t first_bits, uint32_t other_bits, uint32_t rows);
+
 }  // namespace shelf::execution

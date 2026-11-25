@@ -826,6 +826,7 @@ int run_pp(int argc, char** argv) {
             req.sample = last && opts.mode == "greedy";
             std::vector<::shelf::runtime::ScheduledRequest> reqs = {req};
             ::shelf::runtime::ScheduledBatch batch;
+            batch.sampled_ids_only = tp_coordinator != nullptr && req.sample;
             batch.token_ids = prompt_tokens_host + processed;
             batch.requests = reqs;
             batch.num_tokens = chunk_len;

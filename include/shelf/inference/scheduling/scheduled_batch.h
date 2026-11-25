@@ -55,6 +55,7 @@ struct ScheduledBatch {
     uint32_t num_prefill_requests = 0;
 
     bool speculative_verify = false;
+    bool sampled_ids_only = false;
 };
 
 Status validate_scheduled_batch(

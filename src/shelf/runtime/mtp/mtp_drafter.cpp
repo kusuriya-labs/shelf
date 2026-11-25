@@ -1514,7 +1514,7 @@ Result<MtpIterationOutput> mtp_decode_only(
     state::PagedSequenceState& sequence,
     int32_t pending_token,
     uint32_t remaining_tokens,
-    hipStream_t stream) {
+    hipStream_t stream, bool ignore_eos = false) {
     (void)remaining_tokens;
     const uint32_t position = sequence.position;
     std::vector<int32_t> tokens{pending_token};
@@ -1535,7 +1535,7 @@ Result<MtpIterationOutput> mtp_decode_only(
     output.emitted[0] = sampled.value();
     output.emitted_count = 1u;
     output.pending_token = sampled.value();
-    output.finished = qwen_hybrid::is_stop_token(target.model.config->stop_tokens,
+    output.finished = !ignore_eos && qwen_hybrid::is_stop_token(target.model.config->stop_tokens,
                                                  sampled.value());
     return output;
 }
@@ -1616,13 +1616,14 @@ Result<MtpIterationOutput> accept_verified(
     std::vector<MtpGdnRankState>& request_ranks,
     const std::vector<MtpGdnRankState>& log_ranks,
     uint32_t row_base,
-    hipStream_t stream) {
+    hipStream_t stream, bool ignore_eos = false) {
+    const auto stop_tokens = ignore_eos ? qwen_hybrid::StopTokens{} : target.model.config->stop_tokens;
     SpecVerifyResult accepted_result;
     Status accepted = spec_greedy_accept(proposals, drafts, sampled, true, accepted_result);
     if (!accepted.ok()) return accepted;
     // Cut at the first stop token before the state commit, so rows past it are not committed.
     const bool stopped = spec_bound_result(accepted_result, remaining_tokens,
-        target.model.config->stop_tokens);
+        stop_tokens);
     const uint32_t accepted_drafts = accepted_result.num_accepted_drafts;
     MtpIterationOutput output;
     output.finished = stopped;
@@ -1722,14 +1723,14 @@ Result<MtpIterationOutput> accept_verified(
     }
 
     for (uint32_t i = 0u; i < output.emitted_count; ++i) {
-        if (qwen_hybrid::is_stop_token(target.model.config->stop_tokens,
+        if (qwen_hybrid::is_stop_token(stop_tokens,
                                        output.emitted[i])) {
             output.emitted_count = i + 1u;
             output.finished = true;
             break;
         }
     }
-    if (qwen_hybrid::is_stop_token(target.model.config->stop_tokens,
+    if (qwen_hybrid::is_stop_token(stop_tokens,
                                    output.pending_token)) {
         output.finished = true;
     }
@@ -1738,12 +1739,19 @@ Result<MtpIterationOutput> accept_verified(
 
 }  // namespace
 
+static void capture_mtp_draft_boundary(MtpDrafter& drafter, MtpBoundaryCapture* boundary,
+                                       uint32_t position, uint32_t page_tokens, hipStream_t stream) {
+    if (!boundary || !boundary->capture || !page_tokens || position % page_tokens) return;
+    auto snapshot = mtp_save_draft_snapshot(drafter, position, stream);
+    if (snapshot.ok()) boundary->capture(boundary->context, position, snapshot.value());
+}
+
 Result<MtpDraftResult> mtp_draft(
     MtpDrafter& drafter,
     Executor& target,
     state::PagedSequenceState& target_sequence,
     int32_t pending_token,
-    uint32_t remaining_tokens,
+    uint32_t remaining_tokens, uint32_t page_tokens, MtpBoundaryCapture* boundary,
     const int32_t* precomputed_drafts) {
     (void)target;
     if (!drafter.initialized) {
@@ -1767,6 +1775,9 @@ Result<MtpDraftResult> mtp_draft(
     uint32_t drafts = std::min(drafter.num_drafts, remaining_tokens - 1u);
     if (room < 2u) drafts = 0u;
     else drafts = std::min(drafts, room - 1u);
+
+    if (page_tokens && boundary)
+        drafts = std::min(drafts, page_tokens - position % page_tokens - 1u);
 
     MtpDraftResult result;
     result.position = position;
@@ -1810,6 +1821,7 @@ Result<MtpDraftResult> mtp_draft(
         result.proposals[0] = first_sampled.value();
         copy = copy_hidden_to_all(drafter, drafter_hidden_output(drafter), 0u, 1u, stream);
         if (!copy.ok()) return copy;
+        capture_mtp_draft_boundary(drafter, boundary, position, page_tokens, stream);
         for (uint32_t i = 1u; i < drafts; ++i) {
             std::vector<int32_t> step_tokens{result.proposals[i - 1u]};
             auto step = run_mtp_forward(drafter, step_tokens, position + i - 1u, true,
@@ -2269,8 +2281,9 @@ Status mtp_draft_batch(
     for (std::size_t i = 0u; i < count; ++i) {
         const MtpSpecBatchSlot& slot = slots[i];
         MtpDrafter& drafter = *slot.drafter;
-        if (qwen_hybrid::is_stop_token(context.target->model.config->stop_tokens,
-                                       slot.pending_token)) {
+        if (!slot.ignore_eos && qwen_hybrid::is_stop_token(
+                                   context.target->model.config->stop_tokens,
+                                   slot.pending_token)) {
             stopped[i] = 1;
             plans[i].decode_only = true;
             continue;
@@ -2440,17 +2453,9 @@ Status mtp_draft_batch(
         if (!copy.ok()) return copy;
     }
     for (std::size_t i = 0u; i < count; ++i) {
-        MtpBoundaryCapture* boundary = slots[i].boundary_capture;
-        if (boundary == nullptr || boundary->capture == nullptr) continue;
-        if (stopped[i] != 0 || plans[i].decode_only) continue;
-        if (slots[i].page_tokens == 0u ||
-            plans[i].position % slots[i].page_tokens != 0u) {
-            continue;
-        }
-        auto snapshot =
-            mtp_save_draft_snapshot(*slots[i].drafter, plans[i].position, stream);
-        if (!snapshot.ok()) continue;
-        boundary->capture(boundary->context, plans[i].position, snapshot.value());
+        if (!stopped[i] && !plans[i].decode_only)
+            capture_mtp_draft_boundary(*slots[i].drafter, slots[i].boundary_capture, plans[i].position,
+                                       slots[i].page_tokens, stream);
     }
     for (uint32_t depth = 1u; depth < max_drafts; ++depth) {
         active.clear();
@@ -2639,7 +2644,7 @@ Result<MtpSpecBatchOutput> mtp_verify_wavefront(
                     results[i].emitted[results[i].emitted_count++] = sampled[b];
                     results[i].pending_token = sampled[b];
                 }
-                results[i].finished = qwen_hybrid::is_stop_token(
+                results[i].finished = !slots[i].ignore_eos && qwen_hybrid::is_stop_token(
                     context.target->model.config->stop_tokens,
                     results[i].emitted[results[i].emitted_count - 1u]);
                 if (!keep_verifying || results[i].finished ||
@@ -2728,7 +2733,7 @@ Result<MtpSpecBatchOutput> mtp_spec_step_batch(
                                                 __FILE__, __LINE__);
             }
             row_begin[i] = total_rows;
-            if (qwen_hybrid::is_stop_token(context.target->model.config->stop_tokens,
+            if (!slot.ignore_eos && qwen_hybrid::is_stop_token(context.target->model.config->stop_tokens,
                                            slot.pending_token)) {
                 stopped_slot[i] = 1;
                 drafts[i].decode_only = true;
@@ -2737,10 +2742,11 @@ Result<MtpSpecBatchOutput> mtp_spec_step_batch(
                 continue;
             }
             auto draft = mtp_draft(*slot.drafter, *context.target, *slot.sequence,
-                                   slot.pending_token, slot.remaining_tokens,
-                                   slot.precomputed_drafts);
+                                   slot.pending_token, slot.remaining_tokens, slot.page_tokens,
+                                   slot.boundary_capture, slot.precomputed_drafts);
             if (!draft.ok()) return draft.status();
             drafts[i] = draft.value();
+            draft_forwards += drafts[i].drafts;
             if (!drafts[i].decode_only) total_rows += drafts[i].drafts + 1u;
         }
     }
@@ -2909,7 +2915,7 @@ Result<MtpSpecBatchOutput> mtp_spec_step_batch(
                 *slot.drafter, *context.target, *slot.sequence, drafts[i].position,
                 drafts[i].proposals.data(), drafts[i].drafts, verify_tokens,
                 sampled.data() + chunk_row_begin[c], slot.remaining_tokens, request_ranks,
-                context.ranks, chunk_row_begin[c], stream);
+                context.ranks, chunk_row_begin[c], stream, slot.ignore_eos);
             if (!accepted.ok()) return accepted.status();
             slot.drafter->sample_index += static_cast<uint64_t>(drafts[i].drafts) + 1u;
             out.slots[i] = accepted.value();
@@ -2920,7 +2926,7 @@ Result<MtpSpecBatchOutput> mtp_spec_step_batch(
         if (!drafts[i].decode_only || stopped_slot[i]) continue;
         const MtpSpecBatchSlot& slot = slots[i];
         auto output = mtp_decode_only(*slot.drafter, *context.target, *slot.sequence,
-                                      slot.pending_token, slot.remaining_tokens, stream);
+                                      slot.pending_token, slot.remaining_tokens, stream, slot.ignore_eos);
         if (!output.ok()) return output.status();
         out.slots[i] = output.value();
     }

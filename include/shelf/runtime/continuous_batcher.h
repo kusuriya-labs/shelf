@@ -28,6 +28,8 @@ struct ContinuousBatcherConfig {
     uint32_t max_scheduled_requests = 0;
     uint32_t max_seq_len = 0;
     uint32_t page_tokens = 0;
+    uint32_t prefill_decode_interval = 0;
+    bool sampled_ids_only = false;
     qwen_hybrid::StopTokens eos_token_ids;
     KVAdmissionPolicy admission_policy = KVAdmissionPolicy::BankerSafe;
     OnlineNgramConfig ngram{};
@@ -61,6 +63,7 @@ struct DFlash2BatcherStats {
     double adaptive_actual_ms = 0.0;
     uint32_t full_accepts = 0;
     uint32_t partial_accepts = 0;
+    uint64_t proposed_drafts = 0u;
     uint32_t accepted_drafts = 0;
     uint32_t generated_tokens = 0;
     uint64_t verify_rows = 0;
@@ -157,6 +160,7 @@ class ContinuousBatcher {
                            uint32_t stride, uint32_t valid_prefix);
 
     Status set_external_request_id(uint64_t id, int64_t external_request_id);
+    Status set_ignore_eos(uint64_t id, bool ignore_eos);
 
     std::size_t queued_count() const noexcept;
     std::size_t active_count() const noexcept;
@@ -225,6 +229,7 @@ class ContinuousBatcher {
     PrefixCache* prefix_cache_ = nullptr;
     DFlash2BatcherBinding dflash_{};
     uint64_t adaptive_round_ = 0;
+    uint32_t prefill_chunks_since_decode_ = 0;
 
     struct NgramVerifyRankState {
         GdnStatePool* pool = nullptr;

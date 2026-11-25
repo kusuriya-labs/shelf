@@ -38,6 +38,7 @@ prefill の chunk 境界や prefix cache の有無によって、同じ入力の
 | `--max-concurrent-requests N` | max in-flight requests (default 4) |
 | `--max-num-batched-tokens N` | token budget per scheduled step; also sets the executor row bucket (default 2048) |
 | `--prefill-chunk N` | prompt tokens per prefill step; also caps the row bucket (default 512; serve caps max-num-batched-tokens when given) |
+| `--prefill-decode-interval N` | prefill が N 回連続したら decode を優先する（既定の 0 で無効） |
 | `--ple-prefetch 0\|1` | prefetch the next PLE rows during prefill (default 1) |
 | `--device N\|N,M` | GPU device(s); count must match pipeline_parallel * expert_parallel * tensor_parallel (default 0) |
 | `--tensor-parallel N` | tensor parallel degree 1 \| 2 \| 4 (default 1) |
@@ -95,6 +96,10 @@ prefill の chunk 境界や prefix cache の有無によって、同じ入力の
 | `--serve-stdio` | serve JSON Lines generation requests on stdin/stdout |
 | `--help` | show this help |
 <!-- /cli:compute -->
+
+`--prefill-decode-interval N` は連続する prefill chunk が `N` 回に達した時点で、
+decode 待ちの request があれば prefill を中断して decode ステップを優先する。
+既定の `0` は割り込みを行わない。decode を実行すると連続回数は 0 に戻る。切り替えはスケジューラのバッチ境界で行い、実行中のカーネルを中断しない。DFlash2 の初回セッション準備は、1要求の準備完了を1回として数える。
 
 `--arena-gib auto` は起動時の空き VRAM から 0.8 GiB を引いた容量を arena に使う。
 `--arena-gib N`（N > 0.3）は arena 外の消費を見込んで N - 0.3 GiB を使う。
@@ -253,6 +258,13 @@ dense checkpoint を TP=2 で動かす場合:
 
 block size 16 の `DFlash2DraftModel` は `--dflash2-drafts 15` で最大幅を使う。
 単発 CLI と 1 セッションの stdio では、`--dflash2-prefill-rows 16` で drafter の prefill 幅を 16 行にできる。
+
+`--dflash2-adaptive` を指定すると、各ラウンドで提案したトークンに対する受理率の指数移動平均（係数 0.25）から
+draft 数 `K` を `2`〜`5` の範囲で選ぶ。切替にはヒステリシスと 8 ラウンドの最小間隔を
+適用する。同時 batch が 16 を超える場合は `K` の上限を `4` に下げる。
+`--dflash2-drafts` が `5` 未満の場合はその値が上限になる。
+同時接続 32 では、session 数と verify 行数が `kDFlash2SpecMaxVerifyRows` に収まる
+範囲で全 session が投機でき、上限を超えた session は通常 decode に戻る。
 
 併用できない option（いずれも model load 前に exit 2）:
 

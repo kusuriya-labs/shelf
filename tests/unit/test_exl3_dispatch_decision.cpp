@@ -36,6 +36,17 @@ int main() {
     check("A enabled for prefill", shelf::execution::exl3_mul24_use_a_prefill(true, 1u));
     check("B remains selected for prefill", !shelf::execution::exl3_mul24_use_a_prefill(false, 1u));
 
+    using shelf::execution::exl3_grouped_projection_bits_match;
+    check("same 3 bpw beyond 16 rows", !exl3_grouped_projection_bits_match(3u, 3u, 64u));
+    check("same 4 bpw", exl3_grouped_projection_bits_match(4u, 4u, 64u));
+    check("3 bpw groups at 16 rows", exl3_grouped_projection_bits_match(3u, 3u, 16u));
+    check("3 bpw groups beyond 16 rows", !exl3_grouped_projection_bits_match(3u, 3u, 17u));
+    check("mixed 3/4 at 1 row", exl3_grouped_projection_bits_match(3u, 4u, 1u));
+    check("mixed 4/3 at 16 rows", exl3_grouped_projection_bits_match(4u, 3u, 16u));
+    check("mixed 3/4 beyond 16 rows", !exl3_grouped_projection_bits_match(3u, 4u, 17u));
+    check("mixed 3/5 rejected", !exl3_grouped_projection_bits_match(3u, 5u, 1u));
+    check("mixed 4/8 rejected", !exl3_grouped_projection_bits_match(4u, 8u, 1u));
+
     // The decision struct keeps the independent axes and has no fallback by default.
     shelf::execution::Exl3DispatchDecision d;
     check("default direct", d.backend == shelf::kernel::exl3_detail::Exl3Backend::Direct);

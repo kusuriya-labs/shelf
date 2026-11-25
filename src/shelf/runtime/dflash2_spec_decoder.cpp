@@ -2155,7 +2155,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         plan.sample_index = decoder->sample_index;
         plan.thinking_allowance = slot.thinking_allowance;
         plan.thinking_close_token = slot.thinking_close_token;
-        plan.batched = drafts > 0u;
+        plan.batched = drafts > 0u || (slot.batch_anchor_only && room != 0u && slot.remaining_tokens != 0u);
         if (qwen_hybrid::is_stop_token(decoder->config.eos_tokens, slot.anchor_token)) {
             // The stop token was already emitted by the caller; this slot runs nothing.
             plan.stopped = true;
@@ -2237,6 +2237,17 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
     for (std::size_t i = 0; i < plans.size(); ++i) {
         SlotPlan& plan = plans[i];
         if (!plan.batched) continue;
+        DFlash2SpecDecoder& decoder = *plan.decoder;
+        if (bridge) {
+            const hipError_t anchor_err = hipMemcpyAsync(
+                context.verify_token_ids_device + plan.row_begin, &plan.anchor,
+                sizeof(int32_t), hipMemcpyHostToDevice, decoder.stream);
+            if (anchor_err != hipSuccess) {
+                return Status::hip_error("batch anchor upload",
+                                         hipGetErrorString(anchor_err), __FILE__, __LINE__);
+            }
+        }
+        if (plan.drafts == 0u) continue;
         if (plan.slot->precomputed_drafts != nullptr) {
             std::copy_n(plan.slot->precomputed_drafts, plan.drafts, drafts[i].begin());
             if (bridge) {
@@ -2255,7 +2266,6 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             }
             continue;
         }
-        DFlash2SpecDecoder& decoder = *plan.decoder;
         if (propose_executor == nullptr) {
             propose_executor = decoder.draft;
             propose_leader = &decoder;
@@ -2277,15 +2287,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         propose_outputs.push_back(plan.proposal_drafts > plan.drafts
                                       ? decoder.verify_token_ids_device
                                       : context.verify_token_ids_device + plan.row_begin + 1u);
-        if (bridge) {
-            const hipError_t anchor_err = hipMemcpyAsync(
-                context.verify_token_ids_device + plan.row_begin, &plan.anchor,
-                sizeof(int32_t), hipMemcpyHostToDevice, decoder.stream);
-            if (anchor_err != hipSuccess) {
-                return Status::hip_error("batch anchor upload",
-                                         hipGetErrorString(anchor_err), __FILE__, __LINE__);
-            }
-        }
+
     }
     if (propose_executor != nullptr) {
         if (batch_timing) {
@@ -2329,7 +2331,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
     if (!bridge && need_host_drafts) {
         for (std::size_t i = 0; i < plans.size(); ++i) {
             SlotPlan& plan = plans[i];
-            if (!plan.batched || plan.slot->precomputed_drafts != nullptr) continue;
+            if (!plan.batched || !plan.drafts || plan.slot->precomputed_drafts != nullptr) continue;
             const hipError_t err = hipMemcpy(
                 drafts[i].data(), context.verify_token_ids_device + plan.row_begin + 1u,
                 static_cast<std::size_t>(plan.drafts) * sizeof(int32_t),
@@ -2603,18 +2605,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             result_out.finished = true;
             continue;
         }
-        if (!plan.batched) {
-            const int32_t forced =
-                plan.thinking_allowance == 0u ? plan.thinking_close_token : -1;
-            const Status st = run_single_target(decoder, plan.anchor, result_out, forced,
-                                                plan.slot->token_bitmask);
-            if (!st.ok()) return st;
-            mark(single_ms);
-            if (qwen_hybrid::is_stop_token(decoder.config.eos_tokens, result_out.pending_token)) {
-                result_out.finished = true;
-            }
-            continue;
-        }
+        if (!plan.batched) continue;
 
         if (!tree_mode && env_flag_enabled("SHELF_DFLASH2_TREE_TRACE_CHAIN", false)) {
             std::fprintf(stderr, "DFCAND pos=%u sample_index=%llu ids=", plan.position,
@@ -2650,7 +2641,10 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             if (limit == 0u) {
                 verify.first_reject_index = 0u;
                 verify.correction_valid = true;
-                verify.correction_token = sampled[plan.row_begin];
+                const int32_t token = sampled[plan.row_begin];
+                if (token < 0) return Status::invalid_state("invalid target token for the anchor", __FILE__, __LINE__);
+                verify.correction_token = plan.drafts == 0u && plan.thinking_allowance == 0u &&
+                    plan.thinking_close_token >= 0 ? plan.thinking_close_token : token;
                 verify.emitted_tokens.push_back(verify.correction_token);
                 verify.num_emitted_tokens = 1u;
                 verify.num_committed_target_tokens = 1u;
@@ -2681,7 +2675,14 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         result_out.emitted_count = std::min(
             static_cast<uint32_t>(verify.emitted_tokens.size()), plan.remaining);
         for (uint32_t j = 0; j < result_out.emitted_count; ++j) {
-            result_out.emitted[j] = verify.emitted_tokens[j];
+            const int32_t token = verify.emitted_tokens[j];
+            if (token < 0 || static_cast<uint32_t>(token) >= decoder.target->model.config->vocab_size) {
+                char reason[160];
+                std::snprintf(reason, sizeof(reason), "invalid verify token %d at position %u, slot %u, row %u of %u",
+                              token, plan.position + j, decoder.sequence->slot, plan.row_begin + j, total_rows);
+                return Status::invalid_state(reason, __FILE__, __LINE__);
+            }
+            result_out.emitted[j] = token;
         }
         if (verify.correction_valid) {
             result_out.pending_token = verify.correction_token;
@@ -2908,6 +2909,18 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         if (profile) std::fprintf(stderr,
             "DFPHASE_SLOT slot=%u rows=%u drafts=%u accepted=%u emitted=%u\n",
             decoder.sequence->slot, plan.total_rows, plan.drafts, accepted, result_out.emitted_count);
+    }
+
+    for (std::size_t i = 0; i < plans.size(); ++i) {
+        const SlotPlan& plan = plans[i];
+        if (plan.batched || plan.stopped) continue;
+        auto& decoder = *plan.decoder;
+        auto& result_out = out.slots[i];
+        const int32_t forced = plan.thinking_allowance == 0u ? plan.thinking_close_token : -1;
+        const auto st = run_single_target(decoder, plan.anchor, result_out, forced, plan.slot->token_bitmask);
+        if (!st.ok()) return st;
+        mark(single_ms);
+        result_out.finished = qwen_hybrid::is_stop_token(decoder.config.eos_tokens, result_out.pending_token);
     }
 
     if (profile) {

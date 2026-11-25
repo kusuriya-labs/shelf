@@ -31,10 +31,11 @@ TpBarrierGroup::TpBarrierGroup(int rank_count, std::vector<int> devices,
       targets_(static_cast<std::size_t>(rank_count)),
       streams_(static_cast<std::size_t>(rank_count), nullptr),
       peer_written_(static_cast<std::size_t>(rank_count), 0),
+      argmax_invocations_(static_cast<std::size_t>(rank_count)),
       abort_status_(Status::make_ok()) {}
 
 TpBarrierGroup::~TpBarrierGroup() {
-    shutdown();
+    (void)shutdown();
 }
 
 Status TpBarrierGroup::initialize() {
@@ -64,15 +65,19 @@ Status TpBarrierGroup::initialize() {
     return Status::make_ok();
 }
 
-void TpBarrierGroup::shutdown() noexcept {
+Status TpBarrierGroup::shutdown() {
+    Status first = Status::make_ok();
     for (std::size_t r = 0; r < ready_.size(); ++r) {
         if (ready_[r] == nullptr) continue;
         auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
         if (scope.ok()) {
-            shelf::gpu::discard_cleanup_result(hipEventDestroy(ready_[r]));
-        }
+            const auto err = hipEventDestroy(ready_[r]);
+            if (err != hipSuccess && first.ok())
+                first = Status::hip_error("tp barrier event release", hipGetErrorString(err), __FILE__, __LINE__);
+        } else if (first.ok()) first = scope.status();
         ready_[r] = nullptr;
     }
+    return first;
 }
 
 void TpBarrierGroup::abort(const Status& reason) noexcept {
@@ -171,6 +176,64 @@ Status TpBarrierGroup::arrive(int rank, const TpSumTarget& target, hipStream_t s
     Status result = aborted_ ? abort_status_ : Status::make_ok();
     if (result.ok() && transport_ != nullptr) transport_->advance_barrier(rank);
     return result;
+}
+
+Status TpBarrierGroup::reserve_argmax(std::size_t rows) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (aborted_) return abort_status_;
+    return transport_->reserve_argmax(rows);
+}
+
+bool TpBarrierGroup::supports_argmax_reduce() const noexcept {
+    return transport_ != nullptr && transport_->supports_argmax_reduce();
+}
+
+Status TpBarrierGroup::argmax_reduce(int rank, const TpArgmaxInvocation& invocation) {
+    if (rank < 0 || rank >= rank_count_) {
+        return Status::invalid_argument("tp argmax rank out of range", __FILE__, __LINE__);
+    }
+    if (!supports_argmax_reduce()) {
+        return Status::unsupported("tp transport does not support argmax reduce", __FILE__,
+                                   __LINE__);
+    }
+    const std::size_t index = static_cast<std::size_t>(rank);
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (aborted_) return abort_status_;
+    argmax_invocations_[index] = invocation;
+    const uint64_t seq = open_barrier_;
+    ++arrived_;
+    if (arrived_ == rank_count_) {
+        Status st = Status::make_ok();
+        for (int r = 0; r < rank_count_; ++r) {
+            const auto& lane = argmax_invocations_[r];
+            if (lane.rows != invocation.rows || lane.out_ids == nullptr || lane.local_logits == nullptr ||
+                lane.vocab != invocation.vocab || lane.local_cols != invocation.local_cols ||
+                lane.row_stride < lane.vocab || lane.local_offset != static_cast<uint64_t>(r) * lane.local_cols ||
+                static_cast<uint64_t>(lane.local_cols) * rank_count_ != lane.vocab) {
+                st = Status::invalid_argument("inconsistent TP argmax shards", __FILE__, __LINE__);
+                break;
+            }
+        }
+        for (int r = 0; st.ok() && r < rank_count_; ++r)
+            st = transport_->begin_argmax(r, argmax_invocations_[r]);
+        for (int r = 0; st.ok() && r < rank_count_; ++r)
+            st = transport_->finish_argmax(r, argmax_invocations_[r]);
+        if (!st.ok()) {
+            aborted_ = true;
+            abort_status_ = st;
+            arrived_ = 0;
+            cv_.notify_all();
+            return st;
+        }
+        arrived_ = 0;
+        ++open_barrier_;
+        completed_barriers_ = open_barrier_;
+        cv_.notify_all();
+        return Status::make_ok();
+    }
+    cv_.wait(lock, [&] { return completed_barriers_ > seq || aborted_; });
+    if (aborted_) return abort_status_;
+    return Status::make_ok();
 }
 
 Status TpBarrierGroup::reserve(std::size_t bytes) {

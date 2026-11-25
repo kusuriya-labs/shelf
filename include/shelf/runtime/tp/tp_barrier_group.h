@@ -1,5 +1,6 @@
 #pragma once
 
+#include <shelf/runtime/tp/tp_argmax.h>
 #include <shelf/runtime/tp/tp_execution.h>
 
 #include <condition_variable>
@@ -15,7 +16,7 @@ public:
     ~TpBarrierGroup() override;
 
     Status initialize();
-    void shutdown() noexcept;
+    Status shutdown();
 
     void abort(const Status& reason) noexcept;
     bool aborted() const noexcept;
@@ -25,6 +26,9 @@ public:
                     bool peer_written) override;
     bool supports_combine_fusion() const noexcept override;
     Status peer_write_target(int rank, std::size_t bytes, void*& peer_out) override;
+    Status reserve_argmax(std::size_t rows) override;
+    bool supports_argmax_reduce() const noexcept override;
+    Status argmax_reduce(int rank, const TpArgmaxInvocation& invocation) override;
     Status reserve(std::size_t bytes) override;
 
 private:
@@ -35,6 +39,7 @@ private:
     std::vector<TpSumTarget> targets_;
     std::vector<hipStream_t> streams_;
     std::vector<char> peer_written_;
+    std::vector<TpArgmaxInvocation> argmax_invocations_;
 
     mutable std::mutex mutex_;
     std::condition_variable cv_;

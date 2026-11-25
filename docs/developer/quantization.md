@@ -364,11 +364,16 @@ INT8 の重み行列は常駐しない。
 - **A 経路の選択ゲート（`exl3_mul24_use_a`）**: `SHELF_EXL3_MUL24_PREFILL_AB` が未設定または `A` / `a`、
   `HIPBLASLT_USE_ROCROLLER` が `"1"` でない、かつ device が `gfx1201` のときに true。
   候補の実測選択は既定オフ（`SHELF_EXL3_INT8_TUNE=1` で有効）。
-- **Projection group 統合（`try_launch_exl3_projection`）**。BF16 入出力で、同じ入力 slot と bit 幅を持つ
-  連続した `LINEAR_EXL3_INT8` を最大 3 個まとめる。4-bit は 64 行以下、3-bit は HIP Graph の capture 中の
-  8 行以下で適用する。入力回転・量子化、GEMM、出力回転をそれぞれ 1 回起動し、符号ベクトルと scale は
-  projection ごとに扱う。workspace 不足、入出力の重なり、出力列の部分書き込み、debug override、
-  A 経路 prefill 対象時は個別に実行する。
+- **Projection group 統合**。共通実装は同じ入力を使う連続した BF16 入出力の投影を最大3個まとめる。
+  4ビットは64行以下、3ビットと3・4ビットの混在は16行以下を対象とする。混在時は投影ごとの
+  ビット幅で GEMM を実行する。producer を同時に融合する場合は全投影のビット幅をそろえる。
+  入力回転、GEMM、出力回転で各1回起動する。ワークスペース不足、入出力の重複、出力列の部分書き込み、
+  デバッグ設定や対象外の prefill では個別の経路を使う。
+- **Prefill B の部分和**。`launch_exl3_mul24_prefill_wmma` の出力は FP32 の
+  `[splits][rows][n]` である。呼び出し側が全分割の領域を確保する。`splits` は
+  K 方向の128要素グループ数の正の約数で、通常の prefill では1を使う。
+- **単一カーネル投影**。明示指定時は16行以下の3・4ビット BF16 投影で入力回転から出力回転までをまとめる。
+  適用条件と指定方法は [環境変数一覧](../user/env_vars.md) を参照。
 - **Decode 融合（`src/shelf/kernels/fused/exl3/`）**: `num_prefill_requests == 0` かつ `rows <= 16` の
   条件を満たす箇所で、前段演算と入力回転・量子化（または後段の `rotate_out` と残差加算・正規化）を
   1 launch にまとめる。対象は `SWIGLU` → `down_proj`、`SIGMOID + MUL` → `o_proj`、GDN gated norm →

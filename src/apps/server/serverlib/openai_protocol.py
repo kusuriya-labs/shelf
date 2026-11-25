@@ -66,6 +66,7 @@ class ChatRequest:
     seed: int
     stop: tuple[str, ...] = ()
     include_usage: bool = False
+    ignore_eos: bool = False
     enable_thinking: bool = True
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
     preserve_thinking: bool = True
@@ -109,6 +110,7 @@ def reject_unsupported(body: dict) -> None:
         "top_k", "seed", "chat_template_kwargs", "reasoning_effort", "reserve_answer_tokens", "n",
         "user", "store", "metadata", "service_tier", "parallel_tool_calls",
         "frequency_penalty", "presence_penalty", "stop", "response_format",
+        "ignore_eos",
     }
     for key in body:
         if key not in allowed:
@@ -431,6 +433,9 @@ def parse_chat_request(body: Any,
     top_k = _integer(body, "top_k", 0, low=0, high=(1 << 32) - 1)
     seed = _integer(body, "seed", 0, low=-(1 << 63), high=(1 << 63) - 1)
     include_usage = _stream_options_include_usage(body)
+    ignore_eos = body.get("ignore_eos", False)
+    if not isinstance(ignore_eos, bool):
+        raise OpenAIProtocolError("ignore_eos must be a boolean", param="ignore_eos")
 
     enable_thinking, preserve_thinking = parse_chat_template_kwargs(body)
     response_schema = None
@@ -485,6 +490,7 @@ def parse_chat_request(body: Any,
         seed=seed,
         stop=parse_stop(body.get("stop")),
         include_usage=include_usage,
+        ignore_eos=ignore_eos,
         enable_thinking=enable_thinking,
         reasoning_effort=reasoning_effort,
         reserve_answer_tokens=reserve_answer_tokens,

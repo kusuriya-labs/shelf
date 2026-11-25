@@ -184,6 +184,7 @@ struct MtpRequest {
     MtpRequestTiming timing;
     double prefill_ms = 0.0;
     bool stochastic = false;
+    bool ignore_eos = false;
     runtime::OnlineNgramMatcher ngram{};
 };
 
@@ -724,6 +725,7 @@ struct ServeController::Impl {
             if (prop.hit) {
                 slot.precomputed_drafts = ngram_proposals.back().tokens.data();
             }
+            slot.ignore_eos = request.ignore_eos;
             slots.push_back(slot);
             indices.push_back(i);
         }
@@ -805,7 +807,7 @@ struct ServeController::Impl {
             fprintf(stderr,
                     "MTP_BATCH rounds=%llu accepted=%llu emitted=%llu chunks=%llu "
                     "draft_forwards=%llu max_draft_per_round=%u max_verify_per_round=%u "
-                    "max_active=%u round_ms=%.3f\n",
+                    "max_active=%u round_ms=%.3f shared_draft=%u\n",
                     static_cast<unsigned long long>(mtp.rounds),
                     static_cast<unsigned long long>(mtp.accepted_drafts),
                     static_cast<unsigned long long>(mtp.emitted_tokens),
@@ -814,7 +816,8 @@ struct ServeController::Impl {
                     mtp.max_draft_forwards_per_round,
                     mtp.max_verify_chunks_per_round,
                     mtp.max_active_requests,
-                    mtp.rounds > 0u ? mtp.round_ms / static_cast<double>(mtp.rounds) : 0.0);
+                    mtp.rounds > 0u ? mtp.round_ms / static_cast<double>(mtp.rounds) : 0.0,
+                    static_cast<unsigned>(mtp.batch.shared_draft != nullptr));
         }
     }
 
@@ -1042,9 +1045,10 @@ struct ServeController::Impl {
             admitted->ngram.ingest_span(admitted->input_tokens);
             admitted->ngram.ingest_timed(admitted->pending_token);
         }
+        admitted->ignore_eos = request.ignore_eos;
         timing_first_token(admitted->timing);
         push_token(events, external_request_id, prefill.value().pending_token);
-        const bool stop = shelf::qwen_hybrid::is_stop_token(
+        const bool stop = !admitted->ignore_eos && shelf::qwen_hybrid::is_stop_token(
             state.model().hybrid_config().stop_tokens, prefill.value().pending_token);
         if (stop || admitted->generated >= admitted->max_new_tokens) {
             mtp_emit_done(events, *admitted, stop ? "stop" : "length");
@@ -1056,7 +1060,7 @@ struct ServeController::Impl {
             return outcome;
         }
         if (state.prefix_cache_.has_value()) {
-            auto capture = state.prefix_cache_->begin_capture(*admitted->sequence);
+            auto capture = state.prefix_cache_->begin_capture(*admitted->sequence, state.stream());
             if (capture.ok()) admitted->prefix_capture = capture.value();
         }
         mtp.active.push_back(std::move(admitted));
@@ -1133,6 +1137,17 @@ struct ServeController::Impl {
             return outcome;
         }
         generation.internal_request_id = submit_result.release();
+        if (request.ignore_eos) {
+            const shelf::Status ignore_eos_status =
+                session.set_ignore_eos(generation.internal_request_id, true);
+            if (!ignore_eos_status.ok()) {
+                (void)session.cancel(generation.internal_request_id);
+                (void)session.retire(generation.internal_request_id);
+                outcome.code = "internal";
+                outcome.message = ignore_eos_status.message();
+                return outcome;
+            }
+        }
         if (request.grammar && config.dflash_enabled) {
             auto st = session.set_structured_dflash(generation.internal_request_id,
                                                     generation.grammar_delayed,
@@ -1644,9 +1659,7 @@ Status ServeController::draft_mask_request(int64_t external_request_id, uint64_t
     draft_count = 0;
     words_per_row = 0;
     auto it = impl_->inflight.find(external_request_id);
-    if (it == impl_->inflight.end()) {
-        return Status::invalid_argument("unknown request_id", __FILE__, __LINE__);
-    }
+    if (it == impl_->inflight.end()) return Status::make_ok();
     const RequestView active = impl_->session.request(it->second.internal_request_id);
     if (!active.found || active.state == runtime::RequestState::Finished ||
         active.draft_mask_state != runtime::DraftMaskState::PendingMask ||
@@ -1761,9 +1774,12 @@ void ServeController::write_final_stats() {
     }
     const auto& t = impl_->dflash_stats;
     const float rounds = static_cast<float>(t.rounds);
-    const float mean = t.rounds > 0u ? static_cast<float>(t.accepted_drafts) / rounds : 0.0f;
-    const float full_rate =
-        t.rounds > 0u ? static_cast<float>(t.full_accepts) / rounds : 0.0f;
+    const double lane_rounds = static_cast<double>(t.full_accepts) + t.partial_accepts;
+    const double mean = lane_rounds > 0.0 ? t.accepted_drafts / lane_rounds : 0.0;
+    const double full_rate = lane_rounds > 0.0 ? t.full_accepts / lane_rounds : 0.0;
+    const double acceptance = t.proposed_drafts ? static_cast<double>(t.accepted_drafts) / t.proposed_drafts : 0.0;
+    fprintf(stderr, "DFLASH2_PROPOSED_DRAFTS=%llu\n", static_cast<unsigned long long>(t.proposed_drafts));
+    fprintf(stderr, "DFLASH2_ACCEPTANCE_RATE=%.6f\n", acceptance);
     const float emitted =
         t.rounds > 0u ? static_cast<float>(t.generated_tokens) / rounds : 0.0f;
     if (impl_->config.dflash_adaptive && t.adaptive_rounds != 0u) {

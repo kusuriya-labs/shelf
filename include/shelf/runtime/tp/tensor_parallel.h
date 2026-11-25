@@ -253,6 +253,7 @@ public:
     static Result<std::unique_ptr<TpCoordinator>> create(
         const TpCoordinatorConfig& config);
     ~TpCoordinator() noexcept;
+    Status shutdown();
 
     TpCoordinator(const TpCoordinator&) = delete;
     TpCoordinator& operator=(const TpCoordinator&) = delete;

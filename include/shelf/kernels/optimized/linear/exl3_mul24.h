@@ -36,6 +36,12 @@ hipError_t launch_exl3_mul24_gemm(
     hipStream_t stream,
     const uint32_t* active_rows = nullptr);
 
+hipError_t launch_exl3_mul24_fused_linear(
+    const uint16_t* input, uint32_t input_row_stride,
+    const uint16_t* suh, const uint16_t* svh,
+    const uint16_t* trellis, void* out, uint32_t out_row_stride,
+    uint32_t rows, uint32_t n, uint32_t k, uint32_t bits, hipStream_t stream);
+
 // K splits for the fused gemm (rows <= 64; 1 above): each split writes its own yprime slice, so yprime must hold
 // splits * rows * n floats (scratch_rows is the capacity in rows). Chosen so the grid fills the wave slots. The count is
 // the same for every row count of 1..64 (it is clamped down only when splits * rows exceeds the scratch capacity), so a
@@ -68,12 +74,11 @@ hipError_t launch_exl3_mul24_rowscale(
 // B prefill: reconstructed dense INT8 weights in trellis n-major tile order,
 // per-128-K activation scales, gfx12 iu8 WMMA into int32 followed by
 // group-scale FP32 FMA.
-// Writes F32 yprime [rows][n] including the EXL3 grid-step factor.
 hipError_t launch_exl3_mul24_prefill_wmma(
     const int8_t* codes, const float* scales,
     uint32_t code_stride, uint32_t scale_stride_bytes,
     const int8_t* dense_weights, float* yprime,
-    uint32_t rows, uint32_t n, uint32_t k, hipStream_t stream);
+    uint32_t rows, uint32_t n, uint32_t k, hipStream_t stream, uint32_t splits = 1u);
 
 hipError_t launch_exl3_mul24_recon(
     const uint16_t* trellis, uint32_t bits, int8_t* dense, uint32_t n, uint32_t k, hipStream_t stream);

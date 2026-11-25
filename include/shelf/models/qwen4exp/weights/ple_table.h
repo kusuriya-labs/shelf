@@ -97,8 +97,13 @@ public:
         const std::vector<std::int32_t>& prefix_tail,
         std::span<const std::int32_t> tokens) const;
 
+    Result<std::vector<bf16_t>> gather_bf16_batch(
+        const std::vector<std::int32_t>& prefix_tail,
+        std::span<const std::int32_t> tokens) const;
+
 
 private:
+    Status decode_row_into(std::uint64_t row, bool include_head_bias, std::span<float> out) const;
     struct NgramHead {
         std::unique_ptr<io::SafetensorsReader> reader;
         const std::uint8_t* codes = nullptr;

@@ -27,6 +27,7 @@ struct PlamoExl3ProjectionGroup {
     uint32_t input_stride = 0;
     uint32_t scale_stride_bytes = 0;
     uint32_t count = 0;
+    uint32_t three_bit_mask = 0;
 };
 
 hipError_t launch_plamo_exl3_projection(const PlamoExl3ProjectionGroup &args, uint32_t bits,

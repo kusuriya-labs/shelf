@@ -78,7 +78,7 @@ CommitAction commit_sampled_token(
     token = enforce_thinking_budget(request, token);
     ++request.generated_tokens;
     request.generated.push_back(token);
-    if (qwen_hybrid::is_stop_token(stop_tokens, token)) {
+    if (!request.ignore_eos && qwen_hybrid::is_stop_token(stop_tokens, token)) {
         mark_finished(request, FinishReason::Eos);
         return CommitAction::Finished;
     }

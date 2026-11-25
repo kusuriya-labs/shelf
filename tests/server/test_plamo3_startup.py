@@ -46,7 +46,7 @@ class Site:
     async def start(self):
         raise Ready()
 
-server.codec.load_processor = lambda path: object()
+server.codec.load_processor = lambda path, *, max_seq_len: object()
 server.AsyncComputeClient = Compute
 server.ChatService = Service
 server.build_compute_argv = lambda opts: []

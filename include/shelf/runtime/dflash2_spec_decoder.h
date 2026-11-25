@@ -327,6 +327,7 @@ struct DFlash2SpecBatchSlot {
     uint32_t max_accept_drafts = UINT32_MAX;
     int32_t stop_after_token = -1;
     bool disable_tree = false;
+    bool batch_anchor_only = false;
 };
 
 Result<std::vector<int32_t>> dflash2_spec_propose_slot(
