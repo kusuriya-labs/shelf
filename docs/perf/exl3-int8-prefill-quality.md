@@ -1,5 +1,8 @@
 # EXL3-INT8 mul24 prefill の品質
 
+> 本測定は当時存在した `SHELF_EXL3_MUL24_PREFILL_AB` の切り替えを使っている。現在この切り替えは無く、
+> EXL3-INT8 prefill は 1 経路（`prefill_super64`）である。
+
 Qwen3.8-27B、cases-v1 の 8 case・2,632 位置、R9700、ROCm 10.2、BF16 KV。基準は llama.cpp BF16・FP16 KV の logits。温度 1、KL(BF16 ‖ 候補)、有効語彙 248,077 ID。A は gfx1201 の既定 prefill、B は `SHELF_EXL3_MUL24_PREFILL_AB=B`。先頭最大 256 token を prefill し、残りを逐次 decode した。
 
 | 量子化 | 経路 | 平均 KLD | top-1 一致 |

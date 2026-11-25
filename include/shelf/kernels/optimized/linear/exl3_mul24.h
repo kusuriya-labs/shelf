@@ -71,23 +71,29 @@ hipError_t launch_exl3_mul24_rowscale(
     float* scales_f, uint32_t rows, uint32_t cap, uint32_t k, uint32_t code_row_stride_bytes,
     uint32_t scale_row_stride_bytes, float share, hipStream_t stream);
 
-// B prefill: reconstructed dense INT8 weights in trellis n-major tile order,
-// per-128-K activation scales, gfx12 iu8 WMMA into int32 followed by
-// group-scale FP32 FMA.
-hipError_t launch_exl3_mul24_prefill_wmma(
-    const int8_t* codes, const float* scales,
-    uint32_t code_stride, uint32_t scale_stride_bytes,
-    const int8_t* dense_weights, float* yprime,
-    uint32_t rows, uint32_t n, uint32_t k, hipStream_t stream, uint32_t splits = 1u);
-
 hipError_t launch_exl3_mul24_recon(
     const uint16_t* trellis, uint32_t bits, int8_t* dense, uint32_t n, uint32_t k, hipStream_t stream);
 
-// Same decode as launch_exl3_mul24_recon, but the output keeps the trellis n-major tile order:
-// one 256-byte 16x16 tile per (n tile, k tile), lane l holding its eight weights. A WMMA B
-// fragment (32 lanes x 8 bytes) is then one contiguous 256-byte read.
-hipError_t launch_exl3_mul24_recon_wmma(
-    const uint16_t* trellis, uint32_t bits, int8_t* dense, uint32_t n, uint32_t k, hipStream_t stream);
+// Same decode, written for launch_exl3_mul24_prefill_super64: per (n tile, 64-K
+// supertile) 1 KiB, a lane's 32 bytes are its four k16 fragments.
+hipError_t launch_exl3_mul24_recon_super64(const uint16_t* trellis, uint32_t bits, int8_t* dense,
+                                          uint32_t n, uint32_t k, hipStream_t stream);
+
+// Prefill dense INT8 GEMM with the same int32 accumulator contract as
+// exl3_dense_gemm_int8 (rowscale path): C_int32[rows][n] = codes[rows][k] *
+// weights[n][k]^T, weights in the super64 plane. n must be a multiple of 256 and
+// k of 64.
+hipError_t launch_exl3_mul24_prefill_super64(
+    const int8_t* codes, const int8_t* weights_super64, int32_t* yprime,
+    uint32_t rows, uint32_t n, uint32_t k, hipStream_t stream);
+
+// Same tile with the rotate-out epilogue (rowscale, H128, svh, BF16 store), so
+// the int32 accumulator is never written. Rows with slots[m] >= 0 are skipped
+// and must be written by launch_exl3_mul24_rotate_out_i32_flagged.
+hipError_t launch_exl3_mul24_prefill_super64_fused(
+    const int8_t* codes, const int8_t* weights_super64, const float* rowscale,
+    const int32_t* slots, const uint16_t* svh, void* out, uint32_t out_row_stride,
+    uint32_t rows, uint32_t n, uint32_t k, hipStream_t stream);
 
 
 // (128 output columns each).

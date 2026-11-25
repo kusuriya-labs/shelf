@@ -329,7 +329,7 @@ INT8 の重み行列は常駐しない。
 実装は以下の 3 層に分かれる。
 
 - `src/shelf/kernels/optimized/linear/exl3_family/` — `mul24/`（INT8 の decode /
-  prefill / prefill_wmma / projection / projection_prefill / split_plan / workspace）および
+  prefill / prefill_super64 / projection / projection_prefill / split_plan / workspace）および
   variant 制約（`variant.cpp`）。
 - `src/shelf/kernels/fused/exl3/` — decode 融合（`decode.hip`, `producer_rotate.hip`,
   `producer_rotate_rows.hip`, `rotate_quantize.hip`, `rotate_out.hip`, `group_gemm.hip`）および
@@ -357,21 +357,18 @@ INT8 の重み行列は常駐しない。
 
 | 条件 | 選択経路 | 構造・launch 構成 |
 | --- | --- | --- |
-| `use_dense && exl3_mul24_use_a_prefill(!prefill_wmma_b, num_prefill_requests)` | **Prefill A（hipBLASLt INT8、gfx1201 既定）** | `rotate_quantize` → `rowscale`（行最大 scale へ再量子化、エネルギー比が `SHELF_EXL3_INT8_FLAG`（既定 0.5）超の行は最大 `rows/8` 行まで flagged 退避）→ `recon`（dense `[n][k]` INT8 展開）→ `exl3_dense_gemm_int8`（hipBLASLt `int8 × int8 → int32`）→ flagged 行の融合 GEMM → `rotate_out_i32`。`hipblaslt_abi_compatible()` 失敗や `hipErrorNotSupported` / `hipErrorInitializationError` / `hipErrorOutOfMemory` で B 経路へフォールバックする |
-| `use_dense && (prefill_wmma_b \|\| fallback_b)` | **Prefill B（自前 gfx12 iu8 WMMA）** | `SHELF_EXL3_MUL24_PREFILL_AB=B`、PLaMo 既定、`HIPBLASLT_USE_ROCROLLER=1`、または A 経路フォールバック時に選択。`rotate_quantize` → `recon_wmma` → `prefill_wmma`（K128 group scale のまま、rowscale / flagged GEMM なし）→ `rotate_out`（4 launch） |
+| `use_dense && n % 256 == 0 && k % 64 == 0` | **Prefill dense（自前 gfx12 iu8 WMMA）** | `rotate_quantize` → `rowscale`（行最大 scale へ再量子化、エネルギー比が `SHELF_EXL3_INT8_FLAG`（既定 0.5）超の行は最大 `rows/8` 行まで flagged 退避）→ `recon_super64`（64-K supertile のフラグメント平面へ INT8 展開）→ `prefill_super64`（出力回転・H128・`svh`・BF16 書き出しを融合）→ flagged 行の融合 GEMM → flagged 行 fixup。出力が BF16 でない場合は `prefill_super64` の int32 出力と `rotate_out_i32` を使う |
+| `use_dense && (n % 256 != 0 \|\| k % 64 != 0)` | **Prefill dense（int32 経路）** | 同じ tile を使えない形状は `decode` 経路の `mul24_gemm` で計算する |
 | `!use_dense`（decode・verify・小行数） | **Decode / 小・中行数（融合・K-split）** | 3 launch: `rotate_quantize` → `mul24_gemm`（`exl3_mul24_gemm_splits` が `rows <= 64` の K 分割数を決定）→ `rotate_out`。さらに下述の projection group 統合と producer / boundary 融合が条件成立時に適用される |
 
-- **A 経路の選択ゲート（`exl3_mul24_use_a`）**: `SHELF_EXL3_MUL24_PREFILL_AB` が未設定または `A` / `a`、
-  `HIPBLASLT_USE_ROCROLLER` が `"1"` でない、かつ device が `gfx1201` のときに true。
-  候補の実測選択は既定オフ（`SHELF_EXL3_INT8_TUNE=1` で有効）。
+- **prefill tile の重み平面**: `recon_super64` が `(n tile, 64-K)` ごとに 1 KiB を書き、1 lane の 32 B が
+  4 個の k16 フラグメントになる。GEMM は重みを LDS に置かずレジスタへ直読みし、活性だけを 64-K
+  tile で LDS に段取りする。
 - **Projection group 統合**。共通実装は同じ入力を使う連続した BF16 入出力の投影を最大3個まとめる。
   4ビットは64行以下、3ビットと3・4ビットの混在は16行以下を対象とする。混在時は投影ごとの
   ビット幅で GEMM を実行する。producer を同時に融合する場合は全投影のビット幅をそろえる。
   入力回転、GEMM、出力回転で各1回起動する。ワークスペース不足、入出力の重複、出力列の部分書き込み、
   デバッグ設定や対象外の prefill では個別の経路を使う。
-- **Prefill B の部分和**。`launch_exl3_mul24_prefill_wmma` の出力は FP32 の
-  `[splits][rows][n]` である。呼び出し側が全分割の領域を確保する。`splits` は
-  K 方向の128要素グループ数の正の約数で、通常の prefill では1を使う。
 - **単一カーネル投影**。明示指定時は16行以下の3・4ビット BF16 投影で入力回転から出力回転までをまとめる。
   適用条件と指定方法は [環境変数一覧](../user/env_vars.md) を参照。
 - **Decode 融合（`src/shelf/kernels/fused/exl3/`）**: `num_prefill_requests == 0` かつ `rows <= 16` の

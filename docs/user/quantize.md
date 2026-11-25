@@ -83,7 +83,7 @@ Qwen3.8-27B 向けに保存済みの BF16 基準 logits（`cases-v1` の主 8 ca
 ./tools/quality/kld-vs-bf16.sh A --bench ./build/shelf-bench --model /path/to/model
 
 # B 経路（自前 WMMA prefill）を測定
-SHELF_EXL3_MUL24_PREFILL_AB=B ./tools/quality/kld-vs-bf16.sh B --bench ./build/shelf-bench --model /path/to/model
+./tools/quality/kld-vs-bf16.sh B --bench ./build/shelf-bench --model /path/to/model
 
 # 2 つの測定 JSON を位置単位で対応比較（case bootstrap 付き）
 python3 tools/quality/paired_kld.py docs/perf/quality-bf16/B.json docs/perf/quality-bf16/A.json

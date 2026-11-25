@@ -206,7 +206,7 @@ EXL3 カーネル群は通常経路を `src/shelf/kernels/optimized/linear/exl3_
 `variant.cpp`）に、融合経路および MoE 用 grouped 経路を `src/shelf/kernels/fused/exl3/` に配置する。
 
 - `mul24/`（EXL3-INT8）: INT8 活性・iu8 WMMA のみ（`variant.cpp` が mul24 / INT8 活性以外を拒否）。
-  `decode.hip` / `prefill.hip`（A 経路の recon・rowscale 等）/ `prefill_wmma.hip`（B 経路の自前 gfx12 iu8 WMMA）/
+  `decode.hip` / `prefill.hip`（recon・rowscale 等）/ `prefill_super64.hip`（prefill の自前 gfx12 iu8 WMMA）/
   `projection.hip` / `projection_prefill.hip` / `split_plan.cpp` / `workspace.cpp` で構成する。
 - `fused/exl3/`: `decode.hip` / `rotate_quantize.hip` / `rotate_out.hip` / `producer_rotate.hip` /
   `producer_rotate_rows.hip` / `group_gemm.hip` / `grouped.hip`（MoE routed experts、INT8 活性、

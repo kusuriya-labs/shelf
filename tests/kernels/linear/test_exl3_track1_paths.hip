@@ -179,35 +179,6 @@ bool test_fused_linear_guard() {
     return true;
 }
 
-bool test_prefill(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits, uint32_t splits) {
-    std::printf("prefill_wmma rows=%u n=%u k=%u bits=%u splits=%u\n", rows, n, k, bits, splits);
-    Fixture f(rows, n, k, bits, rows * 31u + splits);
-    Dev<int8_t> d_codes(static_cast<size_t>(rows) * f.code_stride);
-    Dev<float> d_scales(static_cast<size_t>(rows) * f.scale_stride_bytes / 4u);
-    Dev<int8_t> d_dense(static_cast<size_t>(n) * k);
-    Dev<float> d_y1(static_cast<size_t>(rows) * n);
-    Dev<float> d_ys(static_cast<size_t>(rows) * n * splits);
-    HIP_OK(shelf::kernel::launch_exl3_mul24_rotate_quantize(
-        reinterpret_cast<const shelf::bf16_t*>(f.d_x.p), k, f.d_suh.p, d_codes.p, d_scales.p,
-        rows, k, f.code_stride, f.scale_stride_bytes, nullptr));
-    HIP_OK(shelf::kernel::launch_exl3_mul24_recon_wmma(f.d_resident.p, bits, d_dense.p, n, k, nullptr));
-    HIP_OK(shelf::kernel::launch_exl3_mul24_prefill_wmma(
-        d_codes.p, d_scales.p, f.code_stride, f.scale_stride_bytes, d_dense.p, d_y1.p,
-        rows, n, k, nullptr, 1u));
-    HIP_OK(shelf::kernel::launch_exl3_mul24_prefill_wmma(
-        d_codes.p, d_scales.p, f.code_stride, f.scale_stride_bytes, d_dense.p, d_ys.p,
-        rows, n, k, nullptr, splits));
-    HIP_OK(hipDeviceSynchronize());
-    std::vector<float> y1(static_cast<size_t>(rows) * n), ys(static_cast<size_t>(rows) * n * splits);
-    HIP_OK(hipMemcpy(y1.data(), d_y1.p, y1.size() * sizeof(float), hipMemcpyDeviceToHost));
-    HIP_OK(hipMemcpy(ys.data(), d_ys.p, ys.size() * sizeof(float), hipMemcpyDeviceToHost));
-    std::vector<float> sum(y1.size(), 0.0f);
-    for (uint32_t z = 0u; z < splits; ++z)
-        for (size_t i = 0; i < y1.size(); ++i) sum[i] += ys[static_cast<size_t>(z) * y1.size() + i];
-    compare_f32("split sum vs single", sum, y1, 1e-4);
-    return true;
-}
-
 bool test_grouped_mixed() {
     const uint32_t rows = 1u, n = 512u, k = 5120u;
     std::printf("grouped projection 3-bit + mixed 3/4\n");
@@ -317,9 +288,6 @@ int main() {
     test_fused_linear(16u, 512u, 5120u, 4u);
     test_fused_linear(3u, 512u, 5120u, 3u);
     test_fused_linear(16u, 512u, 5120u, 3u);
-    test_prefill(256u, 512u, 5120u, 4u, 1u);
-    test_prefill(256u, 512u, 5120u, 4u, 4u);
-    test_prefill(264u, 512u, 5120u, 3u, 2u);
     test_grouped_mixed();
     test_group_body(1);
     test_group_body(4);

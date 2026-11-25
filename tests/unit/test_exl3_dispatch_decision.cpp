@@ -32,9 +32,6 @@ int main() {
     check("min row exact", exl3_mul24_use_dense(true, 256u, 256u, 1ull << 20));
     check("decode rows", !exl3_mul24_use_dense(true, 16u, 256u, 1ull << 20));
     check("dense disabled", !exl3_mul24_use_dense(true, 2048u, 0xFFFFFFFFu, 1ull << 20));
-    check("A disabled for decode or verify", !shelf::execution::exl3_mul24_use_a_prefill(true, 0u));
-    check("A enabled for prefill", shelf::execution::exl3_mul24_use_a_prefill(true, 1u));
-    check("B remains selected for prefill", !shelf::execution::exl3_mul24_use_a_prefill(false, 1u));
 
     using shelf::execution::exl3_grouped_projection_bits_match;
     check("same 3 bpw beyond 16 rows", !exl3_grouped_projection_bits_match(3u, 3u, 64u));

@@ -539,47 +539,16 @@ Result<PhysicalResolveStatus> resolve_bf16_physical(
     return PhysicalResolveStatus::Applicable;
 }
 
-bool exl3_mul24_use_a() {
-    static const bool requested = [] {
-        const char* env = std::getenv("SHELF_EXL3_MUL24_PREFILL_AB");
-        return env == nullptr || ((env[0] == 'A' || env[0] == 'a') && env[1] == '\0');
-    }();
-    if (!requested) return false;
-    const char* rocroller = std::getenv("HIPBLASLT_USE_ROCROLLER");
-    if (rocroller != nullptr && std::strcmp(rocroller, "1") == 0) {
-        static std::atomic_flag reported = ATOMIC_FLAG_INIT;
-        if (!reported.test_and_set())
-            std::fprintf(stderr, "EXL3 INT8 prefill: rocRoller selected; using B kernel\n");
-        return false;
-    }
-    int device = -1;
-    if (hipGetDevice(&device) != hipSuccess) return false;
-    static thread_local int checked_device = -1;
-    static thread_local bool supported = false;
-    if (checked_device != device) {
-        hipDeviceProp_t props{};
-        supported = hipGetDeviceProperties(&props, device) == hipSuccess &&
-                    std::strncmp(props.gcnArchName, "gfx1201", 7u) == 0;
-        checked_device = device;
-    }
-    return supported;
-}
-
 bool exl3_mul24_use_dense(bool dense_ok, uint32_t n_rows, uint32_t dense_min_rows,
                           uint64_t rowsum_bytes) {
     return dense_ok && n_rows >= dense_min_rows &&
            static_cast<uint64_t>(n_rows) * sizeof(float) <= rowsum_bytes;
 }
 
-bool exl3_mul24_use_a_prefill(bool a_selected, uint32_t num_prefill_requests) {
-    return a_selected && num_prefill_requests != 0u;
-}
-
 bool exl3_grouped_projection_bits_match(uint32_t first_bits, uint32_t other_bits, uint32_t rows) {
     if (first_bits != 3u && other_bits != 3u) return first_bits == other_bits;
     return rows <= 16u && first_bits >= 3u && first_bits <= 4u && other_bits >= 3u && other_bits <= 4u;
 }
-
 // EXL3-INT8 (mul24): rotate + int8-quantize the activations, run the int8 WMMA GEMM that decodes the resident
 // trellis on every read, then rotate the output back. The three launches share the EXL3 workspace of the executor:
 // the xrot region holds the int8 codes and their scales, the accum region the F32 pre-rotation output.
@@ -649,9 +618,6 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
         const unsigned long v = std::strtoul(env, nullptr, 10);
         return v == 0ul ? 0xFFFFFFFFu : static_cast<uint32_t>(v);
     }();
-    // A: hipBLASLt row-scale dense prefill + flagged-row correction.
-    // B: hand-written gfx12 iu8 WMMA, K128 scale/FMA and no row re-quantization.
-    const bool prefill_wmma_b = (e.plamo_exl3_linear && std::getenv("SHELF_EXL3_MUL24_PREFILL_AB") == nullptr) || !exl3_mul24_use_a();
     static const float flag_share = [] {
         const char* env = std::getenv("SHELF_EXL3_INT8_FLAG");
         return env != nullptr ? std::strtof(env, nullptr) : 0.5f;
@@ -663,9 +629,12 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
         const char *env = std::getenv("SHELF_PLAMO_EXL3_LINEAR");
         return env == nullptr || std::strcmp(env, "0") != 0;
     }();
+    // The dense prefill tile reads the weights from a preshuffled 64-K supertile
+    // plane and applies rotate-out in its epilogue, so the int32 accumulator never
+    // reaches memory. A shape that the tile cannot take keeps the trellis path.
+    const bool super64 = (n % 256u) == 0u && (k % 64u) == 0u;
     const bool plamo_prefill = e.plamo_exl3_linear && plamo_enabled &&
-                               std::getenv("SHELF_EXL3_INT8_DENSE") == nullptr &&
-                               std::getenv("SHELF_EXL3_MUL24_PREFILL_AB") == nullptr;
+                               std::getenv("SHELF_EXL3_INT8_DENSE") == nullptr;
     const bool dense_ok = ctx.exl3_dense != nullptr && ctx.exl3_rowsum != nullptr && layout.fits;
     static const bool fused_small_batch = [] {
         const char* value = std::getenv("SHELF_EXL3_MUL24_FUSED_SMALL_BATCH");
@@ -674,8 +643,9 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
     uint32_t launches = 0;
     for (uint32_t r0 = 0; r0 < rows; r0 += chunk) {
         const uint32_t n_rows = std::min(chunk, rows - r0);
+        const bool super64_fused = super64 && out_bf16 && !plamo_prefill;
         const bool use_dense =
-            exl3_mul24_use_dense(dense_ok, n_rows, dense_min_rows, ctx.exl3_rowsum_bytes);
+            super64 && exl3_mul24_use_dense(dense_ok, n_rows, dense_min_rows, ctx.exl3_rowsum_bytes);
         const ::shelf::bf16_t* x = reinterpret_cast<const ::shelf::bf16_t*>(in.ptr) + static_cast<size_t>(r0) * in.row_stride;
         const uint16_t* suh = static_cast<const uint16_t*>(e.exl3_suh);
         const uint16_t* svh = static_cast<const uint16_t*>(e.exl3_svh);
@@ -708,8 +678,7 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
         }
         hipError_t herr = hipSuccess;
         bool done = false;
-        bool fallback_b = false;
-        if (use_dense && exl3_mul24_use_a_prefill(!prefill_wmma_b, ctx.num_prefill_requests)) {
+        if (use_dense) {
             float* rowscale = static_cast<float*>(ctx.exl3_rowsum);
             int8_t* dense = static_cast<int8_t*>(ctx.exl3_dense);
             uint8_t* xr = static_cast<uint8_t*>(ctx.exl3_xrot);
@@ -747,7 +716,7 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
             }
             if (herr == hipSuccess) {
                 const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
-                herr = ::shelf::kernel::launch_exl3_mul24_recon(
+                herr = ::shelf::kernel::launch_exl3_mul24_recon_super64(
                     static_cast<const uint16_t*>(e.codes), e.exl3_ka, dense, n, k, stream);
                 if (semantic_timing_enabled())
                     semantic_timing_finish(stream, timing, 0xffff0002u,
@@ -755,14 +724,13 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
             }
             if (herr == hipSuccess) {
                 const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
-                herr = ::shelf::execution::exl3_dense_gemm_int8(n_rows, n, k, dense, codes, yprime, stream);
-                if (herr == hipErrorNotSupported || herr == hipErrorInitializationError ||
-                    herr == hipErrorOutOfMemory) {
-                    static std::atomic_flag reported = ATOMIC_FLAG_INIT;
-                    if (!reported.test_and_set())
-                        std::fprintf(stderr, "EXL3 INT8 prefill: hipBLASLt unavailable; using B kernel\n");
-                    herr = hipErrorNotSupported;
-                }
+                herr = super64_fused
+                    ? ::shelf::kernel::launch_exl3_mul24_prefill_super64_fused(
+                          codes, static_cast<const int8_t*>(dense), rowscale + r0, slots + r0, svh,
+                          out_ptr, dst.row_stride, n_rows, n, k, stream)
+                    : ::shelf::kernel::launch_exl3_mul24_prefill_super64(
+                          codes, static_cast<const int8_t*>(dense),
+                          reinterpret_cast<int32_t*>(yprime), n_rows, n, k, stream);
                 if (semantic_timing_enabled())
                     semantic_timing_finish(stream, timing, 0xffff0003u,
                                            static_cast<uint32_t>(SemPath::Optimized), 0);
@@ -786,7 +754,11 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
             }
             if (herr == hipSuccess) {
                 const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
-                if (plamo_prefill)
+                if (super64_fused)
+                    herr = ::shelf::kernel::launch_exl3_mul24_rotate_out_i32_flagged(
+                        rowscale + r0, slots + r0, yprime2, svh, out_ptr, n_rows, n,
+                        dst.row_stride, stream);
+                else if (plamo_prefill)
                     herr = ::shelf::kernel::launch_plamo_exl3_rotate_out_i32(
                         static_cast<const int32_t *>(ctx.exl3_accum), rowscale, slots, yprime2, svh,
                         out_ptr, out_bf16, n_rows, n, dst.row_stride, stream);
@@ -799,45 +771,7 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
                                            static_cast<uint32_t>(SemPath::Optimized), 0);
             }
             done = herr == hipSuccess;
-            launches += done ? 7u : 0u;
-            if (herr == hipErrorNotSupported) {
-                fallback_b = true;
-                herr = hipSuccess;
-            }
-        }
-        if (use_dense && (prefill_wmma_b || fallback_b)) {
-            // B uses the exact original group codes/scales and the same dense
-            // int8 weight reconstruction as A. No rowscale, slots or flagged GEMM.
-            const uint32_t timing0 = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
-            herr = ::shelf::kernel::launch_exl3_mul24_rotate_quantize(
-                x, in.row_stride, suh, codes, scales, n_rows, k, code_stride, scale_stride_bytes, stream);
-            if (semantic_timing_enabled()) semantic_timing_finish(
-                stream, timing0, 0xffff0010u, static_cast<uint32_t>(SemPath::Optimized), 0);
-            if (herr == hipSuccess) {
-                const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
-                herr = ::shelf::kernel::launch_exl3_mul24_recon_wmma(
-                    static_cast<const uint16_t*>(e.codes), e.exl3_ka,
-                    static_cast<int8_t*>(ctx.exl3_dense), n, k, stream);
-                if (semantic_timing_enabled()) semantic_timing_finish(
-                    stream, timing, 0xffff0011u, static_cast<uint32_t>(SemPath::Optimized), 0);
-            }
-            if (herr == hipSuccess) {
-                const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
-                herr = ::shelf::kernel::launch_exl3_mul24_prefill_wmma(
-                    codes, scales, code_stride, scale_stride_bytes,
-                    static_cast<const int8_t*>(ctx.exl3_dense), yprime, n_rows, n, k, stream, 1u);
-                if (semantic_timing_enabled()) semantic_timing_finish(
-                    stream, timing, 0xffff0012u, static_cast<uint32_t>(SemPath::Optimized), 0);
-            }
-            if (herr == hipSuccess) {
-                const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
-                herr = ::shelf::kernel::launch_exl3_mul24_rotate_out(
-                    yprime, svh, out_ptr, out_dtype, n_rows, n, dst.row_stride, 1u, stream);
-                if (semantic_timing_enabled()) semantic_timing_finish(
-                    stream, timing, 0xffff0013u, static_cast<uint32_t>(SemPath::Optimized), 0);
-            }
-            done = herr == hipSuccess;
-            launches += done ? 4u : 0u;
+            launches += done ? 6u : 0u;
         }
         if (!done && herr == hipSuccess) {
             const uint32_t split_rows =
@@ -1138,9 +1072,7 @@ Result<OptimizedLaunchResult> try_launch_exl3_projection(
         ctx.exl3_xrot == nullptr || ctx.exl3_accum == nullptr)
         return miss;
     const bool custom_prefill = std::getenv("SHELF_EXL3_INT8_DENSE") != nullptr ||
-        (is_plamo && std::getenv("SHELF_EXL3_MUL24_PREFILL_AB") != nullptr) ||
-        (!is_plamo && rows > 16u && exl3_mul24_use_a_prefill(exl3_mul24_use_a(),
-                                                             ctx.num_prefill_requests));
+        (!is_plamo && rows > 16u && ctx.num_prefill_requests != 0u);
     if (custom_prefill)
         return miss;
     auto bits_match = [&](uint32_t ka) {

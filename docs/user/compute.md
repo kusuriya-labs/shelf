@@ -15,12 +15,11 @@ TP、pipeline parallel、MTP、DFlash2、2048 token 超の長文は未対応。
 
 ## EXL3-INT8 prefill
 
-gfx1201 の EXL3-INT8（mul24）は、256 行以上の prefill について 2 つの経路を持つ。
+gfx1201 の EXL3-INT8（mul24）は、256 行以上の prefill を次の 1 経路で計算する。
 
-- **A 経路（既定、`SHELF_EXL3_MUL24_PREFILL_AB=A`）**: trellis を dense INT8 行列へ展開し、hipBLASLt の INT8 GEMM（行単位 scale + massive activation 行の融合補正）で計算する。高スループット。
-- **B 経路（`SHELF_EXL3_MUL24_PREFILL_AB=B`）**: 自前 gfx12 iu8 WMMA カーネルで K128 group scale のまま計算する（行再量子化なし）。
+`rotate_quantize` → `rowscale`（行最大 scale へ再量子化し、エネルギー比が `SHELF_EXL3_INT8_FLAG` を超える massive activation 行だけ group scale のまま退避）→ `recon_super64`（trellis を 64-K supertile のフラグメント平面へ INT8 展開）→ 自前 gfx12 iu8 WMMA GEMM（出力回転・H128・`svh`・BF16 書き出しをエピローグに融合、退避行は別 fixup で書く）。
 
-hipBLASLt の INT8 algorithm が利用できない場合、ABI 検査に失敗した場合、または `HIPBLASLT_USE_ROCROLLER=1` が指定されている場合は、自動で B 経路へ切り替わる（stderr に 1 行通知）。decode と verify は融合経路を使う。PLaMo 3 は未指定時に独自 prefill 経路を維持する。
+出力が BF16 でない場合と PLaMo 3 は、同じ GEMM の int32 出力と既存の `rotate_out_i32` を使う。decode と verify は 256 行未満として融合 decode 経路を使う。
 
 prefill の chunk 境界や prefix cache の有無によって、同じ入力の出力が bit 単位で変わる場合がある。通常生成と DFlash2 の出力不一致は B 経路でも観測されている。BF16 比の精度と測定条件は [EXL3-INT8 prefill の品質](../perf/exl3-int8-prefill-quality.md)、関連する環境変数の一覧は [env_vars.md](env_vars.md#3-exl3--exl3-int8mul24経路制御) を参照。
 

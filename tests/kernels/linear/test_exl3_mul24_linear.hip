@@ -213,29 +213,6 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits, uint32_t see
     worst_ideal = std::sqrt(err2 / std::max(1e-30, ideal_norm));
 
 
-    // B prefill (reconstructed dense weights + per-128-K scales): must reproduce the fused per-group
-    // accumulator, because the only difference is the weight storage (trellis decode vs dense int8).
-    bool wmma_pass = true;
-    {
-        Dev<int8_t> d_dense_w(static_cast<size_t>(n) * k);
-        Dev<float> d_yw(static_cast<size_t>(rows) * n);
-        HIP_OK(shelf::kernel::launch_exl3_mul24_recon_wmma(d_trellis.p, bits, d_dense_w.p, n, k, nullptr));
-        HIP_OK(shelf::kernel::launch_exl3_mul24_prefill_wmma(d_codes.p, d_scales.p, code_stride,
-                                                            scale_stride_bytes, d_dense_w.p, d_yw.p, rows, n, k,
-                                                            nullptr));
-        HIP_OK(hipDeviceSynchronize());
-        std::vector<float> yw(static_cast<size_t>(rows) * n);
-        HIP_OK(hipMemcpy(yw.data(), d_yw.p, yw.size() * 4, hipMemcpyDeviceToHost));
-        double d2 = 0.0, r2 = 0.0;
-        for (size_t i = 0; i < y.size(); ++i) {
-            d2 += (yw[i] - y[i]) * static_cast<double>(yw[i] - y[i]);
-            r2 += static_cast<double>(y[i]) * y[i];
-        }
-        const double rel = std::sqrt(d2 / std::max(1e-30, r2));
-        wmma_pass = rel < 1e-6;
-        std::printf("  prefill_wmma: vs_fused_rel_l2=%.3g %s\n", rel, wmma_pass ? "PASS" : "FAIL");
-    }
-
     // Prefill (dense) path: recon must reproduce the CPU decode exactly; for the rows without a slot the row-scale
     // re-rounding and the int32 GEMM must match the CPU integer math exactly; rows with a slot must give the
     // per-group result above; rotate_out_i32 must match the float reference. The whole result is also compared with
@@ -244,12 +221,16 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits, uint32_t see
     {
         const uint32_t cap = static_cast<uint32_t>(shelf::kernel::exl3_mul24_flag_cap(rows));
         Dev<int8_t> d_dense(static_cast<size_t>(n) * k);
+        Dev<int8_t> d_dense_s(static_cast<size_t>(n) * k);
         Dev<float> d_rs(rows);
         Dev<int32_t> d_slots(rows);
         Dev<uint32_t> d_count(1);
         Dev<int8_t> d_codes_f(static_cast<size_t>(cap) * code_stride);
         Dev<float> d_scales_f(static_cast<size_t>(cap) * scale_stride_bytes / 4u);
         Dev<int32_t> d_acc(static_cast<size_t>(rows) * n);
+        Dev<int32_t> d_acc_s(static_cast<size_t>(rows) * n);
+        Dev<uint16_t> d_out_bf(static_cast<size_t>(rows) * n);
+        Dev<uint16_t> d_out_bf_ref(static_cast<size_t>(rows) * n);
         Dev<float> d_y2(static_cast<size_t>(cap) * n);
         Dev<float> d_out2(static_cast<size_t>(rows) * n);
         HIP_OK(shelf::kernel::launch_exl3_mul24_recon(d_trellis.p, bits, d_dense.p, n, k, nullptr));
@@ -263,11 +244,32 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits, uint32_t see
         } else {
             HIP_OK(ge);
             HIP_OK(shelf::execution::exl3_dense_gemm_int8(rows, n, k, d_dense.p, d_codes.p, d_acc.p, nullptr));
+            // The production tile (preshuffled 64-K weight plane) must reproduce the reference int32
+            // accumulator exactly, and its fused epilogue must reproduce rotate_out_i32 + the flagged fixup.
+            // The tile needs n % 256 and k % 64; the fused form is compared where the reference rotate-out
+            // takes its float4 form (rows >= kRotateOutF4MinRows), i.e. the same epilogue.
+            const bool super64_ok = (n % 256u) == 0u && (k % 64u) == 0u;
+            const bool fused_cmp = super64_ok && rows >= 512u;
+            if (super64_ok) {
+                HIP_OK(shelf::kernel::launch_exl3_mul24_recon_super64(d_trellis.p, bits, d_dense_s.p, n, k,
+                                                                     nullptr));
+                HIP_OK(shelf::kernel::launch_exl3_mul24_prefill_super64(
+                    d_codes.p, d_dense_s.p, d_acc_s.p, rows, n, k, nullptr));
+            }
             HIP_OK(shelf::kernel::launch_exl3_mul24_gemm(d_codes_f.p, d_scales_f.p, code_stride, scale_stride_bytes,
                                                        d_trellis.p, bits, d_y2.p, cap, n, k, 1u, nullptr, d_count.p));
             HIP_OK(shelf::kernel::launch_exl3_mul24_rotate_out_i32(
                 d_acc.p, d_rs.p, d_slots.p, d_y2.p, d_svh.p, d_out2.p, shelf::kernel::Exl3OutputDType::F32, rows, n, n,
                 nullptr));
+            if (fused_cmp) {
+                HIP_OK(shelf::kernel::launch_exl3_mul24_rotate_out_i32(
+                    d_acc.p, d_rs.p, d_slots.p, d_y2.p, d_svh.p, d_out_bf_ref.p,
+                    shelf::kernel::Exl3OutputDType::BF16, rows, n, n, nullptr));
+                HIP_OK(shelf::kernel::launch_exl3_mul24_prefill_super64_fused(
+                    d_codes.p, d_dense_s.p, d_rs.p, d_slots.p, d_svh.p, d_out_bf.p, n, rows, n, k, nullptr));
+                HIP_OK(shelf::kernel::launch_exl3_mul24_rotate_out_i32_flagged(
+                    d_rs.p, d_slots.p, d_y2.p, d_svh.p, d_out_bf.p, rows, n, n, nullptr));
+            }
             HIP_OK(hipDeviceSynchronize());
             std::vector<int8_t> dense(static_cast<size_t>(n) * k), codes2(codes.size());
             std::vector<int32_t> acc(static_cast<size_t>(rows) * n), slots(rows);
@@ -281,6 +283,20 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits, uint32_t see
             HIP_OK(hipMemcpy(&count, d_count.p, 4, hipMemcpyDeviceToHost));
             HIP_OK(hipMemcpy(out2.data(), d_out2.p, out2.size() * 4, hipMemcpyDeviceToHost));
             size_t recon_bad = (dense == q) ? 0 : 1, code_bad = 0, acc_bad = 0, slot_bad = 0, flagged_bad = 0;
+            size_t acc_super_bad = 0, fused_bad = 0;
+            if (super64_ok) {
+                std::vector<int32_t> acc_s(static_cast<size_t>(rows) * n);
+                HIP_OK(hipMemcpy(acc_s.data(), d_acc_s.p, acc_s.size() * 4, hipMemcpyDeviceToHost));
+                for (size_t i = 0; i < acc.size(); ++i)
+                    if (acc[i] != acc_s[i]) ++acc_super_bad;
+            }
+            if (fused_cmp) {
+                std::vector<uint16_t> out_bf(static_cast<size_t>(rows) * n), out_bf_ref(out_bf.size());
+                HIP_OK(hipMemcpy(out_bf.data(), d_out_bf.p, out_bf.size() * 2, hipMemcpyDeviceToHost));
+                HIP_OK(hipMemcpy(out_bf_ref.data(), d_out_bf_ref.p, out_bf_ref.size() * 2, hipMemcpyDeviceToHost));
+                for (size_t i = 0; i < out_bf.size(); ++i)
+                    if (out_bf[i] != out_bf_ref[i]) ++fused_bad;
+            }
             std::vector<float> y2(static_cast<size_t>(rows) * n);
             std::vector<int8_t> codes_f(static_cast<size_t>(cap) * code_stride);
             std::vector<float> scales_f(static_cast<size_t>(cap) * scale_stride_bytes / 4u);
@@ -374,13 +390,13 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits, uint32_t see
             const double out_rel = std::sqrt(d2 / std::max(1e-30, r2));
             const double vs_group = std::sqrt(g2 / std::max(1e-30, gn));
             dense_pass = recon_bad == 0 && code_bad == 0 && acc_bad == 0 && slot_bad == 0 && flagged_bad == 0 &&
-                         out_rel < 1e-5 && vs_group < 0.05;
-            std::printf("  dense: recon_bad=%zu code_bad=%zu acc_bad=%zu slot_bad=%zu flagged_bad=%zu flagged_rows=%u out_rel=%.3g vs_group_rel_l2=%.4f %s\n",
-                        recon_bad, code_bad, acc_bad, slot_bad, flagged_bad, count, out_rel, vs_group, dense_pass ? "PASS" : "FAIL");
+                         acc_super_bad == 0 && fused_bad == 0 && out_rel < 1e-5 && vs_group < 0.05;
+            std::printf("  dense: recon_bad=%zu code_bad=%zu acc_bad=%zu acc_super_bad=%zu fused_bad=%zu slot_bad=%zu flagged_bad=%zu flagged_rows=%u out_rel=%.3g vs_group_rel_l2=%.4f %s\n",
+                        recon_bad, code_bad, acc_bad, acc_super_bad, fused_bad, slot_bad, flagged_bad, count, out_rel, vs_group, dense_pass ? "PASS" : "FAIL");
         }
     }
 
-    const bool ok = dense_pass && wmma_pass && code_mismatch == 0 && worst_scale == 0.0 && worst_y < 1e-5 && worst_out < 1e-5 && worst_ideal < 0.02;
+    const bool ok = dense_pass && code_mismatch == 0 && worst_scale == 0.0 && worst_y < 1e-5 && worst_out < 1e-5 && worst_ideal < 0.02;
     std::printf("%s rows=%u n=%u k=%u: code_mismatch=%zu scale_err=%.3g gemm_rel=%.3g out_rel=%.3g ideal_rel_l2=%.4f\n",
                 ok ? "PASS" : "FAIL", rows, n, k, code_mismatch, worst_scale, worst_y, worst_out, worst_ideal);
     return ok;
