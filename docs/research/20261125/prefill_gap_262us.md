@@ -1,6 +1,6 @@
 # EXL3 prefill の kernel 境界に固定 262 µs の空白
 
-## 計測
+## 観測
 
 `d4fae4a2`、R9700（gfx1201）1 GPU、TP=1、`shelf-bench pp --mode forward`、
 2048 token / chunk 2048、BF16 KV。`rocprofv3 --kernel-trace` の
@@ -12,48 +12,57 @@
 
 | 遷移 | 回数 | gap p50 | 合計 |
 | --- | ---: | ---: | ---: |
-| `exl3_mul24_prefill_super64_kernel<true,true>` → `exl3_mul24_gemm_kernel<4,4,true,true>` | 400 | 261.5 µs | 67.8 ms |
-| `shelf_gdn_recurrence_wmma_lossy_v32` → 直後の kernel | 48 | 262.7 µs | 12.3 ms |
-| `attention_paged_prefill_bf16_impl<0>` → `shelf_sigmoid_bf16_f32` | 16 | 263.2 µs | 4.2 ms |
-| EXL3 chain の残り 4 遷移（rotq→rowprep→recon→super64、flag→fixup） | 400 ずつ | 4.2〜4.3 µs | 6.8 ms |
+| `exl3_mul24_prefill_super64_kernel` → `exl3_mul24_gemm_kernel`（flagged） | 400 | 261.5 µs | 67.8 ms |
+| `shelf_gdn_recurrence_wmma_lossy_v32` → 直後 | 48 | 262.7 µs | 12.3 ms |
+| `attention_paged_prefill_bf16_impl` → `shelf_sigmoid_bf16_f32` | 16 | 263.2 µs | 4.2 ms |
+| EXL3 chain の残り 4 遷移 | 400 ずつ | 4.2〜4.3 µs | 6.8 ms |
 
-262 µs は p50 261.5 / p95 266.1 で、linears の形状（n 1024〜17408）によらず一定である。
-3 遷移の合計は 84.3 ms/run で、464 回のうち約 6 割に 262 µs が乗り、残りは 4.2 µs である
-（p50 だけを見ると全回発生に見える）。差し引き 97.8 ms のうち約 6.7 ms が
-EXL3 chain 外（layer 間）の遷移である。
+262 µs が乗る 3 遷移の前にあるカーネルは、いずれも 1 回の起動が 1 ms を超える
+（super64 1.25 ms 平均、gdn_recurrence 3.1 ms、attention 2.0 ms）。
+他のカーネルはすべて 0.5 ms 未満で、遷移は 4.2 µs である。
 
-## 切り分け
+## 切り分け（棄却した説）
 
 - **ホスト律速ではない。** `--runtime-trace` を併用すると `hipLaunchKernel` の
-  p50 は 3.0 µs（p95 4.9）、カーネル開始時刻は対応する launch 完了より
-  中央値 245 ms 先行している。queue は常に埋まっており、GPU が次 packet を
-  持っていない状態ではない。
-- **stream / queue の跨ぎではない。** 6 launch はすべて `Stream_Id=1`,
-  `Queue_Id=1`。
-- **LDS / scratch の値と完全に相関する。** 遷移を (前 kernel の Scratch_Size,
-  次 kernel の Scratch_Size) で分類すると、262 µs の組は `544 → 12` の
-  800 回だけで、`0 → 0`、`0 → 544`、`12 → 0` はいずれも 4.2 µs である。
-  LDS で見ると 262 µs が乗るのは「前が LDS 14336 B 以上」の 3 種類のみで、
-  `0 → 34816`（rotq → super64）と `512 → 0`（rowprepare → recon）は 4.2 µs。
+  p50 は 3.0 µs、カーネル開始は対応する launch 完了より中央値 245 ms 先行する。
+- **stream / queue の跨ぎではない。** 全 dispatch が `Stream_Id=1`、`Queue_Id=1`。
+  `Dispatch_Id` も連続しており、間に挿入された packet はない。
+- **LDS サイズ説は棄却。** 合成テスト（LDS 0 / 4 / 16 / 32 / 34 KB のカーネルの直後に
+  小さなカーネルを置く）で 1 組あたり 0.75〜0.78 ms、差は出なかった。
+- **HW queue / MES 説は棄却。** `GPU_MAX_HW_QUEUES=1` で 3 ペア測り、
+  +0.09% / −0.02% / +0.00% と差なし（分割版と併用しても分割の利得は変わらない）。
+- **単純な duration 説も合成では再現しない。** 4.8〜92 ms の合成カーネル
+  （2048 blocks、メモリ無し）の直後にも空白は出ない。実 trace の相関は完全なので、
+  起動時間そのものに加えて実カーネルの何か（メモリを大量に読み書きする構造）が
+  関与している可能性があるが、機序は未特定のままである。
 
-## 仮説（未検証）
+## 修正: 1 回の起動を 0.84 ms 未満に分割する
 
-LDS を大量に確保した kernel の終了直後、次の kernel の LDS / scratch 構成へ
-切り替えるための drain が固定費として入る。増加方向（0 → 34816）では
-発生せず、減少方向でも確保量が小さい場合（512 → 0）は発生しないため、
-「大 → 小」の切り替えにだけ課金されているように見える。
+`super64` GEMM の起動を、所要時間の推定
+（`row blocks × n tiles × k × 3.0e-7 ms` を実測から係数化）が 0.84 ms を超えない
+範囲で分割した。
 
-gfx1201 の PMC は 0 を返すため、この drain を直接観測できない。
-確定には「LDS / scratch を減らした版で gap が縮むか」の A/B が必要である。
+- **行バンド分割（行方向）**: 空白は消える（262 µs → 13 µs p50）。ただし重み平面を
+  バンドごとに読み直すため、GEMM 自体が 498.6 → 527.4 ms（+28.8 ms）遅くなる。
+  E2E は −2.7 / −2.5 / −2.3%。
+- **列バンド分割（採用）**: `n_base` を追加して n 方向に分割する。重み平面の読みは
+  (row block, n tile) あたり 1 回のまま変わらず、増えるのは活性 codes の再読だけ。
+  E2E は −3.40 / −3.36 / −3.42%（base 1007.9 / 1012.0 / 1012.6 ms →
+  973.7 / 977.9 / 978.0 ms）。
+- しきい値の比較（列バンド、同じ 3 ペア）: 0.84 ms が最良、0.60 ms と 1.10 ms は
+  それぞれ +0.4〜0.7% 遅い。分割しすぎると起動回数の増加が勝つ。
 
-## 次の実験
+分割後も `gdn_recurrence`（12.3 ms）と `attention_paged_prefill`（4.2 ms）の
+空白は残る。前者は系列方向の依存、後者はページ単位の構造のため、単純な分割は
+できない。合計 16.5 ms（1.6%）が残課題である。
 
-1. `prefill_super64` の scratch（544 B/thread）を消す。VGPR 232 / LDS 34816 の
-   削減は occupancy のレバー（3 → 4 blocks/CU）と同一なので、同時に検証できる。
-2. 同 kernel の LDS を 32768 B 以下へ落とす（A staging の kStride 72 → 64 か、
-   epilogue の scratch を 16 行 → 8 行）。
-3. gap が消えれば 67.8 ms/run（6.7%）が回収できる。消えなければ本仮説を棄却し、
-   「大 kernel の終了固定費」として別の説明（EOP fence 等）を調べる。
+## 結論
+
+- 1 回の起動が約 1 ms を超えると、次の起動に約 262 µs の空白が乗る。実 trace の
+  相関は完全で、分割すると消える。
+- 機序は未特定（合成テストでは再現せず、HW queue / LDS / ホスト要因はいずれも棄却）。
+  ただし「1 ms 未満に分割すれば消える」という実務的な規則は 3 ペアの E2E で再現する。
+- 分割は **列方向** に取る。行方向は重み平面の再読で相殺される。
 
 ## 関連
 

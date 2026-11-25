@@ -44,7 +44,7 @@ constexpr float kInvSqrt128 = 0.08838834764831845f;
 template <bool FULL, bool FUSE>
 __global__ void __launch_bounds__(kThreads) exl3_mul24_prefill_super64_kernel(
     const int8_t* __restrict__ a, const int8_t* __restrict__ wshuf,
-    int32_t* __restrict__ c, uint32_t rows, uint32_t n, uint32_t k,
+    int32_t* __restrict__ c, uint32_t rows, uint32_t n, uint32_t n_base, uint32_t k,
     const float* __restrict__ rowscale, const int32_t* __restrict__ slots,
     const uint16_t* __restrict__ svh, void* __restrict__ out,
     uint32_t out_row_stride) {
@@ -67,7 +67,7 @@ __global__ void __launch_bounds__(kThreads) exl3_mul24_prefill_super64_kernel(
         bn = r / gm;
     }
     const uint32_t m0 = bm * kBlockM;
-    const uint32_t n0 = bn * kBlockN;
+    const uint32_t n0 = n_base + bn * kBlockN;
     const uint32_t wm = wave % kWavesM;
     const uint32_t wn = wave / kWavesM;
     const uint32_t ntile = n0 / 16u + wn * kTilesN;
@@ -198,6 +198,22 @@ __global__ void __launch_bounds__(kThreads) exl3_mul24_prefill_super64_kernel(
         }
     }
 }
+
+// A launch whose grid runs for more than about a millisecond is followed by a ~260 us stall
+// before the next kernel starts (measured by kernel trace), so the tile is cut into column
+// bands that each finish well under that. A column band keeps the weight plane read per
+// (row block, n tile) unchanged; row bands would re-read it per band. The duration is
+// proportional to row blocks x n tiles x k.
+constexpr float kMsPerCtaK = 3.0e-7f;
+constexpr float kMaxLaunchMs = 0.84f;
+
+inline uint32_t super64_launch_parts(uint32_t row_blocks, uint32_t n_blocks, uint32_t k) {
+    const float ms = static_cast<float>(row_blocks) * static_cast<float>(n_blocks) *
+                     static_cast<float>(k) * kMsPerCtaK;
+    uint32_t parts = static_cast<uint32_t>(ms / kMaxLaunchMs) + 1u;
+    if (parts > row_blocks) parts = row_blocks;
+    return parts == 0u ? 1u : parts;
+}
 }  // namespace
 
 hipError_t launch_exl3_mul24_prefill_super64(
@@ -206,13 +222,25 @@ hipError_t launch_exl3_mul24_prefill_super64(
     if (rows == 0u) return hipSuccess;
     if (!codes || !weights_super64 || !yprime) return hipErrorInvalidValue;
     if ((n % kBlockN) != 0u || (k % kSuperK) != 0u) return hipErrorInvalidValue;
-    const dim3 grid((rows + kBlockM - 1u) / kBlockM, n / kBlockN);
-    if ((rows % kBlockM) == 0u) {
-        exl3_mul24_prefill_super64_kernel<true, false><<<grid, kThreads, 0, stream>>>(
-            codes, weights_super64, yprime, rows, n, k, nullptr, nullptr, nullptr, nullptr, 0u);
-    } else {
-        exl3_mul24_prefill_super64_kernel<false, false><<<grid, kThreads, 0, stream>>>(
-            codes, weights_super64, yprime, rows, n, k, nullptr, nullptr, nullptr, nullptr, 0u);
+    const uint32_t n_blocks = n / kBlockN;
+    const uint32_t row_blocks = (rows + kBlockM - 1u) / kBlockM;
+    const uint32_t parts = super64_launch_parts(row_blocks, n_blocks, k);
+    const uint32_t nb_part = (n_blocks + parts - 1u) / parts;
+    const bool full = (rows % kBlockM) == 0u;
+    for (uint32_t b0 = 0u; b0 < n_blocks; b0 += nb_part) {
+        const uint32_t part_blocks = min(n_blocks - b0, nb_part);
+        const dim3 grid(row_blocks, part_blocks);
+        const uint32_t n_base = b0 * kBlockN;
+        if (full) {
+            exl3_mul24_prefill_super64_kernel<true, false><<<grid, kThreads, 0, stream>>>(
+                codes, weights_super64, yprime, rows, n, n_base, k, nullptr, nullptr, nullptr,
+                nullptr, 0u);
+        } else {
+            exl3_mul24_prefill_super64_kernel<false, false><<<grid, kThreads, 0, stream>>>(
+                codes, weights_super64, yprime, rows, n, n_base, k, nullptr, nullptr, nullptr,
+                nullptr, 0u);
+        }
+        if (hipGetLastError() != hipSuccess) return hipGetLastError();
     }
     return hipGetLastError();
 }
@@ -226,15 +254,25 @@ hipError_t launch_exl3_mul24_prefill_super64_fused(
         return hipErrorInvalidValue;
     if ((n % kBlockN) != 0u || (k % kSuperK) != 0u || (out_row_stride % 2u) != 0u)
         return hipErrorInvalidValue;
-    const dim3 grid((rows + kBlockM - 1u) / kBlockM, n / kBlockN);
-    if ((rows % kBlockM) == 0u) {
-        exl3_mul24_prefill_super64_kernel<true, true><<<grid, kThreads, 0, stream>>>(
-            codes, weights_super64, nullptr, rows, n, k, rowscale, slots, svh, out,
-            out_row_stride);
-    } else {
-        exl3_mul24_prefill_super64_kernel<false, true><<<grid, kThreads, 0, stream>>>(
-            codes, weights_super64, nullptr, rows, n, k, rowscale, slots, svh, out,
-            out_row_stride);
+    const uint32_t n_blocks = n / kBlockN;
+    const uint32_t row_blocks = (rows + kBlockM - 1u) / kBlockM;
+    const uint32_t parts = super64_launch_parts(row_blocks, n_blocks, k);
+    const uint32_t nb_part = (n_blocks + parts - 1u) / parts;
+    const bool full = (rows % kBlockM) == 0u;
+    for (uint32_t b0 = 0u; b0 < n_blocks; b0 += nb_part) {
+        const uint32_t part_blocks = min(n_blocks - b0, nb_part);
+        const dim3 grid(row_blocks, part_blocks);
+        const uint32_t n_base = b0 * kBlockN;
+        if (full) {
+            exl3_mul24_prefill_super64_kernel<true, true><<<grid, kThreads, 0, stream>>>(
+                codes, weights_super64, nullptr, rows, n, n_base, k, rowscale, slots, svh, out,
+                out_row_stride);
+        } else {
+            exl3_mul24_prefill_super64_kernel<false, true><<<grid, kThreads, 0, stream>>>(
+                codes, weights_super64, nullptr, rows, n, n_base, k, rowscale, slots, svh, out,
+                out_row_stride);
+        }
+        if (hipGetLastError() != hipSuccess) return hipGetLastError();
     }
     return hipGetLastError();
 }
