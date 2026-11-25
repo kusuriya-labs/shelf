@@ -1115,12 +1115,14 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
 
     drafter->gdn_conv_bytes = spec_gdn_conv_bytes(target_gdn_pool);
     drafter->gdn_recurrent_bytes = spec_gdn_recurrent_bytes(target_gdn_pool);
-    if (!drafter->serial_verify && drafter->gdn_conv_bytes != 0u) {
+    if (options.allocate_target_snapshot && !drafter->serial_verify &&
+        drafter->gdn_conv_bytes != 0u) {
         auto view = arena.allocate_aligned(drafter->gdn_conv_bytes, 256u);
         if (!view.ok()) return fail_with_sequence(view.status());
         drafter->gdn_conv_snapshot = view.release().data();
     }
-    if (!drafter->serial_verify && drafter->gdn_recurrent_bytes != 0u) {
+    if (options.allocate_target_snapshot && !drafter->serial_verify &&
+        drafter->gdn_recurrent_bytes != 0u) {
         auto view = arena.allocate_aligned(drafter->gdn_recurrent_bytes, 256u);
         if (!view.ok()) return fail_with_sequence(view.status());
         drafter->gdn_recurrent_snapshot = view.release().data();
@@ -2078,6 +2080,7 @@ Result<MtpSpecBatchContext> create_mtp_spec_batch_context(
             std::vector<std::unique_ptr<MtpDrafter>> peer_slots;
             MtpDrafterConfig peer_options = per_request;
             peer_options.local_kv_heads = binding.local_kv_heads;
+            peer_options.allocate_target_snapshot = false;
             peer_slots.reserve(max_requests);
             for (uint32_t i = 0u; i < max_requests; ++i) {
                 auto peer = create_mtp_drafter(

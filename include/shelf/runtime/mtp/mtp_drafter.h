@@ -45,6 +45,9 @@ struct MtpDrafterConfig {
     // A batched context shares one history / compact log per rank, so its per-request
     // drafters leave those planes to the context.
     bool allocate_spec_buffers = true;
+    // A batched context keeps one rollback snapshot per request in every rank's arena,
+    // so a peer rank's own draft slot does not need a second copy.
+    bool allocate_target_snapshot = true;
 };
 
 struct MtpPrefillOutput {

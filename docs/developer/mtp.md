@@ -39,8 +39,10 @@ snapshot を `mtp_batch_rank_state_reserve_bytes` で計上する。`--serve-std
 `mtp_spec_rows(max_requests, num_drafts)` = `max_requests * (num_drafts + 1)` であり、
 drafter の prefill 行数（`max_batch_rows`）とは独立である。drafter の executor は
 MTP block 自身の `mtp_exl3_linear_shape` で staging plane を見積もる。target GDN snapshot は
-各 drafter が全 rank の local layout に 1 面ずつ確保するため、rank ごとに
-`max_requests` 面を計上する。
+leader の fused verify が全 rank の local layout に 1 面ずつ確保するため、rank ごとに
+`max_requests` 面を計上する。peer rank の draft slot 自身は snapshot を確保しない
+（`MtpDrafterConfig::allocate_target_snapshot = false`）。したがって leader と peer で
+drafter runtime の予約量は同じになる。
 
 Qwen3.5 MoE の MTP block は routed expert の online MXFP4 再量子化が無効なため
 load できない。qwen4exp は TP=2 を qualified とし、TP=4 は未計測である。

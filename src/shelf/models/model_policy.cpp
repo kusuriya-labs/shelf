@@ -207,12 +207,6 @@ std::size_t mtp_batch_reserve_bytes(
     const char* fused_env = std::getenv("SHELF_MTP_FUSED_VERIFY");
     const bool fused_verify =
         fused_env == nullptr || (fused_env[0] != '\0' && fused_env[0] != '0');
-    const auto& spatial = model.context();
-    const std::uint32_t spatial_rank =
-        spatial.axes_overlap
-            ? spatial.ep_rank
-            : static_cast<std::uint32_t>(spatial.ep_rank * spatial.tp_size + spatial.tp_rank);
-    const std::uint32_t snapshot_copies = spatial_rank == 0u ? 1u : 2u;
     if (model.uses_qsa_state()) {
         const std::uint32_t batch_rows = std::max(
             options.max_batch_rows, config.max_requests * (options.num_drafts + 1u));
@@ -226,7 +220,7 @@ std::size_t mtp_batch_reserve_bytes(
                 layout,
                 shelf::runtime::mtp::mtp_spec_rows(config.max_requests,
                                                       options.num_drafts),
-                config.max_requests * snapshot_copies);
+                config.max_requests);
         }
     } else if (tp_rank == 0u) {
         drafter_bytes = shelf::runtime::mtp::mtp_drafter_reserve_bytes(
@@ -239,7 +233,7 @@ std::size_t mtp_batch_reserve_bytes(
         state_bytes = shelf::runtime::mtp::mtp_batch_rank_state_reserve_bytes(
             layout,
             shelf::runtime::mtp::mtp_spec_rows(config.max_requests, options.num_drafts),
-            config.max_requests * snapshot_copies);
+            config.max_requests);
     }
     return drafter_bytes + state_bytes;
 }
