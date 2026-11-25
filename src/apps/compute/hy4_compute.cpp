@@ -26,15 +26,16 @@ void reply(const Json &event) {
 }
 
 void reply_stats(const Residency &gpu, size_t active, size_t queued, size_t draft_rounds,
-                 const Hy4PrefixStats &prefix, int draft_tokens, size_t k_switches) {
+                 const Hy4PrefixStats &prefix, int draft_tokens, size_t k_switches, double acc_ema,
+                 const Hy4BatchSession *session = nullptr) {
     const bool paged = gpu.kv_pages_total > 0;
     const size_t page_tokens = paged ? kv_page_tokens : gpu.tokens;
     const size_t total_pages = paged ? gpu.kv_pages_total : size_t(gpu.max_slots);
     const size_t used_pages = paged ? gpu.used_kv_pages() : active;
     const size_t free_pages = paged ? gpu.free_kv_pages() : (size_t(gpu.max_slots) - active);
-    reply({{"event", "stats"}, {"max_concurrent_requests", gpu.max_slots}, {"slot_tokens", gpu.tokens},
+    Json event = {{"event", "stats"}, {"max_concurrent_requests", gpu.max_slots}, {"slot_tokens", gpu.tokens},
            {"active_requests", active}, {"queued_requests", queued}, {"batch_draft_rounds", draft_rounds},
-           {"draft_tokens", draft_tokens}, {"k_switches", k_switches}, {"adaptive", gpu.adaptive_draft},
+           {"draft_tokens", draft_tokens}, {"k_switches", k_switches}, {"acc_ema", acc_ema}, {"adaptive", gpu.adaptive_draft},
            {"prefix", {{"enabled", prefix.enabled}, {"reuse_slots", prefix.reuse_slots},
                        {"entries", prefix.entries}, {"saves", prefix.saves},
                        {"hits", prefix.hits}, {"misses", prefix.misses},
@@ -42,7 +43,16 @@ void reply_stats(const Residency &gpu, size_t active, size_t queued, size_t draf
            {"kv", {{"page_tokens", page_tokens}, {"total_pages", total_pages}, {"used_pages", used_pages},
                    {"free_pages", free_pages}, {"capacity_tokens", total_pages * page_tokens},
                    {"free_tokens", free_pages * page_tokens}, {"active_requests", active},
-                   {"queued_requests", queued}, {"banker_safe", true}, {"overcommit_pages", 0}}}});
+                   {"queued_requests", queued}, {"banker_safe", true}, {"overcommit_pages", 0}}}};
+    if (session) {
+        Json slots = Json::array();
+        for (int slot = 0; slot < gpu.max_slots; ++slot)
+            if (auto stats = session->slot_stats(slot))
+                slots.push_back({{"slot", slot}, {"draft_tokens", stats->draft_tokens},
+                                 {"k_switches", stats->k_switches}, {"acc_ema", stats->acc_ema}});
+        event["slots"] = std::move(slots);
+    }
+    reply(event);
 }
 
 std::array<unsigned long long, 2> page_faults() {
@@ -92,7 +102,7 @@ void serve(Residency &gpu, int chunk, bool prefix_cache) {
     Hy4PrefixStats prefix_stats;
     prefix_stats.enabled = prefix_cache;
     prefix_stats.reuse_slots = gpu.max_slots;
-    int last_draft_tokens = gpu.draft_tokens;
+    Hy4DflyStats last_request{gpu.draft_tokens};
     size_t total_draft_rounds = 0, total_k_switches = 0;
     auto control = [&](const Json &request, int active) {
         const auto op = request.at("op").get<std::string>();
@@ -100,7 +110,8 @@ void serve(Residency &gpu, int chunk, bool prefix_cache) {
             reply({{"event", "pong"}, {"protocol_version", 1},
                    {"capabilities", {{"prefix_cache", prefix_cache}, {"paged_kv", gpu.kv_pages_total > 0}}}});
         else if (op == "stats")
-            reply_stats(gpu, active >= 0, 0, total_draft_rounds, prefix_stats, last_draft_tokens, total_k_switches);
+            reply_stats(gpu, active >= 0, 0, total_draft_rounds, prefix_stats, last_request.draft_tokens,
+                        total_k_switches, last_request.acc_ema);
         else if (op == "shutdown") {
             stopping = true;
             reply({{"event", "shutdown"}});
@@ -154,7 +165,7 @@ void serve(Residency &gpu, int chunk, bool prefix_cache) {
             auto result = generate(gpu, ids, count, chunk, temp, request.value("seed", uint64_t{}), {},
                                    request.value("top_k", 0), request.value("top_p", 1.f), emit,
                                    ignore_eos, &prefix_slot, &prefix_stats, &restored, 0, gpu.adaptive_draft, &dfly_stats);
-            last_draft_tokens = dfly_stats.draft_tokens;
+            last_request = dfly_stats;
             total_draft_rounds += dfly_stats.draft_rounds;
             total_k_switches += dfly_stats.k_switches;
             if (profiling) {
@@ -166,7 +177,7 @@ void serve(Residency &gpu, int chunk, bool prefix_cache) {
             reply({{"event", "done"}, {"request_id", id}, {"generated_ids", result},
                    {"prompt_tokens", ids.size()}, {"restored_tokens", restored},
                    {"prefill_tokens", ids.size() - restored}, {"cache_checkpoint_tokens", 0},
-                   {"draft_tokens", dfly_stats.draft_tokens}, {"k_switches", dfly_stats.k_switches},
+                   {"draft_tokens", dfly_stats.draft_tokens}, {"k_switches", dfly_stats.k_switches}, {"acc_ema", dfly_stats.acc_ema},
                    {"finish_reason", (ignore_eos || result.back() != 120025) ? "length" : "stop"}});
         } catch (const Interrupted &) {
             reply({{"event", "done"}, {"request_id", id}, {"restored_tokens", 0},
@@ -187,11 +198,11 @@ void serve_batch(Residency &gpu, int chunk, bool prefix_cache, int prefill_decod
         [&](int id, const std::vector<int> &ids, const char *reason) {
             size_t prompt = session_ptr ? session_ptr->last_prompt_tokens() : 0;
             size_t restored = session_ptr ? session_ptr->last_restored_tokens() : 0;
+            auto dfly = session_ptr->last_request_stats();
             reply({{"event", "done"}, {"request_id", id}, {"generated_ids", ids},
                    {"prompt_tokens", prompt}, {"restored_tokens", restored},
                    {"prefill_tokens", prompt >= restored ? prompt - restored : 0},
-                   {"draft_tokens", session_ptr ? session_ptr->draft_tokens() : gpu.draft_tokens},
-                   {"k_switches", session_ptr ? session_ptr->k_switches() : size_t{0}},
+                   {"draft_tokens", dfly.draft_tokens}, {"k_switches", dfly.k_switches}, {"acc_ema", dfly.acc_ema},
                    {"cache_checkpoint_tokens", 0}, {"finish_reason", reason}});
         });
     session_ptr = &session;
@@ -210,7 +221,7 @@ void serve_batch(Residency &gpu, int chunk, bool prefix_cache, int prefill_decod
                                          {"prefill_decode_interval", session.prefill_decode_interval()}}}});
             else if (op == "stats")
                 reply_stats(gpu, session.active(), session.queued(), session.draft_rounds(),
-                            session.prefix_stats(), session.draft_tokens(), session.k_switches());
+                            session.prefix_stats(), session.draft_tokens(), session.k_switches(), session.acceptance_ema(), &session);
             else if (op == "shutdown") { stopping = true; reply({{"event", "shutdown"}}); }
             else if (op == "cancel") session.cancel(request.at("request_id").get<int>());
             else {

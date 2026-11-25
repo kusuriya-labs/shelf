@@ -585,6 +585,8 @@ model 固有の `<tool_call>` 等の markup は client へ漏れない。
 
 ### concurrency と cancel
 
+Hy4-flash の DFly2 で `--dfly-adaptive` を指定すると、要求ごとに候補数を調整する。`GET /v1/meta` の `speculative.drafts` は初期値である。連続バッチの統計を取得できる場合、`speculative.slots` に稼働中のスロット番号、現在の候補数 `draft_tokens`、要求内の切替回数 `k_switches`、受理数の移動平均 `acc_ema` が並ぶ。`stale` が真の場合は直前に取得した値を示す。compute の JSONL では `done` が完了した要求の値を返し、`stats.k_switches` が全要求の累計を返す。
+
 Hy4-flash は `--max-concurrent-requests` で 1〜32 スロットを予約する。`/v1/meta` の KV 統計では DSA 12 層の共有ページプールにおける 256 token 単位（`page_tokens = 256`）の総ページ数・使用中ページ数・空きページ数を返し、`--kv-pool-tokens` で総容量を指定できる。TP=1 ではページ予算と空きスロットに応じて要求を受け入れ（不足時は LRU Prefix Cache 解放後に `waiting` で Admission Control）、`--prefill-decode-interval`（既定 `1`）で長文 prefill チャンク間に decode を優先割り込みして token を配信する。単一スロットの Graph と複数スロットの DFly2 の切り替え、必要な KV 容量、複数 GPU での照合手順は [Hy4-flash の実行](hy4_flash.md)を参照する。
 
 `--max-concurrent-requests N` は最大 in-flight request 数であり、同時に 1 executor step で

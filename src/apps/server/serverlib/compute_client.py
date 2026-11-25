@@ -78,6 +78,7 @@ class ComputeKVStats:
     queued_requests: int
     banker_safe: bool
     overcommit_pages: int
+    draft_slots: Optional[list[dict]] = None
 
     @classmethod
     def from_event(cls, event: dict) -> Optional["ComputeKVStats"]:
@@ -103,7 +104,7 @@ class ComputeKVStats:
         banker_safe = kv.get("banker_safe")
         if not isinstance(banker_safe, bool):
             return None
-        return cls(banker_safe=banker_safe, **fields)
+        return cls(banker_safe=banker_safe, draft_slots=event.get("slots"), **fields)
 
     def to_wire(self) -> dict:
         return {

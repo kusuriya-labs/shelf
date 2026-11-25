@@ -463,6 +463,9 @@ async def handle_meta(request: web.Request) -> web.Response:
         wire = kv.to_wire()
         wire["stale"] = stale
         meta["kv_cache"] = wire
+        speculative = meta.get("speculative")
+        if speculative and speculative["method"] == "dfly2" and kv.draft_slots is not None:
+            meta["speculative"] = dict(speculative, slots=kv.draft_slots, stale=stale)
     return web.json_response(meta)
 
 
