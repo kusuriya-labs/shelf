@@ -174,7 +174,7 @@ public:
             add_matrix_bytes(total, h.input_mix_up);
             add_matrix_bytes(total, h.block_inject);
         };
-        add_matrix_bytes(total, w.embed_tokens);
+        if (!w.embed_tokens.host_resident) add_matrix_bytes(total, w.embed_tokens);
         add_matrix_bytes(total, w.lm_head);
         add_hyper(w.mixer);
         for (const auto& layer : w.layers) {
@@ -207,6 +207,10 @@ public:
             }
         }
         return total;
+    }
+
+    std::uint64_t host_pinned_bytes() const override {
+        return model_.weights().host_pinned_bytes();
     }
 
     std::size_t token_row_ffn_size() const override {

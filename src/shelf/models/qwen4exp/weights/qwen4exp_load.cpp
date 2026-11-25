@@ -1458,6 +1458,10 @@ std::uint64_t Qwen4ExpRankWeights::host_expert_bytes() const noexcept {
     return expert_host.used();
 }
 
+std::uint64_t Qwen4ExpRankWeights::host_pinned_bytes() const noexcept {
+    return pinned_host.used();
+}
+
 std::vector<std::string> qwen4exp_rank_logical_names(
     const Qwen4ExpTextConfig& config, std::uint32_t tp_size, std::uint32_t tp_rank,
     bool load_mtp, bool mtp_only, const qhy::PipelineStage& stage,
@@ -1581,10 +1585,13 @@ Result<Qwen4ExpRankWeights> load_qwen4exp_rank(const std::string& model_dir,
     const bool load_final =
         !options.stage.enabled || options.stage.last(config.num_hidden_layers);
 
+    WeightLoadOptions embed_options = weight_options;
+    embed_options.pinned_host = &out.pinned_host;
+
     Status st = Status::make_ok();
     if (load_embed) {
         st = load_matrix(reader, "model.language_model.embed_tokens.weight", arena, stream,
-                         weight_options, out.embed_tokens);
+                         embed_options, out.embed_tokens);
         if (!st.ok()) return st;
     }
     if (load_final) {

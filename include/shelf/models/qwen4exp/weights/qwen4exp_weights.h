@@ -108,12 +108,14 @@ struct Qwen4ExpMtpWeights {
 };
 
 struct Qwen4ExpRankWeights {
-    shelf::weights::MatrixWeight embed_tokens;  // replicated BF16
+    shelf::weights::MatrixWeight embed_tokens;  // BF16, pinned host
     shelf::weights::MatrixWeight lm_head;       // replicated EXL3
     Qwen4ExpHyperConnectionWeights mixer;       // model-level stream collapse
     std::vector<Qwen4ExpLayerWeights> layers;
     // The draft head is a rank-local copy on rank 0. It is not sharded by the TP plan.
     Qwen4ExpMtpWeights mtp;
+    // Backs the embedding table. Pinned host memory, device-readable.
+    shelf::weights::PinnedHostArena pinned_host;
     // Cold routed experts of every layer. Pinned host memory, device-readable.
     shelf::weights::PinnedHostArena expert_host;
     // Device int32 [layers][local_experts]: >= 0 is a VRAM slot, -1 - slot is a host
@@ -126,6 +128,7 @@ struct Qwen4ExpRankWeights {
     std::uint32_t host_experts = 0;
 
     [[nodiscard]] std::uint64_t resident_bytes() const noexcept;
+    [[nodiscard]] std::uint64_t host_pinned_bytes() const noexcept;
     [[nodiscard]] std::uint64_t host_expert_bytes() const noexcept;
 };
 

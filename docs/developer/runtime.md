@@ -271,7 +271,8 @@ MEMORY_PLAN host memory tp=2
 
 `embedding` は rank ごとの語彙 shard を pinned host RAM に置いた量である
 （tied embedding のモデルでは 0。量子化 checkpoint と BF16 checkpoint のどちらも
-pinned host に置く）。`PLE table` は `qwen4_exp` の ngram embedding テーブルで、
+pinned host に置く。`qwen4_exp` も同じで、この family は tied を扱わないため常に対象）。
+`PLE table` は `qwen4_exp` の ngram embedding テーブルで、
 プロセス内で 1 つだけ共有するため rank ごとに重複計上しない。
 `--ple-hot-cache-gib` を指定した場合は Hot ブロックキャッシュの実バイトを出し、
 Cold 側の mmap 領域はここには含まれない。`offload experts`

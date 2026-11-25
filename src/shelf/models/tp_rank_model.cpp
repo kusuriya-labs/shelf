@@ -205,7 +205,7 @@ public:
     std::uint64_t weight_bytes() const override {
         const qwen4exp::Qwen4ExpRankWeights& w = model_.weights();
         std::uint64_t total = 0;
-        add_matrix(total, w.embed_tokens);
+        if (!w.embed_tokens.host_resident) add_matrix(total, w.embed_tokens);
         add_matrix(total, w.lm_head);
         add_hyper(total, w.mixer);
         for (const auto& layer : w.layers) {
@@ -240,7 +240,9 @@ public:
         return total;
     }
 
-    std::uint64_t host_pinned_bytes() const override { return 0u; }
+    std::uint64_t host_pinned_bytes() const override {
+        return model_.weights().host_pinned_bytes();
+    }
 
     std::uint64_t host_offload_expert_bytes() const override {
         return model_.weights().host_expert_bytes();

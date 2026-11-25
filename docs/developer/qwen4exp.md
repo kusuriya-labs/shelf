@@ -39,7 +39,9 @@ PP stage 内の EP / TP 展開は実装済みで、TP reduce の後に EP reduce
 | attention / GDN | EXL3 / MXFP4 / FP8 | TP rank の local head / feature 幅に分割 |
 | PLE table（FP8 shard checkpoint） | FP8 E4M3 per-tensor + BF16 `[1]` | CPU RAM に 1 個を共有 |
 | PLE table（Ngram4 / Ngram5） | bundle root の `ngram_manifest.json`（`format: "ngram-q"`）と対応 safetensors shard | CPU RAM に 1 個を共有 |
-| embed / lm_head / hyper / router | BF16 | 全 rank に複製 |
+| embed | BF16 | rank ごとの語彙 shard を pinned host RAM に置く |
+| lm_head | EXL3 / BF16（load 時に INT8 W32 化あり） | 全 rank に複製、または語彙分割 |
+| hyper / router | BF16 | 全 rank に複製 |
 
 - routed expert は `preshuffle_mxfp4_native` で 16 出力 x 32 K の 256 バイト block に
   repack する。E8M0 scale は row-major、row reference は行ごとの最大 E8M0 byte。
@@ -63,6 +65,11 @@ PP stage 内の EP / TP 展開は実装済みで、TP reduce の後に EP reduce
 - MTP に wide residual を渡す executor は `normed_token_hidden_width` を
   `hc_count * hidden_size` にする。Qwen4Exp の pre-mixer residual は hidden より広く、
   既定値のままにすると出力 buffer が不足する。
+- embed_tokens は VRAM ではなく pinned host RAM に置く。ローダは `PinnedHostArena`
+  （`hipHostMallocMapped`）に BF16 表を複製し、device テンソルを作らない。
+  `WeightSlot::device_ptr` には host ポインタが入り、embedding lookup は GPU から
+  直接読む。tied embedding は扱わないため、常にこの配置になる。量は
+  `MEMORY_PLAN host memory` の `embedding` に出る。
 - routed expert は既定で全 local expert を VRAM に置く。`--moe-host-experts N`
   （layer あたり）を設定すると、各 layer の N expert を pinned host の plane に置き、
   残りを VRAM の slot に置く。host plane は `hipHostMallocMapped` で、GPU の grouped
