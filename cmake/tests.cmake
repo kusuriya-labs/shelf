@@ -116,6 +116,7 @@ target_include_directories(test_serve_host_memory PRIVATE "${CMAKE_SOURCE_DIR}/s
 shelf_add_test(NAME test_exl3_mul24_workspace SOURCE unit/test_exl3_mul24_workspace.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_exl3_variant SOURCE unit/test_exl3_variant.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_exl3_dispatch_decision SOURCE unit/test_exl3_dispatch_decision.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_inference_execution shelf_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_exl3_track1_paths SOURCE kernels/linear/test_exl3_track1_paths.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_optimized shelf_quant_reference shelf_gpu)
 shelf_add_test(NAME test_exl3_mul24_linear SOURCE kernels/linear/test_exl3_mul24_linear.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_inference_execution shelf_kernels_optimized shelf_quant_reference shelf_gpu)
 shelf_add_test(NAME test_exl3_mul24_grouped SOURCE kernels/linear/test_exl3_mul24_grouped.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_optimized shelf_quant_reference shelf_gpu)
 shelf_add_test(NAME bench_exl3_mul24_grouped SOURCE kernels/linear/bench_exl3_mul24_grouped.hip LABELS "gpu1;optional;external_files;benchmark" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES shelf_kernels_optimized shelf_gpu)
@@ -382,6 +383,7 @@ add_custom_target(
         test_exl3_mul24_workspace
         test_exl3_variant
         test_exl3_dispatch_decision
+        test_exl3_track1_paths
         test_exl3_mul24_linear
         test_exl3_mul24_grouped
         test_exl3_mul24_tp

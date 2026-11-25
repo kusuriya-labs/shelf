@@ -545,6 +545,11 @@ bool exl3_mul24_use_dense(bool dense_ok, uint32_t n_rows, uint32_t dense_min_row
            static_cast<uint64_t>(n_rows) * sizeof(float) <= rowsum_bytes;
 }
 
+bool exl3_grouped_projection_bits_match(uint32_t first_bits, uint32_t other_bits, uint32_t rows) {
+    if (first_bits != 3u && other_bits != 3u) return first_bits == other_bits;
+    return rows <= 16u && first_bits >= 3u && first_bits <= 4u && other_bits >= 3u && other_bits <= 4u;
+}
+
 // EXL3-INT8 (mul24): rotate + int8-quantize the activations, run the int8 WMMA GEMM that decodes the resident
 // trellis on every read, then rotate the output back. The three launches share the EXL3 workspace of the executor:
 // the xrot region holds the int8 codes and their scales, the accum region the F32 pre-rotation output.
@@ -1044,6 +1049,11 @@ Result<OptimizedLaunchResult> try_launch_exl3_projection(
         (!is_plamo && rows > 16u && ctx.num_prefill_requests != 0u);
     if (custom_prefill)
         return miss;
+    auto bits_match = [&](uint32_t ka) {
+        return (producer == nullptr && !is_plamo && !use_prefill)
+            ? ::shelf::execution::exl3_grouped_projection_bits_match(weight.exl3_ka, ka, rows)
+            : weight.exl3_ka == ka;
+    };
     uint32_t count = 0u;
     if (is_plamo) {
         count = weight.rows == 3072u && weight.cols == 2560u ? 3u :
@@ -1057,7 +1067,7 @@ Result<OptimizedLaunchResult> try_launch_exl3_projection(
                 b.weight_index >= ctx.weight_count) break;
             const auto& w = ctx.weights[b.weight_index];
             if (w.plamo_exl3_linear || w.encoding != 4u || w.device_ptr != nullptr ||
-                w.exl3_ka != weight.exl3_ka || w.cols != weight.cols || w.k_padded != w.cols || w.experts != 1u ||
+                !bits_match(w.exl3_ka) || w.cols != weight.cols || w.k_padded != w.cols || w.experts != 1u ||
                 w.rows == 0u || w.rows % 128u != 0u || w.output_col_total != 0u || w.output_col_offset != 0u ||
                 w.preshuffled || w.exl3_half || !w.codes || !w.exl3_suh || !w.exl3_svh) break;
             ++count;
@@ -1079,9 +1089,10 @@ Result<OptimizedLaunchResult> try_launch_exl3_projection(
             b.output_count != 1u || b.input_slots[0] != binding.input_slots[0] ||
             b.weight_index >= ctx.weight_count) return miss;
         const auto& w = ctx.weights[b.weight_index];
+        if (w.exl3_ka == 3u) group.three_bit_mask |= 1u << j;
         const uint32_t expected_n = count == 3u && j != 0u ? 512u : weight.rows;
         if (w.plamo_exl3_linear != is_plamo || w.encoding != 4u || w.device_ptr != nullptr ||
-            w.exl3_ka != weight.exl3_ka || w.cols != group.k || (is_plamo && w.rows != expected_n) ||
+            !bits_match(w.exl3_ka) || w.cols != group.k || (is_plamo && w.rows != expected_n) ||
             w.output_col_total != 0u || w.preshuffled || w.exl3_half ||
             w.codes == nullptr || w.exl3_suh == nullptr || w.exl3_svh == nullptr)
             return miss;
@@ -1132,6 +1143,7 @@ Result<OptimizedLaunchResult> try_launch_exl3_projection(
         yoffset += static_cast<uint64_t>(rows) * p.n * p.splits * 4u;
         if (xoffset > ctx.exl3_xrot_bytes || yoffset > ctx.exl3_accum_bytes) return miss;
     }
+    if (group.three_bit_mask == (1u << count) - 1u) group.three_bit_mask = 0u;
     uint32_t launch_count = 0u;
     hipError_t err = hipSuccess;
     if (producer != nullptr && producer->kernel_id == KernelId::SWIGLU) {
