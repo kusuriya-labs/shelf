@@ -348,6 +348,13 @@ Status ContinuousBatcher::finish_request(
     Status dflash_release = Status::make_ok();
     if (request.dflash != nullptr) {
         if (request.dflash->ready) {
+            if (dflash_.adaptive && !request.structured_dflash) {
+                const auto& state = request.dflash->adaptive;
+                std::fprintf(stderr, "DFLASH2_ADAPTIVE_SESSION request_id=%lld samples=%llu acc_ema=%.6f switches=%llu final_k=%u\n",
+                             static_cast<long long>(request.external_request_id),
+                             static_cast<unsigned long long>(state.rounds), state.acc_ema,
+                             static_cast<unsigned long long>(state.switches), state.current_k);
+            }
             const Status decoder_st =
                 dflash2_spec_decoder_shutdown(*request.dflash->decoder);
             if (!decoder_st.ok() && dflash_release.ok()) dflash_release = decoder_st;
@@ -1201,8 +1208,7 @@ Status ContinuousBatcher::open_dflash2_session(RuntimeRequest& request) {
     }
     DFlash2RequestSession& session = *request.dflash;
     if (dflash_.adaptive) {
-        const uint32_t max_k = dflash2_adaptive_max_k(dflash_.num_drafts);
-        session.adaptive.reset(std::min(max_k, kDFlash2AdaptiveInitialK));
+        session.adaptive = DFlash2AdaptiveController(dflash_.num_drafts);
         session.adaptive_rows = session.adaptive.current_k + 1u;
     }
     if (request.max_new_tokens == 0u) {
@@ -1322,9 +1328,8 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
     if (host_trace) clock_gettime(CLOCK_THREAD_CPUTIME_ID, &host_start);
     uint32_t host_sessions = 0u;
     uint32_t host_rows = 0u;
-    if (dflash_.adaptive) {
-        select_dflash2_adaptive(active, dflash_, config_, adaptive_round_);
-    }
+    const uint32_t adaptive_batch_size = dflash_.adaptive
+        ? select_dflash2_adaptive(active, dflash_, config_, adaptive_round_) : 0u;
     std::vector<DFlash2SpecBatchSlot> slots;
     std::vector<RuntimeRequest*> slot_requests;
     std::vector<bool> slot_used_ngram;
@@ -1362,7 +1367,9 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
         bool adaptive_ngram_rescue = false;
         if (dflash_.adaptive && !request->structured_dflash && request->dflash->adaptive_rows == 0u) {
             if (config_.ngram.enabled && draft_room > 0u) {
-                const OnlineNgramProposal prop = request->ngram.propose(dflash_.num_drafts, stochastic);
+                const uint32_t k = std::min(request->dflash->adaptive.ceiling(adaptive_batch_size),
+                                            draft_room);
+                const OnlineNgramProposal prop = request->ngram.propose(k, stochastic);
                 if (prop.hit) {
                     request->pending_ngram_proposal = prop;
                     adaptive_ngram_rescue = true;
@@ -1381,6 +1388,7 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
         slot.num_drafts = (dflash_.adaptive && !request->structured_dflash && !adaptive_ngram_rescue)
             ? request->dflash->adaptive_rows - 1u
             : dflash_.num_drafts;
+        if (adaptive_ngram_rescue) slot.num_drafts = request->pending_ngram_proposal.count;
         static const char* const measure_drafts = std::getenv("SHELF_DFLASH2_MEASURE_VERIFY_DRAFTS");
         if (!dflash_.adaptive && measure_drafts != nullptr) {
             char* end = nullptr;
@@ -1553,11 +1561,9 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
                              static_cast<long long>(request.external_request_id),
                              request.sequence.slot, step.num_accepted, step.emitted_count, step.num_drafts);
             }
-            if (dflash_.adaptive && step.num_drafts == request.dflash->adaptive.current_k &&
-                !request.structured_dflash) {
-                observe_dflash2_adaptive(*request.dflash, step.num_accepted,
-                                         static_cast<uint32_t>(slot_requests.size()),
-                                         dflash_.num_drafts);
+            if (dflash_.adaptive && !request.structured_dflash) {
+                request.dflash->adaptive.observe(step.num_accepted, step.num_drafts,
+                                                 slot_used_ngram[i], adaptive_batch_size);
             }
             if (slot_used_ngram[i]) {
                 request.ngram.record_outcome(step.num_accepted);

@@ -1195,7 +1195,7 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
     int32_t pending_token,
     uint32_t remaining_tokens,
     uint32_t proposal_drafts,
-    const int32_t* precomputed_drafts) {
+    const int32_t* precomputed_drafts, uint32_t verify_limit) {
     if (!decoder.initialized) {
         return Status::invalid_state("dflash2_spec_step: not initialized", __FILE__, __LINE__);
     }
@@ -1225,12 +1225,15 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
         decoder.sequence->position,
         static_cast<uint32_t>(decoder.sequence->block_table.size()), true};
     const uint32_t position = snapshot.position;
+    if (position >= decoder.sequence->max_seq_len) {
+        return Status::invalid_state("dflash2_spec_step: sequence is full", __FILE__, __LINE__);
+    }
     const uint32_t room = decoder.sequence->max_seq_len - position;
     uint32_t room_max = 0u;
     if (remaining_tokens > 1u && room >= 2u) {
         room_max = std::min(remaining_tokens - 1u, room - 1u);
     }
-    const uint32_t dflash_k = std::min(decoder.config.num_drafts, room_max);
+    const uint32_t dflash_k = std::min({decoder.config.num_drafts, verify_limit, room_max});
 
     if (dflash_k == 0u) {
         Status st = run_single_target(decoder, pending_token, out);
@@ -1286,9 +1289,10 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
                 }
                 draft_events_recorded = true;
             }
+            const uint32_t proposal_k = std::clamp(proposal_drafts, dflash_k,
+                                                   std::min(decoder.config.num_drafts, room_max));
             Status st = dflash2::dflash2_propose_cached(
-                *decoder.draft, *decoder.context, pending_token,
-                std::max(dflash_k, std::min(proposal_drafts, room_max)), proposal_device,
+                *decoder.draft, *decoder.context, pending_token, proposal_k, proposal_device,
                 decoder.stream);
             if (!st.ok()) return st;
             if (bridge) {
@@ -1959,16 +1963,17 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
 
 Result<DFlash2SpecIterationOutput> dflash2_spec_step(
     DFlash2SpecDecoder& decoder, int32_t pending_token, uint32_t remaining_tokens,
-    uint32_t proposal_drafts, const int32_t* precomputed_drafts) {
+    uint32_t proposal_drafts, const int32_t* precomputed_drafts, uint32_t verify_limit) {
     if (decoder.config.tree) return Status::invalid_state("chain step with tree workspace", __FILE__, __LINE__);
     return dflash2_spec_step_impl(decoder, pending_token, remaining_tokens, proposal_drafts,
-                                  precomputed_drafts);
+                                  precomputed_drafts, verify_limit);
 }
 
 Result<DFlash2SpecIterationOutput> dflash2_spec_step_tree(
-    DFlash2SpecDecoder& decoder, int32_t pending_token, uint32_t remaining_tokens) {
+    DFlash2SpecDecoder& decoder, int32_t pending_token, uint32_t remaining_tokens,
+    uint32_t verify_limit) {
     if (!decoder.config.tree) return Status::invalid_state("tree step without tree workspace", __FILE__, __LINE__);
-    return dflash2_spec_step_impl(decoder, pending_token, remaining_tokens, 0u, nullptr);
+    return dflash2_spec_step_impl(decoder, pending_token, remaining_tokens, 0u, nullptr, verify_limit);
 }
 
 namespace {

@@ -38,6 +38,13 @@ def main():
                     assert len(streamed[rid]) == 48 and streamed[rid] == event["generated_ids"]
                     assert all(token >= 0 for token in streamed[rid])
                     pending.remove(rid)
+    sessions = [dict(field.split("=", 1) for field in line.split()[1:])
+                for line in harness.stderr_lines if line.startswith("DFLASH2_ADAPTIVE_SESSION ")]
+    assert sorted(int(s["request_id"]) for s in sessions) == list(range(1, 193))
+    for session in sessions:
+        assert 2 <= int(session["final_k"]) <= 5, session
+        assert int(session["samples"]) > 0 and 0 <= float(session["acc_ema"]) <= 1, session
+        assert int(session["switches"]) >= 0, session
     stats = dict(line.strip().split("=", 1) for line in harness.stderr_lines
                  if line.startswith(("DFLASH2_FULL_ACCEPT_RATE=", "DFLASH2_ACCEPTANCE_RATE=", "DFLASH2_PROPOSED_DRAFTS=")))
     assert int(stats["DFLASH2_PROPOSED_DRAFTS"]) > 0

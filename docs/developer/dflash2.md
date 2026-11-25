@@ -619,8 +619,8 @@ token を host へ戻して次の position を決めたりしない。`draft_row
 
 `dflash2_spec_step(decoder, pending_token, remaining_tokens)`:
 
-1. `K` を clamp する: `min(config.num_drafts, remaining_tokens - 1, room - 1)`。
-   `room = sequence.max_seq_len - position`。`remaining <= 1` または `room < 2` なら `K = 0`。
+1. 検証幅は `min(config.num_drafts, verify_limit, remaining_tokens - 1, room - 1)` で決まる。
+   `room = sequence.max_seq_len - position`。空きがないときはエラーを返す。残りの生成数または空きが 1 なら `K = 0`。
 2. `K == 0` のときは単一 target decode（`execution_class = DECODE`,
    `speculative_verify = false`, `num_output_rows = 1`）を行い、
    sampled token を emit して target tap 1 row を ring へ append する。
@@ -1304,7 +1304,14 @@ DFlash2 有効時の構造化出力付き request は通常 decode へ退避せ�
 
 ### 投機の適応制御（実験段階）
 
-`--dflash2-adaptive` は TP=1 のバッチャーで、要求ごとの受理率（受理した draft 数を検証した draft 数で割った値）を平滑化する。設定幅をすべて検証したラウンドから EMA を更新し、切り替えは8ラウンド以上の間隔で一段ずつ行う。利用できる K と同時投機数は [compute の操作方法](../user/compute.md) と [環境変数一覧](../user/env_vars.md) を参照。
+`--dflash2-adaptive` は TP=1 の単発 CLI とバッチャーで同じ制御器を要求ごとに持つ。
+DFlash2 が現在の `K` 個をすべて提案・検証したときだけ、受理数を `K` で割った値で EMA を更新する。
+N-gram のヒット、境界で短縮された検証、制約付き slot は観測回数にも含めない。
+chain と tree は設定した最大幅で作業領域を確保し、ラウンドごとの幅はその範囲に収める。
+
+- 受理率による切替には同じ幅で 8 回以上の観測を必要とする。切替後の最初の観測値を新しい EMA の初期値とし、以降は係数 0.25 で平滑化する。
+- 昇格のしきい値は `K=2` で 0.45、それ以外では 0.50（17 要求以上なら 0.65）。降格は平滑化した受理数 `K × EMA` が `(K − 1) × 0.30`（17 要求以上なら `(K − 1) × 0.45`）を下回ったときに行う。幅を広げても受理数が同じ場合、直ちに元の幅に戻ることを避ける。
+- 高並列時の上限は次の検証の前に適用し、この変更も切替回数に含める。終了時の EMA は最後の観測値までの値で、観測がまだなければ `samples=0 acc_ema=0` になる。幅と同時投機数は [compute の操作方法](../user/compute.md) と [環境変数一覧](../user/env_vars.md) を参照。
 
 - 生成上限、系列の空き、thinking budget に応じて実際の検証幅を短くする。線形の適応型 verify は、draft 数がゼロのセッションもターゲットの1行として同じバッチに含める。バッチ検証で共有した中間結果は、単独 forward によって上書きされる前に各要求が消費する。
 - prefix の境界で保存できるセッションは、受理した区間の途中でも境界時点の状態を保存する。経路別の条件は [prefix cache の DFlash2 経路](prefix_cache.md#dflash2-経路) を参照。

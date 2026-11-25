@@ -138,7 +138,7 @@ void compute_usage(const char* prog) {
     printf("                         auto は生成中の要求が投機中の 1 件だけなら 10 行、それ以外は 8 行\n");
     printf("  --dflash2-tree-extra B  enable experimental tree verification (B=0,1,2,4)\n");
     printf("  --dflash2-drafts N     speculative draft tokens per round (default 7)\n");
-    printf("  --dflash2-adaptive     control speculation with a batch policy\n");
+    printf("  --dflash2-adaptive     要求ごとの DFlash2 受理率に応じてドラフト数を調整する\n");
     printf("  --dflash2-prefill-rows N  drafter prefill rows (default from the model)\n");
     printf("  --dflash2-radix-topn N  radix top-n width for the drafter (default from code)\n");
     printf("  --dflash2-max-sessions N  requests that may speculate at once (serve; default\n");

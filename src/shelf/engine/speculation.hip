@@ -3,6 +3,7 @@
 #include "compute_session_impl.h"
 
 #include <shelf/models/loaded_model.h>
+#include <shelf/runtime/dflash2/dflash2_adaptive_state.h>
 #include <shelf/runtime/dflash2/dflash2_session_pool.h>
 #include <shelf/runtime/mtp/mtp_drafter.h>
 #include <shelf/runtime/dflash2/context_state.h>
@@ -499,47 +500,29 @@ Result<SpeculationResult> SpeculationRunner::run_dflash2(
 
     const auto t_decode_start = std::chrono::steady_clock::now();
     const bool stochastic = sampling.temperature != 0.0f;
-    double accepted_ema = 2.0;
-    uint32_t probe_age = 0;
+    runtime::DFlash2AdaptiveController controller(decoder_config.num_drafts);
     std::vector<uint64_t> adaptive_counts(decoder_config.num_drafts + 1u);
     uint64_t adaptive_rounds = 0;
     bool finished = shelf::qwen_hybrid::is_stop_token(decoder_config.eos_tokens, pending);
     while (!finished && result.generated_ids.size() < max_new_tokens) {
         const uint32_t remaining =
             static_cast<uint32_t>(max_new_tokens - result.generated_ids.size());
-        if (adaptive) {
-            ++adaptive_rounds;
-            const bool enabled = accepted_ema >= 0.6;
-            if (enabled) probe_age = 0;
-            else if (probe_age < 64u) ++probe_age;
-            const bool probe = !enabled && probe_age >= 64u;
-            decoder.config.num_drafts = (enabled || probe) ? decoder_config.num_drafts : 0u;
-            if (probe) probe_age = 0;
-            ++adaptive_counts[decoder.config.num_drafts];
-        }
+        const uint32_t k = adaptive ? controller.current_k : decoder_config.num_drafts;
         runtime::OnlineNgramProposal prop{};
+        const uint32_t position = decoder.sequence->position;
         if (impl.config_.ngram.enabled && !dflash2_tree && remaining > 1u &&
-            decoder.sequence->position + 2u <= decoder.sequence->max_seq_len) {
-            const uint32_t room = decoder.sequence->max_seq_len - decoder.sequence->position;
-            const uint32_t target_k =
-                adaptive ? decoder_config.num_drafts : decoder.config.num_drafts;
-            const uint32_t eff_k = std::min({target_k, remaining - 1u, room - 1u});
+            position < decoder.sequence->max_seq_len) {
+            const uint32_t room = decoder.sequence->max_seq_len - position;
+            const uint32_t eff_k = std::min({k, remaining - 1u, room - 1u});
             if (eff_k > 0u) {
                 prop = ngram.propose(eff_k, stochastic);
-                if (prop.hit) {
-                    if (adaptive) {
-                        decoder.config.num_drafts = decoder_config.num_drafts;
-                    }
-                    ngram.note_drafter_skipped();
-                }
+                if (prop.hit) ngram.note_drafter_skipped();
             }
         }
-        auto step_result =
-            dflash2_tree
-                ? runtime::dflash2_spec_step_tree(decoder, pending, remaining)
-                : runtime::dflash2_spec_step(
-                      decoder, pending, remaining, adaptive ? decoder_config.num_drafts : 0u,
-                      prop.hit ? prop.tokens.data() : nullptr);
+        auto step_result = dflash2_tree
+            ? runtime::dflash2_spec_step_tree(decoder, pending, remaining, k)
+            : runtime::dflash2_spec_step(decoder, pending, remaining, 0u,
+                                        prop.hit ? prop.tokens.data() : nullptr, k);
         if (!step_result.ok()) {
             (void)runtime::dflash2_spec_decoder_shutdown(decoder);
             (void)runtime::dflash2::dflash2_context_shutdown(context);
@@ -551,8 +534,10 @@ Result<SpeculationResult> SpeculationRunner::run_dflash2(
         if (prop.hit) {
             ngram.record_outcome(step.num_accepted);
         }
-        if (adaptive && step.num_drafts == decoder_config.num_drafts) {
-            accepted_ema += 0.03 * (static_cast<double>(step.num_accepted) - accepted_ema);
+        if (adaptive) {
+            ++adaptive_rounds;
+            ++adaptive_counts[step.num_drafts];
+            controller.observe(step.num_accepted, step.num_drafts, prop.hit, 1u);
         }
         for (uint32_t i = 0; i < step.emitted_count; ++i) {
             result.generated_ids.push_back(step.emitted[i]);
@@ -577,14 +562,17 @@ Result<SpeculationResult> SpeculationRunner::run_dflash2(
 
     if (adaptive) {
         const double actual_ms = elapsed_ms(t_decode_start, t_decode_end);
-        add_u(result, "DFLASH2_ADAPTIVE", adaptive_rounds);
-        result.stats.pop_back();
         char adaptive[128];
         std::snprintf(adaptive, sizeof(adaptive),
                       "rounds=%llu actual_tps=%.3f",
                       static_cast<unsigned long long>(adaptive_rounds),
                       actual_ms > 0.0 ? 1000.0 * decode_tokens / actual_ms : 0.0);
         result.stats.push_back(SpeculationMetric{"DFLASH2_ADAPTIVE", adaptive});
+        char summary[128];
+        std::snprintf(summary, sizeof(summary), "samples=%llu acc_ema=%.6f switches=%llu final_k=%u",
+                      static_cast<unsigned long long>(controller.rounds), controller.acc_ema,
+                      static_cast<unsigned long long>(controller.switches), controller.current_k);
+        result.stats.push_back(SpeculationMetric{"DFLASH2_ADAPTIVE_SESSION", summary});
         for (std::size_t k = 0; k < adaptive_counts.size(); ++k) {
             char value[64];
             std::snprintf(value, sizeof(value), "k=%zu count=%llu", k,

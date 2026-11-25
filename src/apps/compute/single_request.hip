@@ -244,8 +244,7 @@ void print_speculation_stats(const std::vector<shelf::engine::SpeculationMetric>
     for (const auto& metric : stats) {
         const bool is_ngram = metric.key.rfind("NGRAM_", 0) == 0;
         if (is_ngram ? !include_ngram : !include_spec) continue;
-        const bool space = metric.key == "DFLASH2_ADAPTIVE" ||
-                           metric.key == "DFLASH2_ADAPTIVE_K";
+        const bool space = metric.key.starts_with("DFLASH2_ADAPTIVE");
         if (space) {
             printf("%s %s\n", metric.key.c_str(), metric.value.c_str());
         } else {

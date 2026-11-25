@@ -98,7 +98,7 @@ Ready.
 | `--dflash2-model-dir DFLASH2_MODEL_DIR` | DFlash2 draft model directory (enables speculative decoding) |
 | `--dflash2-drafts DFLASH2_DRAFTS` | speculative draft tokens per round (default 7) |
 | `--dflash2-tree-budget N\|auto` | tree verify rows: auto uses 10 for one decoding request if speculative, 8 otherwise (default 0; 0 disables) |
-| `--dflash2-adaptive` | batch と受理数に応じて投機を制御する |
+| `--dflash2-adaptive` | 要求ごとの DFlash2 受理率に応じてドラフト数を調整する |
 | `--dflash2-max-sessions DFLASH2_MAX_SESSIONS` | requests that may speculate at once; the rest decode without speculation (0 = min(--max-concurrent- requests, 8)) |
 | `--dflash2-prefill-rows DFLASH2_PREFILL_ROWS` | drafter prefill rows（default は model 側） |
 | `--dflash2-radix-topn DFLASH2_RADIX_TOPN` | drafter の radix top-n 幅（default は code 側） |
@@ -178,11 +178,11 @@ request 1 個あたりの生成予算（推論予算）は `--inference-budget-t
   KV admission は通常 decode と同じ KV Banker が行うため、不足時は一部の request が
   Queued になり、Active の完了後に admission される。
 - tool calling / sampling / cancel は DFlash2 経路でも利用できる。
-- `--dflash2-adaptive` は提案したトークンに対する受理率の指数移動平均（係数 0.25）から draft 数 `K` を
-  `2`〜`5` で選ぶ。切替にはヒステリシスと 8 ラウンドの最小間隔を適用し、同時 batch が
-  16 を超える場合は `K` を最大 `4` に制限する。`--dflash2-drafts` が `5` 未満なら
-  その値が上限になる。同時接続 32 でも session 数と verify 行数は容量内に収まり、
-  超過分の session は通常 decode に戻る。
+- `--dflash2-adaptive` は要求ごとに DFlash2 の受理率から検証幅を決める。
+  同時に decode する要求が 16 件までなら `--dflash2-drafts` の解決値まで増やせる。
+  17 件以上では最大 4 に制限する。適応制御対象の要求が終了すると stderr に
+  `DFLASH2_ADAPTIVE_SESSION` が出る。`request_id` で stdio の `done` と対応付けられる。
+  各フィールドの意味は [compute の DFlash2 設定](compute.md) を参照。
 - `--prefill-decode-interval N` は prefill が `N` 回続いた時点で、実行可能な decode 要求を次のバッチで優先する。既定の `0` で無効になる。
 - verify は単一 request を含め既定で lossy chunk を使うため、非投機 greedy と
   生成列が一致しない場合がある。verify 経路切替・`--dflash2-adaptive` の上限上書き・

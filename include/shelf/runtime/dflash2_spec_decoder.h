@@ -255,10 +255,12 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
     int32_t pending_token,
     uint32_t remaining_tokens,
     uint32_t proposal_drafts = 0u,
-    const int32_t* precomputed_drafts = nullptr);
+    const int32_t* precomputed_drafts = nullptr,
+    uint32_t verify_limit = UINT32_MAX);
 
 Result<DFlash2SpecIterationOutput> dflash2_spec_step_tree(
-    DFlash2SpecDecoder& decoder, int32_t pending_token, uint32_t remaining_tokens);
+    DFlash2SpecDecoder& decoder, int32_t pending_token, uint32_t remaining_tokens,
+    uint32_t verify_limit = UINT32_MAX);
 
 struct DFlash2SpecBatchCompact {
     float* delta = nullptr;

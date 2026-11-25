@@ -72,7 +72,7 @@ prefill の chunk 境界や prefix cache の有無によって、同じ入力の
 | `--dflash2-tree-budget N\|auto` | 木検証の行数（既定は 0 で chain を使用） auto は生成中の要求が投機中の 1 件だけなら 10 行、それ以外は 8 行 |
 | `--dflash2-tree-extra B` | enable experimental tree verification (B=0,1,2,4) |
 | `--dflash2-drafts N` | speculative draft tokens per round (default 7) |
-| `--dflash2-adaptive` | control speculation with a batch policy |
+| `--dflash2-adaptive` | 要求ごとの DFlash2 受理率に応じてドラフト数を調整する |
 | `--dflash2-prefill-rows N` | drafter prefill rows (default from the model) |
 | `--dflash2-radix-topn N` | radix top-n width for the drafter (default from code) |
 | `--dflash2-max-sessions N` | requests that may speculate at once (serve; default min(--max-concurrent-requests, 8)); the rest decode without speculation |
@@ -258,10 +258,12 @@ dense checkpoint を TP=2 で動かす場合:
 block size 16 の `DFlash2DraftModel` は `--dflash2-drafts 15` で最大幅を使う。
 単発 CLI と 1 セッションの stdio では、`--dflash2-prefill-rows 16` で drafter の prefill 幅を 16 行にできる。
 
-`--dflash2-adaptive` を指定すると、各ラウンドで提案したトークンに対する受理率の指数移動平均（係数 0.25）から
-draft 数 `K` を `2`〜`5` の範囲で選ぶ。切替にはヒステリシスと 8 ラウンドの最小間隔を
-適用する。同時 batch が 16 を超える場合は `K` の上限を `4` に下げる。
-`--dflash2-drafts` が `5` 未満の場合はその値が上限になる。
+`--dflash2-adaptive` を指定すると、単発 CLI と stdio は要求ごとに draft 数 `K` を調整する。
+初期値は `min(5, --dflash2-drafts の解決値)`。受理率が高い状態が続くと設定した draft 数まで、
+低い状態が続くと `2` まで一段ずつ変わる。設定値が `1` の場合はその値を使う。
+同時に decode する要求が 16 件を超えると上限は `min(4, 設定値)` になる。
+単発 CLI の `DFLASH2_ADAPTIVE_SESSION` には有効な観測回数（`samples`）、受理率の指数移動平均
+（`acc_ema`）、切替回数（`switches`）、終了時点の制御器の幅（`final_k`）が出る。
 同時接続 32 では、session 数と verify 行数が `kDFlash2SpecMaxVerifyRows` に収まる
 範囲で全 session が投機でき、上限を超えた session は通常 decode に戻る。
 

@@ -599,7 +599,7 @@ def parse_args(argv=None):
                         help="tree verify rows: auto uses 10 for one decoding request if speculative, "
                              "8 otherwise (default 0; 0 disables)")
     parser.add_argument("--dflash2-adaptive", action="store_true",
-                        help="batch と受理数に応じて投機を制御する")
+                        help="要求ごとの DFlash2 受理率に応じてドラフト数を調整する")
     parser.add_argument("--dflash2-max-sessions", type=int, default=0,
                         help="requests that may speculate at once; the rest decode "
                              "without speculation (0 = min(--max-concurrent-requests, 8))")
