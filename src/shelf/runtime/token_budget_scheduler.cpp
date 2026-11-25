@@ -6,12 +6,28 @@
 namespace shelf {
 namespace runtime {
 
+bool prefill_decode_should_interrupt(std::span<const RuntimeRequest*> active,
+                                     uint32_t interval,
+                                     uint32_t chunks_since_decode) noexcept {
+    if (interval == 0u || chunks_since_decode < interval) {
+        return false;
+    }
+    bool decode = false;
+    bool prefill = false;
+    for (const RuntimeRequest* request : active) {
+        if (request_decode_ready(*request)) decode = true;
+        if (request_prefill_ready(*request)) prefill = true;
+        if (decode && prefill) return true;
+    }
+    return false;
+}
+
 Result<SchedulePlan> schedule_requests(
     std::span<const RuntimeRequest*> active,
     uint32_t max_num_batched_tokens,
     uint32_t max_scheduled_requests,
     uint32_t page_tokens,
-    KVBankerState* kv) {
+    KVBankerState* kv, bool decode_only) {
     SchedulePlan plan;
 
     auto budget_left = [&]() -> uint32_t {
@@ -69,6 +85,11 @@ Result<SchedulePlan> schedule_requests(
         }
         plan.scheduled_requests.back().token_bitmask = rp->token_bitmask;
         commit_grant(proc_idx, delta);
+    }
+
+    if (decode_only && !plan.scheduled_requests.empty()) {
+        plan.finalize();
+        return plan;
     }
 
     std::size_t prefill_proc = 0;

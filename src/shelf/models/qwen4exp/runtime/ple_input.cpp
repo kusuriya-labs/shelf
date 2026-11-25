@@ -1,5 +1,6 @@
 #include <shelf/models/qwen4exp/runtime/ple_input.h>
 
+#include <algorithm>
 #include <utility>
 
 namespace shelf {
@@ -28,7 +29,7 @@ Status PleInputRuntime::seed(std::uint32_t slot,
 
 Status PleInputRuntime::prepare(const ::shelf::scheduling::ScheduledBatch& batch,
                                 std::vector<bf16_t>& out) {
-    if (table_ == nullptr || batch.token_ids == nullptr || batch.num_requests == 0u) {
+    if (table_ == nullptr || batch.num_requests > batch.requests.size() || batch.token_ids == nullptr || batch.num_requests == 0u) {
         return Status::invalid_argument("PLE input batch is empty", __FILE__, __LINE__);
     }
     if (batch.token_ids_location != ::shelf::scheduling::TokenIdsLocation::Host) {
@@ -53,19 +54,21 @@ Status PleInputRuntime::prepare(const ::shelf::scheduling::ScheduledBatch& batch
                 "PLE token history does not cover the request prefix", __FILE__,
                 __LINE__);
         }
-        for (std::uint32_t t = 0; t < request.num_tokens; ++t) {
-            const std::int32_t token = batch.token_ids[request.token_begin + t];
-            history.push_back(token);
-            auto rows = table_->gather_bf16(history, 1u);
-            if (!rows.ok()) return rows.status();
-            if (rows.value().size() != hidden_) {
-                return Status::invalid_state("PLE gather width mismatch", __FILE__,
-                                             __LINE__);
-            }
-            const std::size_t dst = static_cast<std::size_t>(row_offset + t) * hidden_;
-            for (std::uint32_t d = 0; d < hidden_; ++d)
-                out[dst + d] = rows.value()[d];
+        if (request.token_begin > batch.num_tokens || request.num_tokens > batch.num_tokens - request.token_begin ||
+            request.num_tokens > batch.num_tokens - row_offset)
+            return Status::invalid_argument("PLE token range exceeds the batch", __FILE__, __LINE__);
+        const std::size_t count = request.num_tokens;
+        const std::span<const std::int32_t> tokens(
+            batch.token_ids + request.token_begin, count);
+        auto rows = table_->gather_bf16_batch(history, tokens);
+        if (!rows.ok()) return rows.status();
+        if (rows.value().size() != count * hidden_) {
+            return Status::invalid_state("PLE gather width mismatch", __FILE__,
+                                         __LINE__);
         }
+        std::copy(rows.value().begin(), rows.value().end(),
+                  out.begin() + static_cast<std::size_t>(row_offset) * hidden_);
+        history.insert(history.end(), tokens.begin(), tokens.end());
         row_offset += request.num_tokens;
     }
     if (row_offset != batch.num_tokens) {

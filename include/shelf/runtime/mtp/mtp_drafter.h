@@ -311,6 +311,8 @@ struct MtpDraftResult {
     bool decode_only = false;
 };
 
+struct MtpBoundaryCapture;
+
 Result<MtpDraftResult> mtp_draft(
     MtpDrafter& drafter,
     Executor& target,
@@ -340,6 +342,7 @@ struct MtpSpecBatchSlot {
     uint32_t num_drafts = 0u;
     uint32_t remaining_tokens = 0u;
     uint32_t page_tokens = 0u;
+    bool ignore_eos = false;
     MtpBoundaryCapture* boundary_capture = nullptr;
     const int32_t* precomputed_drafts = nullptr;
 };

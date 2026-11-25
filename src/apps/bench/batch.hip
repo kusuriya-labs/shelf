@@ -372,6 +372,7 @@ int run_batch(int argc, char** argv) {
     shelf::runtime::ContinuousBatcherConfig cfg;
     cfg.max_num_batched_tokens = sched_tokens;
     cfg.max_scheduled_requests = 1;
+    cfg.sampled_ids_only = tp_coordinator != nullptr;
     cfg.max_seq_len = seq_len;
     cfg.page_tokens = static_cast<uint32_t>(opts.page_tokens);
     cfg.eos_token_ids = tc.stop_tokens;

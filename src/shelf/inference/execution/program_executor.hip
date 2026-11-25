@@ -9,6 +9,7 @@
 #include <shelf/inference/execution/weight_slot_validation.h>
 #include <shelf/kernels/optimized/attention/qsa_sparse.h>
 #include <shelf/kernels/correctness/model_dispatch_correctness.h>
+#include <shelf/runtime/tp/tp_argmax.h>
 #include <hip/hip_runtime.h>
 #include <algorithm>
 #include <cstdint>
@@ -405,6 +406,25 @@ Status record_value_trace(const ::shelf::runtime::Program& program, std::size_t 
     return Status::make_ok();
 }
 
+bool greedy_argmax_allowed(const HostExecutionContext& ctx) {
+    if (!::shelf::runtime::tp_argmax_enabled() || !ctx.sampled_ids_only || ctx.value_trace || g_op_dump_enabled || ctx.actual_outputs == 0u ||
+        ctx.actual_sampled_outputs != ctx.actual_outputs || ctx.staged_requests == nullptr || ctx.staged_request_count == 0u)
+        return false;
+    for (uint32_t i = 0u; i < ctx.staged_request_count; ++i) {
+        const auto& sampling = ctx.staged_requests[i].sampling;
+        if (ctx.staged_requests[i].output_count == 0u) continue;
+        if (sampling.mode != 1u) return false;
+        ::shelf::runtime::TpGreedyProbe probe;
+        probe.temperature = sampling.temperature;
+        probe.top_p = sampling.top_p;
+        probe.min_p = sampling.min_p;
+        probe.top_k = sampling.top_k;
+        probe.has_token_bitmask = sampling.token_bitmask != nullptr;
+        if (!::shelf::runtime::tp_greedy_argmax_eligible(probe)) return false;
+    }
+    return true;
+}
+
 }
 
 Status execute_program_range(
@@ -425,6 +445,11 @@ Status execute_program_range(
     const bool sync_each_op = g_op_dump_enabled || g_op_sync_enabled;
     size_t i = begin;
     while (i < end) {
+        if (i == ctx.argmax_skip_dispatch) {
+            ctx.argmax_skip_dispatch = UINT32_MAX;
+            ++i;
+            continue;
+        }
         const auto& binding = program.dispatches[i];
         if (output_tail_has_no_work(program, binding, ctx)) {
             ++i;
@@ -696,6 +721,9 @@ static bool tp_graph_capture_due(const TpSegmentGraphCache& cache, std::size_t s
 static Status execute_tp_segment(const ::shelf::runtime::Program& program,
                                  HostExecutionContext& ctx, hipStream_t stream,
                                  uint32_t begin, uint32_t end, std::size_t segment_index) {
+    if (ctx.argmax_skip_dispatch != UINT32_MAX && ctx.argmax_skip_dispatch >= begin &&
+        ctx.argmax_skip_dispatch < end)
+        return execute_program_range(program, ctx, stream, begin, end);
     TpSegmentGraphCache* cache = ctx.tp_segment_graphs;
     if (cache == nullptr || segment_index >= cache->slots.size() ||
         ctx.tp_graph_policy == TpGraphPolicy::Disabled)
@@ -833,6 +861,7 @@ Status execute_program_tp_ranges(
         }
         HostResolvedValue value{};
         uint32_t producer_begin = segment.dispatch_begin;
+        bool use_argmax = false;
         ctx.tp_peer_armed = false;
         ctx.tp_peer_out = nullptr;
         ctx.tp_peer_written = false;
@@ -844,10 +873,14 @@ Status execute_program_tp_ranges(
             if (value.ptr == nullptr || value.feature_count == 0 || value.row_stride == 0) {
                 return Status::invalid_state("tp combine value is empty", __FILE__, __LINE__);
             }
+            use_argmax = !segment.ep_scope && segment.argmax_dispatch != UINT32_MAX &&
+                value.dtype == ::shelf::runtime::ValueDType::F32 &&
+                segment.combine_local_cols != 0u && segment.combine_local_cols < value.feature_count &&
+                greedy_argmax_allowed(ctx) && active_barrier->supports_argmax_reduce();
             const uint64_t arm_rows = probe_rows(value, ctx);
             const uint64_t arm_bytes = arm_rows * static_cast<uint64_t>(value.row_stride) *
                                        ::shelf::runtime::value_dtype_bytes(value.dtype);
-            if (arm_bytes != 0) {
+            if (arm_bytes != 0 && !use_argmax) {
                 void* peer = nullptr;
                 Status peer_status = active_barrier->peer_write_target(
                     active_rank, static_cast<std::size_t>(arm_bytes), peer);
@@ -889,7 +922,7 @@ Status execute_program_tp_ranges(
                 const uint64_t rows = probe_rows(value, ctx);
                 const uint64_t bytes = rows * static_cast<uint64_t>(value.row_stride) *
                                        ::shelf::runtime::value_dtype_bytes(value.dtype);
-                if (bytes != 0) {
+                if (bytes != 0 && !use_argmax) {
                     const hipError_t memset_err =
                         hipMemsetAsync(value.ptr, 0, static_cast<size_t>(bytes), stream);
                     if (memset_err != hipSuccess) {
@@ -907,8 +940,9 @@ Status execute_program_tp_ranges(
             segment.fusion != ::shelf::runtime::TpCombineFusion::None
                 ? segment.producer_end
                 : segment.dispatch_end;
-        Status st = execute_tp_segment(program, ctx, stream, producer_begin, run_end,
-                                       segment_index);
+        Status st = use_argmax
+            ? execute_program_range(program, ctx, stream, producer_begin, run_end)
+            : execute_tp_segment(program, ctx, stream, producer_begin, run_end, segment_index);
         if (!st.ok()) return st;
         if (!combines) continue;
         ::shelf::runtime::TpSumTarget target;
@@ -951,8 +985,31 @@ Status execute_program_tp_ranges(
                          static_cast<int>(target.dtype), ctx.actual_rows,
                          ctx.actual_outputs);
         }
-        st = active_barrier->arrive(active_rank, target, stream,
-                                    ctx.tp_peer_armed && ctx.tp_peer_written);
+        if (use_argmax) {
+            auto sampled = resolve_host_value(program, segment.argmax_output, ctx);
+            if (!sampled.ok()) return sampled.status();
+            if (sampled.value().ptr == nullptr || sampled.value().dtype != ::shelf::runtime::ValueDType::I32)
+                return Status::invalid_state("argmax output is not an I32 value", __FILE__,
+                                             __LINE__);
+            ::shelf::runtime::TpArgmaxInvocation invocation;
+
+            invocation.out_ids = static_cast<int32_t*>(sampled.value().ptr);
+            invocation.rows = static_cast<uint32_t>(target.rows);
+            invocation.row_stride = value.row_stride;
+            invocation.vocab = value.feature_count;
+            invocation.local_cols = segment.combine_local_cols;
+            invocation.local_offset =
+                static_cast<uint32_t>(active_rank) * segment.combine_local_cols;
+            if (static_cast<uint64_t>(invocation.local_offset) + invocation.local_cols > invocation.vocab)
+                return Status::invalid_state("argmax shard exceeds vocabulary", __FILE__, __LINE__);
+            invocation.local_logits = static_cast<const float*>(value.ptr) + invocation.local_offset;
+            invocation.stream = stream;
+            st = active_barrier->argmax_reduce(active_rank, invocation);
+            ctx.argmax_skip_dispatch = segment.argmax_dispatch;
+        } else {
+            st = active_barrier->arrive(active_rank, target, stream,
+                                        ctx.tp_peer_armed && ctx.tp_peer_written);
+        }
         ctx.tp_peer_armed = false;
         ctx.tp_peer_out = nullptr;
         ctx.tp_peer_written = false;
@@ -994,6 +1051,7 @@ Status execute_program(
     hipStream_t stream) {
     if (ctx.error_word == nullptr)
         return Status::invalid_state("error word not bound", __FILE__, __LINE__);
+    ctx.argmax_skip_dispatch = UINT32_MAX;
     {
         const Status zero_status = prepare_program_run(program, ctx, stream);
         if (!zero_status.ok()) return zero_status;

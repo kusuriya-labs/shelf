@@ -363,6 +363,7 @@ class AsyncComputeClient:
         reasoning_budget_tokens: int = 0,
         reasoning_close_token: int = -1,
         grammar=None,
+        ignore_eos: bool = False,
     ) -> None:
         payload = {
             "op": "generate",
@@ -376,6 +377,8 @@ class AsyncComputeClient:
             "seed": int(seed),
             "prefix_cache_checkpoint_position": int(prefix_cache_checkpoint_position),
         }
+        if ignore_eos:
+            payload["ignore_eos"] = True
         if reasoning_budget_tokens > 0:
             payload["reasoning_budget_tokens"] = int(reasoning_budget_tokens)
         if reasoning_budget_tokens > 0 or (grammar is not None and grammar.after_reasoning):
@@ -423,11 +426,12 @@ class AsyncComputeClient:
         reasoning_budget_tokens: int = 0,
         reasoning_close_token: int = -1,
         grammar=None,
+        ignore_eos: bool = False,
     ) -> dict:
         async with aclosing(self.generate_stream(
             input_ids, max_new_tokens, temperature, top_p, min_p, top_k, seed,
             prefix_cache_checkpoint_position, reasoning_budget_tokens,
-            reasoning_close_token, grammar)) as stream:
+            reasoning_close_token, grammar, ignore_eos=ignore_eos)) as stream:
             async for event in stream:
                 if "done" in event:
                     done = event["done"]
@@ -449,6 +453,7 @@ class AsyncComputeClient:
         reasoning_budget_tokens: int = 0,
         reasoning_close_token: int = -1,
         grammar=None,
+        ignore_eos: bool = False,
     ) -> AsyncIterator[dict]:
         """Yield ``{"token_id": N}`` events, then one ``{"done": event}``.
 
@@ -467,7 +472,8 @@ class AsyncComputeClient:
             await self._send_generate(
                 request_id, input_ids, max_new_tokens, temperature,
                 top_p, min_p, top_k, seed, prefix_cache_checkpoint_position,
-                reasoning_budget_tokens, reasoning_close_token, grammar)
+                reasoning_budget_tokens, reasoning_close_token, grammar,
+                ignore_eos=ignore_eos)
 
             sent = True
 

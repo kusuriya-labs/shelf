@@ -1,4 +1,6 @@
 #include <shelf/runtime/tp/tp_transports.h>
+#include <shelf/runtime/tp/tp_argmax.h>
+#include <algorithm>
 
 #include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/gpu/scoped_device.h>
@@ -14,13 +16,149 @@
 
 namespace shelf::runtime {
 
+bool tp_peer_link_map_all(const TpPeerLinkMap& map) noexcept {
+    for (std::size_t i = 0u; i < map.size(); ++i) {
+        for (std::size_t j = 0u; j < map[i].size(); ++j) {
+            if (i != j && map[i][j] == 0u) return false;
+        }
+    }
+    return true;
+}
+
+bool tp_peer_link_map_none(const TpPeerLinkMap& map) noexcept {
+    for (std::size_t i = 0u; i < map.size(); ++i) {
+        for (std::size_t j = 0u; j < map[i].size(); ++j) {
+            if (i != j && map[i][j] != 0u) return false;
+        }
+    }
+    return true;
+}
+
+std::size_t tp_peer_link_map_disabled(const TpPeerLinkMap& map) noexcept {
+    std::size_t count = 0u;
+    for (std::size_t i = 0u; i < map.size(); ++i) {
+        for (std::size_t j = 0u; j < map[i].size(); ++j) {
+            if (i != j && map[i][j] == 0u) ++count;
+        }
+    }
+    return count;
+}
+
+Result<TpPeerLinkMap> probe_tp_peer_links(const std::vector<int>& devices) {
+    const std::size_t rank_count = devices.size();
+    TpPeerLinkMap links(rank_count, std::vector<std::uint8_t>(rank_count, 0u));
+    if (rank_count < 2u) return links;
+
+    std::vector<void*> src_buffers(rank_count, nullptr);
+    std::vector<void*> dst_buffers(rank_count, nullptr);
+    std::vector<hipStream_t> streams(rank_count, nullptr);
+    Status status = Status::make_ok();
+    for (std::size_t r = 0; r < rank_count; ++r) {
+        links[r][r] = 1u;
+        auto scope = shelf::gpu::ScopedDevice::create(devices[r]);
+        if (!scope.ok()) {
+            status = scope.status();
+            break;
+        }
+        auto err = hipMalloc(&src_buffers[r], kTpPeerProbeBytes);
+        if (err == hipSuccess) err = hipMalloc(&dst_buffers[r], kTpPeerProbeBytes);
+        if (err == hipSuccess) err = hipStreamCreate(&streams[r]);
+        if (err != hipSuccess) {
+            status = Status::hip_error("tp directional probe setup", hipGetErrorString(err), __FILE__, __LINE__);
+            break;
+        }
+    }
+
+    constexpr std::size_t words = kTpPeerProbeBytes / sizeof(std::uint32_t);
+    std::vector<std::uint32_t> expected(words), actual(words);
+    for (std::size_t src = 0; status.ok() && src < rank_count; ++src) {
+        for (std::size_t dst = 0; dst < rank_count; ++dst) {
+            if (src == dst) continue;
+            int accessible = 0;
+            auto err = hipDeviceCanAccessPeer(&accessible, devices[src], devices[dst]);
+            if (err != hipSuccess) {
+                status = Status::hip_error("hipDeviceCanAccessPeer", hipGetErrorString(err), __FILE__, __LINE__);
+                break;
+            }
+            if (!accessible) continue;
+            for (std::size_t i = 0; i < words; ++i)
+                expected[i] = static_cast<std::uint32_t>(i + 1u) * 0x9e3779b9u ^
+                              static_cast<std::uint32_t>(src * 17u + dst * 31u + 1u);
+            {
+                auto scope = shelf::gpu::ScopedDevice::create(devices[dst]);
+                if (!scope.ok()) { status = scope.status(); break; }
+                err = hipMemsetAsync(dst_buffers[dst], 0, kTpPeerProbeBytes, streams[dst]);
+                if (err == hipSuccess) err = hipStreamSynchronize(streams[dst]);
+                if (err != hipSuccess) {
+                    status = Status::hip_error("tp probe clear", hipGetErrorString(err), __FILE__, __LINE__);
+                    break;
+                }
+            }
+            {
+                auto scope = shelf::gpu::ScopedDevice::create(devices[src]);
+                if (!scope.ok()) { status = scope.status(); break; }
+                err = hipMemcpy(src_buffers[src], expected.data(), kTpPeerProbeBytes, hipMemcpyHostToDevice);
+                if (err != hipSuccess) {
+                    status = Status::hip_error("tp probe upload", hipGetErrorString(err), __FILE__, __LINE__);
+                    break;
+                }
+                err = hipDeviceEnablePeerAccess(devices[dst], 0);
+                if (err == hipErrorPeerAccessAlreadyEnabled) {
+                    (void)hipGetLastError();
+                    err = hipSuccess;
+                }
+                if (err == hipSuccess)
+                    err = launch_tp_peer_probe_copy(dst_buffers[dst], src_buffers[src], kTpPeerProbeBytes, streams[src]);
+                if (err == hipSuccess) err = hipStreamSynchronize(streams[src]);
+                if (err != hipSuccess) { (void)hipGetLastError(); continue; }
+            }
+            auto scope = shelf::gpu::ScopedDevice::create(devices[dst]);
+            if (!scope.ok()) { status = scope.status(); break; }
+            err = hipMemcpy(actual.data(), dst_buffers[dst], kTpPeerProbeBytes, hipMemcpyDeviceToHost);
+            if (err != hipSuccess) {
+                status = Status::hip_error("tp probe download", hipGetErrorString(err), __FILE__, __LINE__);
+                break;
+            }
+            links[src][dst] = actual == expected;
+        }
+    }
+
+    auto cleanup = [&](hipError_t err, const char* operation) {
+        if (err != hipSuccess && status.ok())
+            status = Status::hip_error(operation, hipGetErrorString(err), __FILE__, __LINE__);
+    };
+    for (std::size_t r = 0; r < rank_count; ++r) {
+        auto scope = shelf::gpu::ScopedDevice::create(devices[r]);
+        if (!scope.ok()) {
+            if (status.ok()) status = scope.status();
+            continue;
+        }
+        if (streams[r]) cleanup(hipStreamDestroy(streams[r]), "tp probe stream cleanup");
+        if (dst_buffers[r]) cleanup(hipFree(dst_buffers[r]), "tp probe destination cleanup");
+        if (src_buffers[r]) cleanup(hipFree(src_buffers[r]), "tp probe source cleanup");
+    }
+    if (!status.ok()) return status;
+    return links;
+}
+
 HostMediatedTpTransport::HostMediatedTpTransport(std::vector<int> devices)
     : devices_(std::move(devices)) {}
 
 HostMediatedTpTransport::~HostMediatedTpTransport() {
+    (void)shutdown();
+}
+
+Status HostMediatedTpTransport::shutdown() {
+    Status first = Status::make_ok();
     for (void* buffer : staging_) {
-        if (buffer != nullptr) shelf::gpu::discard_cleanup_result(hipHostFree(buffer));
+        if (!buffer) continue;
+        const auto err = hipHostFree(buffer);
+        if (!first.ok() || err == hipSuccess) continue;
+        first = Status::hip_error("tp host staging release", hipGetErrorString(err), __FILE__, __LINE__);
     }
+    staging_.clear();
+    staging_bytes_ = 0;
+    return first;
 }
 
 Status HostMediatedTpTransport::ensure_staging(std::size_t bytes, std::size_t count) {
@@ -123,28 +261,61 @@ Result<TpTransportSelection> create_tp_transport(const std::vector<int>& devices
         selection.transport = std::make_unique<HostMediatedTpTransport>(devices);
         return selection;
     }
-    for (std::size_t i = 0; i < devices.size(); ++i) {
-        for (std::size_t j = 0; j < devices.size(); ++j) {
-            if (i == j) continue;
-            int can_peer = 0;
-            const hipError_t e = hipDeviceCanAccessPeer(&can_peer, devices[i], devices[j]);
-            if (e != hipSuccess) {
-                return Status::hip_error("hipDeviceCanAccessPeer", hipGetErrorString(e),
-                                         __FILE__, __LINE__);
-            }
-            if (can_peer == 0 && force != "p2p") {
-                TpTransportSelection selection;
-                selection.peer_access_available = false;
-                selection.transport = std::make_unique<HostMediatedTpTransport>(devices);
-                return selection;
+    const char* probe_env = std::getenv("SHELF_TP_P2P_PROBE");
+    const bool probing = probe_env == nullptr || std::strtoul(probe_env, nullptr, 10) != 0ul;
+    if (!probing) {
+        TpPeerLinkMap links(devices.size(), std::vector<uint8_t>(devices.size(), 1u));
+        for (std::size_t r = 0; r < devices.size(); ++r) {
+            for (std::size_t q = 0; q < devices.size(); ++q) {
+                if (r == q) continue;
+                int accessible = 0;
+                const auto err = hipDeviceCanAccessPeer(&accessible, devices[r], devices[q]);
+                if (err != hipSuccess) return Status::hip_error("hipDeviceCanAccessPeer", hipGetErrorString(err), __FILE__, __LINE__);
+                links[r][q] = accessible != 0;
             }
         }
+        return create_tp_transport(devices, backend, links);
     }
-    auto peer = HipPeerTpTransport::create(devices, backend);
+    auto links = probe_tp_peer_links(devices);
+    if (!links.ok()) return links.status();
+    if (tp_peer_link_map_none(links.value())) {
+        TpTransportSelection selection;
+        selection.peer_access_available = false;
+        selection.transport = std::make_unique<HostMediatedTpTransport>(devices);
+        return selection;
+    }
+    return create_tp_transport(devices, backend, links.value());
+}
+
+Result<TpTransportSelection> create_tp_transport(const std::vector<int>& devices,
+                                                  TpCombineBackend backend,
+                                                  const TpPeerLinkMap& links) {
+    if (devices.size() < 2) {
+        return Status::invalid_argument("tp transport requires at least 2 devices",
+                                         __FILE__, __LINE__);
+    }
+    TpPeerLinkMap effective = links;
+    if (effective.empty()) {
+        effective.assign(devices.size(), std::vector<std::uint8_t>(devices.size(), 1u));
+        for (std::size_t r = 0; r < devices.size(); ++r) effective[r][r] = 0u;
+    }
+    if (effective.size() != devices.size()) {
+        return Status::invalid_argument("tp peer link map rank count mismatch", __FILE__,
+                                         __LINE__);
+    }
+    if (std::any_of(effective.begin(), effective.end(), [&](const auto& row) { return row.size() != devices.size(); }))
+        return Status::invalid_argument("tp peer link map row count mismatch", __FILE__, __LINE__);
+    if (tp_peer_link_map_none(effective)) {
+        TpTransportSelection selection;
+        selection.transport = std::make_unique<HostMediatedTpTransport>(devices);
+        return selection;
+    }
+    auto peer = HipPeerTpTransport::create(devices, backend, effective);
     if (!peer.ok()) return peer.status();
     TpTransportSelection selection;
-    selection.peer_access_available = true;
-    selection.transport = peer.release();
+    selection.peer_access_available = peer.value()->has_peer_links();
+    if (selection.peer_access_available) selection.transport = peer.release();
+    else selection.transport = std::make_unique<HostMediatedTpTransport>(devices);
     return selection;
 }
 

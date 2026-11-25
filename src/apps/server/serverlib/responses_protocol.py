@@ -115,7 +115,7 @@ def input_messages(value):
 
 
 def parse_responses_request(body, *, inference_budget_tokens):
-    allowed = {"model", "input", "instructions", "tools", "tool_choice", "max_output_tokens", "temperature", "top_p", "seed", "reasoning", "store", "metadata", "user", "parallel_tool_calls", "truncation", "include", "stream", "previous_response_id", "conversation", "text", "prompt_cache_key", "client_metadata"}
+    allowed = {"model", "input", "instructions", "tools", "tool_choice", "max_output_tokens", "temperature", "top_p", "seed", "reasoning", "store", "metadata", "user", "parallel_tool_calls", "truncation", "include", "stream", "previous_response_id", "conversation", "text", "prompt_cache_key", "client_metadata", "ignore_eos"}
     if not isinstance(body, dict):
         raise OpenAIProtocolError("request body must be a JSON object")
     for key in body:
@@ -148,7 +148,7 @@ def parse_responses_request(body, *, inference_budget_tokens):
     chat = {"model": body.get("model"), "messages": messages}
     if response_format is not None:
         chat["response_format"] = response_format
-    for source, target in (("stream", "stream"), ("max_output_tokens", "max_tokens"), ("temperature", "temperature"), ("top_p", "top_p"), ("seed", "seed"), ("tool_choice", "tool_choice")):
+    for source, target in (("ignore_eos", "ignore_eos"), ("stream", "stream"), ("max_output_tokens", "max_tokens"), ("temperature", "temperature"), ("top_p", "top_p"), ("seed", "seed"), ("tool_choice", "tool_choice")):
         if source in body:
             chat[target] = body[source]
     choice = chat.get("tool_choice")

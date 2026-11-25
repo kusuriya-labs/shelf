@@ -244,7 +244,8 @@ class ComputeHarness:
                  mtp_drafts: int = 4,
                  mtp_window: int | None = None,
                  mtp_sink: int | None = None,
-                 ngram_min_match: int | None = None):
+                 ngram_min_match: int | None = None,
+                 adaptive_dflash: bool = False):
         self.log_path = log_path
         self.arena_gib = arena_gib
         self.auto_arena = auto_arena
@@ -256,6 +257,7 @@ class ComputeHarness:
         self.prefill_chunk = prefill_chunk
         self.rope_factor = rope_factor
         self.ngram_min_match = ngram_min_match
+        self.adaptive_dflash = adaptive_dflash
         self.mtp = mtp
         self.mtp_drafts = mtp_drafts
         self.mtp_window = (int(os.environ.get("SHELF_MTP_WINDOW", "0"))
@@ -340,6 +342,8 @@ class ComputeHarness:
                      "--dflash2-tree-budget", "0"]
         if self.ngram_min_match is not None:
             argv += ["--ngram", "--ngram-min-match", str(self.ngram_min_match)]
+        if self.adaptive_dflash:
+            argv += ["--dflash2-adaptive", "--dflash2-max-sessions", str(self.max_concurrent_requests)]
         if self.mtp:
             argv += ["--mtp", "--mtp-drafts", str(self.mtp_drafts)]
             if self.mtp_window:

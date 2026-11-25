@@ -143,6 +143,17 @@ shelf_add_test(NAME test_qwen35_tp_context SOURCE unit/test_qwen35_tp_context.cp
 shelf_add_test(NAME test_qwen35_pipeline_stage SOURCE unit/test_qwen35_pipeline_stage.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35)
 shelf_add_test(NAME test_tp_reduction SOURCE unit/test_tp_reduction.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
 target_include_directories(test_tp_reduction PRIVATE "${CMAKE_SOURCE_DIR}/src")
+shelf_add_test(NAME test_tp_argmax SOURCE unit/test_tp_argmax.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
+shelf_add_test(NAME test_tp_peer_links SOURCE unit/test_tp_peer_links.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
+shelf_add_test(NAME test_tp_argmax_kernels SOURCE unit/test_tp_argmax.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_runtime)
+foreach(ranks IN ITEMS 2 4)
+    add_test(NAME test_tp_argmax_physical_${ranks} COMMAND shelf-gpu-test-runner
+        --gpu-count ${ranks} --cost-gb 1 --timeout 120
+        --state-dir "${CMAKE_BINARY_DIR}/gpu-test-state"
+        -- $<TARGET_FILE:test_tp_argmax_kernels> --physical-${ranks})
+    set_tests_properties(test_tp_argmax_physical_${ranks} PROPERTIES
+        LABELS "gpu${ranks};optional" TIMEOUT 1080 SKIP_RETURN_CODE 77)
+endforeach()
 shelf_add_test(NAME test_tp_barrier_group SOURCE unit/test_tp_barrier_group.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
 target_include_directories(test_tp_barrier_group PRIVATE "${CMAKE_SOURCE_DIR}/src")
 shelf_add_test(NAME test_tp_transport SOURCE unit/test_tp_transport.cpp LABELS "gpu2;optional" TIMEOUT 120 GPU_COUNT 2 GPU_COST_GB 1 LIBRARIES shelf_runtime)
@@ -696,6 +707,35 @@ set_tests_properties(test_compute_ngram_accepts_hybrid_mtp PROPERTIES
                      PASS_REGULAR_EXPRESSION "cannot open config.json")
 
 
+add_test(NAME test_compute_prefill_decode_interval_accept
+         COMMAND $<TARGET_FILE:shelf-compute> --prefill-decode-interval 4)
+set_tests_properties(test_compute_prefill_decode_interval_accept PROPERTIES
+                     LABELS "cpu;required"
+                     PASS_REGULAR_EXPRESSION "model-dir required"
+                     FAIL_REGULAR_EXPRESSION "bad --prefill-decode-interval")
+
+add_test(NAME test_compute_prefill_decode_interval_reject_negative
+         COMMAND $<TARGET_FILE:shelf-compute> --prefill-decode-interval -1)
+set_tests_properties(test_compute_prefill_decode_interval_reject_negative PROPERTIES
+                     LABELS "cpu;required"
+                     PASS_REGULAR_EXPRESSION "bad --prefill-decode-interval")
+
+add_test(NAME test_compute_prefill_decode_interval_reject_large
+         COMMAND $<TARGET_FILE:shelf-compute> --prefill-decode-interval 1025)
+set_tests_properties(test_compute_prefill_decode_interval_reject_large PROPERTIES
+                     LABELS "cpu;required"
+                     PASS_REGULAR_EXPRESSION "bad --prefill-decode-interval")
+
+add_test(NAME test_compute_c32_adaptive_accept
+         COMMAND $<TARGET_FILE:shelf-compute>
+             --model-dir placeholder --dflash2-model-dir placeholder
+             --dflash2-drafts 5 --dflash2-adaptive --dflash2-max-sessions 32
+             --max-concurrent-requests 32 --prefill-decode-interval 2)
+set_tests_properties(test_compute_c32_adaptive_accept PROPERTIES
+                     LABELS "cpu;required"
+                     PASS_REGULAR_EXPRESSION "cannot open config.json"
+                     FAIL_REGULAR_EXPRESSION "bad --|unknown argument")
+
 add_test(NAME test_quality_gate_selftest
          COMMAND python3 "${CMAKE_SOURCE_DIR}/tools/quality_gate.py" selftest)
 set_tests_properties(test_quality_gate_selftest PROPERTIES LABELS "cpu;required")
@@ -873,7 +913,10 @@ if(SHELF_BUILD_OPTIONAL_TESTS)
 
 endif()
 
+shelf_add_test(NAME test_ignore_eos SOURCE unit/test_ignore_eos.cpp LABELS "cpu;required" LIBRARIES shelf_runtime shelf_inference_state shelf_inference_scheduling)
+shelf_add_test(NAME test_prefill_decode_interval SOURCE unit/test_prefill_decode_interval.cpp LABELS "cpu;required" LIBRARIES shelf_runtime shelf_inference_scheduling)
 shelf_add_test(NAME test_token_mask_scheduler SOURCE unit/test_token_mask_scheduler.cpp LABELS "cpu;required" LIBRARIES shelf_qwen35_runtime shelf_qwen35)
 
 shelf_add_test(NAME test_ngram_quantization SOURCE unit/test_ngram_quantization.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES shelf_quant_ngram)
 shelf_add_test(NAME test_qwen4exp_ngram SOURCE unit/test_qwen4exp_ngram.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES shelf_qwen4exp shelf_quant_ngram)
+shelf_add_test(NAME test_ple_batch_gather SOURCE unit/test_ple_batch_gather.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES shelf_qwen4exp shelf_quant_ngram)

@@ -187,6 +187,7 @@ add_library(shelf_runtime STATIC
     src/shelf/runtime/tp/tp_execution.cpp
     src/shelf/runtime/tp/tp_barrier_group.cpp
     src/shelf/runtime/tp/tp_transports.cpp
+    src/shelf/runtime/tp/tp_argmax.hip
     src/shelf/runtime/tp/hip_peer_tp_transport.hip
 )
 target_compile_features(shelf_runtime PRIVATE cxx_std_20)

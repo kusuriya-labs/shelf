@@ -292,6 +292,18 @@ Status ContinuousBatcher::set_external_request_id(uint64_t id,
     return Status::make_ok();
 }
 
+Status ContinuousBatcher::set_ignore_eos(uint64_t id, bool ignore_eos) {
+    auto it = request_index_.find(id);
+    if (it == request_index_.end()) {
+        return Status::invalid_argument("request id not found", __FILE__, __LINE__);
+    }
+    auto& request = *it->second;
+    request.ignore_eos = ignore_eos;
+    if (request.dflash && request.dflash->decoder)
+        request.dflash->decoder->config.eos_tokens = ignore_eos ? qwen_hybrid::StopTokens{} : config_.eos_token_ids;
+    return Status::make_ok();
+}
+
 std::size_t ContinuousBatcher::queued_count() const noexcept {
     std::size_t n = 0;
     for (const auto& r : requests_) {
@@ -450,20 +462,13 @@ void ContinuousBatcher::prefix_begin_capture(RuntimeRequest& request) {
     if (prefix_cache_->strategy() == PrefixCacheStrategy::Slot) {
         return;
     }
-    auto capture = prefix_cache_->begin_capture(request.sequence);
+    auto capture = prefix_cache_->begin_capture(request.sequence, stream_);
     if (!capture.ok()) {
         return;
     }
     request.prefix_capture = capture.value();
-    request.prefix_boundary_pos = 0;
     const uint32_t position = request.sequence.position;
-    if (position > 0 && position % config_.page_tokens == 0) {
-        const Status st =
-            prefix_cache_->capture_boundary(capture.value(), request.sequence, stream_);
-        if (st.ok()) {
-            request.prefix_boundary_pos = position;
-        }
-    }
+    request.prefix_boundary_pos = position % config_.page_tokens == 0u ? position : 0u;
 }
 
 void ContinuousBatcher::prefix_capture_after_step(RuntimeRequest& request) {
@@ -604,7 +609,17 @@ Result<StepResult> ContinuousBatcher::step() {
             "banker invariant violated: active KV state is unsafe", __FILE__, __LINE__);
     }
 
+    const bool decode_due = config_.prefill_decode_interval != 0u &&
+        prefill_chunks_since_decode_ >= config_.prefill_decode_interval &&
+        std::any_of(requests_.begin(), requests_.end(), [](const RuntimeRequest& request) {
+            return request_decode_ready(request) ||
+                (request.state == RequestState::Active && request.dflash && request.dflash->ready &&
+                 request.finish_reason == FinishReason::None && !request.waiting_for_token_bitmask);
+        });
     for (auto& request : requests_) {
+        if (decode_due || (dflash_prefilled_requests != 0u && config_.prefill_decode_interval != 0u &&
+            static_cast<uint64_t>(prefill_chunks_since_decode_) + dflash_prefilled_requests >=
+                config_.prefill_decode_interval)) break;
         if (request.state != RequestState::Queued) {
             continue;
         }
@@ -785,6 +800,10 @@ Result<StepResult> ContinuousBatcher::step() {
     }
 
     if (dflash_prefilled_requests > 0u) {
+        if (config_.prefill_decode_interval != 0u)
+            prefill_chunks_since_decode_ = static_cast<uint32_t>(std::min<uint64_t>(
+                config_.prefill_decode_interval, static_cast<uint64_t>(prefill_chunks_since_decode_) +
+                dflash_prefilled_requests));
         return StepResult{true, dflash_prefilled_tokens, dflash_prefilled_requests};
     }
 
@@ -798,7 +817,8 @@ Result<StepResult> ContinuousBatcher::step() {
     }
     std::vector<const RuntimeRequest*> active(active_requests.begin(),
                                               active_requests.end());
-
+    const bool decode_interrupt = prefill_decode_should_interrupt(
+        active, config_.prefill_decode_interval, prefill_chunks_since_decode_);
     const auto adaptive_start = dflash_.adaptive ? std::chrono::steady_clock::now()
                                                 : std::chrono::steady_clock::time_point{};
     uint64_t adaptive_before_tokens = 0;
@@ -828,11 +848,22 @@ Result<StepResult> ContinuousBatcher::step() {
     }
     kv_state = build_kv_banker_state();
 
-    auto plan_result = schedule_requests(active, config_.max_num_batched_tokens, config_.max_scheduled_requests, config_.page_tokens, &kv_state);
+    auto plan_result = schedule_requests(active, config_.max_num_batched_tokens,
+                                         config_.max_scheduled_requests, config_.page_tokens,
+                                         &kv_state, decode_interrupt);
     if (!plan_result.ok()) {
         return plan_result.status();
     }
     SchedulePlan plan = plan_result.release();
+    if (config_.prefill_decode_interval != 0u) {
+        if (plan.batch.num_decode_requests || dflash_executed)
+            prefill_chunks_since_decode_ = 0u;
+        else if (plan.batch.num_prefill_requests)
+            prefill_chunks_since_decode_ = std::min(config_.prefill_decode_interval,
+                                                   prefill_chunks_since_decode_ + plan.batch.num_prefill_requests);
+        else if (decode_due)
+            prefill_chunks_since_decode_ = 0u;
+    }
     if (plan.empty()) {
         record_adaptive_actual();
         return StepResult{dflash_executed, dflash_tokens, dflash_requests};
@@ -891,6 +922,7 @@ Result<StepResult> ContinuousBatcher::step() {
 
     const auto exec_started = std::chrono::steady_clock::now();
     const bool bt_decode = plan.batch.num_tokens == plan.batch.num_requests;
+    plan.batch.sampled_ids_only = config_.sampled_ids_only;
     auto exec_result = [&] {
         if (tp_batch_hook_ != nullptr) {
             return verify_options.empty() ? tp_batch_hook_->on_execute(plan.batch)
@@ -1053,9 +1085,12 @@ Result<StepResult> ContinuousBatcher::step() {
             if (scheduled.compute_logits) {
                 if (scheduled.sample) {
                     if (token < 0) {
-                        return Status::invalid_state(
-                            "greedy sampled request returned invalid token",
-                            __FILE__, __LINE__);
+                        char reason[160];
+                        std::snprintf(reason, sizeof(reason),
+                            "greedy sampling returned %d for request %lld at position %u (output %u of %u)",
+                            token, static_cast<long long>(request.external_request_id), scheduled.prefix_tokens,
+                            row - 1u, output.num_outputs);
+                        return Status::invalid_state(reason, __FILE__, __LINE__);
                     }
                     const CommitAction action =
                         commit_sampled_token(request, token, config_.eos_token_ids);
@@ -1166,7 +1201,9 @@ Status ContinuousBatcher::open_dflash2_session(RuntimeRequest& request) {
     }
     DFlash2RequestSession& session = *request.dflash;
     if (dflash_.adaptive) {
-        session.adaptive_rows = dflash_.num_drafts + 1u;
+        const uint32_t max_k = dflash2_adaptive_max_k(dflash_.num_drafts);
+        session.adaptive.reset(std::min(max_k, kDFlash2AdaptiveInitialK));
+        session.adaptive_rows = session.adaptive.current_k + 1u;
     }
     if (request.max_new_tokens == 0u) {
         request.finish_reason = FinishReason::MaxNewTokens;
@@ -1175,7 +1212,8 @@ Status ContinuousBatcher::open_dflash2_session(RuntimeRequest& request) {
     DFlash2SpecDecoderConfig decoder_config;
     decoder_config.num_drafts = dflash_.num_drafts;
     decoder_config.tree_budget = dflash_.tree_budget;
-    decoder_config.eos_tokens = config_.eos_token_ids;
+    decoder_config.eos_tokens =
+        request.ignore_eos ? qwen_hybrid::StopTokens{} : config_.eos_token_ids;
     decoder_config.host_token_ids = dflash_.host_token_ids;
     DFlash2SpecWorkspace* workspace = nullptr;
     if (dflash_.sessions != nullptr) {
@@ -1261,7 +1299,8 @@ Status ContinuousBatcher::open_dflash2_session(RuntimeRequest& request) {
         stats.gdn_snapshot_bytes = session.decoder->gdn_snapshot_bytes;
         stats.gdn_compact_bytes = session.decoder->gdn_compact_bytes;
     }
-    if (qwen_hybrid::is_stop_token(config_.eos_token_ids, session.pending_token)) {
+    if (!request.ignore_eos &&
+        qwen_hybrid::is_stop_token(config_.eos_token_ids, session.pending_token)) {
         request.finish_reason = FinishReason::Eos;
     }
     return Status::make_ok();
@@ -1351,16 +1390,14 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
                 slot.num_drafts = static_cast<uint32_t>(requested);
             }
         }
-        if (dflash_.adaptive || measure_drafts != nullptr) slot.proposal_drafts = dflash_.num_drafts;
+        if (!dflash_.adaptive && measure_drafts != nullptr) slot.proposal_drafts = dflash_.num_drafts;
+        slot.batch_anchor_only = dflash_.adaptive && !request->structured_dflash &&
+            !dflash_.batch->tree_budget_auto && dflash_.batch->tree_budget == 0u;
         slot.remaining_tokens = remaining;
         slot.page_tokens =
             request->prefix_capture != 0u ? config_.page_tokens : 0u;
-        if (slot.page_tokens != 0u && slot.decoder->gdn_ranks.size() == 1u &&
-            slot.decoder->tp_hook == nullptr) {
-            const auto& pools = slot.decoder->gdn_ranks.front().spec_pools;
-            if (pools.qsa == nullptr && pools.ple == nullptr)
-                slot.capture_boundary = [this, request] { prefix_capture_after_step(*request); };
-        }
+        if (slot.page_tokens != 0u && dflash2_can_capture_boundary(*slot.decoder))
+            slot.capture_boundary = [this, request] { prefix_capture_after_step(*request); };
         slot.thinking_allowance = thinking_allowance(*request);
         slot.thinking_close_token = request->thinking.close_token;
         bool use_ngram_for_slot = false;
@@ -1516,11 +1553,11 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
                              static_cast<long long>(request.external_request_id),
                              request.sequence.slot, step.num_accepted, step.emitted_count, step.num_drafts);
             }
-            if (dflash_.adaptive) {
-                if (step.num_drafts == dflash_.num_drafts) {
-                    auto& ema = request.dflash->adaptive_accepted_ema;
-                    ema += 0.03 * (static_cast<double>(step.num_accepted) - ema);
-                }
+            if (dflash_.adaptive && step.num_drafts == request.dflash->adaptive.current_k &&
+                !request.structured_dflash) {
+                observe_dflash2_adaptive(*request.dflash, step.num_accepted,
+                                         static_cast<uint32_t>(slot_requests.size()),
+                                         dflash_.num_drafts);
             }
             if (slot_used_ngram[i]) {
                 request.ngram.record_outcome(step.num_accepted);
@@ -1537,12 +1574,12 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
             request.dflash->pending_token = step.pending_token;
             if (dflash_.stats != nullptr) {
                 DFlash2BatcherStats& stats = *dflash_.stats;
+                stats.proposed_drafts += step.num_drafts;
                 stats.accepted_drafts += step.num_accepted;
                 stats.generated_tokens += step.emitted_count;
-                if (step.num_accepted >= step.num_drafts) {
-                    ++stats.full_accepts;
-                } else {
-                    ++stats.partial_accepts;
+                if (step.num_drafts != 0u) {
+                    if (step.num_accepted == step.num_drafts) ++stats.full_accepts;
+                    else ++stats.partial_accepts;
                 }
                 const uint32_t bucket = std::min<uint32_t>(
                     request.sequence.position / kDFlash2PositionBucketTokens,

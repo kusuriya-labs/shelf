@@ -73,9 +73,10 @@ Ready.
 | `--port PORT` | listen port (default 8000) |
 | `--compute COMPUTE` | shelf-compute path |
 | `--max-seq-len MAX_SEQ_LEN` | max sequence length (default 32768; PLaMo 3: 2048) |
-| `--max-num-batched-tokens MAX_NUM_BATCHED_TOKENS` | token budget per scheduled step; also sets the executor row bucket (default 8192) |
-| `--prefill-chunk PREFILL_CHUNK` | cap prefill tokens per step and the executor row bucket (default 8192) |
+| `--max-num-batched-tokens MAX_NUM_BATCHED_TOKENS` | 1ステップのトークン数の上限。executor の行数もこの値から決まる（既定 8192） |
+| `--prefill-chunk PREFILL_CHUNK` | 1ステップの prefill トークン数と executor の行数の上限（既定 8192） |
 | `--max-concurrent-requests MAX_CONCURRENT_REQUESTS` | max in-flight requests (default 4) |
+| `--prefill-decode-interval PREFILL_DECODE_INTERVAL` | prefill が N 回連続したら decode を優先する（既定の 0 で無効） |
 | `--inference-budget-tokens INFERENCE_BUDGET_TOKENS` | max generated tokens per request (default 32768) |
 | `--large-context-tokens LARGE_CONTEXT_TOKENS` | prompt tokens above which the larger inference budget applies (default 262144) |
 | `--large-context-inference-budget-tokens LARGE_CONTEXT_INFERENCE_BUDGET_TOKENS` | max generated tokens for a request whose prompt is longer than --large-context-tokens (default 65536) |
@@ -177,6 +178,12 @@ request 1 個あたりの生成予算（推論予算）は `--inference-budget-t
   KV admission は通常 decode と同じ KV Banker が行うため、不足時は一部の request が
   Queued になり、Active の完了後に admission される。
 - tool calling / sampling / cancel は DFlash2 経路でも利用できる。
+- `--dflash2-adaptive` は提案したトークンに対する受理率の指数移動平均（係数 0.25）から draft 数 `K` を
+  `2`〜`5` で選ぶ。切替にはヒステリシスと 8 ラウンドの最小間隔を適用し、同時 batch が
+  16 を超える場合は `K` を最大 `4` に制限する。`--dflash2-drafts` が `5` 未満なら
+  その値が上限になる。同時接続 32 でも session 数と verify 行数は容量内に収まり、
+  超過分の session は通常 decode に戻る。
+- `--prefill-decode-interval N` は prefill が `N` 回続いた時点で、実行可能な decode 要求を次のバッチで優先する。既定の `0` で無効になる。
 - verify は単一 request を含め既定で lossy chunk を使うため、非投機 greedy と
   生成列が一致しない場合がある。verify 経路切替・`--dflash2-adaptive` の上限上書き・
   `SHELF_DFLASH2_PREFILL_ROWS` などの環境変数は [env_vars.md](env_vars.md#5-dflash2-投機デコード) を参照。
@@ -255,6 +262,11 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   }'
 ```
 
+`ignore_eos: true` を指定すると、停止トークンが生成されても生成を継続し、
+`max_tokens` に達した時点で `finish_reason: "length"` として終了する。
+既定は `false` で、従来どおり停止トークンで `finish_reason: "stop"` になる。
+ストリーミングと `/v1/responses` でも同じ値が compute 側へ転送される。
+
 ### streaming
 
 ```bash
@@ -297,6 +309,12 @@ usage チャンクの例:
   }
 }
 ```
+
+### readiness
+
+`GET /readiness` は compute プロセスが生存していれば `{"ready": true}` を返す。
+生存していない場合は `{"ready": false}` を status 503 で返す。
+Kubernetes の readiness probe などに使う。
 
 ### metadata
 

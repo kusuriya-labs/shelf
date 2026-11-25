@@ -66,6 +66,8 @@ struct ComputeConfig {
     uint32_t max_seq_len = 512;
     uint32_t max_num_batched_tokens = 0;
     uint32_t max_concurrent_requests = 4;
+    uint32_t prefill_decode_interval = 0;
+    bool sampled_ids_only = false;
     ArenaBudgetMode arena_mode = ArenaBudgetMode::Auto;
     std::size_t arena_bytes = 0;
     std::size_t draft_bytes = 0;
@@ -184,6 +186,7 @@ class ComputeSession {
     RequestView request(uint64_t id) const;
 
     Status set_external_request_id(uint64_t id, int64_t external_request_id);
+    Status set_ignore_eos(uint64_t id, bool ignore_eos);
     Status cancel(uint64_t id);
     Status retire(uint64_t id);
     Status cancel_all();

@@ -33,7 +33,9 @@ embedding、prefix checkpoint、offload 用バッファもドライバの GTT �
 | `SHELF_ARENA_VMM` | `0` | runtime | `1` で GPU arena に VMM 割り当て経路を使用する |
 | `SHELF_KV_POOL_PAGES` | 未設定（自動計算） | compute | 物理 KV pool のページ数を明示指定する（PP 等で全 stage のページ数を揃える用途） |
 | `SHELF_LM_HEAD_INT8` | `1` | compute / bench / runtime | `1` で BF16 の `lm_head` をロード時に INT8 W32 へ量子化する（`--lm-head-int8` と同等） |
-| `SHELF_TP_TRANSPORT` | `auto` | compute / server / bench | TP 通信の transport を強制選択する（`auto` / `p2p` / `host`、`--tp-transport` と同等） |
+| `SHELF_TP_TRANSPORT` | `auto` | compute / server / bench | TP 通信方式（`--tp-transport` と同等）。`host` は全方向でホスト転送、`auto` と `p2p` は検査を通った方向で peer 転送を使う |
+| `SHELF_TP_ARGMAX` | `0` | compute / server / bench | `1` で、全出力が制約なしの greedy サンプリングであり、最終語彙投影を TP 分割した場合に、各行の最大値とトークン ID を交換する |
+| `SHELF_TP_P2P_PROBE` | `1` | runtime | 起動時に方向ごとの peer 書き込みを検証する。`0` ではドライバーのアクセス可否を使う |
 | `SHELF_TP_FUSE` | `1` | runtime | `0` で HIP peer TP transport の融合を無効にする |
 | `SHELF_TP_SIGNAL_BARRIER` | 未設定 | compute / server / bench / tests | `1` で StreamSignal を強制、`0` で Event に固定する |
 | `SHELF_TP_DEBUG` | 未設定 | runtime | `1` で TP workspace の reserve / 拡張ログを stderr に出す |
@@ -78,7 +80,7 @@ embedding、prefix checkpoint、offload 用バッファもドライバの GTT �
 | 変数名 | 既定値 | 対象範囲 | 用途 |
 | --- | --- | --- | --- |
 | `SHELF_DFLASH2_PREFILL_ROWS` | モデル依存 | compute / server | TP=1 の DFlash2 prefill context 構築行数（`--dflash2-prefill-rows` と同等。`8` で従来の容量を使う。block size 16 では `16` も同じ容量を選ぶ） |
-| `SHELF_DFLASH2_POLICY_MAX_SESSIONS` | `12` | runtime | `--dflash2-adaptive` で投機を停止する batch 負荷上限 |
+| `SHELF_DFLASH2_POLICY_MAX_SESSIONS` | `32` | runtime | `--dflash2-adaptive` で同時に投機する session 数の上限（超過分は通常 decode） |
 | `SHELF_DFLASH2_RADIX_TOPN` | 自動 | compute / server / runtime | `0` で従来 top-n、`1` で radix top-n（`--dflash2-radix-topn` と同等） |
 | `SHELF_DFLASH2_SERVE_STATS` | `0` | compute (`--serve-stdio`) | `1` で終了時に `DFLASH2_STAGE` / `DFLASH2_POSITION` 等の内訳を stderr へ出力する |
 | `SHELF_DFLASH2_DEVICE_TOKEN_BRIDGE` | `1` | runtime | `0` で legacy host token bridge に戻す |

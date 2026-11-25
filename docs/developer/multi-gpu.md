@@ -157,6 +157,12 @@ routed expert partial
 R9700 では kernel からの peer load が壊れるため、transport は peer store のみで
 構成する。詳細は [../research/](../research/) の P2P transport 記録を参照する。
 
+### 方向ごとの検査と語彙出力
+
+peer 書き込みを送信元・宛先の方向ごとに検査し、使えない方向では送信元からホスト、ホストから宛先の順に転送する。ホスト領域は方向とバリアの世代ごとに分け、宛先が消費を終えてから再利用する。2台の StreamSignal は双方向を利用できる場合に使う。
+
+等分割された語彙投影の直後に最終サンプリングがあり、全出力に対して制約なしの greedy ID だけを要求した場合、明示指定により各 rank の最大値とグローバル ID を交換する。同点は ID の小さい方を採る。送信完了と消費完了のイベントを生成したデバイスのストリームで記録し、相手のストリームから待機する。全 logits を要求した場合は従来の和を返す。指定方法は [環境変数一覧](../user/env_vars.md) を参照。
+
 ### TP inbox の事前確保
 
 TP の inbox は `TpCoordinator::initialize` で確保する。推論中の `hipMalloc` は行わない。
@@ -165,6 +171,7 @@ TP の inbox は `TpCoordinator::initialize` で確保する。推論中の `hip
   起動時に `TP_WORKSPACE inbox_bytes=... groups=...` を stderr に出す。
 - `TpTransport::reserve(bytes)` が `verify()` の後、worker 起動前に inbox と
   StreamSignal の host coherent signal を確保する。
+- 語彙の argmax が有効で対応するスケジュールがある場合は、最大出力行数に対して送受信・行内部分和の領域とイベントを起動時に確保する。
 - 実行中の `sum_hidden` / `sum_hidden_stream_signal` / `peer_write_target` は容量を
   検査するだけで、確保も拡張もしない。容量不足は `Status::unsupported` で返す。
 - `TpCoordinator::attach_aux_executor` は drafter の program から必要量を再計算し、

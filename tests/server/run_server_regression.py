@@ -43,6 +43,7 @@ GROUPS = OrderedDict([
         "test_server_cli.py",
         "test_compute_client_reader.py",
         "test_dflash2_grammar_protocol.py",
+        "test_compute_adaptive_c32.py",
         "test_compute_input_ids.py",
         "test_compute_pids_scope.py",
         "test_compute_service.py",
@@ -64,6 +65,7 @@ GROUPS = OrderedDict([
         "test_server_responses.py",
         "test_server_stream.py",
         "test_server_eos_contract.py",
+        "test_server_ignore_eos_readiness.py",
         "test_plamo3_template.py",
         "test_hunyuan_dense_startup.py",
         "test_hunyuan_dense_template.py",
@@ -71,6 +73,7 @@ GROUPS = OrderedDict([
     ]),
     ("bench", [
         "test_shelf_bench_suite.py",
+        "test_evalscope_agentic.py",
     ]),
     ("commonized-runtime", [
         "test_commonized_runtime_e2e.py",
