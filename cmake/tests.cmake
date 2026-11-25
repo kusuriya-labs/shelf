@@ -505,6 +505,18 @@ add_custom_target(
         test_gpu_memory_manager
 )
 
+if(SHELF_BUILD_BENCHMARKS)
+    add_dependencies(shelf-required-tests shelf-bench)
+    add_test(NAME test_quality_prefill_rows
+             COMMAND $<TARGET_FILE:shelf-gpu-test-runner>
+                 --gpu-count 1 --cost-gb 1 --timeout 120
+                 --state-dir "${CMAKE_BINARY_DIR}/gpu-test-state"
+                 -- python3 "${_SHELF_TESTS_ROOT}/unit/test_quality_prefill_rows.py"
+                    $<TARGET_FILE:shelf-bench>)
+    set_tests_properties(test_quality_prefill_rows PROPERTIES LABELS "gpu1;required"
+                         TIMEOUT 1080 SKIP_RETURN_CODE 77)
+endif()
+
 # ---------------------------------------------------------------------------
 # shelf-compute decode backend contract (CPU-only: no GPU, no model).
 # --decode-backend must be decided before any model load: `hip` alone is
