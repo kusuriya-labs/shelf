@@ -196,6 +196,11 @@ struct HostExecutionContext {
     uint32_t layer_override_count = 0;
     LayerInputOverride layer_override_storage[8] = {};
     std::uint8_t layer_override_injected[8] = {};
+    const ::shelf::runtime::WeightSlot* device_weights = nullptr;
+
+    const ::shelf::runtime::WeightSlot* device_weight_table() const {
+        return device_weights != nullptr ? device_weights : weights;
+    }
 };
 
 Status execute_program(

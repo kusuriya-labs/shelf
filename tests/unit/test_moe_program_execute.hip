@@ -311,7 +311,8 @@ int main() {
     uint32_t* d_error_word = dalloc<uint32_t>(1);
 
     ex::HostExecutionContext ctx;
-    ctx.weights = device_weights;
+    ctx.weights = weights.data();
+    ctx.device_weights = device_weights;
     ctx.weight_count = static_cast<uint32_t>(weights.size());
     ctx.workspace = d_workspace;
     ctx.workspace_bytes = program.workspace.total_bytes;

@@ -101,7 +101,7 @@ Status fill_staging_image(
     *binding_out = binding;
     prog_out->values = static_cast<const ::shelf::runtime::DeviceValueBinding*>(nullptr);
     prog_out->value_count = n;
-    prog_out->weight_table = ctx.weights;
+    prog_out->weight_table = ctx.device_weight_table();
     prog_out->weight_slot_count = ctx.weight_count;
     prog_out->parameter_table = ctx.parameters;
     prog_out->parameter_slot_count = ctx.parameter_count;
@@ -322,7 +322,7 @@ Status launch_host_binding(
     ::shelf::runtime::DeviceProgramView prog_dev{};
     prog_dev.values = reinterpret_cast<const ::shelf::runtime::DeviceValueBinding*>(dev_base + seco.values);
     prog_dev.value_count = static_cast<uint32_t>(nval);
-    prog_dev.weight_table = ctx.weights;
+    prog_dev.weight_table = ctx.device_weight_table();
     prog_dev.weight_slot_count = ctx.weight_count;
     prog_dev.parameter_table = ctx.parameters;
     prog_dev.parameter_slot_count = ctx.parameter_count;

@@ -205,7 +205,8 @@ Status build_host_execution_context(
     ctx.spec.tree_row_parent = options.tree_row_parent;
     ctx.rope_positions = options.rope_positions;
     ctx.model_state = executor.host_model_state;
-    ctx.weights = executor.host_weight_table;
+    ctx.weights = executor.host_weight_slots.data();
+    ctx.device_weights = executor.host_weight_table;
     ctx.weight_count = program.weight_slot_count;
     ctx.parameters = executor.host_parameter_table;
     ctx.parameter_count = program.parameter_slot_count;
@@ -1493,6 +1494,7 @@ Executor::Executor(Executor&& other) noexcept
       ep_rank(other.ep_rank),
       execution_status(std::move(other.execution_status)),
       execution_workspace(std::move(other.execution_workspace)),
+      host_weight_slots(std::move(other.host_weight_slots)),
       host_weight_table(other.host_weight_table),
        host_parameter_table(other.host_parameter_table),
        host_parameter_slots(std::move(other.host_parameter_slots)),
@@ -1657,6 +1659,7 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         other.ep_barrier = nullptr;
         ep_rank = other.ep_rank;
         other.ep_rank = 0;
+        host_weight_slots = std::move(other.host_weight_slots);
         host_weight_table = other.host_weight_table;
         other.host_weight_table = nullptr;
         host_parameter_table = other.host_parameter_table;
@@ -2507,15 +2510,14 @@ Result<Executor> create_executor(
             ex.trace_names.push_back(lv.first);
             ex.trace_value_ids.push_back(lv.second.id);
         }
-        std::vector<::shelf::runtime::WeightSlot> weight_slots =
-            std::move(lowered.weights);
+        ex.host_weight_slots = std::move(lowered.weights);
         std::vector<::shelf::runtime::StaticParameterSlot> param_slots =
             std::move(lowered.parameters);
         ex.host_parameter_slots = param_slots;
         ::shelf::runtime::PrimitiveGraph lowered_graph = std::move(lowered.graph);
         ::shelf::runtime::WeightTableView weight_view{nullptr, 0};
-        weight_view.slots = weight_slots.data();
-        weight_view.count = weight_slots.size();
+        weight_view.slots = ex.host_weight_slots.data();
+        weight_view.count = ex.host_weight_slots.size();
         {
             ::shelf::runtime::ProgramBuildOptions opts;
             opts.validate_workspace = true;
