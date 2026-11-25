@@ -10,6 +10,8 @@
 - [kv-octave.md](kv-octave.md) — Octave KV cache の容量・decode / prefill 性能
 - [qwen-embed-host.md](qwen-embed-host.md) — 16 GiB VRAM での Qwen3.8-27B 3.05bpw / 128Ki 実測
 - [prefill-chunk-reference.md](prefill-chunk-reference.md) — prefill chunk の参考測定
+- [exl3-prefill-selection-table.md](exl3-prefill-selection-table.md) — EXL3 dense prefill の kernel 別 share・実効帯域・occupancy・律速分類（`d4fae4a2`、TP=1）
+
 
 統一ベンチマークスイート（`tools/bench/shelf_bench_suite.py`）と凍結実タスクコーパス（`tools/bench/real_v1/`）の仕様・トラック別契約は [methodology.md](methodology.md#9-統一-4-トラック体系と-shelf_bench_suitepy) を正本とする。
 実験の経緯・採否判断・棄却根拠の正本は [../research/README.md](../research/README.md) を参照する。
