@@ -155,6 +155,22 @@ int main() {
     Residency adaptive_explicit(model, 32, 2, 0, 4, true);
     if (!adaptive_explicit.adaptive_draft)
         return 1;
+    for (int batch : {2, 17}) {
+        Hy4DflyAdaptiveController high, low;
+        int cap = batch > 16 ? 4 : 5;
+        for (int i = 0; i < 32; ++i) {
+            high.observe(high.current_k, batch);
+            low.observe(0, batch);
+        }
+        if (high.current_k != cap || low.current_k != 2) return 1;
+        for (int i = 0; i < 48; ++i) {
+            high.observe(0, batch);
+            low.observe(low.current_k, batch);
+        }
+        if (high.current_k != 2 || low.current_k != cap) return 1;
+        high.reset(3);
+        if (high.switches || high.rounds || high.acc_ema || low.current_k != cap) return 1;
+    }
     test_adaptive_recovery();
     if (test_adaptive_controller())
         return 1;
@@ -181,6 +197,7 @@ int main() {
             return 1;
         } catch (const std::invalid_argument &) {}
     }
+    if (session.slot_stats(0)->draft_tokens != 5 || session.slot_stats(1)->draft_tokens != 5) return 1;
     session.cancel(3);
     session.cancel(0);
     session.cancel(1);
@@ -202,6 +219,16 @@ int main() {
         session.set_prefill_decode_interval(-1);
         return 1;
     } catch (const std::invalid_argument &) {}
+    Hy4BatchSession reused(gpu, {}, [](int, const auto &, const char *) {}, 4, true);
+    reused.admit({10, {100}, 2, {1024, 0, 0, 0, 1, false, 2}});
+    reused.admit({11, {200}, 2, {1024, 0, 0, 0, 1, false, 5}});
+    reused.admit({12, {300}, 2, {}});
+    reused.cancel(10);
+    if (reused.last_request_stats().draft_tokens != 2 || reused.slot_stats(0)->draft_tokens != 4 ||
+        reused.slot_stats(1)->draft_tokens != 5 || reused.slot_stats(0)->acc_ema != 0)
+        return 1;
+    reused.cancel(12);
+    if (reused.slot_stats(0)) return 1;
     if (gpu.pages_for_tokens(0) != 0 || gpu.pages_for_tokens(1) != 1 ||
         gpu.pages_for_tokens(kv_page_tokens) != 1 || gpu.pages_for_tokens(kv_page_tokens + 1) != 2)
         return 1;

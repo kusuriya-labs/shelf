@@ -2,6 +2,7 @@
 #include <shelf/models/hy4_flash/residency.h>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace shelf::hy4 {
@@ -21,6 +22,7 @@ struct Hy4DflyStats {
     size_t draft_rounds = 0;
     size_t accepted = 0;
     size_t k_switches = 0;
+    double acc_ema = 0;
 };
 struct Hy4DflyAdaptiveController {
     int current_k = default_draft_tokens;
@@ -35,7 +37,7 @@ struct Hy4DflyAdaptiveController {
                                        float alpha = 0.25f);
     void reset(int initial_k);
     static int select_k(int current_k, double acc_ema, int batch_size);
-    int observe(double accepted_per_lane, int batch_size);
+    int observe(double accepted_per_lane, int batch_size, bool adaptive = true);
 };
 struct Hy4PrefixStats {
     bool enabled = false;
@@ -77,6 +79,8 @@ public:
     void step();
     void set_draft_tokens(int draft_tokens);
     int draft_tokens() const;
+    std::optional<Hy4DflyStats> slot_stats(int slot) const;
+    Hy4DflyStats last_request_stats() const;
     void set_prefix_cache(bool enabled);
     void set_prefill_decode_interval(int interval);
     int prefill_decode_interval() const;

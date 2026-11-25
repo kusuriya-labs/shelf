@@ -385,7 +385,7 @@ __global__ void pool(Mat keys, uint16_t *history, int first, int start, Param va
     index_group(history, page_table, group)[c] = f32_to_bf16_rne_device(out);
 }
 __global__ void pool_batch(Mat keys, uint16_t *all_history, const uint16_t *all_pending, const int *slots,
-                           const int *positions, Param values, Param gates, Param ape, Param norm, int block_rows,
+                           const int *positions, Param values, Param gates, Param ape, Param norm, int block_rows, const int *row_starts,
                            const int32_t *page_table, int page_stride) {
     __shared__ float pooled[128], scratch[128];
     int row = blockIdx.x, start = positions[row];
@@ -393,8 +393,9 @@ __global__ void pool_batch(Mat keys, uint16_t *all_history, const uint16_t *all_
     auto pending = all_pending + size_t(slots[row]) * 12 * 128;
     const int32_t *pt = page_table ? page_table + size_t(slots[row]) * page_stride : nullptr;
     int c = threadIdx.x, group = start / 4;
-    start -= row % block_rows;
-    keys.p += size_t(row - row % block_rows) * keys.cols;
+    int first = row_starts ? row_starts[row] : row - row % block_rows;
+    start -= row - first;
+    keys.p += size_t(first) * keys.cols;
     float v[4], g[4], peak = -INFINITY;
     for (int i = 0; i < 4; ++i) {
         int pos = 4 * group + i;
@@ -1594,39 +1595,10 @@ Mat attention(Ops &op, const std::string &prefix, int layer, int start, Mat hidd
     Mat out = attention_inner(op, p, layer, start, hidden, qres, q, lat, rot, gate, selected, draft, heads, sliding);
     return op.norm(op.linear(p + "o_proj", out), p + "post_proj_norm.weight");
 }
-Mat attention_batch(Ops &op, const std::string &prefix, int layer, const std::vector<int> &slots,
-                    const std::vector<int> &positions, const int *device_slots,
-                    const int *device_positions, Mat hidden, int block_rows, bool draft) {
-    if (slots.size() != size_t(hidden.rows) || positions.size() != slots.size())
-        throw std::invalid_argument("attention のバッチ長が不正です");
-    std::string p = prefix + "self_attn.";
-    bool sliding = layer != 0 && layer % 4 != 1;
-    int heads = sliding ? 64 : 32;
-    float theta = sliding ? 1e4f : 1e7f;
-    Mat qres = op.norm(op.linear(p + "q_a_proj", hidden), p + "q_a_layernorm.weight");
-    Mat raw = op.linear(p + "q_b_proj", qres);
-    Mat ka = op.linear(p + "kv_a_proj_with_mqa", hidden);
-    Mat lat = op.norm_from(ka, 0, 512, p + "kv_a_layernorm.weight");
-    Mat gate = op.linear(p + "linear_gate", hidden);
-    Mat q = op.rope_batch(raw, heads, theta, device_positions);
-    Mat rot = op.rope_from_batch(ka, 512, 64, 1, theta, device_positions);
-    auto fresh = static_cast<uint8_t *>(op.arena.next(size_t(hidden.rows) * 294));
-    pack_kv_combined<<<dim3(3, hidden.rows), 256, 0, op.stream>>>(lat, rot, fresh);
-    checked(hipGetLastError());
-    if (!sliding && !draft) {
-        std::string ip = p + "compressed_indexer.";
-        Mat k = op.norm(op.linear(ip + "token_key_projection", hidden), ip + "token_key_norm.weight");
-        pool_batch<<<hidden.rows, 128, 0, op.stream>>>(k, op.gpu.index_keys[op.rank][layer],
-            op.gpu.index_pending[op.rank][layer], device_slots, device_positions,
-            op.param(ip + "key_value_projection.weight"), op.param(ip + "key_gate_projection.weight"),
-            op.param(ip + "intra_group_ape"), op.param(ip + "key_norm.weight"), block_rows,
-            op.gpu.page_table[op.rank], int(op.gpu.kv_page_stride));
-        checked(hipGetLastError());
-        save_pending_batch<<<hidden.rows, 128, 0, op.stream>>>(k, op.gpu.index_pending[op.rank][layer],
-                                                               device_slots, device_positions);
-        checked(hipGetLastError());
-    }
-    Mat out = op.mat(hidden.rows, heads * 256);
+static void attend_batch_blocks(Ops &op, const std::string &p, int layer, bool sliding, bool draft,
+                                std::span<const int> slots, std::span<const int> positions,
+                                const int *device_slots, const int *device_positions, int block_rows,
+                                Mat hidden, Mat qres, Mat q, Mat gate, uint8_t *fresh, Mat out) {
     size_t mark = op.arena.cursor;
     int cache_slots = sliding ? std::min(op.gpu.tokens, size_t(518)) : op.gpu.tokens;
     const int32_t *batch_pt = !sliding ? op.gpu.page_table[op.rank] : nullptr;
@@ -1771,10 +1743,65 @@ Mat attention_batch(Ops &op, const std::string &prefix, int layer, const std::ve
                                      op.param(p + "learnable_sink_param"), out, K, block_rows, draft);
         op.arena.cursor = mark;
     }
+}
+Mat attention_batch(Ops &op, const std::string &prefix, int layer, const std::vector<int> &slots,
+                    const std::vector<int> &positions, const int *device_slots,
+                    const int *device_positions, Mat hidden, int block_rows, bool draft,
+                    std::span<const int> row_offsets, const int *row_starts) {
+    if (slots.size() != size_t(hidden.rows) || positions.size() != slots.size())
+        throw std::invalid_argument("attention のバッチ長が不正です");
+    std::string p = prefix + "self_attn.";
+    bool sliding = layer != 0 && layer % 4 != 1;
+    int heads = sliding ? 64 : 32;
+    float theta = sliding ? 1e4f : 1e7f;
+    Mat qres = op.norm(op.linear(p + "q_a_proj", hidden), p + "q_a_layernorm.weight");
+    Mat raw = op.linear(p + "q_b_proj", qres);
+    Mat ka = op.linear(p + "kv_a_proj_with_mqa", hidden);
+    Mat lat = op.norm_from(ka, 0, 512, p + "kv_a_layernorm.weight");
+    Mat gate = op.linear(p + "linear_gate", hidden);
+    Mat q = op.rope_batch(raw, heads, theta, device_positions);
+    Mat rot = op.rope_from_batch(ka, 512, 64, 1, theta, device_positions);
+    auto fresh = static_cast<uint8_t *>(op.arena.next(size_t(hidden.rows) * 294));
+    pack_kv_combined<<<dim3(3, hidden.rows), 256, 0, op.stream>>>(lat, rot, fresh);
+    checked(hipGetLastError());
+    if (!sliding && !draft) {
+        std::string ip = p + "compressed_indexer.";
+        Mat k = op.norm(op.linear(ip + "token_key_projection", hidden), ip + "token_key_norm.weight");
+        pool_batch<<<hidden.rows, 128, 0, op.stream>>>(k, op.gpu.index_keys[op.rank][layer],
+            op.gpu.index_pending[op.rank][layer], device_slots, device_positions,
+            op.param(ip + "key_value_projection.weight"), op.param(ip + "key_gate_projection.weight"),
+            op.param(ip + "intra_group_ape"), op.param(ip + "key_norm.weight"), block_rows, row_starts,
+            op.gpu.page_table[op.rank], int(op.gpu.kv_page_stride));
+        checked(hipGetLastError());
+        save_pending_batch<<<hidden.rows, 128, 0, op.stream>>>(k, op.gpu.index_pending[op.rank][layer],
+                                                               device_slots, device_positions);
+        checked(hipGetLastError());
+    }
+    Mat out = op.mat(hidden.rows, heads * 256);
+    if (row_offsets.empty()) {
+        attend_batch_blocks(op, p, layer, sliding, draft, slots, positions, device_slots, device_positions,
+                            block_rows, hidden, qres, q, gate, fresh, out);
+    } else {
+        for (size_t lane = 0; lane + 1 < row_offsets.size();) {
+            int first = row_offsets[lane];
+            int width = row_offsets[lane + 1] - first;
+            do {
+                ++lane;
+            } while (lane + 1 < row_offsets.size() && row_offsets[lane + 1] - row_offsets[lane] == width);
+            int count = row_offsets[lane] - first;
+            attend_batch_blocks(op, p, layer, sliding, draft, std::span(slots).subspan(first, count),
+                                std::span(positions).subspan(first, count), device_slots + first,
+                                device_positions + first, width, hidden.row(first, count), qres.row(first, count),
+                                q.row(first, count), gate.row(first, count), fresh + size_t(first) * 294,
+                                out.row(first, count));
+        }
+    }
     if (!draft) {
+        int cache_slots = sliding ? std::min(op.gpu.tokens, size_t(518)) : op.gpu.tokens;
+        const auto *batch_pt = sliding ? nullptr : op.gpu.page_table[op.rank];
         save_records_batch<<<(hidden.rows * 294 + 255) / 256, 256, 0, op.stream>>>(
             op.gpu.cache[op.rank][layer], fresh, device_slots, device_positions, cache_slots, hidden.rows,
-            batch_pt, batch_pt_stride);
+            batch_pt, int(op.gpu.kv_page_stride));
         checked(hipGetLastError());
     }
     op.slot = 0;

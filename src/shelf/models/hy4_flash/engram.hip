@@ -60,7 +60,7 @@ __global__ void add_memory(Mat x, Mat k, Mat q, Mat value, const uint16_t *scale
             round_bf16(round_bf16(v * gate) + round_bf16(v * bf16_bits_to_f32(scale[i]))));
     }
 }
-void gather_engram_into(const Checkpoint &model, int layer, int rows, const std::vector<int> &ids,
+void gather_engram_into(const Checkpoint &model, int layer, int rows, std::span<const int> ids,
                         const std::vector<int> &prior, uint8_t *dst) {
     int g = (layer - 1) / 10;
     auto p = "model.layers." + std::to_string(layer) + ".engram_layer.";
@@ -149,24 +149,24 @@ Mat engram(Ops &op, int layer, Mat x, const std::vector<int> &prior, const std::
     return apply_engram(op, layer, x, memory, ids);
 }
 std::vector<uint8_t> gather_batch_engram(const Checkpoint &model, int layer,
-        const std::vector<const std::vector<int> *> &priors, const std::vector<int> &ids) {
-    const int rows = ids.size() / priors.size();
-    std::vector<uint8_t> packed;
-    packed.reserve(ids.size() * 16 * 98);
-    for (size_t slot = 0; slot < priors.size(); ++slot) {
-        auto first = ids.begin() + slot * rows;
-        auto lane = gather_engram(model, layer, rows, {first, first + rows}, *priors[slot]);
-        packed.insert(packed.end(), lane.begin(), lane.end());
+        const std::vector<const std::vector<int> *> &priors, const std::vector<int> &ids, std::span<const int> row_offsets) {
+    std::vector<uint8_t> packed(ids.size() * 16 * 98);
+    int uniform_rows = ids.size() / priors.size();
+    for (size_t lane = 0; lane < priors.size(); ++lane) {
+        int first = row_offsets.empty() ? int(lane) * uniform_rows : row_offsets[lane];
+        int rows = row_offsets.empty() ? uniform_rows : row_offsets[lane + 1] - first;
+        gather_engram_into(model, layer, rows, std::span(ids).subspan(first, rows), *priors[lane],
+                           packed.data() + size_t(first) * 16 * 98);
     }
     return packed;
 }
 Mat engram_batch(Ops &op, int layer, Mat x, const std::vector<const std::vector<int> *> &priors,
-                 const std::vector<int> &ids) {
+                 const std::vector<int> &ids, std::span<const int> row_offsets) {
     if (op.capture) {
         auto memory = op.gpu.batch_input->engram + (layer - 1) / 10 * x.rows * 16 * 98;
         return apply_engram(op, layer, x, memory, ids);
     }
-    auto packed = gather_batch_engram(op.gpu.model, layer, priors, ids);
+    auto packed = gather_batch_engram(op.gpu.model, layer, priors, ids, row_offsets);
     auto memory = static_cast<uint8_t *>(op.arena.next(packed.size()));
     op.copy(memory, packed.data(), packed.size(), hipMemcpyHostToDevice);
     return apply_engram(op, layer, x, memory, ids);
