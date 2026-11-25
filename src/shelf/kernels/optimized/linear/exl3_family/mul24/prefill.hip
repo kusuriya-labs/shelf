@@ -149,6 +149,47 @@ __global__ void __launch_bounds__(256) exl3_mul24_recon_kernel(
     *reinterpret_cast<uint2*>(dst) = v;
 
 }
+// One wave decodes four consecutive 16x16 tiles of one n tile and stores 32 contiguous
+// bytes a lane: the super64 plane's (n tile, 64-K) KiB arrives in one coalesced write.
+template <int BITS>
+__global__ void __launch_bounds__(256) exl3_mul24_recon_x4_kernel(
+    const uint32_t* __restrict__ trellis,
+    int8_t* __restrict__ dense,
+    const uint32_t k) {
+    constexpr uint32_t kWords = 8u * BITS;
+    constexpr uint32_t kBits = 256u * BITS;
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t kt0 = (blockIdx.x * 8u + (threadIdx.x >> 5u)) * 4u;
+    const uint32_t nt = blockIdx.y;
+    const uint32_t base_bit = (lane * 8u * BITS + BITS + kBits - 16u) % kBits;
+    const uint32_t off = base_bit & 31u;
+    const uint32_t i0 = base_bit >> 5u;
+    const uint32_t* const tile0 = trellis + (static_cast<size_t>(nt) * (k >> 4u) + kt0) * kWords;
+    int8_t* const dst = dense + (static_cast<size_t>(nt) * (k >> 6u) + (kt0 >> 2u)) * 1024u +
+                        static_cast<size_t>(lane) * 32u;
+    #pragma unroll
+    for (uint32_t f = 0u; f < 4u; ++f) {
+        const uint32_t* tile = tile0 + f * kWords;
+        const uint32_t w0 = tile[i0];
+        const uint32_t w1 = tile[(i0 + 1u) % kWords];
+        const uint32_t w2 = tile[(i0 + 2u) % kWords];
+        uint32_t packed[2] = {0u, 0u};
+        #pragma unroll
+        for (uint32_t i = 0u; i < 8u; ++i) {
+            const uint32_t e = off + i * BITS + 16u;
+            const uint32_t wl = (e - 1u) >> 5u;
+            const uint32_t r = 32u - (e - 32u * wl);
+            const uint32_t lo = wl == 0u ? w0 : (wl == 1u ? w1 : w2);
+            const uint32_t hi = wl == 0u ? 0u : (wl == 1u ? w0 : w1);
+            const uint32_t state = __builtin_amdgcn_alignbit(hi, lo, r) & 0xFFFFu;
+            const uint32_t b3 = __builtin_amdgcn_udot4(__umul24(state, 0xDCD12Du), 0x01010101u, 3u, false);
+            packed[i >> 2u] |= (b3 >> 2u) << ((i & 3u) * 8u);
+        }
+        const uint2 v = make_uint2(packed[0] ^ 0x80808080u, packed[1] ^ 0x80808080u);
+        *reinterpret_cast<uint2*>(dst + f * 8u) = v;
+    }
+}
+
 }  // namespace
 
 hipError_t launch_exl3_mul24_rowscale(
@@ -194,7 +235,22 @@ hipError_t launch_exl3_mul24_recon(const uint16_t* trellis, uint32_t bits, int8_
 
 hipError_t launch_exl3_mul24_recon_super64(const uint16_t* trellis, uint32_t bits, int8_t* dense,
                                           uint32_t n, uint32_t k, hipStream_t stream) {
-    return launch_recon<2>(trellis, bits, dense, n, k, stream);
+    if ((n % 16u) != 0u || (k % 512u) != 0u || bits < 1u || bits > 8u)
+        return launch_recon<2>(trellis, bits, dense, n, k, stream);
+    const dim3 grid(k / 512u, n / 16u);
+    const uint32_t* t32 = reinterpret_cast<const uint32_t*>(trellis);
+    switch (bits) {
+        case 1: exl3_mul24_recon_x4_kernel<1><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 2: exl3_mul24_recon_x4_kernel<2><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 3: exl3_mul24_recon_x4_kernel<3><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 4: exl3_mul24_recon_x4_kernel<4><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 5: exl3_mul24_recon_x4_kernel<5><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 6: exl3_mul24_recon_x4_kernel<6><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 7: exl3_mul24_recon_x4_kernel<7><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 8: exl3_mul24_recon_x4_kernel<8><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        default: return hipErrorInvalidValue;
+    }
+    return hipGetLastError();
 }
 
 }  // namespace shelf::kernel
