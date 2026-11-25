@@ -57,6 +57,10 @@ struct OnlineNgramProposal {
     std::array<int32_t, kMaxDraftTokens> tokens{};
 };
 
+inline constexpr uint32_t kNgramDecodeOnlyBatchSize = 8u;
+
+uint32_t standalone_ngram_max_rows(uint32_t requests, uint32_t drafts) noexcept;
+
 class OnlineNgramMatcher {
 public:
     static constexpr uint32_t kWindowCapacity = 32768u;

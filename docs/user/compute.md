@@ -261,9 +261,9 @@ block size 16 の `DFlash2DraftModel` は `--dflash2-drafts 15` で最大幅を�
 
 ### Online N-gram / Suffix 投機的デコード
 
-`--ngram` を指定すると、現在のリクエスト履歴（入力プロンプト + 生成済みトークン）から最長 suffix 一致を検出し、追加重み・追加 VRAM なしで draft トークンを提案する。詳細は [../developer/online_ngram.md](../developer/online_ngram.md) を参照。
+`--ngram` を指定すると、現在のリクエスト履歴（入力プロンプト + 生成済みトークン）から最長 suffix 一致を検出し、ドラフタの重みを読み込まずに draft トークンを提案する。詳細は [../developer/online_ngram.md](../developer/online_ngram.md) を参照。
 
-- **単独実行（`--ngram`）**: ドラフタ重みを使わず既定 `K=7`（`--ngram-drafts` 3/7/15）の verify を行い、不一致時は通常の 1 行 `DECODE` にフォールバックする。
+- **単独実行（`--ngram`）**: ドラフタ重みを使わず既定 `K=7`（`--ngram-drafts` 3/7/15）を上限に候補を検証する。複数要求では候補のない要求も同じバッチで 1 トークン進む。実行中の要求が 8 件以上になると通常のバッチ decode に切り替わり、要求が減ると投機を再開する。GDN の途中状態を保存できないモデル形状では通常の decode を使う。
 - **ハイブリッド併用（`--dflash2-model-dir` + `--ngram` または `--mtp` + `--ngram`）**: 事前ゲートとして先に一致判定し、ヒット時は DFlash2 / MTP の draft forward をスキップして検証へ流す。
 - 既定の最小一致長（`--ngram-min-match 0`）は greedy 時 `4`、stochastic（`--temperature > 0`）時 `6`、最大照合長は `--ngram-max-match 32`。`--ngram-stats 1` で `NGRAM_ROUNDS` / `NGRAM_HITS` / `NGRAM_ACCEPTED_DRAFTS` / `NGRAM_MEAN_ACCEPTED` / `NGRAM_DFLASH_SKIPPED` / `NGRAM_CPU_US_PER_ROUND` を出力する。
 

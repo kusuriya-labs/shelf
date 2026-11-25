@@ -168,6 +168,32 @@ int main() {
     }
 
     {
+        rt::PrimitiveGraph packed;
+        constexpr uint32_t vocab = 128167u;
+        const auto input = packed.alloc_value(vocab, rt::ValueDType::F32, rt::ValueRowDomain::OUTPUT_ROWS);
+        const auto logits = packed.alloc_value(vocab, rt::ValueDType::F32, rt::ValueRowDomain::OUTPUT_ROWS);
+        const auto token = packed.alloc_value(1, rt::ValueDType::I32, rt::ValueRowDomain::OUTPUT_ROWS);
+        packed.external_inputs = {input};
+        packed.external_outputs = {logits, token};
+        auto& scale = packed.add_node(rt::ScaleNode{rt::RowwiseShapeKey{vocab}, 1.0f});
+        scale.inputs = {input};
+        scale.outputs = {logits};
+        auto& sample = packed.add_node(rt::SamplingNode{vocab});
+        sample.inputs = {logits};
+        sample.outputs = {token};
+        auto result = rt::build_program(packed, {}, rt::RowBucket::R16, rt::ExecutionClass::DECODE, options);
+        check(result.ok(), "端数のある語彙幅でプログラムを生成できる");
+        if (result.ok()) {
+            for (auto id : packed.external_outputs) {
+                const auto* binding = result.value().find_value(id);
+                check(binding && binding->row_stride == binding->feature_count &&
+                      binding->bytes == options.max_output_rows * binding->feature_count * sizeof(int32_t),
+                      "外部出力の行間隔とバイト数が連続テンソルに一致する");
+            }
+        }
+    }
+
+    {
         rt::PrimitiveGraph norm_graph;
         const auto x = norm_graph.alloc_value(128, rt::ValueDType::BF16,
                                               rt::ValueRowDomain::TOKEN_ROWS);

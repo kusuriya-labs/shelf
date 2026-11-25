@@ -357,7 +357,7 @@ Status build_host_execution_context(
     ctx.spec.max_visible_tokens = max_visible_tokens;
     ctx.splitk_tuning_rows = 0u;
     ctx.attention_tuning_rows =
-        role == ::shelf::runtime::ExecutionRole::Verify ? 1u : 0u;
+        role == ::shelf::runtime::ExecutionRole::Verify && request_count == 1u ? 1u : 0u;
     return Status::make_ok();
 }
 
@@ -2374,7 +2374,7 @@ Result<Executor> create_executor(
 
     {
         const std::size_t sampled_bytes =
-            static_cast<std::size_t>(R) * sizeof(int32_t);
+            static_cast<std::size_t>(MO) * sizeof(int32_t);
         void* sampled_host = nullptr;
         hipError_t smerr = hipHostMalloc(&sampled_host, sampled_bytes);
         if (smerr != hipSuccess) {

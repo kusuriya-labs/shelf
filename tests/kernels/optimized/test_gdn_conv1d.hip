@@ -57,6 +57,7 @@ struct Case {
     uint32_t in_stride;
     uint32_t out_stride;
     uint32_t seed;
+    bool capture_verify = false;
 };
 
 struct Bufs {
@@ -66,6 +67,7 @@ struct Bufs {
     void* out_opt = nullptr;
     void* state_correct = nullptr;
     void* state_opt = nullptr;
+    void* conv_history = nullptr;
     void* requests = nullptr;
     void* vals_dev = nullptr;
     void* state_dev = nullptr;
@@ -75,7 +77,7 @@ struct Bufs {
     void* error_word = nullptr;
     ~Bufs() {
         void* all[] = {weight, input, out_correct, out_opt, state_correct, state_opt, requests,
-                       vals_dev, state_dev, param_dev, ctx_dev, scratch, error_word};
+                       vals_dev, state_dev, param_dev, ctx_dev, scratch, error_word, conv_history};
         for (auto* p : all)
             if (p) shelf::gpu::discard_cleanup_result(hipFree(p));
     }
@@ -125,6 +127,10 @@ bool run_case(const Case& c) {
         h_req[r].request_handle.slot = c.reqs[r].slot;
         h_req[r].row_begin = c.reqs[r].row_begin;
         h_req[r].row_count = c.reqs[r].row_count;
+        if (c.capture_verify) {
+            h_req[r].execution_class = r == 0u ? shelf::runtime::ExecutionClass::DECODE
+                                               : shelf::runtime::ExecutionClass::SPEC_VERIFY;
+        }
     }
     if (hipMemcpy(buf.requests, h_req.data(), h_req.size() * sizeof(h_req[0]), hipMemcpyHostToDevice) != hipSuccess) return false;
 
@@ -224,6 +230,15 @@ bool run_case(const Case& c) {
     ka.conv_slot_stride = slot_stride;
     ka.conv_layer_stride = layer_stride;
     ka.conv_history_stride = hist_stride;
+    const size_t capture_bytes = rows * slot_stride * sizeof(bf16t);
+    if (c.capture_verify) {
+        if (!m(&buf.conv_history, capture_bytes) ||
+            hipMemset(buf.conv_history, 0xff, capture_bytes) != hipSuccess) return false;
+        ka.conv_history_store = static_cast<bf16t*>(buf.conv_history);
+        ka.conv_history_row_stride = slot_stride;
+        ka.capture_rows = rows;
+        ka.capture_verify_only = 1u;
+    }
     hipError_t he = ::shelf::kernel::launch_gdn_conv1d_bf16_f32(ka, nullptr);
     if (he != hipSuccess) {
         std::printf("  [%s] optimized launch failed: %s\n", c.name, hipGetErrorString(he));
@@ -239,6 +254,21 @@ bool run_case(const Case& c) {
     if (hipMemcpy(oo.data(), buf.out_opt, oo.size() * 4, hipMemcpyDeviceToHost) != hipSuccess) return false;
     if (hipMemcpy(sc.data(), buf.state_correct, sc.size() * 2, hipMemcpyDeviceToHost) != hipSuccess) return false;
     if (hipMemcpy(so.data(), buf.state_opt, so.size() * 2, hipMemcpyDeviceToHost) != hipSuccess) return false;
+
+    if (c.capture_verify) {
+        std::vector<uint16_t> captured(rows * slot_stride);
+        if (hipMemcpy(captured.data(), buf.conv_history, capture_bytes, hipMemcpyDeviceToHost) != hipSuccess) return false;
+        for (uint32_t row = 0; row < rows; ++row) {
+            const size_t tail = row * slot_stride + c.state_index * layer_stride + 2u * hist_stride;
+            for (uint32_t ch = 0; ch < conv_dim; ++ch) {
+                const auto expected = row < c.reqs.front().row_count ? 0xffffu : h_in[row * in_stride + ch];
+                if (captured[tail + ch] != expected) {
+                    std::printf("畳み込み履歴の不一致 row=%u ch=%u\n", row, ch);
+                    return false;
+                }
+            }
+        }
+    }
 
     double out_max_abs = 0.0, out_max_rel = 0.0;
     size_t out_bad = 0, out_nan = 0;
@@ -277,6 +307,8 @@ int main() {
     int failures = 0;
     auto run = [&](const Case& c) { if (!run_case(c)) ++failures; };
 
+    run({"mixed-verify-history", 8192, 1, 2, 3, {{2, 0, 1}, {0, 1, 4}, {1, 5, 7}},
+         12, 0, 0, 204, true});
     run({"27b-decode", 10240, 0, 1, 4, {{0, 0, 1}}, 1, 0, 0, 101});
     run({"27b-decode-multi", 10240, 0, 2, 4,
          {{0, 0, 1}, {1, 1, 1}, {2, 2, 1}, {3, 3, 1}}, 4, 0, 0, 102});

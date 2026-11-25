@@ -615,11 +615,11 @@ std::size_t ComputeSession::drafter_reserve_bytes(
     }
     if (!state.config_.draft_config_ready) {
         if (state.config_.ngram.enabled && pool.num_gdn_states() > 0u &&
-            pool.device_view().recurrent_base != nullptr) {
+            pool.device_view().recurrent_base != nullptr && runtime::supports_ngram_history(pool.device_view())) {
             const uint32_t max_reqs = std::max(1u, state.config_.max_concurrent_requests);
             const uint32_t ngram_k =
                 state.config_.ngram.num_drafts != 0u ? state.config_.ngram.num_drafts : 7u;
-            const uint32_t rows = max_reqs * (ngram_k + 1u);
+            const uint32_t rows = runtime::standalone_ngram_max_rows(max_reqs, ngram_k);
             return static_cast<std::size_t>(rows) *
                 (runtime::spec_gdn_conv_bytes(pool) +
                  runtime::spec_gdn_recurrent_bytes(pool)) +

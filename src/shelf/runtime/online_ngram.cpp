@@ -1,5 +1,7 @@
 #include <shelf/runtime/online_ngram.h>
 
+#include <shelf/kernels/optimized/linear/config.h>
+
 #include <algorithm>
 #include <chrono>
 
@@ -20,6 +22,13 @@ void push_bucket_entry(uint32_t* bucket, uint32_t pos_plus_one) noexcept {
     bucket[0] = pos_plus_one;
 }
 
+}
+
+uint32_t standalone_ngram_max_rows(uint32_t requests, uint32_t drafts) noexcept {
+    const uint64_t width = static_cast<uint64_t>(drafts) + 1u;
+    const uint64_t rows = requests >= kNgramDecodeOnlyBatchSize
+        ? std::max<uint64_t>(requests, width) : requests * width;
+    return static_cast<uint32_t>(std::min<uint64_t>(kernel::kBf16GemmExactRowsKernelMax, rows));
 }
 
 OnlineNgramMatcher::OnlineNgramMatcher(const OnlineNgramConfig& config) : config_(config) {

@@ -77,10 +77,8 @@ bool qsa_sparse_supported(const PagedAttentionResolvedArgs& args,
 
 bool should_use_paged_attention_prefill(uint32_t rows, const HostExecutionContext& ctx) {
     if (rows < kPrefillKernelMinRows) return false;
-    const auto* bc = ctx.batch_context;
-    if (bc == nullptr || bc->requests == nullptr) return false;
-    if (bc->num_requests != 1u) return false;
-    const auto& req = bc->requests[0];
+    if (ctx.staged_request_count != 1u || ctx.num_prefill_requests != 1u) return false;
+    const auto& req = ctx.staged_requests[0];
     return req.row_begin == 0u && req.row_count >= rows;
 }
 
@@ -749,12 +747,16 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
     const PagedAttentionResolvedArgs a = res.value();
     if (a.common.rows == 0u) return PhysicalResolveStatus::Skipped;
 
-    const auto* bc = ctx.batch_context;
     const bool static_plan = mode != PagedAttentionResolveMode::HostImmediate;
     const bool prefill_intent =
         mode == PagedAttentionResolveMode::StaticPrefill;
-    const bool mixed = !static_plan && bc != nullptr &&
-                       bc->requests != nullptr && bc->num_requests > 1u;
+    const bool per_row = ctx.num_prefill_requests == 0u && ctx.num_requests > 1u &&
+        a.common.head_dim < ::shelf::kernel::kPagedAttentionHeadLimit &&
+        a.common.block_mask == nullptr && a.kv_dtype == ::shelf::kernel::KVCacheDType::BF16;
+    if (!static_plan && (ctx.staged_requests == nullptr || ctx.staged_request_count != ctx.num_requests)) {
+        return Status::invalid_state("paged-attention: missing host request descriptors", __FILE__, __LINE__);
+    }
+    const bool mixed = !static_plan && !per_row && ctx.staged_request_count > 1u;
 
     if (!mixed) {
         const bool use_prefill =
@@ -819,8 +821,8 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
     };
 
     uint32_t decode_rows = a.common.rows;
-    for (uint32_t i = 0u; i < bc->num_requests; ++i) {
-        const auto& d = bc->requests[i];
+    for (uint32_t i = 0u; i < ctx.staged_request_count; ++i) {
+        const auto& d = ctx.staged_requests[i];
         if (!is_region_request(d)) continue;
         if (d.row_begin < decode_rows) decode_rows = d.row_begin;
     }
@@ -845,8 +847,8 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
     }
 
     uint32_t prefill_regions = 0u;
-    for (uint32_t i = 0u; i < bc->num_requests; ++i) {
-        const auto& d = bc->requests[i];
+    for (uint32_t i = 0u; i < ctx.staged_request_count; ++i) {
+        const auto& d = ctx.staged_requests[i];
         if (!is_region_request(d)) continue;
         if (d.row_count == 0u) continue;
         if (prefill_regions >= kPhysicalPagedAttentionMaxPrefillRegions)

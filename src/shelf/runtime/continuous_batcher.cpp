@@ -1,4 +1,6 @@
 #include <shelf/runtime/continuous_batcher.h>
+#include <shelf/inference/execution/selectors/gdn_conv_selector.h>
+#include <shelf/inference/execution/selectors/gdn_recurrence_selector.h>
 #include <shelf/runtime/dflash2/dflash2_adaptive_batch.h>
 #include <shelf/runtime/prefix_cache.h>
 #include <shelf/runtime/runtime_request.h>
@@ -8,6 +10,7 @@
 #include <shelf/kernels/dflash2/feature_concat.h>
 #include <shelf/runtime/state_types.h>
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <ctime>
@@ -145,6 +148,22 @@ Status ContinuousBatcher::set_dflash2(const DFlash2BatcherBinding& binding) {
     return Status::make_ok();
 }
 
+bool supports_ngram_history(const GdnStatePoolDeviceView& gdn) {
+    if (gdn.recurrent_base == nullptr) return true;
+    const uint64_t value_width = static_cast<uint64_t>(gdn.num_v_heads) * gdn.head_v;
+    const uint64_t key_pair = 2ull * gdn.head_k;
+    if (key_pair == 0u || value_width >= gdn.conv_dim || (gdn.conv_dim - value_width) % key_pair != 0u) {
+        return false;
+    }
+    const uint32_t key_heads = static_cast<uint32_t>((gdn.conv_dim - value_width) / key_pair);
+    const auto conv = execution::select_gdn_conv_implementation(
+        {ValueDType::BF16, ValueDType::F32, gdn.conv_dim, gdn.conv_history, 1u, 1u, 1u});
+    const auto recurrence = execution::select_gdn_recurrence_implementation(
+        {1u, 1u, 1u, key_heads, gdn.num_v_heads, gdn.head_k, gdn.head_v});
+    return conv == execution::GdnConvImplementation::Optimized &&
+           recurrence == execution::GdnRecurrenceImplementation::Optimized;
+}
+
 Status ContinuousBatcher::set_ngram_verify(
     gpu::GpuArena* arena,
     const std::vector<NgramVerifyRankBinding>* rank_bindings) {
@@ -153,6 +172,11 @@ Status ContinuousBatcher::set_ngram_verify(
     ngram_verify_.bindings.clear();
     if (rank_bindings != nullptr) {
         ngram_verify_.bindings = *rank_bindings;
+    }
+    if (!supports_ngram_history(gdn_pool_.device_view()) ||
+        std::any_of(ngram_verify_.bindings.begin(), ngram_verify_.bindings.end(),
+            [](const auto& rank) { return rank.pool && !supports_ngram_history(rank.pool->device_view()); })) {
+        config_.ngram.enabled = false;
     }
     return Status::make_ok();
 }
@@ -802,26 +826,6 @@ Result<StepResult> ContinuousBatcher::step() {
     if (!dflash_st.ok()) {
         return dflash_st;
     }
-    bool ngram_executed = false;
-    uint32_t ngram_tokens = 0;
-    uint32_t ngram_requests = 0;
-    const Status ngram_st = run_ngram_round(active_requests, ngram_executed,
-                                             ngram_tokens, ngram_requests);
-    if (!ngram_st.ok()) {
-        return ngram_st;
-    }
-    if (ngram_executed) {
-        active.erase(
-            std::remove_if(active.begin(), active.end(),
-                           [](const RuntimeRequest* req) {
-                               return req->ngram_round_active ||
-                                      req->state == RequestState::Finished;
-                           }),
-            active.end());
-        for (RuntimeRequest* req : active_requests) {
-            req->ngram_round_active = false;
-        }
-    }
     kv_state = build_kv_banker_state();
 
     auto plan_result = schedule_requests(active, config_.max_num_batched_tokens, config_.max_scheduled_requests, config_.page_tokens, &kv_state);
@@ -831,9 +835,25 @@ Result<StepResult> ContinuousBatcher::step() {
     SchedulePlan plan = plan_result.release();
     if (plan.empty()) {
         record_adaptive_actual();
-        return StepResult{dflash_executed || ngram_executed,
-                          dflash_tokens + ngram_tokens,
-                          dflash_requests + ngram_requests};
+        return StepResult{dflash_executed, dflash_tokens, dflash_requests};
+    }
+
+    std::vector<ExecuteBatchOptions> verify_options;
+    if (config_.ngram.enabled && !dflash2_available()) {
+        const Status st = plan_ngram_round(plan, active_requests, kv_state);
+        if (!st.ok()) return st;
+        if (plan.batch.num_verify_requests != 0u) {
+            const uint32_t rows = plan.batch.num_tokens;
+            const Status init = ensure_ngram_verify_initialized();
+            if (!init.ok()) return init;
+            for (const auto& rank : ngram_verify_.ranks) {
+                ExecuteBatchOptions options;
+                options.gdn_spec_history = gdn_spec_history_view(rank.history, rows);
+                options.use_verify_graph = plan.batch.num_requests == 1u &&
+                    (rows == 4u || rows == 8u || rows == 16u);
+                verify_options.push_back(options);
+            }
+        }
     }
 
     std::unordered_map<uint64_t, RuntimeRequest*> by_handle;
@@ -871,9 +891,14 @@ Result<StepResult> ContinuousBatcher::step() {
 
     const auto exec_started = std::chrono::steady_clock::now();
     const bool bt_decode = plan.batch.num_tokens == plan.batch.num_requests;
-    auto exec_result = tp_batch_hook_ != nullptr
-                          ? tp_batch_hook_->on_execute(plan.batch)
-                          : execute_batch(executor_, plan.batch, stream_);
+    auto exec_result = [&] {
+        if (tp_batch_hook_ != nullptr) {
+            return verify_options.empty() ? tp_batch_hook_->on_execute(plan.batch)
+                                          : tp_batch_hook_->on_execute(plan.batch, verify_options.data());
+        }
+        if (verify_options.empty()) return execute_batch(executor_, plan.batch, stream_);
+        return execute_batch(executor_, plan.batch, stream_, verify_options.front());
+    }();
     const auto bt_exec_end = bt_wall ? std::chrono::steady_clock::now()
                                      : std::chrono::steady_clock::time_point{};
     const double exec_ms = std::chrono::duration<double, std::milli>(
@@ -931,11 +956,13 @@ Result<StepResult> ContinuousBatcher::step() {
 
     BatchExecutionOutput output = exec_result.release();
 
-    std::vector<int32_t> host_sampled;
-    host_sampled.resize(output.num_outputs);
+    auto* host_sampled = static_cast<int32_t*>(executor_.host_sampled_staging);
+    if (output.num_outputs > executor_.host_sampled_staging_bytes / sizeof(int32_t)) {
+        return Status::invalid_state("sample output exceeds host staging", __FILE__, __LINE__);
+    }
     if (output.num_outputs > 0) {
         hipError_t copy_err = hipMemcpy(
-            host_sampled.data(),
+            host_sampled,
             output.sampled_tokens.data<int32_t>(),
             output.num_outputs * sizeof(int32_t),
             hipMemcpyDeviceToHost);
@@ -984,6 +1011,24 @@ Result<StepResult> ContinuousBatcher::step() {
             return Status::invalid_state("planned sequence not found", __FILE__, __LINE__);
         }
         RuntimeRequest& request = *request_ptr;
+        if (scheduled.execution_class == ExecutionClass::SPEC_VERIFY) {
+            if (scheduled.num_tokens > output.num_outputs - row) {
+                return Status::invalid_state("ngram verify output count mismatch", __FILE__, __LINE__);
+            }
+            const Status st = commit_ngram_verify(request, scheduled,
+                plan.token_ids.data() + scheduled.token_begin + 1u, host_sampled + row);
+            if (!st.ok()) {
+                if (first_error.ok()) first_error = st;
+                if (request.state == RequestState::Active) {
+                    request.sequence.mark_poisoned();
+                    request.error_message = st.message();
+                    const Status cleanup = finish_request(request, FinishReason::Error, stream_);
+                    if (!cleanup.ok()) return cleanup;
+                }
+            }
+            row += scheduled.num_tokens;
+            continue;
+        }
         int32_t token = -1;
         if (scheduled.compute_logits) {
             if (row >= output.num_outputs) {
@@ -1082,8 +1127,8 @@ Result<StepResult> ContinuousBatcher::step() {
                      ms(bt_sync_end, bt_end), ms(bt_step_t0, bt_end), cpu_ms);
     }
     record_adaptive_actual();
-    return StepResult{true, plan.batch.num_tokens + dflash_tokens + ngram_tokens,
-                      plan.batch.num_requests + dflash_requests + ngram_requests};
+    return StepResult{true, plan.batch.num_tokens + dflash_tokens,
+                      plan.batch.num_requests + dflash_requests};
 }
 
 Status ContinuousBatcher::open_dflash2_context(RuntimeRequest& request) {
@@ -1536,14 +1581,10 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
     return first_error;
 }
 
-Status ContinuousBatcher::ensure_ngram_verify_initialized(uint32_t num_drafts) {
-    const uint32_t max_reqs =
-        config_.max_scheduled_requests == 0u ? 1u : config_.max_scheduled_requests;
-    const uint32_t needed_rows = max_reqs * (num_drafts + 1u);
-    if (ngram_verify_.initialized && ngram_verify_.max_rows >= needed_rows) {
-        return Status::make_ok();
-    }
-    shutdown_ngram_verify();
+Status ContinuousBatcher::ensure_ngram_verify_initialized() {
+    if (ngram_verify_.initialized) return Status::make_ok();
+    const uint32_t drafts = config_.ngram.num_drafts == 0u ? 7u : config_.ngram.num_drafts;
+    const uint32_t needed_rows = standalone_ngram_max_rows(executor_.config.max_scheduled_requests, drafts);
     std::vector<NgramVerifyRankBinding> bindings = ngram_verify_.bindings;
     if (bindings.empty()) {
         bindings.push_back(NgramVerifyRankBinding{
@@ -1578,7 +1619,6 @@ Status ContinuousBatcher::ensure_ngram_verify_initialized(uint32_t num_drafts) {
         }
         ngram_verify_.ranks.push_back(std::move(rank));
     }
-    ngram_verify_.max_rows = needed_rows;
     ngram_verify_.initialized = true;
     return Status::make_ok();
 }
@@ -1590,228 +1630,112 @@ void ContinuousBatcher::shutdown_ngram_verify() noexcept {
         }
     }
     ngram_verify_.ranks.clear();
-    ngram_verify_.max_rows = 0u;
     ngram_verify_.initialized = false;
 }
 
-Status ContinuousBatcher::run_ngram_round(std::vector<RuntimeRequest*>& active,
-                                          bool& executed, uint32_t& tokens,
-                                          uint32_t& requests) {
-    if (!config_.ngram.enabled || dflash2_available()) {
+Status ContinuousBatcher::plan_ngram_round(SchedulePlan& plan,
+                                         const std::vector<RuntimeRequest*>& active,
+                                         KVBankerState& kv) {
+    const uint32_t count = plan.batch.num_requests;
+    const uint32_t configured_k = config_.ngram.num_drafts != 0u ? config_.ngram.num_drafts : 7u;
+    if (count >= kNgramDecodeOnlyBatchSize || plan.batch.num_decode_requests != count ||
+        active.size() != count ||
+        executor_.config.external_hidden_input || executor_.uses_qsa_state ||
+        executor_.uses_ple_conv_state || configured_k > OnlineNgramProposal::kMaxDraftTokens) {
         return Status::make_ok();
     }
-    if (executor_.config.external_hidden_input || executor_.uses_qsa_state ||
-        executor_.uses_ple_conv_state) {
-        return Status::make_ok();
+    const uint32_t budget = std::min({standalone_ngram_max_rows(count, configured_k),
+        config_.max_num_batched_tokens, executor_.config.max_scheduled_output_rows});
+    if (budget <= count) return Status::make_ok();
+
+    const auto least_generated = std::min_element(active.begin(), active.end(),
+        [](const RuntimeRequest* a, const RuntimeRequest* b) {
+            return a->generated_tokens < b->generated_tokens;
+        });
+    const uint32_t minimum = (*least_generated)->generated_tokens;
+    uint32_t extra = budget - count;
+    for (uint32_t i = 0; i < count; ++i) {
+        RuntimeRequest& req = *active[i];
+        const uint32_t position = req.sequence.position;
+        const uint32_t room = std::min({req.sequence.max_seq_len - position,
+            req.max_new_tokens - req.generated_tokens, thinking_allowance(req)});
+        uint32_t k = room > 1u ? std::min({configured_k, extra, room - 1u}) : 0u;
+        if (count == 1u && k != configured_k) k = 0u;
+        req.pending_ngram_proposal.hit = false;
+        if (k == 0u || req.token_bitmask != nullptr || req.dflash != nullptr ||
+            (count >= 3u && req.generated_tokens - minimum > configured_k)) continue;
+        const auto blocks = kv.processes[i].allocated_pages;
+        const auto requested = additional_kv_pages(position, blocks, k + 1u, config_.page_tokens);
+        if (requested != 0u && !can_grant_pages(kv, i, requested)) continue;
+        auto prop = req.ngram.propose(k, req.sampling.temperature != 0.0f);
+        if (!prop.hit) continue;
+        if (count > 1u) prop.count = prop.valid_drafts;
+        extra -= prop.count;
+        const auto pages = additional_kv_pages(position,
+            kv.processes[i].allocated_pages, prop.count + 1u, config_.page_tokens);
+        kv.processes[i].allocated_pages += pages;
+        kv.available_pages -= pages;
+        req.pending_ngram_proposal = prop;
     }
-    const uint32_t draft_k = config_.ngram.num_drafts != 0u ? config_.ngram.num_drafts : 7u;
-    if (draft_k == 0u || draft_k > OnlineNgramProposal::kMaxDraftTokens) {
-        return Status::make_ok();
+    if (extra == budget - count) return Status::make_ok();
+
+    SchedulePlan mixed;
+    for (auto* req : active) {
+        if (req->pending_ngram_proposal.hit) continue;
+        auto st = mixed.append_decode(&req->sequence,
+            req->pending_decode_token, req->sequence.position, true, true,
+            req->sampling, req->generated_tokens);
+        if (!st.ok()) return st;
+        mixed.scheduled_requests.back().token_bitmask = req->token_bitmask;
     }
-
-    std::vector<RuntimeRequest*> hit_requests;
-    std::vector<OnlineNgramProposal> proposals;
-    std::vector<uint32_t> row_begin;
-    std::vector<uint32_t> old_positions;
-    uint32_t total_rows = 0u;
-
-    for (RuntimeRequest* request : active) {
-        if (request->state != RequestState::Active ||
-            request->finish_reason != FinishReason::None ||
-            request->dflash != nullptr ||
-            request->generated_tokens == 0u ||
-            request->generated_tokens >= request->max_new_tokens ||
-            request->pending_decode_token < 0 ||
-            request->waiting_for_token_bitmask ||
-            request->token_bitmask != nullptr) {
-            continue;
-        }
-        const uint32_t seq_room = request->sequence.max_seq_len > request->sequence.position
-            ? request->sequence.max_seq_len - request->sequence.position
-            : 0u;
-        const uint32_t remaining = request->max_new_tokens - request->generated_tokens;
-        const uint32_t think = thinking_allowance(*request);
-        if (seq_room <= draft_k || remaining <= draft_k || think <= draft_k) {
-            continue;
-        }
-        if (config_.max_scheduled_requests != 0u &&
-            hit_requests.size() >= config_.max_scheduled_requests) {
-            break;
-        }
-        if (config_.max_num_batched_tokens != 0u &&
-            total_rows + draft_k + 1u > config_.max_num_batched_tokens) {
-            break;
-        }
-        const OnlineNgramProposal prop =
-            request->ngram.propose(draft_k, request->sampling.temperature != 0.0f);
-        if (!prop.hit) {
-            continue;
-        }
-        request->ngram_round_active = true;
-        hit_requests.push_back(request);
-        proposals.push_back(prop);
-        row_begin.push_back(total_rows);
-        old_positions.push_back(request->sequence.position);
-        total_rows += draft_k + 1u;
+    for (auto* req : active) {
+        const auto& prop = req->pending_ngram_proposal;
+        if (!prop.hit) continue;
+        std::array<int32_t, OnlineNgramProposal::kMaxDraftTokens + 1u> tokens;
+        tokens[0] = req->pending_decode_token;
+        std::copy_n(prop.tokens.begin(), prop.count, tokens.begin() + 1);
+        const auto rows = prop.count + 1u;
+        auto st = mixed.append_verify(&req->sequence, std::span(tokens.data(), rows),
+                                      req->sequence.position, rows, req->sampling,
+                                      req->generated_tokens);
+        if (!st.ok()) return st;
     }
+    plan = std::move(mixed);
+    plan.finalize();
+    return Status::make_ok();
+}
 
-    if (hit_requests.empty()) {
-        return Status::make_ok();
-    }
-
-    Status init_st = ensure_ngram_verify_initialized(draft_k);
-    if (!init_st.ok()) {
-        for (RuntimeRequest* request : hit_requests) {
-            request->ngram_round_active = false;
+Status ContinuousBatcher::commit_ngram_verify(RuntimeRequest& req, const ScheduledRequest& scheduled,
+                                             const int32_t* drafts, const int32_t* sampled) {
+    const uint32_t k = scheduled.num_tokens - 1u;
+    SpecVerifyResult verify;
+    auto st = spec_greedy_accept(drafts, k, sampled, true, verify);
+    if (!st.ok()) return st;
+    spec_bound_result(verify, req.max_new_tokens - req.generated_tokens, config_.eos_token_ids);
+    const uint32_t accepted = verify.num_accepted_drafts;
+    if (accepted < k) {
+        for (const auto& rank : ngram_verify_.ranks) {
+            if (!rank.history.initialized) continue;
+            auto scope = shelf::gpu::ScopedDevice::create(rank.device);
+            if (!scope.ok()) return scope.status();
+            st = restore_gdn_spec_history(*rank.pool, req.sequence.slot, rank.history,
+                                          scheduled.token_begin + accepted, rank.stream);
+            if (!st.ok()) return st;
         }
-        return init_st;
+        req.sequence.position = scheduled.prefix_tokens + verify.num_committed_target_tokens;
+        const uint32_t pages = kv_pages_for_tokens(req.sequence.position, config_.page_tokens);
+        st = rollback_sequence_append(req.sequence, pages, stream_);
+        if (!st.ok()) return st;
     }
-
-    std::vector<int32_t> token_ids;
-    token_ids.reserve(total_rows);
-    std::vector<ScheduledRequest> scheduled_reqs;
-    scheduled_reqs.reserve(hit_requests.size());
-    for (std::size_t s = 0u; s < hit_requests.size(); ++s) {
-        RuntimeRequest& req = *hit_requests[s];
-        token_ids.push_back(req.pending_decode_token);
-        for (uint32_t j = 0u; j < draft_k; ++j) {
-            token_ids.push_back(proposals[s].tokens[j]);
-        }
-        ScheduledRequest scheduled;
-        scheduled.sequence = &req.sequence;
-        scheduled.handle = req.sequence.request_handle();
-        scheduled.execution_class = ::shelf::runtime::ExecutionClass::SPEC_VERIFY;
-        scheduled.token_begin = row_begin[s];
-        scheduled.num_tokens = draft_k + 1u;
-        scheduled.prefix_tokens = old_positions[s];
-        scheduled.compute_logits = true;
-        scheduled.sample = true;
-        scheduled.num_output_rows = draft_k + 1u;
-        scheduled.sampling = req.sampling;
-        scheduled.sampling_index =
-            static_cast<uint64_t>(old_positions[s]) + 1000000ull * req.id;
-        scheduled_reqs.push_back(scheduled);
-    }
-
-    ScheduledBatch batch;
-    batch.token_ids = token_ids.data();
-    batch.token_ids_location = TokenIdsLocation::Host;
-    batch.requests = std::move(scheduled_reqs);
-    batch.num_tokens = total_rows;
-    batch.num_requests = static_cast<uint32_t>(hit_requests.size());
-    batch.num_decode_requests = 0u;
-    batch.num_verify_requests = static_cast<uint32_t>(hit_requests.size());
-    batch.num_prefill_requests = 0u;
-    batch.speculative_verify = true;
-
-    const bool use_graph =
-        (draft_k == 3u || draft_k == 7u || draft_k == 9u || draft_k == 15u);
-    std::vector<ExecuteBatchOptions> options(ngram_verify_.ranks.size());
-    for (std::size_t r = 0u; r < ngram_verify_.ranks.size(); ++r) {
-        const NgramVerifyRankState& rank = ngram_verify_.ranks[r];
-        options[r].gdn_spec_history = rank.history.initialized
-            ? gdn_spec_history_view(rank.history, total_rows)
-            : GdnSpecHistoryDeviceView{};
-        options[r].use_verify_graph = use_graph;
-    }
-
-    auto exec_res = tp_batch_hook_ != nullptr
-        ? tp_batch_hook_->on_execute(batch, options.data())
-        : execute_batch(executor_, batch, stream_, options[0]);
-    if (!exec_res.ok()) {
-        for (RuntimeRequest* req : hit_requests) {
-            if (req->sequence.is_poisoned()) {
-                req->error_message = exec_res.status().message();
-                (void)finish_request(*req, FinishReason::Error, stream_);
-            }
-            req->ngram_round_active = false;
-        }
-        return exec_res.status();
-    }
-
-    BatchExecutionOutput output = exec_res.release();
-    if (output.num_outputs < total_rows) {
-        return Status::invalid_state("ngram verify output count mismatch", __FILE__, __LINE__);
-    }
-    std::vector<int32_t> sampled(total_rows, -1);
-    const hipError_t copy_err = hipMemcpy(
-        sampled.data(), output.sampled_tokens.data<int32_t>(),
-        static_cast<std::size_t>(total_rows) * sizeof(int32_t), hipMemcpyDeviceToHost);
-    if (copy_err != hipSuccess) {
-        return Status::hip_error("ngram verify sample copy", hipGetErrorString(copy_err),
-                                 __FILE__, __LINE__);
-    }
-
-    Status first_error = Status::make_ok();
-    for (std::size_t s = 0u; s < hit_requests.size(); ++s) {
-        RuntimeRequest& req = *hit_requests[s];
-        const uint32_t remaining = req.max_new_tokens - req.generated_tokens;
-        SpecVerifyResult verify{};
-        const Status accept_st = spec_greedy_accept(
-            proposals[s].tokens.data(), draft_k, sampled.data() + row_begin[s], true, verify);
-        if (!accept_st.ok()) {
-            if (first_error.ok()) first_error = accept_st;
-            continue;
-        }
-        const bool stopped = spec_bound_result(verify, remaining, config_.eos_token_ids);
-        const uint32_t accepted = verify.num_accepted_drafts;
-        const uint32_t emitted_count = std::min<uint32_t>(
-            static_cast<uint32_t>(verify.emitted_tokens.size()), remaining);
-
-        if (accepted < draft_k) {
-            for (const NgramVerifyRankState& rank : ngram_verify_.ranks) {
-                if (rank.pool != nullptr && rank.pool->num_gdn_states() > 0u &&
-                    rank.history.initialized) {
-                    auto scope = shelf::gpu::ScopedDevice::create(rank.device);
-                    if (!scope.ok()) {
-                        if (first_error.ok()) first_error = scope.status();
-                        continue;
-                    }
-                    const Status gdn_st = restore_gdn_spec_history(
-                        *rank.pool, req.sequence.slot, rank.history, row_begin[s] + accepted,
-                        rank.stream);
-                    if (!gdn_st.ok() && first_error.ok()) first_error = gdn_st;
-                }
-            }
-        }
-        req.sequence.position = old_positions[s] + accepted + 1u;
-        const uint32_t required_pages =
-            (req.sequence.position + config_.page_tokens - 1u) / config_.page_tokens;
-        const Status rb_st = rollback_sequence_append(req.sequence, required_pages, stream_);
-        if (!rb_st.ok() && first_error.ok()) first_error = rb_st;
-
-        req.ngram.record_outcome(accepted);
-        for (uint32_t j = 0u; j < emitted_count; ++j) {
-            const int32_t tok = verify.emitted_tokens[j];
-            req.generated.push_back(tok);
-            note_generated_token(req, tok);
-            req.ngram.ingest_timed(tok);
-        }
-        req.generated_tokens = static_cast<uint32_t>(req.generated.size());
-        const int32_t pending_tok = verify.correction_valid
-            ? verify.correction_token
-            : (verify.bonus_token_valid ? verify.bonus_token : -1);
-
-        if (stopped) {
-            const bool eos = !req.generated.empty() &&
-                qwen_hybrid::is_stop_token(config_.eos_token_ids, req.generated.back());
-            req.finish_reason = eos ? FinishReason::Eos : FinishReason::MaxNewTokens;
-        } else if (req.generated_tokens >= req.max_new_tokens) {
-            req.finish_reason = FinishReason::MaxNewTokens;
-        }
-        if (req.finish_reason != FinishReason::None) {
-            const Status fin_st = finish_request(req, req.finish_reason, stream_);
-            if (!fin_st.ok() && first_error.ok()) first_error = fin_st;
-        } else {
-            req.pending_decode_token = pending_tok;
-            prefix_capture_after_step(req);
+    req.ngram.record_outcome(accepted);
+    for (int32_t token : verify.emitted_tokens) {
+        const auto action = commit_sampled_token(req, token, config_.eos_token_ids);
+        req.ngram.ingest_timed(req.generated.back());
+        if (action == CommitAction::Finished) {
+            return finish_request(req, req.finish_reason, stream_);
         }
     }
-
-    executed = true;
-    tokens = total_rows;
-    requests = static_cast<uint32_t>(hit_requests.size());
-    return first_error;
+    return Status::make_ok();
 }
 
 }

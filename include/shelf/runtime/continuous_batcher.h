@@ -33,6 +33,8 @@ struct ContinuousBatcherConfig {
     OnlineNgramConfig ngram{};
 };
 
+bool supports_ngram_history(const GdnStatePoolDeviceView& gdn);
+
 struct NgramVerifyRankBinding {
     GdnStatePool* pool = nullptr;
     gpu::GpuArena* arena = nullptr;
@@ -202,10 +204,12 @@ class ContinuousBatcher {
     Status run_dflash2_round(std::vector<RuntimeRequest*>& active, bool& executed,
                              uint32_t& tokens, uint32_t& requests);
 
-    Status ensure_ngram_verify_initialized(uint32_t num_drafts);
+    Status ensure_ngram_verify_initialized();
     void shutdown_ngram_verify() noexcept;
-    Status run_ngram_round(std::vector<RuntimeRequest*>& active, bool& executed,
-                           uint32_t& tokens, uint32_t& requests);
+    Status plan_ngram_round(SchedulePlan& plan, const std::vector<RuntimeRequest*>& active,
+                            KVBankerState& kv);
+    Status commit_ngram_verify(RuntimeRequest& request, const ScheduledRequest& scheduled,
+                               const int32_t* drafts, const int32_t* sampled);
 
     KVBankerState build_kv_banker_state() const;
 
@@ -233,7 +237,6 @@ class ContinuousBatcher {
         gpu::GpuArena* arena = nullptr;
         std::vector<NgramVerifyRankBinding> bindings{};
         std::vector<NgramVerifyRankState> ranks{};
-        uint32_t max_rows = 0u;
         bool initialized = false;
     } ngram_verify_{};
     OnlineNgramStats completed_ngram_stats_{};

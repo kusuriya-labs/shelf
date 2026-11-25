@@ -1,5 +1,6 @@
 #include <shelf/inference/execution/paged_attention_dispatch.h>
 #include <shelf/inference/execution/program_executor.h>
+#include <shelf/inference/execution/physical_launch.h>
 #include <shelf/kernels/optimized/attention/paged_attention.h>
 #include <shelf/kernels/optimized/attention/paged_verify.h>
 
@@ -72,9 +73,58 @@ PagedAttentionPlan masked_plan(bool prefill_intent, uint32_t rows = 1u,
     return shelf::execution::plan_paged_attention(a, ctx, prefill_intent);
 }
 
+void test_previous_verify_descriptors() {
+    namespace rt = shelf::runtime;
+    rt::Program program;
+    auto& attention = program.dispatches.emplace_back();
+    attention.kernel_id = rt::KernelId::PAGED_ATTENTION;
+    attention.descriptor_slot = 1u;
+    attention.group_size = 256u;
+    attention.input_count = attention.output_count = 1u;
+    attention.output_slots[0] = 1u;
+    program.states.emplace_back();
+    constexpr uint32_t width = 16u * 256u;
+    program.values = {
+        {rt::ValueId{0}, rt::ValueStorage::WORKSPACE, ValueDType::BF16,
+         rt::ValueRowDomain::TOKEN_ROWS, 0u, width, width},
+        {rt::ValueId{1}, rt::ValueStorage::WORKSPACE, ValueDType::F32,
+         rt::ValueRowDomain::TOKEN_ROWS, 0u, width, width},
+    };
+    rt::DeviceRequestDescriptor previous[3]{};
+    for (uint32_t i = 0; i < 3u; ++i) {
+        previous[i].execution_class = rt::ExecutionClass::SPEC_VERIFY;
+        previous[i].row_begin = 8u * i;
+        previous[i].row_count = 8u;
+    }
+    rt::DeviceBatchContext device{};
+    device.requests = previous;
+    device.num_requests = 3u;
+    rt::DeviceRequestDescriptor current{};
+    current.execution_class = rt::ExecutionClass::DECODE;
+    current.row_count = 1u;
+    HostExecutionContext ctx{};
+    ctx.batch_context = &device;
+    ctx.staged_requests = &current;
+    ctx.staged_request_count = ctx.num_requests = ctx.num_decode_requests = ctx.actual_rows = 1u;
+    ctx.spec.max_visible_tokens = 16u;
+    static uint8_t workspace[24u * width * sizeof(float)]{};
+    shelf::bf16_t kv{};
+    uint32_t positions[24]{};
+    ctx.workspace = workspace;
+    ctx.row_positions = ctx.row_sequence_slots = positions;
+    ctx.model_state.block_table = {positions, 1u, 1u};
+    ctx.model_state.kv_bf16 = {&kv, &kv, 16u, 1u, 1u, 4u, 256u, 1024u, 16384u, 16384u};
+    shelf::execution::PhysicalPagedAttentionPlan plan;
+    auto status = shelf::execution::resolve_paged_attention_physical(program, 0u, ctx, plan);
+    check(status.ok() && status.value() == shelf::execution::PhysicalResolveStatus::Applicable &&
+          plan.physical_count == 1u && plan.kernels[0].common.rows == 1u,
+          "直前の verify の行数を次の decode に持ち越さない");
+}
+
 }  // namespace
 
 int main() {
+    test_previous_verify_descriptors();
     for (auto dtype : {KVCacheDType::BF16, KVCacheDType::FP8_E4M3, KVCacheDType::OCTAVE}) {
         PagedAttentionResolvedArgs args{};
         args.kv_dtype = dtype;

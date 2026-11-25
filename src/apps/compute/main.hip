@@ -212,8 +212,9 @@ int main(int argc, char** argv) {
             }
             config.max_scheduled_output_rows = batch_rows;
         } else if (opt.ngram && !shelf::app::compute_dflash_enabled(opt)) {
-            const uint32_t verify_rows = static_cast<uint32_t>(opt.ngram_drafts) + 1u;
-            const uint32_t batch_rows = config.max_concurrent_requests * verify_rows;
+            const uint32_t batch_rows = std::max(config.max_concurrent_requests,
+                shelf::runtime::standalone_ngram_max_rows(
+                    config.max_concurrent_requests, opt.ngram_drafts));
             if (config.max_num_batched_tokens < batch_rows) {
                 config.max_num_batched_tokens = batch_rows;
             }

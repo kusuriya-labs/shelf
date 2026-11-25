@@ -758,6 +758,16 @@ if(SHELF_BUILD_OPTIONAL_TESTS)
     # SHELF_MODEL_DIR_QWEN4EXP. Skips (exit 77) when unset.
     shelf_add_test(NAME test_qwen4exp_mtp SOURCE unit/test_qwen4exp_mtp.cpp LABELS "gpu1;optional;external_files" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 8 LIBRARIES shelf_qwen4exp shelf_qwen35 shelf_qwen35_runtime shelf_qwen_hybrid shelf_runtime shelf_inference_state shelf_inference_execution shelf_inference_scheduling shelf_kernels_correctness shelf_kernels_optimized shelf_qwen35_kernels_optimized shelf_weights shelf_io shelf_quant_bundle shelf_gpu)
 
+    add_test(NAME test_online_ngram_batch
+             COMMAND $<TARGET_FILE:shelf-gpu-test-runner>
+                 --gpu-count 1 --cost-gb 12 --timeout 360
+                 --state-dir "${CMAKE_BINARY_DIR}/gpu-test-state"
+                 -- ${CMAKE_COMMAND} -E env "SHELF_BUILD_DIR=${CMAKE_BINARY_DIR}"
+                    python3 "${CMAKE_SOURCE_DIR}/tests/server/test_online_ngram_batch.py")
+    set_tests_properties(test_online_ngram_batch PROPERTIES
+                         LABELS "gpu1;optional;external_files"
+                         TIMEOUT 1320 SKIP_RETURN_CODE 77)
+
     add_test(NAME test_mtp_parity
              COMMAND $<TARGET_FILE:shelf-gpu-test-runner>
                  --gpu-count 1 --cost-gb 30 --timeout 1800

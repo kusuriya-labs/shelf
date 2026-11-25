@@ -1459,8 +1459,7 @@ Status finalize_externals(Ctx& c) {
             }
         }
         if (found == nullptr) return fail("external output lacks producing node");
-        found->storage = ValueStorage::EXTERNAL_OUTPUT;
-        found->slot = c.plan->external_output_count++;
+        *found = c.make_binding(eo, ValueStorage::EXTERNAL_OUTPUT, c.plan->external_output_count++, 0u);
     }
     return Status::make_ok();
 }

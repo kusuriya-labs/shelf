@@ -264,6 +264,13 @@ void test_reset_reuse_and_stats_merge() {
 }
 
 int main() {
+    using shelf::runtime::standalone_ngram_max_rows;
+    CHECK(standalone_ngram_max_rows(1u, 7u) == 8u);
+    CHECK(standalone_ngram_max_rows(2u, 3u) == 8u);
+    CHECK(standalone_ngram_max_rows(4u, 7u) == 16u);
+    CHECK(standalone_ngram_max_rows(8u, 7u) == 8u);
+    CHECK(standalone_ngram_max_rows(8u, 15u) == 16u);
+    CHECK(standalone_ngram_max_rows(16u, 15u) == 16u);
     test_boundaries_and_min_match();
     test_longest_and_newest_priority();
     test_max_match_and_window_wraparound();

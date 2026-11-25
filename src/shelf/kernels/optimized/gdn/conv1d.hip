@@ -122,9 +122,8 @@ void shelf_gdn_conv1d_bf16_f32(
         s2 = x;
         output[static_cast<size_t>(row) * output_row_stride + ch] = y;
         const bool verify_only = capture_verify_only != 0u;
-        const uint32_t hist_row = row_parent != nullptr
-                                      ? row
-                                      : (verify_only ? (row - req.row_begin) : row);
+        const bool local_history = verify_only && capture_rows < actual_rows && row_parent == nullptr;
+        const uint32_t hist_row = local_history ? row - req.row_begin : row;
         if (conv_history_store != nullptr && hist_row < capture_rows &&
             (!verify_only ||
              req.execution_class ==

@@ -823,6 +823,8 @@ strict tools の stream は完成した tool call をまとめて送る。生成
 次のラウンドから制約付き DFlash2 へ切り替える）。MTP が有効な場合は引き続き通常 decode へ
 フォールバックする。`--ngram` 併用時は非制約・制約付きいずれのリクエストでも N-gram ヒット時に DFlash2 / MTP の draft forward をスキップして同じ verify 経路へ合流する（[online_ngram.md](../developer/online_ngram.md)）。
 
+`--ngram` 単独でサーブすると、同時に処理している要求数に応じて検証する候補数を自動調整する。8 件以上の間は通常のバッチ decode を使い、要求が減ると投機を再開する。設定値と統計の意味は [compute の N-gram 設定](compute.md) を参照。
+
 ## PLaMo 3 Translate
 
 実験的対応である。挙動や対応範囲は今後変わる可能性がある。

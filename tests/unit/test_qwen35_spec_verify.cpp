@@ -1,4 +1,5 @@
 #include <shelf/runtime/dflash2_spec_decoder.h>
+#include <shelf/runtime/continuous_batcher.h>
 #include <shelf/models/qwen35/runtime/spec_decode.h>
 
 #include <algorithm>
@@ -73,6 +74,20 @@ void expect_result(
 }  // namespace
 
 int main() {
+    {
+        shelf::runtime::GdnStatePoolDeviceView gdn{};
+        check(shelf::runtime::supports_ngram_history(gdn), "attention のみの検証");
+        shelf::state::GdnStateScalar recurrent{};
+        gdn.recurrent_base = &recurrent;
+        gdn.conv_history = 3u;
+        gdn.head_k = gdn.head_v = 128u;
+        gdn.conv_dim = 6144u;
+        gdn.num_v_heads = 16u;
+        check(!shelf::runtime::supports_ngram_history(gdn), "履歴を保存できない 2B 形状");
+        gdn.conv_dim = 8192u;
+        gdn.num_v_heads = 32u;
+        check(shelf::runtime::supports_ngram_history(gdn), "履歴を保存できる 4B 形状");
+    }
     check(std::string(shelf::runtime::spec_phase_name(SpecPhase::IDLE)) == "IDLE", "phase IDLE");
     check(std::string(shelf::runtime::spec_phase_name(SpecPhase::DRAFTING)) == "DRAFTING", "phase DRAFTING");
     check(std::string(shelf::runtime::spec_phase_name(SpecPhase::VERIFYING)) == "VERIFYING", "phase VERIFYING");
