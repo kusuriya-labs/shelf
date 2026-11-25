@@ -25,6 +25,5 @@ struct Exl3DispatchDecision {
 // bytes of rowsum capacity. This is the existing condition, moved to a pure function.
 bool exl3_mul24_use_dense(bool dense_ok, uint32_t n_rows, uint32_t dense_min_rows,
                           uint64_t rowsum_bytes);
-bool exl3_mul24_use_a_prefill(bool a_selected, uint32_t num_prefill_requests);
 
 }  // namespace shelf::execution

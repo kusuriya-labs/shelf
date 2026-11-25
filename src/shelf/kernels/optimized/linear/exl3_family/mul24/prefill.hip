@@ -192,11 +192,6 @@ hipError_t launch_exl3_mul24_recon(const uint16_t* trellis, uint32_t bits, int8_
     return launch_recon<0>(trellis, bits, dense, n, k, stream);
 }
 
-hipError_t launch_exl3_mul24_recon_wmma(const uint16_t* trellis, uint32_t bits, int8_t* dense, uint32_t n, uint32_t k,
-                                        hipStream_t stream) {
-    return launch_recon<1>(trellis, bits, dense, n, k, stream);
-}
-
 hipError_t launch_exl3_mul24_recon_super64(const uint16_t* trellis, uint32_t bits, int8_t* dense,
                                           uint32_t n, uint32_t k, hipStream_t stream) {
     return launch_recon<2>(trellis, bits, dense, n, k, stream);

@@ -65,16 +65,6 @@ hipError_t launch_exl3_mul24_rowscale(
     float* scales_f, uint32_t rows, uint32_t cap, uint32_t k, uint32_t code_row_stride_bytes,
     uint32_t scale_row_stride_bytes, float share, hipStream_t stream);
 
-// B prefill: reconstructed dense INT8 weights in trellis n-major tile order,
-// per-128-K activation scales, gfx12 iu8 WMMA into int32 followed by
-// group-scale FP32 FMA.
-// Writes F32 yprime [rows][n] including the EXL3 grid-step factor.
-hipError_t launch_exl3_mul24_prefill_wmma(
-    const int8_t* codes, const float* scales,
-    uint32_t code_stride, uint32_t scale_stride_bytes,
-    const int8_t* dense_weights, float* yprime,
-    uint32_t rows, uint32_t n, uint32_t k, hipStream_t stream);
-
 hipError_t launch_exl3_mul24_recon(
     const uint16_t* trellis, uint32_t bits, int8_t* dense, uint32_t n, uint32_t k, hipStream_t stream);
 
@@ -98,12 +88,6 @@ hipError_t launch_exl3_mul24_prefill_super64_fused(
     const int8_t* codes, const int8_t* weights_super64, const float* rowscale,
     const int32_t* slots, const uint16_t* svh, void* out, uint32_t out_row_stride,
     uint32_t rows, uint32_t n, uint32_t k, hipStream_t stream);
-
-// Same decode as launch_exl3_mul24_recon, but the output keeps the trellis n-major tile order:
-// one 256-byte 16x16 tile per (n tile, k tile), lane l holding its eight weights. A WMMA B
-// fragment (32 lanes x 8 bytes) is then one contiguous 256-byte read.
-hipError_t launch_exl3_mul24_recon_wmma(
-    const uint16_t* trellis, uint32_t bits, int8_t* dense, uint32_t n, uint32_t k, hipStream_t stream);
 
 
 // (128 output columns each).

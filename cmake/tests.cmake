@@ -122,7 +122,6 @@ shelf_add_test(NAME bench_exl3_mul24_grouped SOURCE kernels/linear/bench_exl3_mu
 target_include_directories(bench_exl3_mul24_grouped SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
 set_tests_properties(bench_exl3_mul24_grouped PROPERTIES
     ENVIRONMENT "SHELF_QWEN4EXP_MODEL_DIR=${CMAKE_SOURCE_DIR}/models/kusuriya-labs/Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw")
-shelf_add_test(NAME bench_exl3_mul24_prefill_wmma SOURCE kernels/linear/bench_exl3_mul24_prefill_wmma.hip LABELS "gpu1;optional;benchmark" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES shelf_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_exl3_mul24_tp SOURCE kernels/linear/test_exl3_mul24_tp.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_inference_execution shelf_kernels_optimized shelf_quant_reference shelf_weights shelf_gpu)
 find_library(SHELF_TEST_HIPBLASLT_LIBRARY NAMES hipblaslt PATHS "${SHELF_ROCM_ROOT}/lib" NO_DEFAULT_PATH)
 if(SHELF_TEST_HIPBLASLT_LIBRARY)

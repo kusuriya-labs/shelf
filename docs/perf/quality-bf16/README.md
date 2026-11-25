@@ -23,7 +23,7 @@ cmake --build build-bf16-kld --target shelf-bench -j 8
 
 ```bash
 export LD_LIBRARY_PATH="/opt/rocm/core-10.2/lib:$llvm23/lib"
-SHELF_EXL3_MUL24_PREFILL_AB=B ./tools/quality/kld-vs-bf16.sh B
+./tools/quality/kld-vs-bf16.sh B
 ./tools/quality/kld-vs-bf16.sh A
 ```
 

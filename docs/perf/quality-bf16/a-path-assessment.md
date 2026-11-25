@@ -1,5 +1,8 @@
 # EXL3-INT8 prefill A 経路の評価
 
+> 本測定は当時存在した `SHELF_EXL3_MUL24_PREFILL_AB` の切り替えを使っている。現在この切り替えは無く、
+> EXL3-INT8 prefill は 1 経路（`prefill_super64`）である。
+
 2026-11-20、R9700 `GPU-a8e9ddefa2d60f55`、ROCm 10.2、libstdc++ 先行、BF16 KV。各 GPU 実行は `/tmp/r9700.lock` で排他し、`ROCR_VISIBLE_DEVICES` と `HIP_VISIBLE_DEVICES=0` を指定した。`rocprofv3` は使っていない。測定器・BF16 基準・有効語彙・cases-v1 の説明は [README](README.md) を参照。B は環境変数未設定、A は `SHELF_EXL3_MUL24_PREFILL_AB=A`、融合はさらに `SHELF_EXL3_MUL24_FUSED_DECODE=1` を指定した。測定器の実行ファイルは opt-in の融合 decode に対応するが、`ebaeef74` と `56a0911c` を適用した既定化候補そのものではない。
 
 位置ごとの KL は BF16 基準から候補への KL、top-1 は BF16 基準と一致したかを意味する。同一の case・入力位置・基準 logits を対応づけて A−B を算出した。95% 区間は case を復元抽出する bootstrap 10 万回、seed 20261120、抽出した case 内の位置すべてを位置数で重み付けした平均の percentile 区間。8 case しかないため区間の推定も不安定であり、位置が独立という前提は置かない。短い 3 case は prefill が 256 行未満で、A の dense prefill は動かない。
