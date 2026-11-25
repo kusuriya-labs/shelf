@@ -1866,7 +1866,7 @@ Result<MtpIterationOutput> mtp_spec_step(
     }
     const auto started = std::chrono::steady_clock::now();
     auto draft = mtp_draft(drafter, target, target_sequence, pending_token,
-                           remaining_tokens, precomputed_drafts);
+                           remaining_tokens, 0u, nullptr, precomputed_drafts);
     if (!draft.ok()) return draft.status();
     const MtpDraftResult& plan = draft.value();
     const hipStream_t stream = drafter.target_stream;
