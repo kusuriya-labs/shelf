@@ -275,7 +275,8 @@ pinned host に置く。`qwen4_exp` も同じで、この family は tied を扱
 `PLE table` は `qwen4_exp` の ngram embedding テーブルで、
 プロセス内で 1 つだけ共有するため rank ごとに重複計上しない。
 `--ple-hot-cache-gib` を指定した場合は Hot ブロックキャッシュの実バイトを出し、
-Cold 側の mmap 領域はここには含まれない。`offload experts`
+Cold 側の mmap 領域はここには含まれない。指定しない場合は mmap したテーブル全量の
+サイズを出す。`offload experts`
 は `--moe-host-experts` で VRAM から host へ移した冷たい routed expert の plane で、
 rank ごとの合計を出す。`prefix checkpoint` は prefix cache が保持する
 checkpoint の全 rank 分で、`MEMORY_PLAN host memory` の `total` はこれら全項目の合計である。

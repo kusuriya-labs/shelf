@@ -95,9 +95,10 @@ PP stage 内の EP / TP 展開は実装済みで、TP reduce の後に EP reduce
   `Status::unsupported` で拒否する。
 - `--ple-hot-cache-gib N` を 0 以外にすると、`Ngram4` / `Ngram5` の table を全量 host RAM
   へ読み込まず、mmap のページキャッシュを Cold 側、pinned host のブロックキャッシュを
-  Hot 側として使う。ブロックは 2048 行である。Hot キャッシュの実バイトは
-  `MEMORY_PLAN host memory` の `PLE table` に表示され、`payload_bytes()` は
-  テーブル全体のサイズのままである。
+  Hot 側として使う。ブロックは 2048 行である。このとき `MEMORY_PLAN host memory` の
+  `PLE table` は Hot ブロックと codebook の実バイトを出し、Cold 側の mmap は含まない。
+  0（既定）では table はファイルマッピングのまま全量を使うため、`PLE table` は
+  `payload_bytes()`（テーブル全体のサイズ）を出す。
 - MXFP4 / FP8 の preshuffle staging は関数ローカルの buffer を非同期コピーしない。
   同期コピーで device へ移してから buffer を破棄する。
 

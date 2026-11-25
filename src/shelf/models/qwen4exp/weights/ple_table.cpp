@@ -389,6 +389,10 @@ Result<std::shared_ptr<const PleTable>> PleTable::load_shared(
 std::uint64_t PleTable::host_bytes() const noexcept {
     if (ngram_) {
         std::lock_guard<std::mutex> lock(ngram_->mutex);
+        // Without a hot cache the whole n-gram payload stays mapped and is read through
+        // the page cache. With a hot cache only the taken blocks are host-resident and
+        // the cold mapping is left out, so the codebooks and blocks are what it holds.
+        if (ngram_->capacity == 0u) return payload_bytes_;
         std::uint64_t bytes = 0;
         for (const auto& head : ngram_->heads) bytes += head.codebook.size() * 2u;
         for (const auto& block : ngram_->blocks) bytes += block.data.capacity();
