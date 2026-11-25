@@ -347,7 +347,7 @@ int compute(int argc, char **argv) {
         if (hipGetDeviceCount(&visible) != hipSuccess || visible < 1 || visible > 4)
             throw std::runtime_error("R9700 を 1〜4 台指定してください");
         if (!ep)
-            ep = visible;
+            ep = visible / tp;
         if (ep * tp != visible)
             throw std::runtime_error("EP × TP と GPU 数が一致しません");
         Checkpoint checkpoint(model, engram, draft, read_owners(placement), ep, tp);

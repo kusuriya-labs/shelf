@@ -6,12 +6,13 @@
 #include <shelf/models/hy4_flash/sync.h>
 #include <shelf/models/hy4_flash/graph.h>
 #include <algorithm>
+#include <atomic>
 #include <memory>
 #include <string_view>
 
 namespace shelf::hy4 {
 inline constexpr int max_prefill_chunk = 4096;
-inline constexpr int tp_prefill_rows = 1024;
+inline constexpr int tp_prefill_rows = max_prefill_chunk;
 inline constexpr int min_draft_tokens = 2;
 inline constexpr int max_draft_tokens = 5;
 inline constexpr int max_verify_rows = max_draft_tokens + 1;
@@ -73,12 +74,6 @@ struct Region {
     void *next(size_t length);
 };
 
-struct RankEvent {
-    hipEvent_t handle{};
-    int owner = -1;
-    operator hipEvent_t() const { return handle; }
-};
-
 struct Residency {
     Checkpoint &model;
     size_t tokens;
@@ -89,10 +84,12 @@ struct Residency {
     size_t kv_page_stride = 0;
     bool batch_draft;
     bool index_wmma = true;
-    std::vector<std::array<int, 42>> sparse_last;
+    std::array<std::vector<std::array<int, 42>>, 4> sparse_last;
     size_t prefill_rows() const { return std::min(tokens, size_t(tp_size > 1 ? tp_prefill_rows : max_prefill_chunk)); }
-    int *sparse_top_slot(int layer, int slot) const {
-        return sparse_top[0][layer] + (prefill_rows() + slot * max_verify_rows) * 511;
+    int moe_group(int rank) const { return tp_size == 4 ? rank : rank / tp_size; }
+    int expert_intermediate() const { return tp_size == 2 ? 768 : 1536; }
+    int *sparse_top_slot(int layer, int slot, int rank = 0) const {
+        return sparse_top[rank][layer] + (prefill_rows() + slot * max_verify_rows) * 511;
     }
     int ranks = 0;
     int ep_size = 1;
@@ -145,11 +142,12 @@ struct Residency {
     std::array<float *, 4> gate_expert_norms{};
     std::array<uint64_t *, 4> moe_counts{};
     std::array<hipStream_t, 4> local_expert{};
-    std::array<hipEvent_t, 4> local_ready{}, local_done{};
+    std::array<RankEvent, 4> local_ready{}, local_done{};
     std::array<std::array<void *, 4>, 4> small_staging{};
     void reserve_experts(int rank, Region &buffer);
-    void create_event(RankEvent &event, int rank);
+    void create_event(RankEvent &event, int rank, unsigned flags = hipEventDisableTiming | hipEventReleaseToSystem);
     void record_event(const RankEvent &event, int rank) const;
+    void record_event(const RankEvent &event, int rank, hipStream_t stream) const;
     void sync_record(const RankEvent &event, bool &recorded, int rank) const;
     void collect_route_counts(int rank);
     static constexpr size_t matrix_bytes = 41 * 512 * 3 * sizeof(Hy4ExpertProjection);
@@ -168,15 +166,16 @@ struct Residency {
     std::array<GraphPlan, 4> target_graphs{};
     std::array<GraphPlan, 2> draft_graphs{};
     size_t target_victim = 0, draft_victim = 0;
-    GraphInput *graph_input = nullptr;
-    BatchGraphInput *batch_input = nullptr;
+    std::array<GraphInput *, 4> graph_input{};
+    std::array<BatchGraphInput *, 4> batch_input{};
     uint64_t target_replays = 0, draft_replays = 0;
     std::array<std::array<std::array<RankEvent, 2>, 4>, 4> ready{}, ack{};
     std::array<std::array<int, 4>, 4> parity{};
     std::array<void *, 4> tp_recv{};
     std::array<void *, 4> ep_recv{};
-    std::array<void *, 4> tp_ptr{};
-    std::array<size_t, 4> tp_bytes{};
+    std::array<void *, 4> tp_ptr{}, ep_ptr{};
+    std::array<const void *, 4> tp_src_ptr{}, ep_src_ptr{};
+    std::array<size_t, 4> tp_bytes{}, ep_bytes{};
     bool lm_head_tp = false;
     bool lm_host_fallback = false;
     int lm_head_ranks() const { return lm_head_tp ? ranks : 1; }
@@ -189,36 +188,46 @@ struct Residency {
     std::array<void *, 4> lm_dst_ptr{};
     std::array<size_t, 4> lm_xfer_bytes{};
     std::array<std::array<RankEvent, 2>, 4> lm_ready{}, lm_done{}, lm_arrived{}, lm_consumed{};
-    std::array<std::array<bool, 2>, 4> lm_recorded{};
     std::array<std::array<bool, 2>, 4> lm_ready_rec{}, lm_done_rec{}, lm_arrived_rec{}, lm_consumed_rec{};
     int lm_parity = 0;
-    std::array<std::array<RankEvent, 2>, 4> tp_ready{}, tp_done{}, tp_arrived{}, tp_consumed{};
+    std::array<std::array<RankEvent, 2>, 4> tp_ready{}, tp_done{}, tp_arrived{}, tp_consumed{}, tp_ag_done{};
     std::array<std::array<RankEvent, 2>, 4> ep_ready{}, ep_done{}, ep_arrived{}, ep_consumed{};
     std::array<std::array<bool, 2>, 4> tp_recorded{}, ep_recorded{};
     std::array<int, 4> tp_parity{}, ep_parity{};
     std::array<void *, 4> reduce_staging{};
     std::array<std::unique_ptr<SyncBarrier>, 4> tp_barrier{}, ep_barrier{};
-    std::unique_ptr<SyncBarrier> all_barrier;
+    std::unique_ptr<SyncBarrier> all_barrier, capture_barrier;
+    std::atomic<bool> capture_failed{false};
     void abort_collectives();
     void reset_collectives();
-    void reduce_pair(void *data, int rank, size_t bytes, bool ep);
-    void tp_sum(void *data, int rank, size_t bytes);
-    void ep_reduce(void *data, int rank, size_t bytes);
+    void reduce_pair(void *data, int rank, size_t bytes, bool ep, GraphCapture *capture = nullptr,
+                     const float *f32_src = nullptr);
+    void reduce_tp4(void *data, int rank, size_t bytes, GraphCapture *capture = nullptr,
+                    const float *f32_src = nullptr);
+    void tp_sum(void *data, int rank, size_t bytes, GraphCapture *capture = nullptr);
+    void tp_sum_f32(void *dst_bf16, const float *src_f32, int rank, size_t bf16_bytes,
+                    GraphCapture *capture = nullptr);
+    void ep_reduce(void *data, int rank, size_t bytes, GraphCapture *capture = nullptr);
     void lm_scatter_hidden(const void *src, size_t bytes, std::array<void *, 4> &dst_out, bool capture = false);
     void lm_gather_argmax(const std::array<const float *, 4> &vals, const std::array<const int *, 4> &ids, int rows,
                           int *out_ids);
     void lm_gather_logits(const std::array<const float *, 4> &local_logits, int rows, int local_vocab, int full_vocab,
                           float *out_logits);
-    void tp_argmax(const float *vals, const int *ids, int *out_ids, int rank, int rows);
+    void tp_argmax(const float *vals, const int *ids, int *out_ids, int rank, int rows, GraphCapture *capture = nullptr);
     void tp_gather_logits(const float *local_logits, float *out_logits, int rank, int rows, int local_vocab,
-                          int full_vocab);
+                          int full_vocab, GraphCapture *capture = nullptr);
     void broadcast_lm_ids(size_t bytes, int parity);
-    void tp_broadcast_ids(int *ids, int rank, int rows);
+    void tp_broadcast_ids(int *ids, int rank, int rows, GraphCapture *capture = nullptr);
     void shutdown();
     const void *device(const Weight &w) const;
 };
 void peer_copy(void *dst, const void *src, size_t bytes, hipStream_t stream = nullptr);
 void tp_add_bf16(void *dst, const void *src, size_t bytes, hipStream_t stream = nullptr);
+void tp_sum_bf16_4(void *dst, const void *s0, const void *s1, const void *s2, const void *s3, size_t bytes,
+                   hipStream_t stream = nullptr);
+void tp_add_f32_to_bf16(void *dst, const float *s0, const float *s1, size_t count, hipStream_t stream = nullptr);
+void tp_sum_f32_to_bf16_4(void *dst, const float *s0, const float *s1, const float *s2, const float *s3,
+                          size_t count, hipStream_t stream = nullptr);
 void tp_argmax_pack(const float *vals, const int *ids, void *out_pairs, int rows, hipStream_t stream = nullptr);
 void tp_argmax_reduce(const void *src_pairs, int stride_pairs, int tp_size, int rows, int *out_ids,
                       hipStream_t stream = nullptr);

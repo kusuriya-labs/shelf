@@ -6,8 +6,22 @@ using namespace shelf::hy4;
 
 int main() {
     unsetenv("SHELF_HY4_DFLY_DRAFTS");
+    if (!Residency::check_batch_topology(1, 32).ok())
+        return 1;
+    if (!Residency::check_batch_topology(2, 16).ok())
+        return 1;
+    if (!Residency::check_batch_topology(4, 16).ok())
+        return 1;
+    if (Residency::check_batch_topology(3, 1).code() != shelf::Status::Code::unsupported)
+        return 1;
+    if (Residency::check_batch_topology(1, 33).code() != shelf::Status::Code::unsupported)
+        return 1;
+    if (Residency::check_batch_topology(2, 17).code() != shelf::Status::Code::unsupported)
+        return 1;
+    if (Residency::check_batch_topology(4, 17).code() != shelf::Status::Code::unsupported)
+        return 1;
     Checkpoint model;
-    model.tp = 2;
+    model.tp = 3;
     Residency parallel(model, 32, 2);
     if (parallel.reserve().code() != shelf::Status::Code::unsupported)
         return 1;

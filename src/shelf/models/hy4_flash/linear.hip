@@ -229,8 +229,8 @@ hipError_t shelf_hy4_linear_workspace(const uint16_t *input, const uint16_t *suh
                                        const uint32_t *trellis, int8_t *codes, float *scales, float *partial,
                                        uint16_t *output, int rows, int input_width, int output_width,
                                        int padded_input, int padded_output, int bits, hipStream_t stream,
-                                       int splits, int8_t *expanded) {
-    if (!input || !suh || !svh || !trellis || !codes || !scales || !partial || !output || rows < 1 ||
+                                       int splits, int8_t *expanded, float *f32_output) {
+    if (!input || !suh || !svh || !trellis || !codes || !scales || !partial || (!output && !f32_output) || rows < 1 ||
         rows > 65535 || input_width < 1 || output_width < 1 || padded_input < input_width ||
         padded_output < output_width || padded_input % 128 || padded_output % 128 ||
         (bits != 3 && bits != 4 && bits != 6))
@@ -243,7 +243,7 @@ hipError_t shelf_hy4_linear_workspace(const uint16_t *input, const uint16_t *suh
                             (rows <= 6 && (rows == 1 || padded_input <= 3072) &&
                              size_t(rows) * ((padded_input / 128 + splits - 1) / splits) * 132 <= 48u * 1024u));
     if (use_fused) {
-        const bool out_fused = splits == 1 && output_width == padded_output;
+        const bool out_fused = !f32_output && splits == 1 && output_width == padded_output;
         status = shelf_hy4_linear_fused_gemm(input, suh, out_fused ? svh : nullptr, trellis, partial,
                                              out_fused ? output : nullptr, rows, input_width, output_width,
                                              padded_input, padded_output, bits, splits, stream);
@@ -272,10 +272,12 @@ hipError_t shelf_hy4_linear_workspace(const uint16_t *input, const uint16_t *suh
     }
     if (rows >= 4)
         rotate_output<4><<<dim3(padded_output / 128, (rows + 3) / 4), 128, 0, stream>>>(
-            partial, svh, output, output_width, padded_output, nullptr, 0, nullptr, nullptr, splits, nullptr, rows);
+            partial, svh, f32_output ? nullptr : output, output_width, padded_output, nullptr, 0, f32_output, nullptr,
+            splits, nullptr, rows);
     else
         rotate_output<1><<<dim3(padded_output / 128, rows), 32, 0, stream>>>(
-            partial, svh, output, output_width, padded_output, nullptr, 0, nullptr, nullptr, splits, nullptr, rows);
+            partial, svh, f32_output ? nullptr : output, output_width, padded_output, nullptr, 0, f32_output, nullptr,
+            splits, nullptr, rows);
     return hipGetLastError();
 }
 

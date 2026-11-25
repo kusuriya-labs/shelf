@@ -29,6 +29,7 @@ struct Checkpoint {
     const Weight *find(const std::string &key, int rank) const;
     const std::array<int, 2> *shape_of(const std::string &key, int rank) const;
     bool row_parallel(const std::string &key, int rank) const;
+    int moe_groups() const { return tp == 4 ? 4 : ep; }
     void populate_engram(bool lock) const;
     void report_engram_residency(const char *phase) const;
     void load(const Path &directory, bool draft);

@@ -377,14 +377,19 @@ __global__ void router_choose_fallback(Mat x, const uint16_t *weight, const floa
         __syncthreads();
     }
 }
-__global__ void weighted(Mat x, const Hy4Route *route, const int *offsets, const int *inverse, Mat out) {
+__global__ void weighted(Mat x, const Hy4Route *route, const int *offsets, const int *inverse, Mat out,
+                         float *out_f32 = nullptr) {
     int r = blockIdx.y, c = blockIdx.x * 256 + threadIdx.x;
     float sum = 0;
     for (int i = offsets[r]; i < offsets[r + 1]; ++i) {
         int j = inverse ? inverse[i] : i;
-        sum = round_bf16(sum + round_bf16(route[j].weight * bf16_bits_to_f32(x.p[j * 1536 + c])));
+        float term = round_bf16(route[j].weight * bf16_bits_to_f32(x.p[j * 1536 + c]));
+        sum = out_f32 ? (sum + term) : round_bf16(sum + term);
     }
-    out.p[r * 1536 + c] = f32_to_bf16_rne_device(sum);
+    if (out_f32)
+        out_f32[size_t(r) * 1536 + c] = sum;
+    else
+        out.p[r * 1536 + c] = f32_to_bf16_rne_device(sum);
 }
 __global__ void make_decode_plans(const Hy4Route *picks, Mat latent, const int *owners, uint8_t *packets,
                                   size_t stride, int first_group, bool scatter, uint64_t *totals) {
@@ -403,13 +408,13 @@ __global__ void make_decode_plans(const Hy4Route *picks, Mat latent, const int *
 }
 
 __global__ void make_grouped_plans(const Hy4Route *picks, Mat latent, const int *owners, uint8_t *packets,
-                                   size_t stride, uint64_t *totals) {
+                                   size_t stride, int first_group, bool scatter, uint64_t *totals) {
     using Scan = rocprim::block_scan<unsigned, 512>;
     __shared__ typename Scan::storage_type scan;
     __shared__ unsigned masks[6][512];
     __shared__ int starts[512], row_counts[Hy4GroupedPlan::max_rows];
-    const int t = threadIdx.x, group = blockIdx.x, rows = latent.rows;
-    auto plan = reinterpret_cast<Hy4GroupedPlan *>(packets + group * stride);
+    const int t = threadIdx.x, group = first_group + blockIdx.x, rows = latent.rows;
+    auto plan = reinterpret_cast<Hy4GroupedPlan *>(packets + blockIdx.x * stride);
     for (auto &word : masks)
         word[t] = 0;
     if (t < rows)
@@ -452,7 +457,7 @@ __global__ void make_grouped_plans(const Hy4Route *picks, Mat latent, const int 
             continue;
         plan->place(route, picks + row * 16, owners, masks, starts[e]);
     }
-    if (group) {
+    if (scatter && blockIdx.x != 0) {
         auto dst = reinterpret_cast<uint4 *>(plan + 1);
         auto src = reinterpret_cast<const uint4 *>(latent.p);
         for (int i = t; i < rows * 1536 / 8; i += 512)
@@ -461,9 +466,9 @@ __global__ void make_grouped_plans(const Hy4Route *picks, Mat latent, const int 
 }
 
 template<class Plan>
-Mat decode_experts(Ops &op, int layer, Mat latent, const Plan *plan, hipStream_t stream) {
+Mat decode_experts(Ops &op, int layer, Mat latent, const Plan *plan, hipStream_t stream, float *out_f32 = nullptr) {
     const int capacity = Hy4MoePlan::capacity(latent.rows);
-    const int intermediate = 1536 / op.gpu.tp_size;
+    const int intermediate = op.gpu.expert_intermediate();
     Mat output = op.mat(latent.rows, 1536);
     auto codes = static_cast<int8_t *>(op.arena.next(size_t(capacity) * 2 * 1536));
     auto scales = static_cast<float *>(op.arena.next(size_t(capacity) * 2 * 12 * sizeof(float)));
@@ -481,7 +486,7 @@ Mat decode_experts(Ops &op, int layer, Mat latent, const Plan *plan, hipStream_t
     }
     checked(shelf_hy4_expert_decode(latent.p, matrices, plan->routes, &plan->count, capacity, intermediate,
                                     codes, scales, partial, values.p, stream, batches, num_batches));
-    weighted<<<dim3(6, latent.rows), 256, 0, stream>>>(values, plan->routes, plan->offsets, inverse, output);
+    weighted<<<dim3(6, latent.rows), 256, 0, stream>>>(values, plan->routes, plan->offsets, inverse, output, out_f32);
     checked(hipGetLastError());
     if (op.gpu.expert_end[op.rank])
         checked(hipEventRecord(op.gpu.expert_end[op.rank], stream));
@@ -493,19 +498,50 @@ Mat decode_moe(Ops &op, int layer, const std::string &prefix, Mat x, Mat latent,
     auto &gpu = op.gpu;
     const int rank = op.rank;
     const int groups = gpu.tp_size == 1 ? gpu.ep_size : 1;
+    const int moe_group = gpu.moe_group(rank);
     const size_t stride = groups > 1 ? Plan::packet_bytes(x.rows) : sizeof(Plan);
     auto packets = static_cast<uint8_t *>(op.arena.next(groups * stride));
     if constexpr (std::is_same_v<Plan, Hy4GroupedPlan>)
         make_grouped_plans<<<groups, 512, 0, op.stream>>>(picks, latent, gpu.moe_owners[rank] + (layer - 1) * 512,
-                                                         packets, stride, gpu.moe_counts[rank]);
+                                                         packets, stride, moe_group, groups > 1, gpu.moe_counts[rank]);
     else
         make_decode_plans<<<groups, 128, 0, op.stream>>>(picks, latent, gpu.moe_owners[rank] + (layer - 1) * 512,
-                                                   packets, stride, rank / gpu.tp_size, groups > 1,
+                                                   packets, stride, moe_group, groups > 1,
                                                    gpu.moe_counts[rank]);
     checked(hipGetLastError());
+    auto capture = op.capture;
+    if (gpu.tp_size > 1) {
+        Mat shared{};
+        bool overlap = !capture;
+        if (overlap) {
+            checked(hipEventSynchronize(gpu.local_done[rank]));
+            gpu.record_event(gpu.local_ready[rank], rank, op.stream);
+            checked(hipStreamWaitEvent(gpu.local_expert[rank], gpu.local_ready[rank], 0));
+            const size_t shared_ws = size_t(x.rows) * (200u << 10) + (1u << 20);
+            Region shared_region{static_cast<uint8_t *>(op.arena.next(shared_ws)), shared_ws};
+            Ops shared_op(gpu, rank, shared_region, gpu.local_expert[rank]);
+            shared = feedforward(shared_op, prefix + "shared_experts", x);
+            gpu.record_event(gpu.local_done[rank], rank, gpu.local_expert[rank]);
+        }
+        auto *result_f32 = static_cast<float *>(op.arena.next(size_t(x.rows) * 1536 * sizeof(float)));
+        Mat result = decode_experts(op, layer, latent, reinterpret_cast<Plan *>(packets), op.stream, result_f32);
+        gpu.tp_sum_f32(result.p, result_f32, rank, result.bytes(), capture);
+        gpu.ep_reduce(result.p, rank, result.bytes(), capture);
+        if (overlap)
+            checked(hipStreamWaitEvent(op.stream, gpu.local_done[rank], 0));
+        else
+            shared = feedforward(op, prefix + "shared_experts", x);
+        if (gpu.expert_begin[rank]) {
+            checked(hipEventSynchronize(gpu.expert_end[rank]));
+            float ms;
+            checked(hipEventElapsedTime(&ms, gpu.expert_begin[rank], gpu.expert_end[rank]));
+            gpu.expert_ms[rank] += ms;
+        }
+        return op.norm(op.add(shared, op.linear(prefix + "routed_expert_up_proj", result)),
+                       prefix + "combine_output_norm.weight");
+    }
     std::array<Plan *, 4> received{};
     std::array<Mat, 4> outputs{}, returns{};
-    auto capture = op.capture;
     auto segment = capture && (groups > 1 || !op.batch_decode) ? &capture->plan.layers[layer - 1] : nullptr;
     for (int r = 1; r < groups; ++r) {
         auto &arena = gpu.workspace[r];
@@ -538,12 +574,12 @@ Mat decode_moe(Ops &op, int layer, const std::string &prefix, Mat x, Mat latent,
         local_stream = op.stream;
     } else {
         checked(hipEventSynchronize(gpu.local_done[rank]));
-        checked(hipEventRecord(gpu.local_ready[rank], op.stream));
+        gpu.record_event(gpu.local_ready[rank], rank, op.stream);
         checked(hipStreamWaitEvent(local_stream, gpu.local_ready[rank], 0));
     }
     Mat result = decode_experts(op, layer, latent, reinterpret_cast<Plan *>(packets), local_stream);
     if (!capture)
-        checked(hipEventRecord(gpu.local_done[rank], local_stream));
+        gpu.record_event(gpu.local_done[rank], rank, local_stream);
     if (segment && op.batch_decode) {
         capture->finish(segment->local);
         capture->begin(rank);
@@ -561,10 +597,6 @@ Mat decode_moe(Ops &op, int layer, const std::string &prefix, Mat x, Mat latent,
             gpu.transfer(local.p, rank, outputs[r].p, r, local.bytes());
         }
         op.add_into(result, local, result);
-    }
-    if (gpu.tp_size > 1) {
-        gpu.tp_sum(result.p, rank, result.bytes());
-        gpu.ep_reduce(result.p, rank, result.bytes());
     }
     if (gpu.expert_begin[rank]) {
         for (int i = 0; i < groups; ++i) {
@@ -660,16 +692,22 @@ __global__ void scatter_prefill(const PrefillRoutes *choices, int size, int grou
     }
     inverse[i] = j;
 }
-__global__ void sum_prefill(Mat x, const Hy4Route *routes, const int *inverse, Mat out, const PrefillRoutes *choices, int group) {
+__global__ void sum_prefill(Mat x, const Hy4Route *routes, const int *inverse, Mat out, const PrefillRoutes *choices,
+                            int group, float *out_f32 = nullptr) {
     int row = blockIdx.y, c = blockIdx.x * 256 + threadIdx.x;
     if (choices && !choices[row].masks[group]) return;
     float sum = 0;
     for (int i = 0; i < 16; ++i) {
         int j = inverse[row * 16 + i];
-        if (j >= 0)
-            sum = round_bf16(sum + round_bf16(routes[j].weight * bf16_bits_to_f32(x.p[j * 1536 + c])));
+        if (j >= 0) {
+            float term = round_bf16(routes[j].weight * bf16_bits_to_f32(x.p[j * 1536 + c]));
+            sum = out_f32 ? (sum + term) : round_bf16(sum + term);
+        }
     }
-    out.p[row * 1536 + c] = f32_to_bf16_rne_device(sum);
+    if (out_f32)
+        out_f32[size_t(row) * 1536 + c] = sum;
+    else
+        out.p[row * 1536 + c] = f32_to_bf16_rne_device(sum);
 }
 __global__ void add_prefill(Mat sum, Mat partial, const PrefillRoutes *choices, int group) {
     int row = blockIdx.y, c = blockIdx.x * 256 + threadIdx.x;
@@ -678,9 +716,10 @@ __global__ void add_prefill(Mat sum, Mat partial, const PrefillRoutes *choices, 
         sum.p[i] = f32_to_bf16_rne_device(bf16_bits_to_f32(sum.p[i]) + bf16_bits_to_f32(partial.p[i]));
     }
 }
-void prefill_experts(Ops &op, int layer, Mat latent, const PrefillRoutes *choices, Mat out, bool sparse_output = false) {
-    const int group = op.rank / op.gpu.tp_size, capacity = latent.rows * 16;
-    const int intermediate = 1536 / op.gpu.tp_size;
+void prefill_experts(Ops &op, int layer, Mat latent, const PrefillRoutes *choices, Mat out,
+                     bool sparse_output = false, float *out_f32 = nullptr) {
+    const int group = op.gpu.moe_group(op.rank), capacity = latent.rows * 16;
+    const int intermediate = op.gpu.expert_intermediate();
     auto mark = op.arena.cursor;
     auto histogram = static_cast<int *>(op.arena.next(512 * sizeof(int)));
     auto sizes = static_cast<int *>(op.arena.next(2 * sizeof(int)));
@@ -700,7 +739,8 @@ void prefill_experts(Ops &op, int layer, Mat latent, const PrefillRoutes *choice
     auto matrices = op.gpu.matrices[op.rank] + (layer - 1) * 1536;
     checked(shelf_hy4_expert_decode(latent.p, matrices, routes, sizes, capacity, intermediate, codes, scales,
                                     partial, values.p, op.stream, batches, sizes + 1, true));
-    sum_prefill<<<dim3(6, latent.rows), 256, 0, op.stream>>>(values, routes, inverse, out, sparse_output ? choices : nullptr, group);
+    sum_prefill<<<dim3(6, latent.rows), 256, 0, op.stream>>>(values, routes, inverse, out,
+                                                              sparse_output ? choices : nullptr, group, out_f32);
     checked(hipGetLastError());
     op.arena.cursor = mark;
 }
@@ -710,7 +750,7 @@ void peer_prefill_packet(void *dst, const void *src, int rows, int group, hipStr
     checked(hipGetLastError());
 }
 Mat feedforward(Ops &op, const std::string &p, Mat x, bool clip) {
-    if (!clip && op.gpu.tp_size == 1 && x.rows <= 16 && x.cols == 3072 &&
+    if (!clip && x.rows <= 16 && x.cols == 3072 &&
         p.ends_with(".shared_experts")) {
         auto projection = [&](const std::string &name) {
             const auto *w = op.gpu.model.find(name + ".trellis", op.rank);
@@ -741,11 +781,27 @@ Mat feedforward(Ops &op, const std::string &p, Mat x, bool clip) {
 static Mat prefill_moe(Ops &op, int layer, const std::string &p, Mat x, Mat latent, const Hy4Route *picks) {
     auto &gpu = op.gpu;
     int groups = gpu.tp_size == 1 ? gpu.ep_size : 1;
+    const int moe_groups = gpu.tp_size == 4 ? 4 : gpu.ep_size;
     unsigned active = 0;
     if (groups > 1)
         for (int owner : gpu.model.owners[layer - 1])
             active |= 1u << owner;
+    Mat shared{};
+    bool overlap_shared = gpu.tp_size > 1 && !op.capture;
+    if (overlap_shared) {
+        checked(hipEventSynchronize(gpu.local_done[op.rank]));
+        gpu.record_event(gpu.local_ready[op.rank], op.rank, op.stream);
+        checked(hipStreamWaitEvent(gpu.local_expert[op.rank], gpu.local_ready[op.rank], 0));
+        const size_t shared_ws = std::max(size_t(x.rows) * (80u << 10) + (8u << 20),
+                                          size_t(x.rows) * (200u << 10) + (1u << 20));
+        Region shared_region{static_cast<uint8_t *>(op.arena.next(shared_ws)), shared_ws};
+        Ops shared_op(gpu, op.rank, shared_region, gpu.local_expert[op.rank]);
+        shared = feedforward(shared_op, p + "shared_experts", x);
+        gpu.record_event(gpu.local_done[op.rank], op.rank, gpu.local_expert[op.rank]);
+    }
     Mat result = op.mat(x.rows, 1536);
+    float *result_f32 = gpu.tp_size > 1 ? static_cast<float *>(op.arena.next(size_t(x.rows) * 1536 * sizeof(float)))
+                                        : nullptr;
     auto mark = op.arena.cursor;
     for (int first = 0; first < x.rows; first += expert_tile_rows) {
         Mat tile = latent.row(first, std::min(expert_tile_rows, x.rows - first));
@@ -755,7 +811,7 @@ static Mat prefill_moe(Ops &op, int layer, const std::string &p, Mat x, Mat late
         auto choices = reinterpret_cast<PrefillRoutes *>(packet);
         auto copy = groups > 1 ? reinterpret_cast<uint4 *>(packet + choice_bytes) : nullptr;
         pack_prefill<<<tile.rows, 128, 0, op.stream>>>(tile, picks + first * 16, gpu.moe_owners[op.rank] + (layer - 1) * 512,
-                                                      gpu.ep_size, active & ~1u, choices, copy, gpu.moe_counts[op.rank]);
+                                                      moe_groups, active & ~1u, choices, copy, gpu.moe_counts[op.rank]);
         checked(hipGetLastError());
         std::array<Mat, 4> remote{};
         std::array<bool, 4> peer_result{};
@@ -780,7 +836,8 @@ static Mat prefill_moe(Ops &op, int layer, const std::string &p, Mat x, Mat late
         checked(hipSetDevice(gpu.physical[op.rank]));
         if (gpu.expert_begin[op.rank]) checked(hipEventRecord(gpu.expert_begin[op.rank], op.stream));
         Mat sum = result.row(first, tile.rows);
-        prefill_experts(op, layer, tile, choices, sum);
+        prefill_experts(op, layer, tile, choices, sum, false,
+                        result_f32 ? result_f32 + size_t(first) * 1536 : nullptr);
         if (gpu.expert_end[op.rank]) checked(hipEventRecord(gpu.expert_end[op.rank], op.stream));
         for (int r = 1; r < groups; ++r) {
             if (!(active & (1u << r))) continue;
@@ -816,10 +873,13 @@ static Mat prefill_moe(Ops &op, int layer, const std::string &p, Mat x, Mat late
         op.arena.cursor = mark;
     }
     if (gpu.tp_size > 1) {
-        gpu.tp_sum(result.p, op.rank, result.bytes());
-        gpu.ep_reduce(result.p, op.rank, result.bytes());
+        gpu.tp_sum_f32(result.p, result_f32, op.rank, result.bytes(), op.capture);
+        gpu.ep_reduce(result.p, op.rank, result.bytes(), op.capture);
     }
-    Mat shared = feedforward(op, p + "shared_experts", x);
+    if (overlap_shared)
+        checked(hipStreamWaitEvent(op.stream, gpu.local_done[op.rank], 0));
+    else
+        shared = feedforward(op, p + "shared_experts", x);
     return op.norm(op.add(shared, op.linear(p + "routed_expert_up_proj", result)), p + "combine_output_norm.weight");
 }
 

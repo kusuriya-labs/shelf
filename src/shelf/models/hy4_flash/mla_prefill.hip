@@ -330,20 +330,26 @@ __global__ void recall_scores(const _Float16 *input, const _Float16 *query, cons
         H8 a{};
         if (token >= 0)
             a = half_frag(input + size_t(token) * 512 + k + hi * 4);
-        H8 b = half_frag(query + (size_t(r) * heads + h) * 512 + k + hi * 4);
+        H8 b{};
+        if (h < heads)
+            b = half_frag(query + (size_t(r) * heads + h) * 512 + k + hi * 4);
         acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, acc);
     }
     for (int k = 0; k < 64; k += 16) {
         H8 a{};
         if (token >= 0)
             a = half_from_bf(rotary + size_t(token) * 64 + k + hi * 4);
-        H8 b = half_from_bf(q + (size_t(r) * heads + h) * 256 + 192 + k + hi * 4);
+        H8 b{};
+        if (h < heads)
+            b = half_from_bf(q + (size_t(r) * heads + h) * 256 + 192 + k + hi * 4);
         acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, acc);
     }
-    for (int j = 0; j < 8; ++j) {
-        int col = kb + hi * 8 + j;
-        scores[(size_t(r) * heads + h) * pitch + col] =
-            col < eff_stride && ids[r * stride + col] >= 0 ? round_bf16(acc[j]) * 0.0625f : -INFINITY;
+    if (h < heads) {
+        for (int j = 0; j < 8; ++j) {
+            int col = kb + hi * 8 + j;
+            scores[(size_t(r) * heads + h) * pitch + col] =
+                col < eff_stride && ids[r * stride + col] >= 0 ? round_bf16(acc[j]) * 0.0625f : -INFINITY;
+        }
     }
 }
 template <int HeadGroups>
@@ -430,11 +436,14 @@ __global__ void recall_values(const _Float16 *input, const uint16_t *probs, cons
             if (token >= 0)
                 a[j] = input[size_t(token) * 512 + cb + lo];
         }
-        H8 b = half_from_bf(probs + (size_t(r) * heads + h) * pitch + k + hi * 4);
+        H8 b{};
+        if (h < heads)
+            b = half_from_bf(probs + (size_t(r) * heads + h) * pitch + k + hi * 4);
         acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, acc);
     }
-    for (int j = 0; j < 8; ++j)
-        values[(size_t(r) * heads + h) * 512 + cb + hi * 8 + j] = static_cast<_Float16>(acc[j]);
+    if (h < heads)
+        for (int j = 0; j < 8; ++j)
+            values[(size_t(r) * heads + h) * 512 + cb + hi * 8 + j] = static_cast<_Float16>(acc[j]);
 }
 __global__ void project_value(const _Float16 *values, const _Float16 *w, const uint16_t *gate, int heads,
                               int rows, uint16_t *out, const int *block_map = nullptr, int block_rows = 1) {
@@ -530,7 +539,7 @@ __global__ void recall_fused_batch(const _Float16 *input, const _Float16 *query,
                                    const uint16_t *q, const int *ids, const int *row_positions, int heads,
                                    int stride, int pitch, float *scores, uint16_t *probs, _Float16 *values,
                                    const void *sinks, bool sink_fp32, bool sliding) {
-    __shared__ float parts[8];
+    __shared__ float parts[2][8];
     int r = blockIdx.y, head_base = blockIdx.x * 16;
     int eff_stride = sliding ? min(row_positions[r] + 1, 512) : row_positions[r] + 1;
     int lane = threadIdx.x % 32, lo = lane % 16, hi = lane / 16;
@@ -544,38 +553,43 @@ __global__ void recall_fused_batch(const _Float16 *input, const _Float16 *query,
             for (int k = 0; k < 512; k += 16) {
                 H8 a{};
                 if (token >= 0) a = half_frag(input + (size_t(r) * stride + token) * 512 + k + hi * 4);
-                H8 b = half_frag(query + (size_t(r) * heads + h) * 512 + k + hi * 4);
+                H8 b{};
+                if (h < heads) b = half_frag(query + (size_t(r) * heads + h) * 512 + k + hi * 4);
                 acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, acc);
             }
             for (int k = 0; k < 64; k += 16) {
                 H8 a{};
                 if (token >= 0) a = half_from_bf(rotary + (size_t(r) * stride + token) * 64 + k + hi * 4);
-                H8 b = half_from_bf(q + (size_t(r) * heads + h) * 256 + 192 + k + hi * 4);
+                H8 b{};
+                if (h < heads) b = half_from_bf(q + (size_t(r) * heads + h) * 256 + 192 + k + hi * 4);
                 acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, acc);
             }
-            for (int j = 0; j < 8; ++j) {
-                int col = kb + hi * 8 + j;
-                scores[(size_t(r) * heads + h) * pitch + col] =
-                    col < eff_stride && ids[r * stride + col] >= 0 ? round_bf16(acc[j]) * 0.0625f : -INFINITY;
+            if (h < heads) {
+                for (int j = 0; j < 8; ++j) {
+                    int col = kb + hi * 8 + j;
+                    scores[(size_t(r) * heads + h) * pitch + col] =
+                        col < eff_stride && ids[r * stride + col] >= 0 ? round_bf16(acc[j]) * 0.0625f : -INFINITY;
+                }
             }
         }
     }
     __syncthreads();
     int limit = (eff_stride + 15) / 16 * 16;
-    for (int head = head_base; head < head_base + 16; ++head) {
+    const int head_end = min(head_base + 16, heads);
+    for (int head = head_base; head < head_end; ++head) {
         size_t base = (size_t(r) * heads + head) * pitch;
         float sink = sink_fp32 ? static_cast<const float *>(sinks)[head]
                                : bf16_bits_to_f32(static_cast<const uint16_t *>(sinks)[head]);
         float peak = sink;
         for (int i = threadIdx.x; i < limit; i += 256) peak = fmaxf(peak, scores[base + i]);
-        peak = reduce<true>(peak, parts);
+        peak = reduce<true>(peak, parts[0]);
         float sum = threadIdx.x ? 0.f : expf(sink - peak);
         for (int i = threadIdx.x; i < limit; i += 256) {
             float e = expf(scores[base + i] - peak);
             scores[base + i] = e;
             sum += e;
         }
-        sum = reduce<false>(sum, parts);
+        sum = reduce<false>(sum, parts[1]);
         for (int i = threadIdx.x; i < limit; i += 256)
             probs[base + i] = f32_to_bf16_rne_device(scores[base + i] / sum);
         __syncthreads();
@@ -591,11 +605,13 @@ __global__ void recall_fused_batch(const _Float16 *input, const _Float16 *query,
                     int token = pos < eff_stride ? ids[r * stride + pos] : -1;
                     if (token >= 0) a[j] = input[(size_t(r) * stride + token) * 512 + cb + lo];
                 }
-                H8 b = half_from_bf(probs + (size_t(r) * heads + h) * pitch + k + hi * 4);
+                H8 b{};
+                if (h < heads) b = half_from_bf(probs + (size_t(r) * heads + h) * pitch + k + hi * 4);
                 acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, acc);
             }
-            for (int j = 0; j < 8; ++j)
-                values[(size_t(r) * heads + h) * 512 + cb + hi * 8 + j] = static_cast<_Float16>(acc[j]);
+            if (h < heads)
+                for (int j = 0; j < 8; ++j)
+                    values[(size_t(r) * heads + h) * 512 + cb + hi * 8 + j] = static_cast<_Float16>(acc[j]);
         }
     }
 }
@@ -628,25 +644,31 @@ __global__ void recall_scores_sparse(const _Float16 *input, const _Float16 *quer
         H8 a{};
         if (token >= 0)
             a = half_frag(lane_input + size_t(token) * 512 + k + hi * 4);
-        H8 b = half_frag(query + (size_t(r) * heads + h) * 512 + k + hi * 4);
+        H8 b{};
+        if (h < heads)
+            b = half_frag(query + (size_t(r) * heads + h) * 512 + k + hi * 4);
         acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, acc);
     }
     for (int k = 0; k < 64; k += 16) {
         H8 a{};
         if (token >= 0)
             a = half_from_bf(lane_rotary + size_t(token) * 64 + k + hi * 4);
-        H8 b = half_from_bf(q + (size_t(q_row) * heads + h) * 256 + 192 + k + hi * 4);
+        H8 b{};
+        if (h < heads)
+            b = half_from_bf(q + (size_t(q_row) * heads + h) * 256 + 192 + k + hi * 4);
         acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, acc);
     }
-    for (int j = 0; j < 8; ++j) {
-        int col = kb + hi * 8 + j;
-        scores[(size_t(r) * heads + h) * pitch + col] =
-            col < eff_stride && ids[r * stride + col] >= 0 ? round_bf16(acc[j]) * 0.0625f : -INFINITY;
+    if (h < heads) {
+        for (int j = 0; j < 8; ++j) {
+            int col = kb + hi * 8 + j;
+            scores[(size_t(r) * heads + h) * pitch + col] =
+                col < eff_stride && ids[r * stride + col] >= 0 ? round_bf16(acc[j]) * 0.0625f : -INFINITY;
+        }
     }
 }
 __global__ void normalize_sparse(float *scores, uint16_t *probs, const void *sinks, bool fp32, int pitch, int stride,
                                  const int *row_positions, int block_rows, bool draft) {
-    __shared__ float parts[8];
+    __shared__ float parts[2][8];
     int h = blockIdx.x, r = blockIdx.y, t = threadIdx.x;
     int limit = sparse_eff_stride(stride, block_rows, row_positions, r, draft);
     limit = (limit + 15) / 16 * 16;
@@ -656,14 +678,14 @@ __global__ void normalize_sparse(float *scores, uint16_t *probs, const void *sin
     float peak = sink;
     for (int i = t; i < limit; i += 256)
         peak = fmaxf(peak, scores[base + i]);
-    peak = reduce<true>(peak, parts);
+    peak = reduce<true>(peak, parts[0]);
     float sum = t ? 0.f : expf(sink - peak);
     for (int i = t; i < limit; i += 256) {
         float e = expf(scores[base + i] - peak);
         scores[base + i] = e;
         sum += e;
     }
-    sum = reduce<false>(sum, parts);
+    sum = reduce<false>(sum, parts[1]);
     for (int i = t; i < limit; i += 256)
         probs[base + i] = f32_to_bf16_rne_device(scores[base + i] / sum);
 }
@@ -685,11 +707,14 @@ __global__ void recall_values_sparse(const _Float16 *input, const uint16_t *prob
             if (token >= 0)
                 a[j] = lane_input[size_t(token) * 512 + cb + lo];
         }
-        H8 b = half_from_bf(probs + (size_t(r) * heads + h) * pitch + k + hi * 4);
+        H8 b{};
+        if (h < heads)
+            b = half_from_bf(probs + (size_t(r) * heads + h) * pitch + k + hi * 4);
         acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, acc);
     }
-    for (int j = 0; j < 8; ++j)
-        values[(size_t(r) * heads + h) * 512 + cb + hi * 8 + j] = static_cast<_Float16>(acc[j]);
+    if (h < heads)
+        for (int j = 0; j < 8; ++j)
+            values[(size_t(r) * heads + h) * 512 + cb + hi * 8 + j] = static_cast<_Float16>(acc[j]);
 }
 
 }
@@ -720,7 +745,7 @@ hipError_t shelf_hy4_mla_absorbed(const uint16_t *q, const void *folded, const u
             input, query, rotary, q, indices, heads, stride, pitch, scores, params, contiguous, sliding, row_offset,
             chunk_rows);
     else
-        recall_scores<<<dim3((pitch + 63) / 64, heads / 16, rows), 128, 0, stream>>>(
+        recall_scores<<<dim3((pitch + 63) / 64, (heads + 15) / 16, rows), 128, 0, stream>>>(
             input, query, rotary, q, indices, heads, stride, pitch, scores, params, contiguous, sliding, row_offset,
             chunk_rows);
     rc = hipGetLastError();
@@ -738,7 +763,7 @@ hipError_t shelf_hy4_mla_absorbed(const uint16_t *q, const void *folded, const u
         recall_values_tiled<2><<<dim3(2, 1, rows), 256, 0, stream>>>(
             input, probs, indices, heads, stride, pitch, values, params, contiguous, sliding, row_offset, chunk_rows);
     else
-        recall_values<<<dim3(8, heads / 16, rows), 128, 0, stream>>>(
+        recall_values<<<dim3(8, (heads + 15) / 16, rows), 128, 0, stream>>>(
             input, probs, indices, heads, stride, pitch, values, params, contiguous, sliding, row_offset, chunk_rows);
     rc = hipGetLastError();
     if (rc != hipSuccess)
@@ -767,7 +792,7 @@ hipError_t shelf_hy4_mla_absorbed_batch(const uint16_t *q, const void *folded, c
         project_query<<<dim3(8, rb, heads), 128, 0, stream>>>(q, w, query, rows, heads);
     auto rc = hipGetLastError();
     if (rc != hipSuccess) return rc;
-    recall_fused_batch<<<dim3(heads / 16, rows), 256, 0, stream>>>(
+    recall_fused_batch<<<dim3((heads + 15) / 16, rows), 256, 0, stream>>>(
         input, query, rotary, q, indices, row_positions, heads, stride, pitch, scores, probs, values,
         sinks, sink_fp32, sliding);
     rc = hipGetLastError();
@@ -793,7 +818,7 @@ hipError_t shelf_hy4_mla_absorbed_sparse_batch(const uint16_t *q, const void *fo
     project_query<<<dim3(8, rb, heads), 128, 0, stream>>>(q, w, query, rows, heads, block_map, block_rows);
     auto rc = hipGetLastError();
     if (rc != hipSuccess) return rc;
-    recall_scores_sparse<<<dim3((pitch + 63) / 64, heads / 16, rows), 128, 0, stream>>>(
+    recall_scores_sparse<<<dim3((pitch + 63) / 64, (heads + 15) / 16, rows), 128, 0, stream>>>(
         input, query, rotary, q, indices, heads, stride, id_stride, pitch, scores, row_positions, block_map,
         block_rows, draft);
     rc = hipGetLastError();
@@ -802,7 +827,7 @@ hipError_t shelf_hy4_mla_absorbed_sparse_batch(const uint16_t *q, const void *fo
                                                             row_positions, block_rows, draft);
     rc = hipGetLastError();
     if (rc != hipSuccess) return rc;
-    recall_values_sparse<<<dim3(8, heads / 16, rows), 128, 0, stream>>>(
+    recall_values_sparse<<<dim3(8, (heads + 15) / 16, rows), 128, 0, stream>>>(
         input, probs, indices, heads, stride, id_stride, pitch, values, row_positions, block_rows, draft);
     rc = hipGetLastError();
     if (rc != hipSuccess) return rc;

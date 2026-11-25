@@ -44,18 +44,33 @@ bool lm_head_tp_enabled(int ranks) {
     const char *env = std::getenv("SHELF_HY4_LM_HEAD_TP");
     return !env || !*env || std::string_view(env) != "0";
 }
-Split split_name(const std::string &base, bool split_lm_head) {
+Split split_name(const std::string &base, int tp, bool split_lm_head) {
     if (base == "lm_head")
         return split_lm_head ? Split::N : Split::None;
-    if (draft_name(base))
+    if (base.find(".mlp.shared_experts.") != std::string::npos)
         return Split::None;
+    if (draft_name(base)) {
+        if (base == "model.dfly_layers.mtp_fusion.eh_proj")
+            return Split::None;
+        if (base.ends_with(".self_attn.q_b_proj") || base.ends_with(".self_attn.kv_b_proj") ||
+            base.ends_with(".self_attn.linear_gate") || base.ends_with(".gate_proj") ||
+            base.ends_with(".up_proj"))
+            return Split::N;
+        if (base.ends_with(".self_attn.o_proj") || base.ends_with(".down_proj"))
+            return Split::K;
+        return Split::None;
+    }
     if (expert_name(base)) {
+        if (tp == 4)
+            return Split::None;
         if (base.ends_with(".down_proj"))
             return Split::K;
         if (base.ends_with(".gate_proj") || base.ends_with(".up_proj"))
             return Split::N;
         return Split::None;
     }
+    if (base == "lm_head")
+        return split_lm_head ? Split::N : Split::None;
     if (base.ends_with(".self_attn.q_b_proj") || base.ends_with(".self_attn.kv_b_proj") ||
         base.ends_with(".self_attn.linear_gate") || base.ends_with(".gate_proj") ||
         base.ends_with(".up_proj"))
@@ -218,11 +233,12 @@ Checkpoint::Checkpoint(const Path &model, const Path &engram, const Path &draft,
                        int ep_size, int tp_size)
     : owners(layout), has_draft(!draft.empty()), ep(ep_size), tp(tp_size), ranks(ep_size * tp_size) {
     require(ep >= 1 && tp >= 1 && ranks <= 4, "EP / TP の構成が不正です");
-    require(tp == 1 || (ep <= 2 && tp <= 2), "TP を使う場合は EP 2 × TP 2 までに対応します");
+    require(tp == 1 || tp == 2 || (tp == 4 && ep == 1), "TP は 1、2 または EP 1 × TP 4 に対応します");
     split_lm_head = lm_head_tp_enabled(ranks);
+    const int mg = moe_groups();
     for (const auto &row : owners)
         for (int owner : row)
-            require(owner >= 0 && owner < ep, "配置表の expert owner が EP 数を超えています");
+            require(owner >= 0 && owner < mg, "配置表の expert owner が EP 数を超えています");
     const auto cfg = read_json(model / "config.json");
     require(cfg.value("model_type", std::string{}) == "hy_v4_flash" && cfg.value("exl3_text_only", false) &&
                 cfg.at("num_hidden_layers") == 42 && cfg.at("hc_mult") == 4 &&
@@ -484,21 +500,26 @@ void Checkpoint::load(const Path &directory, bool draft) {
             const auto base = base_name(key);
             const bool lm_head_slice = split_lm_head && base == "lm_head";
             std::vector<int> targets;
+            const int mg = moe_groups();
             if (expert_name(base)) {
                 int layer = 0, e = 0;
                 require(sscanf(key.c_str(), "model.layers.%d.mlp.experts.%d.", &layer, &e) == 2 && layer >= 1 &&
                             layer <= 41 && e >= 0 && e < 512,
                         "expert 名が不正です");
                 int group = owners[layer - 1][e];
-                require(group >= 0 && group < ep, "expert の所有 group が不正です");
-                for (int t = 0; t < tp; ++t)
-                    targets.push_back(group * tp + t);
+                require(group >= 0 && group < mg, "expert の所有 group が不正です");
+                if (tp == 4) {
+                    targets.push_back(group);
+                } else {
+                    for (int t = 0; t < tp; ++t)
+                        targets.push_back(group * tp + t);
+                }
             } else {
                 for (int r = 0; r < ranks; ++r)
                     if (tp > 1 || lm_head_slice || r == 0)
                         targets.push_back(r);
             }
-            const Split split = split_name(base, split_lm_head);
+            const Split split = split_name(base, tp, split_lm_head);
             const bool quantized = shape.contains(base) || expert_name(base);
             const auto dims = shape.contains(base) ? shape.at(base)
                                                    : (expert_name(base) ? std::array<int, 2>{1536, 1536}
@@ -521,7 +542,7 @@ void Checkpoint::load(const Path &directory, bool draft) {
                     else if (split == Split::K)
                         logical[0] /= slice_parts;
                 }
-                if (split == Split::K)
+                if (tp > 1 && split == Split::K)
                     row_split[r].insert(base);
             }
         }

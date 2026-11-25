@@ -7,10 +7,10 @@ void collect(std::string &errors, hipError_t status) {
         errors += std::string(hipGetErrorString(status)) + "\n";
 }
 }
-void GraphCapture::begin(int rank) {
-    checked(hipSetDevice(gpu.physical[rank]));
-    checked(hipStreamBeginCapture(gpu.compute[rank], hipStreamCaptureModeThreadLocal));
-    active = rank;
+void GraphCapture::begin(int r) {
+    checked(hipSetDevice(gpu.physical[r]));
+    checked(hipStreamBeginCapture(gpu.compute[r], hipStreamCaptureModeThreadLocal));
+    active = r;
 }
 
 void GraphCapture::finish(hipGraphExec_t &exec) {
@@ -21,6 +21,14 @@ void GraphCapture::finish(hipGraphExec_t &exec) {
     status = hipGraphInstantiate(&exec, graph, nullptr, nullptr, 0);
     checked(hipGraphDestroy(graph));
     checked(status);
+}
+
+void GraphCapture::step(uint8_t sync_mode) {
+    hipGraphExec_t exec{};
+    finish(exec);
+    plan.tp_captured[rank].push_back(exec);
+    plan.tp_modes[rank].push_back(sync_mode);
+    begin(rank);
 }
 
 void GraphCapture::cancel(std::string &errors) {
@@ -36,7 +44,85 @@ void GraphCapture::cancel(std::string &errors) {
         collect(errors, status);
 }
 
+void GraphPlan::finalize_tp() {
+    const size_t steps = tp_captured[0].size();
+    tp_steps.resize(steps);
+    for (size_t s = 0; s < steps; ++s) {
+        tp_steps[s].group_mode = tp_modes[0][s];
+        for (int r = 0; r < tp_ranks; ++r) {
+            tp_steps[s].exec[r] = tp_captured[r][s];
+            tp_captured[r][s] = nullptr;
+        }
+    }
+    for (int r = 0; r < 4; ++r) {
+        tp_captured[r].clear();
+        tp_modes[r].clear();
+    }
+}
+
 void GraphPlan::launch(Residency &gpu) {
+    if (!tp_steps.empty()) {
+        if (!events_ready) {
+            for (int slot = 0; slot < 2; ++slot) {
+                if (!replay_done[slot])
+                    gpu.create_event(replay_done[slot], 0);
+                for (int r = 0; r < tp_ranks; ++r) {
+                    if (!tp_rank_done[slot][r])
+                        gpu.create_event(tp_rank_done[slot][r], r);
+                    for (auto &step : tp_steps)
+                        if (!step.done[slot][r])
+                            gpu.create_event(step.done[slot][r], r);
+                }
+            }
+            checked(hipSetDevice(gpu.physical[0]));
+            events_ready = true;
+        }
+        unsigned slot = replay_slot;
+        if (replay_recorded[slot]) {
+            auto status = hipEventQuery(replay_done[slot]);
+            if (status == hipErrorNotReady)
+                checked(hipEventSynchronize(replay_done[slot]));
+            else
+                checked(status);
+        }
+        if (replay_recorded[slot ^ 1]) {
+            for (int r = 0; r < tp_ranks; ++r) {
+                checked(hipSetDevice(gpu.physical[r]));
+                checked(hipStreamWaitEvent(gpu.compute[r], replay_done[slot ^ 1], 0));
+            }
+        }
+        for (size_t s = 0; s < tp_steps.size(); ++s) {
+            if (s > 0) {
+                const uint8_t mode = tp_steps[s - 1].group_mode;
+                for (int r = 0; r < tp_ranks; ++r) {
+                    checked(hipSetDevice(gpu.physical[r]));
+                    for (int p = 0; p < tp_ranks; ++p) {
+                        if (p == r)
+                            continue;
+                        const bool same = mode == 2 || (mode == 0 ? (p / gpu.tp_size == r / gpu.tp_size)
+                                                                  : (p % gpu.tp_size == r % gpu.tp_size));
+                        if (same)
+                            checked(hipStreamWaitEvent(gpu.compute[r], tp_steps[s - 1].done[slot][p], 0));
+                    }
+                }
+            }
+            for (int r = 0; r < tp_ranks; ++r) {
+                checked(hipSetDevice(gpu.physical[r]));
+                checked(hipGraphLaunch(tp_steps[s].exec[r], gpu.compute[r]));
+                if (s + 1 < tp_steps.size())
+                    gpu.record_event(tp_steps[s].done[slot][r], r);
+                else
+                    gpu.record_event(tp_rank_done[slot][r], r);
+            }
+        }
+        checked(hipSetDevice(gpu.physical[0]));
+        for (int r = 1; r < tp_ranks; ++r)
+            checked(hipStreamWaitEvent(gpu.compute[0], tp_rank_done[slot][r], 0));
+        gpu.record_event(replay_done[slot], 0);
+        replay_recorded[slot] = true;
+        replay_slot ^= 1;
+        return;
+    }
     auto root = gpu.compute[0];
     const bool has_layers = layers.front().scatter != nullptr;
     if (!has_layers && head_steps.empty()) {
@@ -47,7 +133,7 @@ void GraphPlan::launch(Residency &gpu) {
         for (int slot = 0; slot < 2; ++slot) {
             checked(hipSetDevice(gpu.physical[0]));
             if (!replay_done[slot])
-                checked(hipEventCreateWithFlags(&replay_done[slot], hipEventDisableTiming));
+                gpu.create_event(replay_done[slot], 0, hipEventDisableTiming);
             if (has_layers) {
                 for (auto &layer : layers) {
                     if (!layer.scatter_done[slot])
@@ -121,7 +207,7 @@ void GraphPlan::launch(Residency &gpu) {
             checked(hipStreamWaitEvent(root, step.rank_done[slot][r], 0));
     }
     checked(hipGraphLaunch(tail, root));
-    checked(hipEventRecord(replay_done[slot], root));
+    gpu.record_event(replay_done[slot], 0);
     replay_recorded[slot] = true;
     replay_slot ^= 1;
 }
@@ -133,14 +219,25 @@ void GraphPlan::release(Residency &gpu, std::string &errors) {
             exec = nullptr;
         }
     };
-    auto destroy_event = [&](hipEvent_t &event) {
+    auto destroy_event = [&](auto &event) {
         if (event) {
             collect(errors, hipEventDestroy(event));
-            event = nullptr;
+            event = {};
         }
     };
     for (int r = gpu.ranks - 1; r >= 0; --r) {
         collect(errors, hipSetDevice(gpu.physical[r]));
+        for (auto &step : tp_steps) {
+            destroy(step.exec[r]);
+            for (int slot = 0; slot < 2; ++slot)
+                destroy_event(step.done[slot][r]);
+        }
+        for (auto &exec : tp_captured[r])
+            destroy(exec);
+        tp_captured[r].clear();
+        tp_modes[r].clear();
+        for (int slot = 0; slot < 2; ++slot)
+            destroy_event(tp_rank_done[slot][r]);
         for (auto &layer : layers) {
             destroy(layer.expert[r]);
             for (int slot = 0; slot < 2; ++slot) {
@@ -172,6 +269,12 @@ void GraphPlan::release(Residency &gpu, std::string &errors) {
         }
     }
     head_steps.clear();
+    tp_steps.clear();
+    tp_logits.fill(nullptr);
+    tp_tokens.fill(nullptr);
+    tp_hidden.fill(nullptr);
+    tp_cursor.fill(0);
+    tp_ranks = 0;
     key = {};
     logits = nullptr;
     tokens = nullptr;

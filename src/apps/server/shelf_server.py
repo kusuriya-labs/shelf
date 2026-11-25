@@ -583,7 +583,7 @@ def parse_args(argv=None):
                         help="comma separated GPU devices, one per rank; "
                              "count must match pipeline_parallel * expert_parallel * "
                              "tensor_parallel (default 0)")
-    parser.add_argument("--tensor-parallel", type=int, default=1, choices=(1, 2),
+    parser.add_argument("--tensor-parallel", type=int, default=1, choices=(1, 2, 4),
                         help="tensor parallel size forwarded to compute (default 1)")
     parser.add_argument("--expert-parallel", type=int, default=1, choices=(1, 2, 3, 4),
                         help="expert parallel size forwarded to compute (default 1)")

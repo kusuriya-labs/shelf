@@ -32,7 +32,7 @@ def routing_counts(work):
     return layers
 
 
-def assign(capacity, speed, counts, base=None, expert_bytes=EXPERT_BYTES, balance_experts=False):
+def assign(capacity, speed, counts, base=None, expert_bytes=EXPERT_BYTES, balance_experts=False, rank0_weight=9):
     if not 1 <= len(capacity) <= 4 or min(capacity) < 0 or len(speed) != len(capacity) or min(speed) <= 0:
         raise ValueError("1〜4 rank の空き容量と帯域が必要です")
     base = base if base is not None else [0] * len(capacity)
@@ -44,7 +44,7 @@ def assign(capacity, speed, counts, base=None, expert_bytes=EXPERT_BYTES, balanc
         if sum(slots) < total:
             raise MemoryError(f"expert 用の枠が不足しています: {sum(slots)} / {total}")
         quota = [0] * len(capacity)
-        quota_weights = [9 * speed[0], *(10 * value for value in speed[1:])]
+        quota_weights = [rank0_weight * speed[0], *(10 * value for value in speed[1:])]
         for _ in range(total):
             rank = min((r for r in range(len(capacity)) if quota[r] < slots[r]),
                        key=lambda r: (quota[r] + 1) / quota_weights[r] if balance_experts
@@ -80,7 +80,7 @@ def assign(capacity, speed, counts, base=None, expert_bytes=EXPERT_BYTES, balanc
     cap_left = list(capacity)
     used_bytes = [0] * len(capacity)
     used_counts = [0] * len(capacity)
-    quota_weights = [9 * speed[0], *(10 * value for value in speed[1:])]
+    quota_weights = [rank0_weight * speed[0], *(10 * value for value in speed[1:])]
     limits = [{} for _ in range(len(counts))]
     items = sorted(((sizes[layer][expert], layer) for layer in range(len(counts)) for expert in range(512)),
                    key=lambda item: (-item[0], item[1]))
@@ -113,6 +113,51 @@ def assign(capacity, speed, counts, base=None, expert_bytes=EXPERT_BYTES, balanc
             layer_limits[sz][rank] -= 1
         result.append(assigned)
     return result
+
+
+def is_tp_split_tensor(name):
+    base = name
+    for suffix in (".suh", ".svh", ".trellis"):
+        if base.endswith(suffix):
+            base = base[:-len(suffix)]
+            break
+    if ".mlp.experts." in base or ".mlp.shared_experts." in base or base.endswith("mtp_fusion.eh_proj"):
+        return False
+    if (base.endswith(".self_attn.q_b_proj") or base.endswith(".self_attn.kv_b_proj") or
+            base.endswith(".self_attn.linear_gate") or base.endswith(".self_attn.o_proj") or
+            base.endswith(".gate_proj") or base.endswith(".up_proj") or base.endswith(".down_proj")):
+        return True
+    return False
+
+
+def split_checkpoint_sizes(directory):
+    import struct
+
+    index_path = directory / "model.safetensors.index.json"
+    if not index_path.is_file():
+        return None, None
+    index = json.loads(index_path.read_bytes())["weight_map"]
+    tp_split = 0
+    replicated = 0
+    for shard in set(index.values()):
+        with (directory / shard).open("rb") as f:
+            header = json.loads(f.read(struct.unpack("<Q", f.read(8))[0]))
+        for name, spec in header.items():
+            if name == "__metadata__" or name not in index:
+                continue
+            if name.startswith("lm_head."):
+                continue
+            if name.endswith((".mul1", ".lookup_table", ".multi_head_embedding.embedding.weight",
+                              ".multi_head_embedding.embedding.weight.scale")):
+                continue
+            if ".mlp.experts." in name:
+                continue
+            size = (spec["data_offsets"][1] - spec["data_offsets"][0] + 15) & ~15
+            if is_tp_split_tensor(name):
+                tp_split += size
+            else:
+                replicated += size
+    return tp_split, replicated
 
 
 def checkpoint_sizes(directory):
@@ -180,10 +225,15 @@ def main():
     args = p.parse_args()
     if not 0 < args.tokens <= 2097152:
         raise ValueError("KV の予約長が範囲外です")
-    if not 1 <= args.tensor_parallel <= 4:
+    if args.tensor_parallel not in (1, 2, 4):
         raise ValueError("TP の値が範囲外です")
-    if not 1 <= args.max_concurrent_requests <= 32 or (args.tensor_parallel > 1 and args.max_concurrent_requests != 1):
-        raise ValueError("スロット数は TP=1 で 1〜32、TP 実行では 1 です")
+    if args.tensor_parallel == 4 and len(args.capacity) != 4:
+        raise ValueError("TP=4 では 4 GPU 分の容量指定が必要です")
+    if args.tensor_parallel == 2 and len(args.capacity) * 2 > 4:
+        raise ValueError("EP × TP が 4 を超えています")
+    max_slots = 32 if args.tensor_parallel == 1 else 16
+    if not 1 <= args.max_concurrent_requests <= max_slots:
+        raise ValueError("スロット数は TP=1 で 1〜32、TP>1 で 1〜16 です")
     if args.workspace is None:
         args.workspace = [1] * len(args.capacity) if args.tensor_parallel > 1 else [2] + [0.5] * (len(args.capacity) - 1)
     if len(args.workspace) != len(args.capacity):
@@ -200,14 +250,15 @@ def main():
     folded = sum(meta["original_shape"][1] * 512 * 2 for name, meta in storage.items()
                  if name.endswith(".self_attn.kv_b_proj.weight"))
     matrix_bytes = 41 * 512 * 3 * 40
+    tp_div = 1 if args.tensor_parallel in (1, 4) else args.tensor_parallel
     unique_sizes = set(experts.values())
     if len(unique_sizes) == 1:
-        expert_arg = next(iter(unique_sizes)) // args.tensor_parallel
+        expert_arg = next(iter(unique_sizes)) // tp_div
         per_layer_sizes = None
     else:
-        per_layer_sizes = [[experts[(layer + 1, e)] // args.tensor_parallel for e in range(512)] for layer in range(41)]
+        per_layer_sizes = [[experts[(layer + 1, e)] // tp_div for e in range(512)] for layer in range(41)]
         expert_arg = per_layer_sizes
-    graph_bytes = GRAPH_HEADROOM if args.tensor_parallel == 1 else 0
+    graph_bytes = GRAPH_HEADROOM
     base = [int(w * GIB) + matrix_bytes + graph_bytes for w in args.workspace]
     routing_bytes = 41 * 512 * 4 + 256
     physical_ranks = len(args.capacity) * args.tensor_parallel
@@ -222,18 +273,22 @@ def main():
     lm_per_rank = lm_split_bytes // physical_ranks if lm_split_bytes else lm_bytes
     fixed_body = fixed - lm_split_bytes
     if args.tensor_parallel > 1:
-        collective_bytes = 1024 * (3072 + (1536 if len(args.capacity) > 1 else 0)) * 2
-        local = (
-            routing_bytes
-            + collective_bytes
-            + fixed_body // args.tensor_parallel
-            + draft
-            + kv
-            + indexer
-            + folded // args.tensor_parallel
-        )
+        tp_split, replicated = split_checkpoint_sizes(args.model)
+        if tp_split is None:
+            tp_split, replicated = fixed_body, 0
+        if args.draft:
+            d_tp, d_rep = split_checkpoint_sizes(args.draft)
+            if d_tp is None:
+                d_tp, d_rep = draft, 0
+        else:
+            d_tp, d_rep = 0, 0
+        collective_bytes = 4096 * 3072 * 2 + (4096 * 1536 * 2 if args.tensor_parallel == 2 and len(args.capacity) > 1 else 0)
+        local = (routing_bytes + collective_bytes + replicated + tp_split // args.tensor_parallel +
+                 d_rep + d_tp // args.tensor_parallel + kv + indexer + folded // args.tensor_parallel)
         if lm_split_bytes:
             local += lm_per_rank + lm_buf_bytes + 2 * (2 << 20)
+        else:
+            local += lm_bytes
         base = [value + local for value in base]
     else:
         base[0] += routing_bytes + fixed_body + draft + kv + indexer + folded
@@ -243,7 +298,9 @@ def main():
     capacities = [int(c * GIB) - used - int(args.safety_gib * GIB)
                   for c, used in zip(args.capacity, base)]
     balance = args.max_concurrent_requests > 1 if args.balance_experts is None else args.balance_experts
-    owners = assign(capacities, [1] * len(capacities), routing_counts(args.work), base, expert_arg, balance)
+    rank0_weight = 10 if args.tensor_parallel == 4 else 9
+    owners = assign(capacities, [1] * len(capacities), routing_counts(args.work), base, expert_arg, balance,
+                    rank0_weight=rank0_weight)
     rank_experts = [sum(row.count(r) for row in owners) for r in range(len(capacities))]
     if per_layer_sizes is None:
         rank_expert_bytes = [count * expert_arg for count in rank_experts]

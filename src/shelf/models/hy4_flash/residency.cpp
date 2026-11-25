@@ -65,7 +65,8 @@ Residency::Residency(Checkpoint &model, size_t tokens, int slots, size_t kv_pool
     const char *draft = std::getenv("SHELF_HY4_BATCH_DFLY");
     batch_draft = slots > 1 && model.has_draft && (!draft || std::string_view(draft) != "0");
     if (batch_draft)
-        sparse_last.resize(slots);
+        for (auto &v : sparse_last)
+            v.resize(slots);
     ep_size = model.ep;
     tp_size = model.tp;
     for (int r = 0; r < model.ranks; ++r)
@@ -83,8 +84,11 @@ Residency::~Residency() noexcept {
     }
 }
 Status Residency::check_batch_topology(int tp_size, int slots) {
-    if (tp_size > 1 && slots > 1)
-        return Status::unsupported("TP の同時リクエスト数は 1 です", __FILE__, __LINE__);
+    if (tp_size != 1 && tp_size != 2 && tp_size != 4)
+        return Status::unsupported("TP の値は 1、2 または 4 です", __FILE__, __LINE__);
+    const int max_allowed = tp_size == 1 ? 32 : 16;
+    if (slots < 1 || slots > max_allowed)
+        return Status::unsupported("同時リクエスト数は TP=1 で 1〜32、TP>1 で 1〜16 です", __FILE__, __LINE__);
     return Status::make_ok();
 }
 Status Residency::reserve() {
@@ -101,7 +105,6 @@ Status Residency::reserve() {
     lm_head_tp = model.split_lm_head;
     lm_host_fallback = false;
     lm_parity = 0;
-    lm_recorded = {};
     lm_ready_rec = {};
     lm_done_rec = {};
     lm_arrived_rec = {};
@@ -119,9 +122,10 @@ Status Residency::reserve() {
     std::array<size_t, 4> available{}, base_overhead{}, overhead{};
     std::array<int64_t, 4> remaining{};
     std::array<int, 4> used{};
+    const int mg = model.moe_groups();
     for (const auto &row : model.owners)
         for (int r : row) {
-            if (r < 0 || r >= ep_size)
+            if (r < 0 || r >= mg)
                 throw std::runtime_error("配置表の group が EP 数を超えています");
             ++used[r];
         }
@@ -170,9 +174,11 @@ Status Residency::reserve() {
             return Status::unsupported("要求された配置と予約長は GPU の空き容量に収まりません", __FILE__, __LINE__);
     } else {
         const size_t max_useful = size_t(max_slots) * kv_page_stride;
-        const size_t fit_with_graph = (tp_size == 1 && min_attention_budget > int64_t(graph_headroom))
-                                          ? size_t(min_attention_budget - int64_t(graph_headroom)) / per_page_bytes
-                                          : 0;
+        const size_t fit_with_graph =
+            ((tp_size == 1 || tp_size == 2 || (tp_size == 4 && ep_size == 1)) &&
+             min_attention_budget > int64_t(graph_headroom))
+                ? size_t(min_attention_budget - int64_t(graph_headroom)) / per_page_bytes
+                : 0;
         const size_t fit_no_graph = size_t(min_attention_budget) / per_page_bytes;
         const size_t min_required = max_slots == 1 ? kv_page_stride : std::min(kv_page_stride, max_useful);
         if (fit_with_graph >= min_required)
@@ -189,8 +195,9 @@ Status Residency::reserve() {
     }
     if (*std::min_element(remaining.begin(), remaining.begin() + ranks) < 0)
         return Status::unsupported("要求された配置と予約長は GPU の空き容量に収まりません", __FILE__, __LINE__);
-    graph_room = tp_size == 1 && std::all_of(remaining.begin(), remaining.begin() + ranks,
-                                            [](int64_t bytes) { return bytes >= int64_t(graph_headroom); });
+    graph_room = (tp_size == 1 || tp_size == 2 || (tp_size == 4 && ep_size == 1)) &&
+                 std::all_of(remaining.begin(), remaining.begin() + ranks,
+                             [](int64_t bytes) { return bytes >= int64_t(graph_headroom); });
     fprintf(stderr, "rank_counts=%d,%d,%d,%d kv_pages=%zu kv_page_tokens=%zu\n", used[0], used[1], used[2], used[3],
             kv_pages_total, kv_page_tokens);
     for (int r = 0; r < ranks; ++r) {
@@ -255,9 +262,11 @@ Status Residency::reserve() {
             tp_barrier[g] = std::make_unique<SyncBarrier>(tp_size);
     if (tp_size > 1 && ep_size > 1)
         for (int t = 0; t < tp_size; ++t)
-            ep_barrier[t] = std::make_unique<SyncBarrier>(2);
-    if (tp_size > 1)
+            ep_barrier[t] = std::make_unique<SyncBarrier>(ep_size);
+    if (tp_size > 1) {
         all_barrier = std::make_unique<SyncBarrier>(ranks);
+        capture_barrier = std::make_unique<SyncBarrier>(ranks);
+    }
     kv_page_refs.assign(kv_pages_total, 0);
     kv_free_pages.resize(kv_pages_total);
     for (size_t i = 0; i < kv_pages_total; ++i)
@@ -354,8 +363,8 @@ void Residency::reserve_experts(int r, Region &buffer) {
     moe_counts[r] = static_cast<uint64_t *>(buffer.next(12 * sizeof(uint64_t)));
     check(hipMemset(moe_counts[r], 0, 12 * sizeof(uint64_t)));
     check(hipStreamCreateWithFlags(&local_expert[r], hipStreamNonBlocking));
-    check(hipEventCreateWithFlags(&local_ready[r], hipEventDisableTiming));
-    check(hipEventCreateWithFlags(&local_done[r], hipEventDisableTiming));
+    create_event(local_ready[r], r, hipEventDisableTiming);
+    create_event(local_done[r], r, hipEventDisableTiming);
 }
 
 void Residency::collect_route_counts(int rank) {
@@ -364,7 +373,7 @@ void Residency::collect_route_counts(int rank) {
     check(hipMemsetAsync(moe_counts[rank], 0, sizeof(totals), compute[rank]));
     check(hipStreamSynchronize(compute[rank]));
     if (tp_size > 1)
-        routed_rows[rank] += totals[rank / tp_size];
+        routed_rows[rank] += totals[moe_group(rank)];
     else
         for (int r = 0; r < ep_size; ++r) {
             routed_rows[r] += totals[r];
@@ -375,7 +384,7 @@ void Residency::collect_route_counts(int rank) {
 
 void Residency::upload_experts(int r, int layer) {
     std::vector<Hy4ExpertProjection> table(512 * 3);
-    const int group = r / tp_size;
+    const int group = moe_group(r);
     for (int e = 0; e < 512; ++e)
         if (model.owners[layer - 1][e] == group) {
             std::string key =
@@ -559,7 +568,7 @@ void Residency::upload() {
         }
         if (tp_size > 1) {
             for (int p = 0; p < 2; ++p) {
-                for (auto events : {&tp_ready, &tp_done, &tp_arrived, &tp_consumed})
+                for (auto events : {&tp_ready, &tp_done, &tp_arrived, &tp_consumed, &tp_ag_done})
                     create_event((*events)[r][p], r);
                 if (ep_size > 1)
                     for (auto events : {&ep_ready, &ep_done, &ep_arrived, &ep_consumed})
@@ -606,15 +615,20 @@ void Residency::upload() {
     }
     check(hipSetDevice(physical[0]));
 }
-void Residency::create_event(RankEvent &event, int rank) {
+void Residency::create_event(RankEvent &event, int rank, unsigned flags) {
     check(hipSetDevice(physical[rank]));
-    check(hipEventCreateWithFlags(&event.handle, hipEventDisableTiming | hipEventReleaseToSystem));
+    check(hipEventCreateWithFlags(&event.handle, flags));
     event.owner = rank;
 }
 void Residency::record_event(const RankEvent &event, int rank) const {
     if (event.owner != rank)
         throw std::logic_error("event と記録先 stream の所有 rank が一致しません");
     check(hipEventRecord(event.handle, compute[rank]));
+}
+void Residency::record_event(const RankEvent &event, int rank, hipStream_t stream) const {
+    if (event.owner != rank || (stream != compute[rank] && stream != local_expert[rank]))
+        throw std::logic_error("event と記録先 stream の所有 rank が一致しません");
+    check(hipEventRecord(event.handle, stream));
 }
 void Residency::sync_record(const RankEvent &event, bool &recorded, int rank) const {
     if (recorded)
@@ -680,34 +694,301 @@ void Residency::reset_collectives() {
     for (auto &barrier : tp_barrier) if (barrier) barrier->reset();
     for (auto &barrier : ep_barrier) if (barrier) barrier->reset();
 }
-void Residency::tp_sum(void *data, int rank, size_t bytes) {
-    if (tp_size > 1) reduce_pair(data, rank, bytes, false);
+void Residency::tp_sum(void *data, int rank, size_t bytes, GraphCapture *capture) {
+    if (tp_size == 4)
+        reduce_tp4(data, rank, bytes, capture);
+    else if (tp_size > 1)
+        reduce_pair(data, rank, bytes, false, capture);
 }
-void Residency::ep_reduce(void *data, int rank, size_t bytes) {
-    if (ep_size > 1) reduce_pair(data, rank, bytes, true);
+void Residency::tp_sum_f32(void *dst_bf16, const float *src_f32, int rank, size_t bf16_bytes, GraphCapture *capture) {
+    if (tp_size <= 1)
+        return;
+    const size_t max_bf16 = (tp_prefill_rows * 3072u * 2u) / 2u;
+    for (size_t off = 0; off < bf16_bytes; off += max_bf16) {
+        size_t chunk = std::min(max_bf16, bf16_bytes - off);
+        auto *dst = static_cast<uint8_t *>(dst_bf16) + off;
+        const float *src = src_f32 + off / 2u;
+        if (tp_size == 4)
+            reduce_tp4(dst, rank, chunk, capture, src);
+        else
+            reduce_pair(dst, rank, chunk, false, capture, src);
+    }
 }
-void Residency::reduce_pair(void *data, int rank, size_t bytes, bool ep) {
+void Residency::ep_reduce(void *data, int rank, size_t bytes, GraphCapture *capture) {
+    if (ep_size > 1)
+        reduce_pair(data, rank, bytes, true, capture);
+}
+void Residency::reduce_tp4(void *data, int rank, size_t bytes, GraphCapture *capture, const float *f32_src) {
+    const size_t src_bytes = f32_src ? bytes * 2u : bytes;
+    const size_t elem_size = f32_src ? sizeof(float) : sizeof(uint16_t);
+    auto slot_2m = [&](int dst, int src, int parity_idx) -> uint8_t * {
+        int idx = src < dst ? src : src - 1;
+        return static_cast<uint8_t *>(tp_recv[dst]) + (size_t(parity_idx) * 3 + idx) * (2u << 20);
+    };
+    auto sum4 = [&](void *dst_ptr, const void *s0, const void *s1, const void *s2, const void *s3, size_t chunk_src) {
+        if (f32_src)
+            tp_sum_f32_to_bf16_4(dst_ptr, static_cast<const float *>(s0), static_cast<const float *>(s1),
+                                 static_cast<const float *>(s2), static_cast<const float *>(s3), chunk_src / 4u,
+                                 compute[rank]);
+        else
+            tp_sum_bf16_4(dst_ptr, s0, s1, s2, s3, chunk_src, compute[rank]);
+    };
+    if (capture) {
+        if (src_bytes > (2u << 20))
+            throw std::runtime_error("Graph capture の転送サイズが大きすぎます");
+        const int buf_slot = int(capture->plan.tp_captured[rank].size() & 1u);
+        tp_ptr[rank] = data;
+        tp_src_ptr[rank] = f32_src ? static_cast<const void *>(f32_src) : data;
+        tp_bytes[rank] = src_bytes;
+        tp_barrier[0]->arrive_and_wait();
+        const bool mismatch = tp_bytes[rank] != tp_bytes[0];
+        tp_barrier[0]->arrive_and_wait();
+        if (mismatch)
+            throw std::runtime_error("collective の転送サイズが一致しません");
+        for (int dst = 0; dst < 4; ++dst)
+            if (dst != rank)
+                peer_copy(slot_2m(dst, rank, buf_slot), tp_src_ptr[rank], src_bytes, compute[rank]);
+        capture->step(0);
+        const void *srcs[4]{};
+        for (int k = 0; k < 4; ++k)
+            srcs[k] = k == rank ? tp_src_ptr[rank] : slot_2m(rank, k, buf_slot);
+        sum4(tp_ptr[rank], srcs[0], srcs[1], srcs[2], srcs[3], src_bytes);
+        return;
+    }
+    const int p = tp_parity[rank];
+    check(hipSetDevice(physical[rank]));
+    if (tp_recorded[rank][p])
+        check(hipEventSynchronize(tp_consumed[rank][p]));
+    tp_ptr[rank] = data;
+    tp_src_ptr[rank] = f32_src ? static_cast<const void *>(f32_src) : data;
+    tp_bytes[rank] = src_bytes;
+    record_event(tp_ready[rank][p], rank);
+    tp_barrier[0]->arrive_and_wait();
+    if (tp_bytes[rank] != tp_bytes[0] || src_bytes > tp_prefill_rows * 3072u * 2u)
+        throw std::runtime_error("collective の転送サイズが一致しません");
+    if (src_bytes <= (2u << 20)) {
+        bool need_stage = false;
+        for (int dst = 0; dst < 4; ++dst) {
+            if (dst == rank)
+                continue;
+            if (push && peer[rank][dst]) {
+                if (tp_recorded[dst][p])
+                    check(hipStreamWaitEvent(compute[rank], tp_consumed[dst][p], 0));
+                peer_copy(slot_2m(dst, rank, p), tp_src_ptr[rank], src_bytes, compute[rank]);
+            } else if (push || !peer[dst][rank]) {
+                need_stage = true;
+            }
+        }
+        if (need_stage) {
+            for (int dst = 0; dst < 4; ++dst)
+                if (dst != rank && tp_recorded[dst][p ^ 1])
+                    check(hipStreamWaitEvent(compute[rank], tp_consumed[dst][p ^ 1], 0));
+            check(hipMemcpyAsync(reduce_staging[rank], tp_src_ptr[rank], src_bytes, hipMemcpyDeviceToHost,
+                                 compute[rank]));
+        }
+        record_event(tp_done[rank][p], rank);
+        tp_barrier[0]->arrive_and_wait();
+        const void *srcs[4]{};
+        srcs[rank] = tp_src_ptr[rank];
+        for (int src = 0; src < 4; ++src) {
+            if (src == rank)
+                continue;
+            auto mode = select_reduce_transport(push, peer[src][rank], peer[rank][src]);
+            uint8_t *dst_slot = slot_2m(rank, src, p);
+            srcs[src] = dst_slot;
+            if (mode == ReduceTransport::push) {
+                check(hipStreamWaitEvent(compute[rank], tp_done[src][p], 0));
+            } else if (mode == ReduceTransport::peer) {
+                check(hipStreamWaitEvent(compute[rank], tp_ready[src][p], 0));
+                peer_copy(dst_slot, tp_src_ptr[src], src_bytes, compute[rank]);
+            } else {
+                check(hipStreamWaitEvent(compute[rank], tp_done[src][p], 0));
+                check(hipMemcpyAsync(dst_slot, reduce_staging[src], src_bytes, hipMemcpyHostToDevice, compute[rank]));
+            }
+        }
+        if (!push) {
+            record_event(tp_arrived[rank][p], rank);
+            tp_barrier[0]->arrive_and_wait();
+            for (int dst = 0; dst < 4; ++dst)
+                if (dst != rank && peer[dst][rank])
+                    check(hipStreamWaitEvent(compute[rank], tp_arrived[dst][p], 0));
+        }
+        sum4(tp_ptr[rank], srcs[0], srcs[1], srcs[2], srcs[3], src_bytes);
+        record_event(tp_consumed[rank][p], rank);
+        tp_recorded[rank][p] = true;
+        tp_parity[rank] ^= 1;
+        tp_barrier[0]->arrive_and_wait();
+        return;
+    }
+    const size_t count = bytes / 2;
+    const size_t chunk_elems = ((count + 3) / 4 + 7) & ~size_t(7);
+    std::array<size_t, 4> src_off{}, src_len{}, dst_off{}, dst_len{};
+    for (int q = 0; q < 4; ++q) {
+        size_t first_elem = std::min(size_t(q) * chunk_elems, count);
+        size_t elem_len = std::min(chunk_elems, count - first_elem);
+        src_off[q] = first_elem * elem_size;
+        src_len[q] = elem_len * elem_size;
+        dst_off[q] = first_elem * 2u;
+        dst_len[q] = elem_len * 2u;
+    }
+    const size_t slot_stride = (tp_prefill_rows * 3072u * 2u) / 4;
+    auto slot_slice = [&](int dst, int src) -> uint8_t * {
+        int idx = src < dst ? src : src - 1;
+        return static_cast<uint8_t *>(tp_recv[dst]) + size_t(idx) * slot_stride;
+    };
+    bool need_stage_p1 = false;
+    for (int dst = 0; dst < 4; ++dst) {
+        if (dst == rank)
+            continue;
+        if (push && peer[rank][dst]) {
+            if (tp_recorded[dst][p ^ 1])
+                check(hipStreamWaitEvent(compute[rank], tp_consumed[dst][p ^ 1], 0));
+            peer_copy(slot_slice(dst, rank), static_cast<const uint8_t *>(tp_src_ptr[rank]) + src_off[dst],
+                      src_len[dst], compute[rank]);
+        } else if (push || !peer[dst][rank]) {
+            need_stage_p1 = true;
+        }
+    }
+    if (need_stage_p1) {
+        for (int dst = 0; dst < 4; ++dst)
+            if (dst != rank && tp_recorded[dst][p ^ 1])
+                check(hipStreamWaitEvent(compute[rank], tp_consumed[dst][p ^ 1], 0));
+        check(hipMemcpyAsync(reduce_staging[rank], tp_src_ptr[rank], src_bytes, hipMemcpyDeviceToHost, compute[rank]));
+    }
+    record_event(tp_done[rank][p], rank);
+    tp_barrier[0]->arrive_and_wait();
+    const void *rs_srcs[4]{};
+    rs_srcs[rank] = static_cast<const uint8_t *>(tp_src_ptr[rank]) + src_off[rank];
+    for (int src = 0; src < 4; ++src) {
+        if (src == rank)
+            continue;
+        auto mode = select_reduce_transport(push, peer[src][rank], peer[rank][src]);
+        uint8_t *dst_slot = slot_slice(rank, src);
+        rs_srcs[src] = dst_slot;
+        if (mode == ReduceTransport::push) {
+            check(hipStreamWaitEvent(compute[rank], tp_done[src][p], 0));
+        } else if (mode == ReduceTransport::peer) {
+            check(hipStreamWaitEvent(compute[rank], tp_ready[src][p], 0));
+            peer_copy(dst_slot, static_cast<const uint8_t *>(tp_src_ptr[src]) + src_off[rank], src_len[rank],
+                      compute[rank]);
+        } else {
+            check(hipStreamWaitEvent(compute[rank], tp_done[src][p], 0));
+            check(hipMemcpyAsync(dst_slot, static_cast<const uint8_t *>(reduce_staging[src]) + src_off[rank],
+                                 src_len[rank], hipMemcpyHostToDevice, compute[rank]));
+        }
+    }
+    sum4(static_cast<uint8_t *>(tp_ptr[rank]) + dst_off[rank], rs_srcs[0], rs_srcs[1], rs_srcs[2], rs_srcs[3],
+         src_len[rank]);
+    record_event(tp_arrived[rank][p], rank);
+    tp_barrier[0]->arrive_and_wait();
+    bool need_stage_p2 = false;
+    for (int dst = 0; dst < 4; ++dst) {
+        if (dst == rank)
+            continue;
+        if (push && peer[rank][dst]) {
+            check(hipStreamWaitEvent(compute[rank], tp_arrived[dst][p], 0));
+            peer_copy(static_cast<uint8_t *>(tp_ptr[dst]) + dst_off[rank],
+                      static_cast<const uint8_t *>(tp_ptr[rank]) + dst_off[rank], dst_len[rank], compute[rank]);
+        } else if (push || !peer[dst][rank]) {
+            need_stage_p2 = true;
+        }
+    }
+    if (need_stage_p2) {
+        for (int dst = 0; dst < 4; ++dst)
+            if (dst != rank)
+                check(hipStreamWaitEvent(compute[rank], tp_arrived[dst][p], 0));
+        check(hipMemcpyAsync(reduce_staging[rank], static_cast<const uint8_t *>(tp_ptr[rank]) + dst_off[rank],
+                             dst_len[rank], hipMemcpyDeviceToHost, compute[rank]));
+    }
+    record_event(tp_ag_done[rank][p], rank);
+    tp_barrier[0]->arrive_and_wait();
+    for (int src = 0; src < 4; ++src) {
+        if (src == rank)
+            continue;
+        auto mode = select_reduce_transport(push, peer[src][rank], peer[rank][src]);
+        if (mode == ReduceTransport::push) {
+            check(hipStreamWaitEvent(compute[rank], tp_ag_done[src][p], 0));
+        } else if (mode == ReduceTransport::peer) {
+            check(hipStreamWaitEvent(compute[rank], tp_arrived[src][p], 0));
+            peer_copy(static_cast<uint8_t *>(tp_ptr[rank]) + dst_off[src],
+                      static_cast<const uint8_t *>(tp_ptr[src]) + dst_off[src], dst_len[src], compute[rank]);
+        } else {
+            check(hipStreamWaitEvent(compute[rank], tp_ag_done[src][p], 0));
+            check(hipMemcpyAsync(static_cast<uint8_t *>(tp_ptr[rank]) + dst_off[src], reduce_staging[src],
+                                 dst_len[src], hipMemcpyHostToDevice, compute[rank]));
+        }
+    }
+    record_event(tp_consumed[rank][p], rank);
+    tp_recorded[rank][p] = true;
+    tp_parity[rank] ^= 1;
+    tp_barrier[0]->arrive_and_wait();
+    if (!push) {
+        for (int dst = 0; dst < 4; ++dst)
+            if (dst != rank && peer[dst][rank])
+                check(hipStreamWaitEvent(compute[rank], tp_consumed[dst][p], 0));
+    }
+}
+void Residency::reduce_pair(void *data, int rank, size_t bytes, bool ep, GraphCapture *capture,
+                          const float *f32_src) {
+    const size_t src_bytes = f32_src ? bytes * 2u : bytes;
+    const size_t max_bytes = tp_prefill_rows * (ep ? 1536u : 3072u) * 2u;
     const int index = ep ? rank % tp_size : rank / tp_size;
     const int a = ep ? index : index * tp_size;
     const int b = ep ? a + tp_size : a + 1;
     auto &barrier = ep ? ep_barrier[index] : tp_barrier[index];
+    auto &recv = ep ? ep_recv : tp_recv;
+    auto &ptr = ep ? ep_ptr : tp_ptr;
+    auto &src_ptr = ep ? ep_src_ptr : tp_src_ptr;
+    auto &pair_bytes = ep ? ep_bytes : tp_bytes;
+    auto sum2 = [&](int destination, const void *received) {
+        if (f32_src)
+            tp_add_f32_to_bf16(ptr[destination], static_cast<const float *>(src_ptr[destination]),
+                               static_cast<const float *>(received), bytes / 2u, compute[destination]);
+        else
+            tp_add_bf16(ptr[destination], received, bytes, compute[destination]);
+    };
+    if (capture) {
+        if (src_bytes > max_bytes)
+            throw std::runtime_error("collective の転送サイズが一致しません");
+        const int other = rank == a ? b : a;
+        ptr[rank] = data;
+        src_ptr[rank] = f32_src ? static_cast<const void *>(f32_src) : data;
+        pair_bytes[rank] = src_bytes;
+        barrier->arrive_and_wait();
+        const bool mismatch = pair_bytes[a] != pair_bytes[b];
+        barrier->arrive_and_wait();
+        if (mismatch)
+            throw std::runtime_error("collective の転送サイズが一致しません");
+        const uint8_t group = ep_size > 1 && tp_size > 1 ? 2 : (ep ? 1 : 0);
+        const size_t half = max_bytes / 2;
+        const bool full_buffer = src_bytes > half;
+        if (full_buffer)
+            capture->step(group);
+        const size_t offset = full_buffer ? 0 : (capture->plan.tp_captured[rank].size() & 1u) * half;
+        peer_copy(static_cast<uint8_t *>(recv[other]) + offset, src_ptr[rank], src_bytes, compute[rank]);
+        capture->step(group);
+        sum2(rank, static_cast<uint8_t *>(recv[rank]) + offset);
+        if (full_buffer)
+            capture->step(group);
+        return;
+    }
     auto &ready_events = ep ? ep_ready : tp_ready;
     auto &done_events = ep ? ep_done : tp_done;
     auto &arrived_events = ep ? ep_arrived : tp_arrived;
     auto &consumed_events = ep ? ep_consumed : tp_consumed;
     auto &recorded = ep ? ep_recorded : tp_recorded;
     auto &parity = ep ? ep_parity[index] : tp_parity[index];
-    auto &recv = ep ? ep_recv : tp_recv;
     const int p = parity;
     check(hipSetDevice(physical[rank]));
     if (recorded[rank][p])
         check(hipEventSynchronize(consumed_events[rank][p]));
-    tp_ptr[rank] = data;
-    tp_bytes[rank] = bytes;
+    ptr[rank] = data;
+    src_ptr[rank] = f32_src ? static_cast<const void *>(f32_src) : data;
+    pair_bytes[rank] = src_bytes;
     record_event(ready_events[rank][p], rank);
     barrier->arrive_and_wait();
     if (rank == a) {
-        if (tp_bytes[a] != tp_bytes[b] || bytes > tp_prefill_rows * (ep ? 1536u : 3072u) * 2u)
+        if (pair_bytes[a] != pair_bytes[b] || src_bytes > max_bytes)
             throw std::runtime_error("collective の転送サイズが一致しません");
         for (int source : {a, b}) {
             const int destination = source == a ? b : a;
@@ -717,22 +998,22 @@ void Residency::reduce_pair(void *data, int rank, size_t bytes, bool ep) {
                 check(hipStreamWaitEvent(compute[source], ready_events[source][p], 0));
                 if (recorded[destination][p ^ 1])
                     check(hipStreamWaitEvent(compute[source], consumed_events[destination][p ^ 1], 0));
-                peer_copy(recv[destination], tp_ptr[source], bytes, compute[source]);
+                peer_copy(recv[destination], src_ptr[source], src_bytes, compute[source]);
                 record_event(done_events[source][p], source);
                 check(hipSetDevice(physical[destination]));
                 check(hipStreamWaitEvent(compute[destination], done_events[source][p], 0));
             } else if (mode == ReduceTransport::peer) {
                 check(hipSetDevice(physical[destination]));
                 check(hipStreamWaitEvent(compute[destination], ready_events[source][p], 0));
-                peer_copy(recv[destination], tp_ptr[source], bytes, compute[destination]);
+                peer_copy(recv[destination], src_ptr[source], src_bytes, compute[destination]);
             } else {
                 check(hipSetDevice(physical[source]));
-                check(hipMemcpyAsync(reduce_staging[source], tp_ptr[source], bytes, hipMemcpyDeviceToHost,
+                check(hipMemcpyAsync(reduce_staging[source], src_ptr[source], src_bytes, hipMemcpyDeviceToHost,
                                      compute[source]));
                 record_event(done_events[source][p], source);
                 check(hipSetDevice(physical[destination]));
                 check(hipStreamWaitEvent(compute[destination], done_events[source][p], 0));
-                check(hipMemcpyAsync(recv[destination], reduce_staging[source], bytes, hipMemcpyHostToDevice,
+                check(hipMemcpyAsync(recv[destination], reduce_staging[source], src_bytes, hipMemcpyHostToDevice,
                                      compute[destination]));
             }
             record_event(arrived_events[destination][p], destination);
@@ -741,7 +1022,7 @@ void Residency::reduce_pair(void *data, int rank, size_t bytes, bool ep) {
             check(hipSetDevice(physical[destination]));
             check(hipStreamWaitEvent(compute[destination], arrived_events[a][p], 0));
             check(hipStreamWaitEvent(compute[destination], arrived_events[b][p], 0));
-            tp_add_bf16(tp_ptr[destination], recv[destination], bytes, compute[destination]);
+            sum2(destination, recv[destination]);
             record_event(consumed_events[destination][p], destination);
         }
         recorded[a][p] = recorded[b][p] = true;
@@ -832,12 +1113,10 @@ void Residency::lm_gather_argmax(const std::array<const float *, 4> &vals, const
                 check(hipSetDevice(physical[0]));
                 check(hipMemcpyAsync(dst_r, lm_staging[r], bytes, hipMemcpyHostToDevice, compute[0]));
             }
-            lm_recorded[r][p] = true;
         }
         check(hipSetDevice(physical[0]));
         tp_argmax_reduce(base_recv0, lm_argmax_max_rows, ranks, count, out_ids + first, compute[0]);
         sync_record(lm_consumed[0][p], lm_consumed_rec[0][p], 0);
-        lm_recorded[0][p] = true;
         lm_parity ^= 1;
     }
 }
@@ -887,7 +1166,6 @@ void Residency::lm_gather_logits(const std::array<const float *, 4> &local_logit
             tp_scatter_logits(recv_r, out_logits + size_t(first) * full_vocab, count, local_vocab, full_vocab,
                               r * local_vocab, compute[0]);
             sync_record(lm_consumed[0][p], lm_consumed_rec[0][p], 0);
-            lm_recorded[0][p] = true;
             lm_parity ^= 1;
         }
         if (mode == ReduceTransport::peer) {
@@ -899,16 +1177,30 @@ void Residency::lm_gather_logits(const std::array<const float *, 4> &local_logit
     }
     check(hipSetDevice(physical[0]));
 }
-void Residency::tp_argmax(const float *vals, const int *ids, int *out_ids, int rank, int rows) {
+void Residency::tp_argmax(const float *vals, const int *ids, int *out_ids, int rank, int rows, GraphCapture *capture) {
     if (!lm_head_tp || tp_size <= 1 || rows <= 0)
         return;
+    if (capture) {
+        const int buf_slot = int(capture->plan.tp_captured[rank].size() & 1u);
+        auto slot_of = [&](int dst, int src_rank, int parity_idx) -> uint8_t * {
+            return static_cast<uint8_t *>(lm_head_recv[dst]) + (size_t(parity_idx) * 4 + src_rank) * lm_argmax_stride;
+        };
+        uint8_t *local_packed = slot_of(rank, rank, buf_slot);
+        tp_argmax_pack(vals, ids, local_packed, rows, compute[rank]);
+        for (int dst = 0; dst < ranks; ++dst)
+            if (dst != rank)
+                peer_copy(slot_of(dst, rank, buf_slot), local_packed, size_t(rows) * 8, compute[rank]);
+        capture->step(2);
+        tp_argmax_reduce(slot_of(rank, 0, buf_slot), lm_argmax_max_rows, ranks, rows, out_ids, compute[rank]);
+        return;
+    }
     for (int first = 0; first < rows; first += lm_argmax_max_rows) {
         const int count = std::min(lm_argmax_max_rows, rows - first);
         const size_t bytes = size_t(count) * 8;
         const size_t id_bytes = size_t(count) * sizeof(int);
         const int p = lm_parity;
         check(hipSetDevice(physical[rank]));
-        if (lm_recorded[rank][p])
+        if (lm_arrived_rec[rank][p])
             check(hipEventSynchronize(lm_arrived[rank][p]));
         void *local_buf = rank == 0
             ? static_cast<char *>(lm_head_recv[0]) + size_t(p) * 4 * lm_argmax_stride
@@ -918,7 +1210,7 @@ void Residency::tp_argmax(const float *vals, const int *ids, int *out_ids, int r
         lm_dst_ptr[rank] = out_ids + first;
         lm_xfer_bytes[rank] = bytes;
         if (rank != 0)
-            record_event(lm_ready[rank][p], rank);
+            sync_record(lm_ready[rank][p], lm_ready_rec[rank][p], rank);
         all_barrier->arrive_and_wait();
         if (rank == 0) {
             char *base_recv0 = static_cast<char *>(lm_head_recv[0]) + size_t(p) * 4 * lm_argmax_stride;
@@ -929,7 +1221,7 @@ void Residency::tp_argmax(const float *vals, const int *ids, int *out_ids, int r
                     check(hipSetDevice(physical[src]));
                     check(hipStreamWaitEvent(compute[src], lm_ready[src][p], 0));
                     peer_copy(dst_r, lm_src_ptr[src], bytes, compute[src]);
-                    record_event(lm_done[src][p], src);
+                    sync_record(lm_done[src][p], lm_done_rec[src][p], src);
                     check(hipSetDevice(physical[0]));
                     check(hipStreamWaitEvent(compute[0], lm_done[src][p], 0));
                 } else if (mode == ReduceTransport::peer) {
@@ -940,7 +1232,7 @@ void Residency::tp_argmax(const float *vals, const int *ids, int *out_ids, int r
                     check(hipSetDevice(physical[src]));
                     check(hipStreamWaitEvent(compute[src], lm_ready[src][p], 0));
                     check(hipMemcpyAsync(lm_staging[src], lm_src_ptr[src], bytes, hipMemcpyDeviceToHost, compute[src]));
-                    record_event(lm_done[src][p], src);
+                    sync_record(lm_done[src][p], lm_done_rec[src][p], src);
                     check(hipEventSynchronize(lm_done[src][p]));
                     check(hipSetDevice(physical[0]));
                     check(hipMemcpyAsync(dst_r, lm_staging[src], bytes, hipMemcpyHostToDevice, compute[0]));
@@ -956,14 +1248,24 @@ void Residency::tp_argmax(const float *vals, const int *ids, int *out_ids, int r
     }
 }
 void Residency::tp_gather_logits(const float *local_logits, float *out_logits, int rank, int rows, int local_vocab,
-                                 int full_vocab) {
+                                 int full_vocab, GraphCapture *capture) {
     if (!lm_head_tp || tp_size <= 1 || rows <= 0)
         return;
+    if (capture) {
+        if (rank == 0)
+            lm_dst_ptr[0] = out_logits;
+        all_barrier->arrive_and_wait();
+        capture->step(2);
+        tp_scatter_logits(local_logits, static_cast<float *>(lm_dst_ptr[0]), rows, local_vocab, full_vocab,
+                          rank * local_vocab, compute[rank]);
+        capture->step(2);
+        return;
+    }
     check(hipSetDevice(physical[rank]));
     if (rank == 0)
         tp_scatter_logits(local_logits, out_logits, rows, local_vocab, full_vocab, 0, compute[0]);
     lm_src_ptr[rank] = local_logits;
-    record_event(lm_ready[rank][0], rank);
+    sync_record(lm_ready[rank][0], lm_ready_rec[rank][0], rank);
     all_barrier->arrive_and_wait();
     if (rank == 0) {
         const int chunk_rows = std::max(1, int(lm_logits_chunk_bytes / (size_t(local_vocab) * sizeof(float))));
@@ -988,10 +1290,10 @@ void Residency::tp_gather_logits(const float *local_logits, float *out_logits, i
                     static_cast<char *>(lm_logits_recv[0]) + size_t(p) * lm_logits_chunk_bytes);
                 if (mode == ReduceTransport::push) {
                     check(hipSetDevice(physical[src]));
-                    if (lm_recorded[0][p])
+                    if (lm_consumed_rec[0][p])
                         check(hipStreamWaitEvent(compute[src], lm_consumed[0][p], 0));
                     peer_copy(recv_r, src_r, chunk_bytes, compute[src]);
-                    record_event(lm_done[src][p], src);
+                    sync_record(lm_done[src][p], lm_done_rec[src][p], src);
                     check(hipSetDevice(physical[0]));
                     check(hipStreamWaitEvent(compute[0], lm_done[src][p], 0));
                 } else if (mode == ReduceTransport::peer) {
@@ -1000,7 +1302,7 @@ void Residency::tp_gather_logits(const float *local_logits, float *out_logits, i
                 } else {
                     check(hipSetDevice(physical[src]));
                     check(hipMemcpyAsync(lm_staging[src], src_r, chunk_bytes, hipMemcpyDeviceToHost, compute[src]));
-                    record_event(lm_done[src][p], src);
+                    sync_record(lm_done[src][p], lm_done_rec[src][p], src);
                     check(hipEventSynchronize(lm_done[src][p]));
                     check(hipSetDevice(physical[0]));
                     check(hipMemcpyAsync(recv_r, lm_staging[src], chunk_bytes, hipMemcpyHostToDevice, compute[0]));
@@ -1009,13 +1311,12 @@ void Residency::tp_gather_logits(const float *local_logits, float *out_logits, i
                 check(hipSetDevice(physical[0]));
                 tp_scatter_logits(recv_r, out_logits + size_t(first) * full_vocab, count, local_vocab, full_vocab,
                                   src * local_vocab, compute[0]);
-                record_event(lm_consumed[0][p], 0);
-                lm_recorded[0][p] = true;
+                sync_record(lm_consumed[0][p], lm_consumed_rec[0][p], 0);
                 lm_parity ^= 1;
             }
         }
         check(hipSetDevice(physical[0]));
-        record_event(lm_done[0][0], 0);
+        sync_record(lm_done[0][0], lm_done_rec[0][0], 0);
     }
     all_barrier->arrive_and_wait();
     check(hipSetDevice(physical[rank]));
@@ -1036,7 +1337,7 @@ void Residency::broadcast_lm_ids(size_t bytes, int p) {
     }
     if (host)
         check(hipMemcpyAsync(lm_staging[0], lm_dst_ptr[0], bytes, hipMemcpyDeviceToHost, compute[0]));
-    record_event(lm_done[0][p], 0);
+    sync_record(lm_done[0][p], lm_done_rec[0][p], 0);
     if (host)
         check(hipEventSynchronize(lm_done[0][p]));
     for (int dst = 1; dst < ranks; ++dst) {
@@ -1049,28 +1350,36 @@ void Residency::broadcast_lm_ids(size_t bytes, int p) {
             check(hipMemcpyAsync(lm_dst_ptr[dst], lm_staging[0], bytes, hipMemcpyHostToDevice, compute[dst]));
             check(hipStreamSynchronize(compute[dst]));
         }
-        record_event(lm_arrived[dst][p], dst);
-        lm_recorded[dst][p] = true;
+        sync_record(lm_arrived[dst][p], lm_arrived_rec[dst][p], dst);
         if (mode == ReduceTransport::peer) {
             check(hipSetDevice(physical[0]));
             check(hipStreamWaitEvent(compute[0], lm_arrived[dst][p], 0));
         }
     }
     check(hipSetDevice(physical[0]));
-    record_event(lm_arrived[0][p], 0);
-    lm_recorded[0][p] = true;
+    sync_record(lm_arrived[0][p], lm_arrived_rec[0][p], 0);
     lm_parity ^= 1;
 }
-void Residency::tp_broadcast_ids(int *ids, int rank, int rows) {
+void Residency::tp_broadcast_ids(int *ids, int rank, int rows, GraphCapture *capture) {
     if (!lm_head_tp || tp_size <= 1 || rows <= 0)
         return;
+    if (capture) {
+        lm_dst_ptr[rank] = ids;
+        all_barrier->arrive_and_wait();
+        capture->step(2);
+        if (rank == 0)
+            for (int dst = 1; dst < ranks; ++dst)
+                peer_copy(lm_dst_ptr[dst], lm_dst_ptr[0], size_t(rows) * sizeof(int), compute[0]);
+        capture->step(2);
+        return;
+    }
     const int p = lm_parity;
     check(hipSetDevice(physical[rank]));
-    if (lm_recorded[rank][p])
+    if (lm_arrived_rec[rank][p])
         check(hipEventSynchronize(lm_arrived[rank][p]));
     lm_dst_ptr[rank] = ids;
     if (rank != 0)
-        record_event(lm_ready[rank][p], rank);
+        sync_record(lm_ready[rank][p], lm_ready_rec[rank][p], rank);
     all_barrier->arrive_and_wait();
     if (rank == 0)
         broadcast_lm_ids(size_t(rows) * sizeof(int), p);
@@ -1084,10 +1393,10 @@ void Residency::shutdown() {
             errors += std::string(hipGetErrorString(e)) + "\n";
     };
     for (auto &plan : target_graphs)
-        if (plan.tail || !plan.head_steps.empty())
+        if (plan.tail || !plan.head_steps.empty() || !plan.tp_steps.empty())
             plan.release(*this, errors);
     for (auto &plan : draft_graphs)
-        if (plan.tail || !plan.head_steps.empty())
+        if (plan.tail || !plan.head_steps.empty() || !plan.tp_steps.empty())
             plan.release(*this, errors);
     for (int r = 0; r < ranks; ++r) {
         if (local_expert[r]) {
@@ -1100,7 +1409,7 @@ void Residency::shutdown() {
             if (*event) {
                 collect(hipSetDevice(physical[r]));
                 collect(hipEventDestroy(*event));
-                *event = nullptr;
+                *event = {};
             }
         if (compute[r]) {
             collect(hipSetDevice(physical[r]));
@@ -1126,8 +1435,9 @@ void Residency::shutdown() {
     index_keys = {};
     for (int r = 0; r < ranks; ++r) {
         collect(hipSetDevice(physical[r]));
-        for (auto events : {&tp_ready, &tp_done, &tp_arrived, &tp_consumed, &ep_ready, &ep_done, &ep_arrived,
-                            &ep_consumed, &lm_ready, &lm_done, &lm_arrived, &lm_consumed})
+        for (auto events : {&tp_ready, &tp_done, &tp_arrived, &tp_consumed, &tp_ag_done,
+                            &ep_ready, &ep_done, &ep_arrived, &ep_consumed,
+                            &lm_ready, &lm_done, &lm_arrived, &lm_consumed})
             for (auto &event : (*events)[r])
                 if (event) {
                     collect(hipEventDestroy(event));
@@ -1148,7 +1458,6 @@ void Residency::shutdown() {
     lm_src_ptr.fill(nullptr);
     lm_dst_ptr.fill(nullptr);
     lm_xfer_bytes.fill(0);
-    lm_recorded = {};
     lm_ready_rec = {};
     lm_done_rec = {};
     lm_arrived_rec = {};
