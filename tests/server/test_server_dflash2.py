@@ -155,6 +155,7 @@ def main() -> int:
             headers={"Content-Type": "application/json"},
             method="POST")
         chunks = []
+        stats = None
         finish = None
         with urllib.request.urlopen(request, timeout=600) as response:
             for line in response:
@@ -170,8 +171,14 @@ def main() -> int:
                     chunks.append(delta)
                 if event["choices"][0].get("finish_reason"):
                     finish = event["choices"][0]["finish_reason"]
+                    stats = event.get("speculative_stats")
         checker.check("stream returns content", len(chunks) > 0, str(chunks))
         checker.check("stream finish reason", finish == "stop", str(finish))
+
+        checker.check("stream speculative counters",
+                      bool(stats) and stats["final_k"] == 7 and stats["k_switches"] == 0
+                      and stats["draft_rounds"] > 0 and stats["verify_rows"] > 0
+                      and 0 <= stats["accepted_drafts"] <= stats["proposed_drafts"], str(stats))
 
         used = arena_used_values(harness.log_path.read_text(errors="replace"))
         checker.check("arena trace captured", len(used) > 0, f"{len(used)} steps")

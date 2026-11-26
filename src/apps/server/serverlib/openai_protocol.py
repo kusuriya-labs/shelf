@@ -803,6 +803,7 @@ def encode_stream_event(request: ChatRequest, event,
         delta = {"tool_calls": [entry]}
     elif isinstance(event, StreamDone):
         return {
+            **({"speculative_stats": event.speculative_stats} if event.speculative_stats is not None else {}),
             "id": completion_id,
             "object": "chat.completion.chunk",
             "created": created,

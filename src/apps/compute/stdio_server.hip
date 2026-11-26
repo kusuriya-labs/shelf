@@ -85,6 +85,15 @@ void emit_events(const std::vector<ServeEvent>& events) {
                 done["restored_tokens"] = event.restored_tokens;
                 done["prefill_tokens"] = event.prefill_tokens;
                 done["cache_checkpoint_tokens"] = event.cache_checkpoint_tokens;
+                const auto& stats = event.dflash_stats;
+                if (stats.final_k != 0) {
+                    done["speculative_stats"] = {
+                        {"final_k", stats.final_k}, {"k_switches", stats.k_switches},
+                        {"adaptive_samples", stats.adaptive_samples}, {"draft_rounds", stats.draft_rounds},
+                        {"proposed_drafts", stats.proposed_drafts}, {"accepted_drafts", stats.accepted_drafts},
+                        {"verify_rows", stats.verify_rows}};
+                    if (stats.adaptive_samples != 0) done["speculative_stats"]["acc_ema"] = stats.acc_ema;
+                }
                 if (!event.error_message.empty()) done["error_message"] = event.error_message;
                 emit_json(done);
                 break;

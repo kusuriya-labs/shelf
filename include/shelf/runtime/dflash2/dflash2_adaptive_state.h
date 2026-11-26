@@ -8,6 +8,7 @@
 namespace shelf::runtime {
 
 constexpr uint32_t kDFlash2AdaptiveInitialK = 5u;
+constexpr uint32_t kDFlash2AdaptiveLargeBatch = 12u;
 constexpr uint32_t kDFlash2AdaptiveSwitchInterval = 8u;
 constexpr double kDFlash2AdaptiveEmaAlpha = 0.25;
 
@@ -32,7 +33,7 @@ struct DFlash2AdaptiveController {
     }
 
     uint32_t ceiling(uint32_t batch_size) const {
-        return batch_size > 16u ? std::min(configured_drafts, 4u) : configured_drafts;
+        return batch_size >= kDFlash2AdaptiveLargeBatch ? std::min(configured_drafts, 4u) : configured_drafts;
     }
 
     uint32_t apply_batch_limit(uint32_t batch_size) {
@@ -48,7 +49,7 @@ struct DFlash2AdaptiveController {
         ++rounds;
         if (++rounds_since_switch < min_switch_interval) return;
 
-        const bool large_batch = batch_size > 16u;
+        const bool large_batch = batch_size >= kDFlash2AdaptiveLargeBatch;
         const double promote = current_k == 2u ? 0.45 : (large_batch ? 0.65 : 0.50);
         const double demote = large_batch ? 0.45 : 0.30;
         if (current_k < ceiling(batch_size) && acc_ema >= promote) {

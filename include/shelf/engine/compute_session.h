@@ -110,6 +110,7 @@ struct RequestView {
     uint32_t restored_tokens = 0;
     uint32_t generated_tokens = 0;
     bool dflash_used = false;
+    const runtime::DFlash2RequestStats* dflash_stats = nullptr;
     bool structured_dflash = false;
     runtime::DraftMaskState draft_mask_state = runtime::DraftMaskState::Idle;
     uint64_t draft_round_id = 0;

@@ -40,9 +40,9 @@ static int controller_tests() {
     check(ctrl.rounds == 0 && ctrl.current_k == 5u, "reject bad observations");
 
     for (uint32_t configured : {1u, 4u, 5u, 7u, 15u}) {
-        for (uint32_t batch : {1u, 16u, 17u, 32u}) {
+        for (uint32_t batch : {1u, 8u, 11u, 12u, 16u, 32u}) {
             rt::DFlash2AdaptiveController c(configured);
-            const auto ceiling = batch > 16u ? std::min(configured, 4u) : configured;
+            const auto ceiling = batch >= 12u ? std::min(configured, 4u) : configured;
             c.apply_batch_limit(batch);
             for (int r = 0; r < 32; ++r) c.observe(0u, c.current_k, false, batch);
             check(c.current_k == std::min(2u, configured), "low acceptance reaches floor");
@@ -57,6 +57,18 @@ static int controller_tests() {
             for (int r = 0; r < 128; ++r) c.observe(0u, c.current_k, false, batch);
             check(c.current_k == std::min(2u, configured), "returns to floor");
         }
+    }
+    for (uint32_t batch : {11u, 12u}) {
+        rt::DFlash2AdaptiveController c(7u, 2u);
+        check(c.apply_batch_limit(batch) == (batch == 11u ? 5u : 4u), "cap before first verify");
+        c.apply_batch_limit(12u);
+        for (int r = 0; r < 2; ++r) c.observe(1u, 4u, false, batch);
+        check(c.current_k == (batch == 11u ? 4u : 3u), "demotion at the batch boundary");
+        rt::DFlash2AdaptiveController promote(4u, 2u);
+        for (int r = 0; r < 2; ++r) promote.observe(0u, 4u, false, batch);
+        promote.observe(2u, 3u, false, batch);
+        promote.observe(1u, 3u, false, batch);
+        check(promote.current_k == (batch == 11u ? 4u : 3u), "promotion at the batch boundary");
     }
     rt::DFlash2AdaptiveController zero(0u);
     zero.observe(0u, 0u, false, 1u);

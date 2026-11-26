@@ -89,6 +89,7 @@ class StreamDone:
     prompt_tokens: Optional[int] = None
     completion_tokens: Optional[int] = None
     cached_tokens: Optional[int] = None
+    speculative_stats: Optional[dict] = None
 
 
 def _cached_tokens(done: dict) -> Optional[int]:
@@ -469,7 +470,7 @@ class ChatService:
                         str(done.get("finish_reason", "")), has_tool_calls=False),
                         prompt_tokens=len(prepared.prompt_ids),
                         completion_tokens=len(final_ids),
-                        cached_tokens=_cached_tokens(done))
+                        cached_tokens=_cached_tokens(done), speculative_stats=done.get("speculative_stats"))
                     return
         except ComputeInvalidArgument as exc:
             raise OpenAIProtocolError(str(exc)) from exc
@@ -538,7 +539,7 @@ class ChatService:
         self._validate_forced_calls(request, calls, finish)
         yield StreamDone(map_finish_reason(finish, has_tool_calls=bool(calls)),
                          prompt_tokens=len(prepared.prompt_ids), completion_tokens=len(final_ids),
-                         cached_tokens=_cached_tokens(done))
+                         cached_tokens=_cached_tokens(done), speculative_stats=done.get("speculative_stats"))
 
     async def _stream_forced_tools(self, prepared: PreparedChat,
                                    request: ChatRequest, tracker: dict) -> AsyncIterator[Any]:
@@ -584,7 +585,7 @@ class ChatService:
                 yield delta
         yield StreamDone(map_finish_reason(finish, has_tool_calls=bool(calls)),
             prompt_tokens=len(prepared.prompt_ids), completion_tokens=len(final_ids),
-            cached_tokens=_cached_tokens(done))
+            cached_tokens=_cached_tokens(done), speculative_stats=done.get("speculative_stats"))
 
     async def _stream_tools(self, prepared: PreparedChat,
                             request: ChatRequest, tracker: dict) -> AsyncIterator[Any]:
@@ -649,7 +650,7 @@ class ChatService:
             str(done.get("finish_reason", "")), has_tool_calls=state["calls"] > 0),
             prompt_tokens=len(prepared.prompt_ids),
             completion_tokens=len(final_ids),
-            cached_tokens=_cached_tokens(done))
+            cached_tokens=_cached_tokens(done), speculative_stats=done.get("speculative_stats"))
 
     def _region_tail(self, regions, generated: list[int],
                      final_ids: list[int]) -> list[Any]:

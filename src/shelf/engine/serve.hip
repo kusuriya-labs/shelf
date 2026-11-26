@@ -346,6 +346,7 @@ struct ServeController::Impl {
             done.finish_reason = finish_reason_name(request.finish_reason);
             done.prompt_tokens = request.input_tokens_size;
             done.restored_tokens = request.restored_tokens;
+            done.dflash_stats = *request.dflash_stats;
             done.prefill_tokens = request.input_tokens_size - request.restored_tokens;
             done.cache_checkpoint_tokens = 0;
             if (request.error_message != nullptr && request.error_message[0] != '\0') {

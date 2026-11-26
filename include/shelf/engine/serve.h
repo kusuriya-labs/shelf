@@ -56,6 +56,7 @@ struct ServeEvent {
     uint64_t restored_tokens = 0;
     uint64_t prefill_tokens = 0;
     uint64_t cache_checkpoint_tokens = 0;
+    runtime::DFlash2RequestStats dflash_stats{};
     std::string error_message;
     uint64_t round_id = 0;
     std::vector<int32_t> draft_tokens;

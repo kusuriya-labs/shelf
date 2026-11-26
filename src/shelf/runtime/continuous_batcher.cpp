@@ -348,8 +348,17 @@ Status ContinuousBatcher::finish_request(
     Status dflash_release = Status::make_ok();
     if (request.dflash != nullptr) {
         if (request.dflash->ready) {
+            auto& stats = request.dflash_stats;
+            const auto& timing = request.dflash->timing;
+            stats.final_k = dflash_.num_drafts;
+            stats.draft_rounds = timing.rounds;
+            stats.verify_rows = timing.verify_rows_total;
             if (dflash_.adaptive && !request.structured_dflash) {
                 const auto& state = request.dflash->adaptive;
+                stats.final_k = state.current_k;
+                stats.k_switches = state.switches;
+                stats.acc_ema = state.acc_ema;
+                stats.adaptive_samples = state.rounds;
                 std::fprintf(stderr, "DFLASH2_ADAPTIVE_SESSION request_id=%lld samples=%llu acc_ema=%.6f switches=%llu final_k=%u\n",
                              static_cast<long long>(request.external_request_id),
                              static_cast<unsigned long long>(state.rounds), state.acc_ema,
@@ -1556,6 +1565,8 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
                 request.draft_bitmask = nullptr;
             }
             const DFlash2SpecIterationOutput& step = results.slots[i];
+            request.dflash_stats.proposed_drafts += step.num_drafts;
+            request.dflash_stats.accepted_drafts += step.num_accepted;
             if (phase_trace) {
                 std::fprintf(stderr, "DFPHASE_REQUEST id=%lld slot=%u accepted=%u emitted=%u drafts=%u\n",
                              static_cast<long long>(request.external_request_id),

@@ -179,8 +179,8 @@ request 1 個あたりの生成予算（推論予算）は `--inference-budget-t
   Queued になり、Active の完了後に admission される。
 - tool calling / sampling / cancel は DFlash2 経路でも利用できる。
 - `--dflash2-adaptive` は要求ごとに DFlash2 の受理率から検証幅を決める。
-  同時に decode する要求が 16 件までなら `--dflash2-drafts` の解決値まで増やせる。
-  17 件以上では最大 4 に制限する。適応制御対象の要求が終了すると stderr に
+  同時に decode する要求が 11 件までなら `--dflash2-drafts` の解決値まで増やせる。
+  12 件以上のラウンドでは最大 4 に制限する。適応制御対象の要求が終了すると stderr に
   `DFLASH2_ADAPTIVE_SESSION` が出る。`request_id` で stdio の `done` と対応付けられる。
   各フィールドの意味は [compute の DFlash2 設定](compute.md) を参照。
 - `--prefill-decode-interval N` は prefill が `N` 回続いた時点で、実行可能な decode 要求を次のバッチで優先する。既定の `0` で無効になる。

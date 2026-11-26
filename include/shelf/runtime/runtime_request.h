@@ -33,6 +33,17 @@ enum class FinishReason : uint8_t {
 
 enum class DraftMaskState : uint8_t { Idle, PendingMask, Ready };
 
+struct DFlash2RequestStats {
+    uint32_t final_k = 0;
+    uint64_t k_switches = 0;
+    uint64_t adaptive_samples = 0;
+    double acc_ema = 0;
+    uint32_t draft_rounds = 0;
+    uint64_t proposed_drafts = 0;
+    uint64_t accepted_drafts = 0;
+    uint64_t verify_rows = 0;
+};
+
 struct DFlash2RequestSession {
     dflash2::DFlash2ContextState* context = nullptr;
     std::unique_ptr<DFlash2SpecDecoder> decoder;
@@ -99,6 +110,7 @@ struct RuntimeRequest {
 
     bool speculative_decode = false;
     bool dflash_used = false;
+    DFlash2RequestStats dflash_stats{};
     bool ignore_eos = false;
     std::unique_ptr<DFlash2RequestSession> dflash;
     OnlineNgramMatcher ngram{};

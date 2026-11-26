@@ -1125,6 +1125,7 @@ RequestView ComputeSession::request(uint64_t id) const {
     view.restored_tokens = request->restored_tokens;
     view.generated_tokens = request->generated_tokens;
     view.dflash_used = request->dflash_used;
+    view.dflash_stats = &request->dflash_stats;
     view.structured_dflash = request->structured_dflash;
     view.draft_mask_state = request->draft_mask_state;
     view.draft_round_id = request->draft_round_id;

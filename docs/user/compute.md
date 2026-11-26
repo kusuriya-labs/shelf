@@ -261,7 +261,8 @@ block size 16 の `DFlash2DraftModel` は `--dflash2-drafts 15` で最大幅を�
 `--dflash2-adaptive` を指定すると、単発 CLI と stdio は要求ごとに draft 数 `K` を調整する。
 初期値は `min(5, --dflash2-drafts の解決値)`。受理率が高い状態が続くと設定した draft 数まで、
 低い状態が続くと `2` まで一段ずつ変わる。設定値が `1` の場合はその値を使う。
-同時に decode する要求が 16 件を超えると上限は `min(4, 設定値)` になる。
+同時に decode する要求が 12 件以上のラウンドでは、上限は `min(4, 設定値)` になる。
+11 件以下に戻ると、受理率に応じて再び設定値まで増やせる。
 単発 CLI の `DFLASH2_ADAPTIVE_SESSION` には有効な観測回数（`samples`）、受理率の指数移動平均
 （`acc_ema`）、切替回数（`switches`）、終了時点の制御器の幅（`final_k`）が出る。
 同時接続 32 では、session 数と verify 行数が `kDFlash2SpecMaxVerifyRows` に収まる
