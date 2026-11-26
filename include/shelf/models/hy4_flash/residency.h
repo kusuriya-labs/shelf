@@ -88,6 +88,7 @@ struct Residency {
     size_t kv_pages_total = 0;
     size_t kv_page_stride = 0;
     bool batch_draft;
+    bool adaptive_draft = false;
     bool index_wmma = true;
     std::vector<std::array<int, 42>> sparse_last;
     size_t prefill_rows() const { return std::min(tokens, size_t(tp_size > 1 ? tp_prefill_rows : max_prefill_chunk)); }
@@ -124,9 +125,10 @@ struct Residency {
     void release_pages(std::vector<int32_t> &pages);
     int32_t alloc_single_page();
     explicit Residency(Checkpoint &model, size_t tokens, int slots = 1, size_t kv_pool_tokens = 0,
-                       int draft_tokens = 0);
+                       int draft_tokens = 0, bool adaptive = false);
     static int parse_draft_tokens(std::string_view value);
     static int resolve_draft_tokens(int requested = 0);
+    static bool resolve_adaptive_draft(bool requested = false);
     ~Residency() noexcept;
     Residency(const Residency &) = delete;
     Residency &operator=(const Residency &) = delete;

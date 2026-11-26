@@ -62,6 +62,7 @@ class FakeCompute:
             queued_requests=0,
             banker_safe=True,
             overcommit_pages=0,
+            draft_slots=[{"slot": 0, "draft_tokens": 2}, {"slot": 1, "draft_tokens": 5}],
         )
 
     async def shutdown(self):
@@ -107,6 +108,7 @@ class IgnoreEosAndReadinessTests(unittest.IsolatedAsyncioTestCase):
         )
         meta = {
             "model": "hy4-test",
+            "speculative": {"method": "dfly2", "drafts": 4, "adaptive": True},
             "max_seq_len": 4096,
             "max_concurrent_requests": 4,
             "prefix_cache_strategy": "slot",
@@ -159,6 +161,10 @@ class IgnoreEosAndReadinessTests(unittest.IsolatedAsyncioTestCase):
             payload = await meta.json()
             self.assertEqual(payload["model"], "hy4-test")
             self.assertTrue(payload["prefix_cache"])
+            self.assertEqual(payload["speculative"]["drafts"], 4)
+            self.assertEqual(payload["speculative"]["slots"],
+                             [{"slot": 0, "draft_tokens": 2}, {"slot": 1, "draft_tokens": 5}])
+            self.assertFalse(payload["speculative"]["stale"])
 
     async def test_chat_ignore_eos_and_cached_tokens(self):
         app, compute = self._make_app()

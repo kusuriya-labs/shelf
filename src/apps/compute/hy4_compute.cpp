@@ -25,14 +25,17 @@ void reply(const Json &event) {
     std::cout << event.dump() << std::endl;
 }
 
-void reply_stats(const Residency &gpu, size_t active, size_t queued, size_t draft_rounds, const Hy4PrefixStats &prefix) {
+void reply_stats(const Residency &gpu, size_t active, size_t queued, size_t draft_rounds,
+                 const Hy4PrefixStats &prefix, int draft_tokens, size_t k_switches, double acc_ema,
+                 const Hy4BatchSession *session = nullptr) {
     const bool paged = gpu.kv_pages_total > 0;
     const size_t page_tokens = paged ? kv_page_tokens : gpu.tokens;
     const size_t total_pages = paged ? gpu.kv_pages_total : size_t(gpu.max_slots);
     const size_t used_pages = paged ? gpu.used_kv_pages() : active;
     const size_t free_pages = paged ? gpu.free_kv_pages() : (size_t(gpu.max_slots) - active);
-    reply({{"event", "stats"}, {"max_concurrent_requests", gpu.max_slots}, {"slot_tokens", gpu.tokens},
+    Json event = {{"event", "stats"}, {"max_concurrent_requests", gpu.max_slots}, {"slot_tokens", gpu.tokens},
            {"active_requests", active}, {"queued_requests", queued}, {"batch_draft_rounds", draft_rounds},
+           {"draft_tokens", draft_tokens}, {"k_switches", k_switches}, {"acc_ema", acc_ema}, {"adaptive", gpu.adaptive_draft},
            {"prefix", {{"enabled", prefix.enabled}, {"reuse_slots", prefix.reuse_slots},
                        {"entries", prefix.entries}, {"saves", prefix.saves},
                        {"hits", prefix.hits}, {"misses", prefix.misses},
@@ -40,7 +43,16 @@ void reply_stats(const Residency &gpu, size_t active, size_t queued, size_t draf
            {"kv", {{"page_tokens", page_tokens}, {"total_pages", total_pages}, {"used_pages", used_pages},
                    {"free_pages", free_pages}, {"capacity_tokens", total_pages * page_tokens},
                    {"free_tokens", free_pages * page_tokens}, {"active_requests", active},
-                   {"queued_requests", queued}, {"banker_safe", true}, {"overcommit_pages", 0}}}});
+                   {"queued_requests", queued}, {"banker_safe", true}, {"overcommit_pages", 0}}}};
+    if (session) {
+        Json slots = Json::array();
+        for (int slot = 0; slot < gpu.max_slots; ++slot)
+            if (auto stats = session->slot_stats(slot))
+                slots.push_back({{"slot", slot}, {"draft_tokens", stats->draft_tokens},
+                                 {"k_switches", stats->k_switches}, {"acc_ema", stats->acc_ema}});
+        event["slots"] = std::move(slots);
+    }
+    reply(event);
 }
 
 std::array<unsigned long long, 2> page_faults() {
@@ -90,13 +102,16 @@ void serve(Residency &gpu, int chunk, bool prefix_cache) {
     Hy4PrefixStats prefix_stats;
     prefix_stats.enabled = prefix_cache;
     prefix_stats.reuse_slots = gpu.max_slots;
+    Hy4DflyStats last_request{gpu.draft_tokens};
+    size_t total_draft_rounds = 0, total_k_switches = 0;
     auto control = [&](const Json &request, int active) {
         const auto op = request.at("op").get<std::string>();
         if (op == "ping")
             reply({{"event", "pong"}, {"protocol_version", 1},
                    {"capabilities", {{"prefix_cache", prefix_cache}, {"paged_kv", gpu.kv_pages_total > 0}}}});
         else if (op == "stats")
-            reply_stats(gpu, active >= 0, 0, 0, prefix_stats);
+            reply_stats(gpu, active >= 0, 0, total_draft_rounds, prefix_stats, last_request.draft_tokens,
+                        total_k_switches, last_request.acc_ema);
         else if (op == "shutdown") {
             stopping = true;
             reply({{"event", "shutdown"}});
@@ -145,10 +160,14 @@ void serve(Residency &gpu, int chunk, bool prefix_cache) {
                 gpu.model.report_engram_residency("request_before");
                 before = page_faults();
             }
+            Hy4DflyStats dfly_stats{gpu.draft_tokens, 0, 0, 0};
             size_t restored = 0;
             auto result = generate(gpu, ids, count, chunk, temp, request.value("seed", uint64_t{}), {},
                                    request.value("top_k", 0), request.value("top_p", 1.f), emit,
-                                   ignore_eos, &prefix_slot, &prefix_stats, &restored);
+                                   ignore_eos, &prefix_slot, &prefix_stats, &restored, 0, gpu.adaptive_draft, &dfly_stats);
+            last_request = dfly_stats;
+            total_draft_rounds += dfly_stats.draft_rounds;
+            total_k_switches += dfly_stats.k_switches;
             if (profiling) {
                 auto after = page_faults();
                 fprintf(stderr, "hy4_faults request=%d minor=%llu major=%llu\n", id,
@@ -158,6 +177,7 @@ void serve(Residency &gpu, int chunk, bool prefix_cache) {
             reply({{"event", "done"}, {"request_id", id}, {"generated_ids", result},
                    {"prompt_tokens", ids.size()}, {"restored_tokens", restored},
                    {"prefill_tokens", ids.size() - restored}, {"cache_checkpoint_tokens", 0},
+                   {"draft_tokens", dfly_stats.draft_tokens}, {"k_switches", dfly_stats.k_switches}, {"acc_ema", dfly_stats.acc_ema},
                    {"finish_reason", (ignore_eos || result.back() != 120025) ? "length" : "stop"}});
         } catch (const Interrupted &) {
             reply({{"event", "done"}, {"request_id", id}, {"restored_tokens", 0},
@@ -178,9 +198,11 @@ void serve_batch(Residency &gpu, int chunk, bool prefix_cache, int prefill_decod
         [&](int id, const std::vector<int> &ids, const char *reason) {
             size_t prompt = session_ptr ? session_ptr->last_prompt_tokens() : 0;
             size_t restored = session_ptr ? session_ptr->last_restored_tokens() : 0;
+            auto dfly = session_ptr->last_request_stats();
             reply({{"event", "done"}, {"request_id", id}, {"generated_ids", ids},
                    {"prompt_tokens", prompt}, {"restored_tokens", restored},
                    {"prefill_tokens", prompt >= restored ? prompt - restored : 0},
+                   {"draft_tokens", dfly.draft_tokens}, {"k_switches", dfly.k_switches}, {"acc_ema", dfly.acc_ema},
                    {"cache_checkpoint_tokens", 0}, {"finish_reason", reason}});
         });
     session_ptr = &session;
@@ -198,7 +220,8 @@ void serve_batch(Residency &gpu, int chunk, bool prefix_cache, int prefill_decod
                                          {"paged_kv", gpu.kv_pages_total > 0},
                                          {"prefill_decode_interval", session.prefill_decode_interval()}}}});
             else if (op == "stats")
-                reply_stats(gpu, session.active(), session.queued(), session.draft_rounds(), session.prefix_stats());
+                reply_stats(gpu, session.active(), session.queued(), session.draft_rounds(),
+                            session.prefix_stats(), session.draft_tokens(), session.k_switches(), session.acceptance_ema(), &session);
             else if (op == "shutdown") { stopping = true; reply({{"event", "shutdown"}}); }
             else if (op == "cancel") session.cancel(request.at("request_id").get<int>());
             else {
@@ -251,7 +274,7 @@ int compute(int argc, char **argv) {
         if (argc == 1 || std::string_view(argv[1]) == "--help") {
             puts(
                 "shelf-compute [hy4] [inspect|reserve|generate|serve] --model-dir PATH --engram-dir PATH --placement "
-                "PATH [--dfly-dir PATH] [--dfly-drafts N] [--max-seq-len N] [--kv-pool-tokens N] [--input-ids-file PATH] "
+                "PATH [--dfly-dir PATH] [--dfly-drafts N] [--dfly-adaptive] [--max-seq-len N] [--kv-pool-tokens N] [--input-ids-file PATH] "
                 "[--max-new-tokens N] [--chunk N] [--prefill-decode-interval N] [--temperature T] [--seed N] "
                 "[--dump-logits PATH] [--repeats N] [--expert-parallel N] [--tensor-parallel N] "
                 "[--max-concurrent-requests N] [--batch-size N] [--batch-input-files PATH1,PATH2,...] "
@@ -266,13 +289,21 @@ int compute(int argc, char **argv) {
         Path input, logits_file;
         int count = 32, chunk = 64, repeats = 1, ep = 0, tp = 1, batch_size = 1, max_concurrent = 1,
             dfly_drafts = 0, prefix_cache = 1, prefill_decode_interval = -1;
+        bool dfly_adaptive = false;
         std::string batch_files, batch_counts;
         float temperature = 0;
         uint64_t seed = 0;
-        for (int i = implicit ? 1 : 2; i < argc; i += 2) {
+        for (int i = implicit ? 1 : 2; i < argc;) {
+            std::string_view key = argv[i];
+            if (key == "--dfly-adaptive") {
+                dfly_adaptive = true;
+                ++i;
+                continue;
+            }
             if (i + 1 >= argc)
                 throw std::runtime_error("引数の値がありません");
-            std::string_view key = argv[i], value = argv[i + 1];
+            std::string_view value = argv[i + 1];
+            i += 2;
             if (key == "--model-dir")
                 model = value;
             else if (key == "--engram-dir")
@@ -339,6 +370,7 @@ int compute(int argc, char **argv) {
         if (batch_size > 32 || max_concurrent > 32 || (max_concurrent != 1 && mode != "serve" && mode != "reserve"))
             throw std::invalid_argument("スロット数または動作の指定が不正です");
         dfly_drafts = Residency::resolve_draft_tokens(dfly_drafts);
+        dfly_adaptive = Residency::resolve_adaptive_draft(dfly_adaptive);
         const int slots = mode == "generate" ? batch_size : max_concurrent;
         auto topology = Residency::check_batch_topology(tp, slots);
         if (!topology.ok())
@@ -406,7 +438,7 @@ int compute(int argc, char **argv) {
             throw std::invalid_argument("バッチ指定は generate 専用です");
         for (;;) {
             Residency gpu(checkpoint, tokens, mode == "generate" ? batch_size : max_concurrent, kv_pool_tokens,
-                          dfly_drafts);
+                          dfly_drafts, dfly_adaptive);
             try {
                 auto status = gpu.reserve();
                 if (!status.ok())

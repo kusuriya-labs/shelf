@@ -289,6 +289,106 @@ void compare(const Path &body, const Path &draft, int ranks) {
     printf("ep=%d k=%d target=7/7 draft=7/7 target_captures=4 draft_captures=2 capture_fallback=pass\n", ranks, gpu.draft_tokens);
     gpu.shutdown();
 }
+void compare_ragged(const Path &body, const Path &draft) {
+    const std::vector<int> short_prompt{802, 15063, 2576, 12286};
+    std::vector<std::vector<int>> prompts{short_prompt, std::vector<int>(2047),
+                                         std::vector<int>(2053), {401, 82, 44, 276}};
+    for (int lane : {1, 2})
+        for (size_t i = 0; i < prompts[lane].size(); ++i)
+            prompts[lane][i] = 100 + int((i * 7 + lane) % 101);
+    constexpr int count = 12, adaptive_count = 48;
+    setenv("SHELF_HY4_BATCH_DFLY", "1", 1);
+    setenv("SHELF_HY4_LM_HEAD_TP", "1", 1);
+    Checkpoint sharded(body, body, draft, Owners{}, 4, 1);
+    for (int ranks : {1, 4}) {
+        setenv("SHELF_HY4_EP_TRANSPORT", "push", 1);
+        std::vector<std::vector<int>> reference;
+        std::vector<int> adaptive_ref;
+        {
+            Checkpoint model(body, body, draft, Owners{}, 1, 1);
+            share_expert_weights(model);
+            model.has_draft = false;
+            Residency gpu(model, 2112, 1);
+            auto status = gpu.reserve();
+            if (!status.ok()) throw std::runtime_error(status.message());
+            gpu.upload();
+            if (ranks == 4) {
+                logical_ranks(gpu, ranks);
+                logical_lm_head_tp(gpu, sharded);
+            }
+            for (const auto &prompt : prompts)
+                reference.push_back(generate(gpu, prompt, count, 1024, 0, 0, {}, 0, 1, {}, true));
+            adaptive_ref = generate(gpu, short_prompt, adaptive_count, 1024, 0, 0, {}, 0, 1, {}, true);
+            gpu.shutdown();
+        }
+        for (const char *transport : {"push", "peer", "host"}) {
+            if (ranks == 1 && std::string_view(transport) != "push") continue;
+            setenv("SHELF_HY4_EP_TRANSPORT", transport, 1);
+            Checkpoint model(body, body, draft, Owners{}, 1, 1);
+            share_expert_weights(model);
+            Residency gpu(model, 2112, 4);
+            auto status = gpu.reserve();
+            if (!status.ok()) throw std::runtime_error(status.message());
+            gpu.upload();
+            if (ranks == 4) {
+                logical_ranks(gpu, ranks);
+                logical_lm_head_tp(gpu, sharded);
+            }
+            {
+                std::vector<std::vector<int>> output(4);
+                Hy4BatchSession session(gpu, {}, [&](int id, const auto &ids, const char *) { output[id] = ids; });
+                session.set_prefill_decode_interval(0);
+                for (int id = 0; id < 4; ++id)
+                    session.admit({id, prompts[id], count, {1024, 0, 0, 0, 1, true, 2 + id}});
+                while (session.draft_rounds() == 0 && session.active()) session.step();
+                if (session.draft_rounds() != 4)
+                    throw std::runtime_error("最初のラウンドで 4 スロットを同時検証できませんでした");
+                for (int id = 0; id < 4; ++id) {
+                    auto slot = session.slot_stats(id);
+                    if (!slot || slot->draft_tokens != 2 + id || slot->draft_rounds != 1)
+                        throw std::runtime_error("スロット別の検証幅またはラウンド数が不正です");
+                }
+                while (session.active()) session.step();
+                for (int id = 0; id < 4; ++id) {
+                    auto mismatch = std::mismatch(output[id].begin(), output[id].end(),
+                                                  reference[id].begin(), reference[id].end());
+                    if (mismatch.first != output[id].end() || mismatch.second != reference[id].end())
+                        throw std::runtime_error("混在 K の greedy ID が不一致: slot=" + std::to_string(id) +
+                            " token=" + std::to_string(mismatch.first - output[id].begin()) +
+                            " EP=" + std::to_string(ranks) + " transport=" + transport);
+                }
+            }
+            {
+                std::vector<std::vector<int>> output(2);
+                size_t completed_switches = 0;
+                Hy4BatchSession session(gpu, {}, [&](int id, const auto &ids, const char *) {
+                    output[id] = ids;
+                    completed_switches += session.last_request_stats().k_switches;
+                }, default_draft_tokens, true);
+                Hy4BatchOptions options;
+                options.ignore_eos = true;
+                session.admit({0, short_prompt, adaptive_count, options});
+                while (session.active() && session.k_switches() == 0) session.step();
+                session.admit({1, short_prompt, adaptive_count, options});
+                bool verified = false;
+                while (session.active()) {
+                    auto a = session.slot_stats(0), b = session.slot_stats(1);
+                    auto before = session.draft_rounds();
+                    session.step();
+                    if (a && b && a->draft_tokens != b->draft_tokens && session.draft_rounds() == before + 2)
+                        verified = true;
+                }
+                if (!verified || session.k_switches() != completed_switches ||
+                    output[0] != adaptive_ref || output[1] != adaptive_ref)
+                    throw std::runtime_error("要求別の Adaptive K 検証結果が不正です");
+            }
+            gpu.shutdown();
+            printf("ragged ep=%d transport=%s K=2,3,4,5 sparse=2047,2053 adaptive=pass\n", ranks, transport);
+            fflush(stdout);
+        }
+    }
+    unsetenv("SHELF_HY4_EP_TRANSPORT");
+}
 void compare_draft_counts(const Path &body, const Path &draft) {
     Checkpoint model(body, body, draft, Owners{}, 1, 1);
     share_expert_weights(model);
@@ -303,7 +403,9 @@ void compare_draft_counts(const Path &body, const Path &draft) {
         prompt_2048[i] = 100 + int(i * 7 % 101);
     const std::vector<std::vector<int>> cases{prompt_short, prompt_512, prompt_2048};
     const std::vector<int> counts{12, 10, 10};
+    constexpr int adaptive_count = 48;
     std::vector<std::vector<int>> baselines;
+    std::vector<int> adaptive_baseline;
     {
         Residency single_gpu(model, 2100, 1);
         auto status = single_gpu.reserve();
@@ -315,6 +417,7 @@ void compare_draft_counts(const Path &body, const Path &draft) {
         setenv("SHELF_HY4_DRAFT_GRAPH", "0", 1);
         for (size_t c = 0; c < cases.size(); ++c)
             baselines.push_back(generate(single_gpu, cases[c], counts[c], 1024, 0.f, 0, {}));
+        adaptive_baseline = generate(single_gpu, prompt_short, adaptive_count, 1024, 0.f, 0, {});
         model.has_draft = true;
         for (int k : {2, 3, 4, 5}) {
             single_gpu.draft_tokens = k;
@@ -333,6 +436,22 @@ void compare_draft_counts(const Path &body, const Path &draft) {
                 }
             }
             printf("k_parity_single k=%d=pass\n", k);
+            fflush(stdout);
+        }
+        single_gpu.draft_tokens = default_draft_tokens;
+        for (bool graph : {false, true}) {
+            setenv("SHELF_HY4_GRAPH", graph ? "1" : "0", 1);
+            setenv("SHELF_HY4_DRAFT_GRAPH", graph ? "1" : "0", 1);
+            auto target_before = single_gpu.target_replays, draft_before = single_gpu.draft_replays;
+            Hy4DflyStats adaptive_stats;
+            auto got = generate(single_gpu, prompt_short, adaptive_count, 1024, 0.f, 0, {}, 0, 1.f, {},
+                                false, nullptr, nullptr, nullptr, default_draft_tokens, true, &adaptive_stats);
+            if (got != adaptive_baseline)
+                throw std::runtime_error("単一スロット Adaptive K greedy 不一致: graph=" + std::to_string(graph));
+            if (graph && (single_gpu.target_replays == target_before || single_gpu.draft_replays == draft_before))
+                throw std::runtime_error("単一スロット Adaptive K Graph が起動しませんでした");
+            printf("k_adaptive_single graph=%d rounds=%zu k_final=%d switches=%zu=pass\n",
+                   graph, adaptive_stats.draft_rounds, adaptive_stats.draft_tokens, adaptive_stats.k_switches);
             fflush(stdout);
         }
         single_gpu.shutdown();
@@ -410,6 +529,28 @@ void compare_draft_counts(const Path &body, const Path &draft) {
         if (session_out[i] != baselines[i % 3])
             throw std::runtime_error("動的 K 切替 Hy4BatchSession が非投機と一致しません");
     printf("k_dynamic_session=pass\n");
+    gpu.draft_tokens = default_draft_tokens;
+    for (bool graph : {false, true}) {
+        setenv("SHELF_HY4_GRAPH", graph ? "1" : "0", 1);
+        setenv("SHELF_HY4_DRAFT_GRAPH", graph ? "1" : "0", 1);
+        auto target_before = gpu.target_replays, draft_before = gpu.draft_replays;
+        std::vector<std::vector<int>> adaptive_out(2);
+        Hy4BatchSession adaptive_sess(
+            gpu, [&](int id, int token) { adaptive_out[id].push_back(token); },
+            [](int, const auto &, const char *) {}, default_draft_tokens, true);
+        for (int i = 0; i < 2; ++i)
+            adaptive_sess.admit({i, prompt_short, adaptive_count, {1024}});
+        while (adaptive_sess.active() || adaptive_sess.queued())
+            adaptive_sess.step();
+        for (int i = 0; i < 2; ++i)
+            if (adaptive_out[i] != adaptive_baseline)
+                throw std::runtime_error("バッチ Adaptive K Hy4BatchSession が非投機と一致しません");
+        if (graph && (gpu.target_replays == target_before || gpu.draft_replays == draft_before))
+            throw std::runtime_error("バッチ Adaptive K Graph が起動しませんでした");
+        printf("k_adaptive_batch graph=%d rounds=%zu k_final=%d switches=%zu=pass\n",
+               graph, adaptive_sess.draft_rounds(), adaptive_sess.draft_tokens(), adaptive_sess.k_switches());
+        fflush(stdout);
+    }
     gpu.shutdown();
 }
 void compare_batches(const Path &body, const Path &draft, int ranks) {
@@ -931,6 +1072,7 @@ int main(int argc, char **argv) {
             return 0;
         }
         if (argc == 4 && std::string_view(argv[3]) == "kparity") {
+            compare_ragged(argv[1], argv[2]);
             compare_draft_counts(argv[1], argv[2]);
             return 0;
         }
@@ -944,6 +1086,7 @@ int main(int argc, char **argv) {
             for (int ranks : {1, 2, 3, 4}) compare_batches(argv[1], argv[2], ranks);
         } else {
             for (int ranks : {1, 3, 4}) compare(argv[1], argv[2], ranks);
+            compare_ragged(argv[1], argv[2]);
             compare_draft_counts(argv[1], argv[2]);
             compare_lm_head_tp(argv[1], argv[2]);
         }

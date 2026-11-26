@@ -93,6 +93,8 @@ def build_compute_argv(opts) -> list[str]:
             argv += ["--tensor-parallel", str(opts.tensor_parallel)]
         if opts.dfly_dir:
             argv += ["--dfly-dir", opts.dfly_dir, "--dfly-drafts", str(opts.dfly_drafts)]
+            if opts.dfly_adaptive:
+                argv.append("--dfly-adaptive")
         if not opts.prefix_cache:
             argv += ["--prefix-cache", "0"]
         if getattr(opts, "kv_pool_tokens", None) is not None:
@@ -461,6 +463,9 @@ async def handle_meta(request: web.Request) -> web.Response:
         wire = kv.to_wire()
         wire["stale"] = stale
         meta["kv_cache"] = wire
+        speculative = meta.get("speculative")
+        if speculative and speculative["method"] == "dfly2" and kv.draft_slots is not None:
+            meta["speculative"] = dict(speculative, slots=kv.draft_slots, stale=stale)
     return web.json_response(meta)
 
 
@@ -544,6 +549,8 @@ def parse_args(argv=None):
     parser.add_argument("--dfly-dir", help="Hy4 DFly2 のディレクトリ")
     parser.add_argument("--dfly-drafts", type=int, default=None, choices=(2, 3, 4, 5),
                         help="Hy4 DFly2 draft tokens per round (default 4)")
+    parser.add_argument("--dfly-adaptive", action="store_true", default=None,
+                        help="adaptively adjust Hy4 DFly2 draft tokens per round")
     parser.add_argument("--model", default="shelf",
                         help="model name reported by the API")
     parser.add_argument("--host", default="127.0.0.1",
@@ -762,6 +769,14 @@ def parse_args(argv=None):
                 parser.error("SHELF_HY4_DFLY_DRAFTS must be 2, 3, 4, or 5")
         else:
             opts.dfly_drafts = 4
+    if opts.dfly_adaptive is None:
+        env_adaptive = os.environ.get("SHELF_HY4_DFLY_ADAPTIVE")
+        if env_adaptive is None or env_adaptive == "" or env_adaptive == "0":
+            opts.dfly_adaptive = False
+        elif env_adaptive == "1":
+            opts.dfly_adaptive = True
+        else:
+            parser.error("SHELF_HY4_DFLY_ADAPTIVE must be 0 or 1")
     return opts
 
 
@@ -780,7 +795,7 @@ def _validate_model_dirs(opts) -> None:
 
 def speculative_meta(opts) -> dict | None:
     if opts.dfly_dir and (opts.max_concurrent_requests == 1 or os.environ.get("SHELF_HY4_BATCH_DFLY") != "0"):
-        return {"method": "dfly2", "drafts": opts.dfly_drafts}
+        return {"method": "dfly2", "drafts": opts.dfly_drafts, "adaptive": bool(opts.dfly_adaptive)}
     if opts.dflash2_model_dir:
         return {"method": "dflash2", "drafts": opts.dflash2_drafts}
     return None
@@ -990,7 +1005,8 @@ async def _serve(opts) -> int:
         _log(_banner("Reasoning:", "disabled"))
     _log("")
     if is_hy4:
-        _log(_banner("Hy4-flash:", f"DFly2={bool(speculative)}, SSE"))
+        _log(_banner("Hy4-flash:", f"DFly2={bool(speculative)}"
+                     f"{' (adaptive)' if opts.dfly_adaptive and speculative else ''}, SSE"))
     elif is_plamo:
         _log(_banner("Supported:",
                      "Chat Completions, Responses, SSE, translation, sampling, "

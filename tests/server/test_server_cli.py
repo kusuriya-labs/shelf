@@ -147,20 +147,48 @@ def main() -> int:
         "--placement", "owners.json", "--max-seq-len", "2304", "--chunk", "1024",
         "--max-concurrent-requests", "4", "--dfly-dir", "draft", "--dfly-drafts", "4",
     ])
-    checker.check("hy4-meta-default", shelf_server.speculative_meta(hy4) == {"method": "dfly2", "drafts": 4})
+    checker.check("hy4-meta-default",
+                  shelf_server.speculative_meta(hy4) == {"method": "dfly2", "drafts": 4, "adaptive": False})
+    checker.check("hy4-no-adaptive-argv", "--dfly-adaptive" not in shelf_server.build_compute_argv(hy4))
+    hy4_adaptive = shelf_server.parse_args([
+        "--model-dir", "body", "--placement", "owners.json", "--engram-dir", "fp8",
+        "--dfly-dir", "draft", "--dfly-adaptive",
+    ])
+    checker.check("hy4-adaptive-argv", "--dfly-adaptive" in shelf_server.build_compute_argv(hy4_adaptive))
+    checker.check("hy4-adaptive-meta",
+                  shelf_server.speculative_meta(hy4_adaptive) == {"method": "dfly2", "drafts": 4, "adaptive": True})
     for k in (2, 3, 4, 5):
         opts = shelf_server.parse_args([
             "--model-dir", "body", "--placement", "owners.json", "--dfly-dir", "draft",
             "--dfly-drafts", str(k),
         ])
         checker.check(f"hy4-drafts-argv-{k}", value_of(shelf_server.build_compute_argv(opts), "--dfly-drafts") == str(k))
-        checker.check(f"hy4-meta-{k}", shelf_server.speculative_meta(opts) == {"method": "dfly2", "drafts": k})
+        checker.check(f"hy4-meta-{k}",
+                      shelf_server.speculative_meta(opts) == {"method": "dfly2", "drafts": k, "adaptive": False})
     old_env = os.environ.get("SHELF_HY4_DFLY_DRAFTS")
+    old_adaptive_env = os.environ.get("SHELF_HY4_DFLY_ADAPTIVE")
     try:
         os.environ["SHELF_HY4_DFLY_DRAFTS"] = "3"
+        os.environ["SHELF_HY4_DFLY_ADAPTIVE"] = "1"
         env_opts = shelf_server.parse_args(["--model-dir", "body", "--placement", "owners.json", "--dfly-dir", "draft"])
         checker.check("hy4-env-drafts", value_of(shelf_server.build_compute_argv(env_opts), "--dfly-drafts") == "3")
-        checker.check("hy4-env-meta", shelf_server.speculative_meta(env_opts) == {"method": "dfly2", "drafts": 3})
+        checker.check("hy4-env-adaptive-argv", "--dfly-adaptive" in shelf_server.build_compute_argv(env_opts))
+        checker.check("hy4-env-meta",
+                      shelf_server.speculative_meta(env_opts) == {"method": "dfly2", "drafts": 3, "adaptive": True})
+        os.environ["SHELF_HY4_DFLY_ADAPTIVE"] = "0"
+        cli_override_opts = shelf_server.parse_args([
+            "--model-dir", "body", "--placement", "owners.json", "--dfly-dir", "draft", "--dfly-adaptive",
+        ])
+        checker.check("hy4-cli-override-adaptive",
+                      shelf_server.speculative_meta(cli_override_opts) == {
+                          "method": "dfly2", "drafts": 3, "adaptive": True})
+        os.environ["SHELF_HY4_DFLY_ADAPTIVE"] = "2"
+        try:
+            shelf_server.parse_args(["--model-dir", "body", "--placement", "owners.json"])
+            checker.check("hy4-env-adaptive-reject-2", False)
+        except SystemExit:
+            checker.check("hy4-env-adaptive-reject-2", True)
+        os.environ["SHELF_HY4_DFLY_ADAPTIVE"] = "0"
         os.environ["SHELF_HY4_DFLY_DRAFTS"] = "6"
         try:
             shelf_server.parse_args(["--model-dir", "body", "--placement", "owners.json"])
@@ -172,6 +200,10 @@ def main() -> int:
             os.environ.pop("SHELF_HY4_DFLY_DRAFTS", None)
         else:
             os.environ["SHELF_HY4_DFLY_DRAFTS"] = old_env
+        if old_adaptive_env is None:
+            os.environ.pop("SHELF_HY4_DFLY_ADAPTIVE", None)
+        else:
+            os.environ["SHELF_HY4_DFLY_ADAPTIVE"] = old_adaptive_env
     for bad in ("0", "1", "6", "-1", "abc"):
         try:
             shelf_server.parse_args(["--model-dir", "body", "--placement", "owners.json", "--dfly-drafts", bad])

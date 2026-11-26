@@ -38,7 +38,17 @@ eager 実行では各 forward の開始時に 4 つの Engram 層の行を非同
 
 ## 複数リクエストの実行
 
-TP=1、EP=1〜4 では、SWA 30 層の固定長リングバッファと生成履歴をスロットごとに持ち、DSA 12 層の KV（294 B/tok/layer）と圧縮 index（64 B/tok/layer、4-token グループ単位）は `kv_page_tokens = 256` の共有ページプールとスロット別 `page_table` を介して参照する。DFly2 の隠れ状態と疎な attention の選択行もスロットに対応付ける。バッチ decode と verify は同じ rank 別 Graph を使う。EP=1 では層 0 と残りの層をまとめた 2 個の Graph を順に起動する。EP が複数の場合は rank 0 の routed expert と共有 FFN を別々の stream で実行し、合流後に部分和を加える。DFly2 の候補数 `K` は `--dfly-drafts` / `SHELF_HY4_DFLY_DRAFTS` で `2, 3, 4, 5`（既定 `4`）を指定でき、バッチ DFly2 は指定された `K` 候補を 1 回の Graph 起動で生成する。Target は最大 4 件、DFly2 は最大 2 件の Graph を予約単位で保持する。バッチのキーには稼働中の件数と候補数 `draft_tokens` を含め、上限を超えた場合は順番に入れ替える。疎な attention を使う行ではスロット番号と 2048 境界までの行数を区別し、draft ではスロットごとのサンプリング設定も区別する。位置、seed、受理行、token ID、Engram 入力は再生ごとに更新する。対応する転送構成と切替方法は[操作方法](../user/hy4_flash.md)を参照する。
+TP=1、EP=1〜4 では、SWA 30 層の固定長リングバッファと生成履歴をスロットごとに持ち、DSA 12 層の KV（294 B/tok/layer）と圧縮 index（64 B/tok/layer、4-token グループ単位）は `kv_page_tokens = 256` の共有ページプールとスロット別 `page_table` を介して参照する。DFly2 の隠れ状態と疎な attention の選択行もスロットに対応付ける。均一な幅のバッチでは decode と verify が同じ rank 別 Graph 実装を使う。EP=1 では層 0 と残りの層をまとめた 2 個の Graph を順に起動する。EP が複数の場合は rank 0 の routed expert と共有 FFN を別々の stream で実行し、合流後に部分和を加える。候補数が均一なバッチでは、DFly2 は各スロットの候補を 1 回の Graph 起動で生成する。Target は最大 4 件、DFly2 は最大 2 件の Graph を予約単位で保持する。バッチのキーには稼働中の件数と候補数 `draft_tokens` を含め、上限を超えた場合は順番に入れ替える。疎な attention を使う行ではスロット番号と 2048 境界までの行数を区別し、draft ではスロットごとのサンプリング設定も区別する。位置、seed、受理行、token ID、Engram 入力は再生ごとに更新する。対応する転送構成と切替方法は[操作方法](../user/hy4_flash.md)を参照する。
+
+DFly2 の候補数 `K` は 2〜5（既定 4）。`--dfly-adaptive` を有効にすると、各要求の `Hy4DflyAdaptiveController` が、投機ラウンドごとにその要求の受理数（anchor を除く）の指数移動平均（EMA、係数 0.25）を更新する。スロットを割り当てるたびに初期 K、EMA、切替回数を初期化する。開始時と切り替え直後は最初の観測値で EMA を初期化し、同じ `K` で 8 ラウンド観測してから次の切り替えを許可する。上昇は一度に 1 段とし、下降時は受理数に見合う段まで下げる。17 スロット以上で投機する場合は検証の前に上限 4 を適用する。
+
+| 稼働中のスロット数 | 切り替えの境界 | 上昇する平均受理数 | 下降する平均受理数 |
+| --- | --- | --- | --- |
+| 1〜16 | 2 / 3 | 0.90 以上 | 0.70 未満 |
+| 1〜16 | 3 / 4 | 1.95 以上 | 1.65 未満 |
+| 1〜16 | 4 / 5 | 3.35 以上 | 3.05 未満 |
+| 17〜32（上限 4） | 2 / 3 | 1.50 以上 | 1.20 未満 |
+| 17〜32（上限 4） | 3 / 4 | 2.55 以上 | 2.25 未満 |
 
 TP>1 の予約は同時リクエスト数が 1 を超えると `Status::unsupported` を返す。
 
@@ -46,7 +56,11 @@ TP>1 の予約は同時リクエスト数が 1 を超えると `Status::unsuppor
 
 バッチ decode と verify で各 EP rank の GPU 計画は所有 expert、入力行、重み、元の加算順を保持する。複数行は expert ごとにまとめ、最大 16 行の `Hy4ExpertBatch` を全 rank で gfx1201 WMMA に渡す。部分和は各入力行の expert 順で計算し、rank 0 が rank 順に加算する。転送には通常経路と同じ方向別の peer 判定と 2 組の event を使用する。
 
-`Hy4BatchSession` は要求を FIFO で空きスロットに割り当て、Prefix Cache の完全ページをページ参照カウントで共有し、末尾の部分ページのみコピーまたは引き継ぎで再利用する。ページプールの空きが不足する場合は未使用 Prefix Cache エントリを LRU 順に解放し、それでも不足する要求は `waiting` キューで Admission Control を行う。1 回の `step()` で prefill の 1 チャンク、または準備が済んだ要求の decode を進め、`prefill_decode_interval`（既定 `1`）ごとに完了前の長文 prefill チャンク間に decode ステップを優先割り込みさせる。キャンセルは指定した要求だけを完了させ、解放したスロットに待機中の要求を割り当てる。DFly2 は各スロットの anchor と `K` 候補（`K + 1` 行）をまとめ、最大 192 行を検証する。`Residency` / `GraphInput` / `BatchGraphInput` / `sparse_top_slot` / SWA の固定バッファ容量は最大 `K=5`（6 行）分を確保し、実行時の `K` は `Target` / `Hy4BatchSession` / `GraphKey` で保持する。受理数と乱数 seed は要求ごとに管理する。いずれかの要求で KV 残量が `K + 1` 未満、または生成できる残りが 1 トークンの場合、そのステップは通常の decode を使う。`SHELF_HY4_BATCH_DFLY=0` でバッチ投機を無効にできる。
+`Hy4BatchSession` は要求を FIFO で空きスロットに割り当て、Prefix Cache の完全ページをページ参照カウントで共有し、末尾の部分ページのみコピーまたは引き継ぎで再利用する。ページプールの空きが不足する場合は未使用 Prefix Cache エントリを LRU 順に解放し、それでも不足する要求は `waiting` キューで Admission Control を行う。1 回の `step()` で prefill の 1 チャンク、または準備が済んだ要求の decode を進め、`prefill_decode_interval`（既定 `1`）ごとに完了前の長文 prefill チャンク間に decode ステップを優先割り込みさせる。キャンセルは指定した要求だけを完了させ、解放したスロットに待機中の要求を割り当てる。
+
+DFly2 はスロット `s` の anchor と候補を `K_s + 1` 行に詰める。先行スロットの行数の和が開始行となり、Target は合計最大 192 行を一度の forward で検証する。幅が異なるラウンドは eager で実行する。attention の KV 展開と疎索引の計算は連続する同じ幅のスロットをまとめ、MoE と出力射影には全検証行を渡す。受理後はスロットの開始行から確定した分だけ履歴を進め、最後の確定行から次の隠れ状態と疎索引を選ぶ。DFly2 の状態領域と SWA リングは最大 6 行の書き込みに対応する。いずれかの要求で KV 残量がその要求の検証幅に満たない場合、または生成の残りが 1 トークンの場合、そのステップは通常の decode を使う。`SHELF_HY4_BATCH_DFLY=0` でバッチ投機を無効にできる。
+
+`Hy4BatchSession::slot_stats(slot)` は使用中のスロットの要求統計を返し、空きスロットでは `std::nullopt` を返す。`last_request_stats()` は完了通知の対象となった要求の統計を返す。`draft_tokens()` は使用中の最小番号のスロットの K、`acceptance_ema()` は使用中のスロットの EMA の算術平均である。空きスロットのみのときは最後の要求の値を返す。`k_switches()` は完了した要求を含む累計である。`set_draft_tokens(K)` は現在の全要求の K と今後の既定値を変更する。`Hy4Request::options.draft_tokens` を指定すると、その要求の初期値を変更できる。
 
 `test_hy4_graph BODY DRAFT batch` は単一 R9700 上で 1〜4 論理 rank を使い、バッチの greedy 生成 ID を B=1 と照合する。単一 rank では B=2〜32 の各件数を検査する。位置 2047・2053 の混在は各 EP 構成で検査する。4 スロットのセッションではキャンセル後の再利用、FIFO、KV 残量が異なる要求、capture 失敗後の eager 復帰を検査する。
 
