@@ -38,19 +38,35 @@ def server(output):
                 if not self.path.endswith('/v1/chat/completions'):
                     self.send_error(404)
                     return
-                chunks, count, finish = output(self.path, request, index)
+                result = output(self.path, request, index)
+                if len(result) == 4:
+                    chunks, count, finish, extra = result
+                else:
+                    chunks, count, finish = result
+                    extra = {}
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/event-stream')
                 self.end_headers()
+                for reasoning in extra.get('reasoning', []):
+                    self.event({'choices': [{'delta': {'reasoning_content': reasoning}}]})
+                    time.sleep(0.002)
+                for call_delta in extra.get('tool_calls', []):
+                    self.event({'choices': [{'delta': {'tool_calls': [call_delta]}}]})
+                    time.sleep(0.002)
                 for chunk in chunks:
                     self.event({'choices': [{'delta': {'content': chunk}}]})
                     time.sleep(0.002)
                 event = {
                     'choices': [{'delta': {}, 'finish_reason': finish}],
-                    'speculative_stats': dict(zip(suite.ROUND_FIELDS, (12, 2, 3))),
+                    'speculative_stats': extra.get(
+                        'speculative_stats', dict(zip(suite.ROUND_FIELDS, (12, 2, 3)))
+                    ),
                 }
                 if count is not None:
-                    event['usage'] = {'completion_tokens': count, 'prompt_tokens': 2015}
+                    usage = {'completion_tokens': count, 'prompt_tokens': extra.get('prompt_tokens', 2015)}
+                    if 'cached_tokens' in extra:
+                        usage['prompt_tokens_details'] = {'cached_tokens': extra['cached_tokens']}
+                    event['usage'] = usage
                 self.event(event)
                 if finish:
                     self.wfile.write(b'data: [DONE]\n\n')
@@ -348,39 +364,232 @@ class SuiteTest(unittest.TestCase):
         self.assertAlmostEqual(suite.summarize(manifest, tasks, data)['macro_decode_tok_s'], (435 + 10) / 30)
         self.assertIsNone(suite.summarize(manifest, tasks, data[2:])['macro_decode_tok_s'])
 
-    def test_serving_mix_and_steady(self):
+    def test_serving_prefill_mix_and_agentic(self):
         def reply(path, body, index):
-            long = len(body['messages'][0]['content']) > 20000
-            return ['first', ' next', ' last'], 6 if long else 3, 'stop'
+            msgs = body['messages']
+            long = len(msgs[0]['content']) > 20000
+            if body.get('tools') and body.get('tool_choice') != 'auto':
+                return (
+                    [],
+                    18,
+                    'tool_calls',
+                    {
+                        'prompt_tokens': 400 + len(msgs) * 100,
+                        'cached_tokens': 300 if len(msgs) > 1 else 0,
+                        'tool_calls': [
+                            {'index': 0, 'id': f'call_{index}', 'type': 'function', 'function': {'name': 'read_next_section', 'arguments': '{"topic":'}},
+                            {'index': 0, 'function': {'arguments': '"state"}'}},
+                        ],
+                        'speculative_stats': {
+                            'final_k': 5,
+                            'k_switches': 0,
+                            'adaptive_samples': 2,
+                            'acc_ema': 0.75,
+                            'draft_rounds': 3,
+                            'proposed_drafts': 15,
+                            'accepted_drafts': 12,
+                            'verify_rows': 18,
+                        },
+                    },
+                )
+            thinking = (body.get('chat_template_kwargs') or {}).get('enable_thinking')
+            extra = {
+                'prompt_tokens': 500 + len(msgs) * 120,
+                'cached_tokens': 400 if len(msgs) > 1 else 0,
+                'speculative_stats': {
+                    'final_k': 6 if not thinking else 4,
+                    'k_switches': 2,
+                    'adaptive_samples': 8,
+                    'acc_ema': 0.5,
+                    'draft_rounds': 4,
+                    'proposed_drafts': 20,
+                    'accepted_drafts': 10,
+                    'verify_rows': 24,
+                },
+            }
+            if thinking:
+                extra['reasoning'] = ['think1 ', 'think2 ']
+            return ['first', ' next', ' last'], 6 if long else 8, 'stop', extra
 
         with server(reply) as (srv, url):
-            data = run('track-d', '--endpoint', url + '/v1', '--concurrency', '2', '--requests', '6')
+            data = run(
+                'track-d',
+                '--endpoint',
+                url + '/v1',
+                '--mode',
+                'both',
+                '--concurrency',
+                '2',
+                '--requests',
+                '4',
+            )
         self.assertGreaterEqual(srv.peak, 2)
-        self.assertEqual(len({b['messages'][0]['content'].splitlines()[0] for b in srv.bodies}), 12)
-        steady, mix = data['levels']
-        self.assertTrue(all(r['kind'] == 'short' for r in steady['results']))
+        agentic, mix = data['levels']
+        self.assertEqual(agentic['mode'], 'agentic')
+        self.assertEqual(agentic['conversations'], 4)
+        self.assertEqual(agentic['errors'], 0)
+        self.assertEqual(agentic['completion_rate'], 1)
+        self.assertGreater(agentic['kv_cache_hit_rate'], 0)
+        self.assertAlmostEqual(agentic['acceptance_rate'], sum(
+            r['speculative_stats']['accepted_drafts'] for r in agentic['results']
+        ) / sum(
+            r['speculative_stats']['proposed_drafts'] for r in agentic['results']
+        ))
+        self.assertGreater(agentic['verify_rows_per_tok'], 0)
+        self.assertEqual(set(agentic['by_workload']), {'tool', 'reasoning', 'coding'})
+        tool_stats = agentic['by_workload']['tool']
+        self.assertEqual(tool_stats['requests'], 12)
+        self.assertAlmostEqual(tool_stats['mean_final_k'], 31 / 6)
+        self.assertIsNotNone(tool_stats['ttft_ms']['p50'])
+        self.assertIsNotNone(tool_stats['decode_tok_s_median'])
+        self.assertEqual(mix['mode'], 'prefill-mix')
         self.assertEqual({r['kind'] for r in mix['results']}, {'long', 'short'})
-        self.assertEqual(steady['completion_rate'], 1)
-        for level in (steady, mix):
-            self.assertEqual(level['errors'], 0)
-            self.assertIsNone(level['long_window_tok_s'])
-            count = sum(r['completion_tokens'] for r in level['results'])
-            self.assertAlmostEqual(level['aggregate_tok_s'], count / level['window_s'])
-            self.assertGreater(level['decode_tok_s_median'], 0)
-            for key in ('ttft_ms', 'e2e_ms'):
-                self.assertGreater(level[key]['p50'], 0)
-                self.assertGreaterEqual(level[key]['p95'], level[key]['p50'])
+        self.assertEqual(mix['errors'], 0)
+        self.assertIsNone(mix['long_window_tok_s'])
+        count = sum(r['completion_tokens'] for r in mix['results'])
+        self.assertAlmostEqual(mix['aggregate_tok_s'], count / mix['window_s'])
+        self.assertGreater(mix['decode_tok_s_median'], 0)
+        for key in ('ttft_ms', 'e2e_ms'):
+            self.assertGreater(mix[key]['p50'], 0)
+            self.assertGreaterEqual(mix[key]['p95'], mix[key]['p50'])
         for r in mix['results']:
             single = r['tokens_per_update'] == 1
             self.assertEqual('itl_ms' in r, single)
             self.assertEqual('update_gap_ms' in r, not single)
-        self.assertIsNone(steady['update_gap_ms']['p50'])
         self.assertGreater(mix['update_gap_ms']['p50'], 0)
+
+        plan_both = run('track-d', '--mode', 'both', '--concurrency', '2', '--requests', '20', '--dry-run')
+        self.assertEqual([p['mode'] for p in plan_both], ['agentic', 'prefill-mix'])
+        self.assertEqual(plan_both[0]['workload_counts'], {'tool': 9, 'reasoning': 5, 'coding': 4, 'doc': 2})
+        plan_default = run('track-d', '--concurrency', '2', '--requests', '4', '--list')
+        self.assertEqual([p['mode'] for p in plan_default], ['agentic'])
+
+    def test_track_d_agentic_dataset_and_validation(self):
+        ds = self.save(
+            'agentic.json',
+            {
+                'metadata': {'mix_profile': 'custom'},
+                'conversations': [
+                    {
+                        'workload_type': 'tool_calling',
+                        'max_tokens': 32,
+                        'extra_body': {
+                            'tools': [suite.NEXT_SECTION],
+                            'tool_choice': {'type': 'function', 'function': {'name': 'read_next_section'}},
+                            'chat_template_kwargs': {'enable_thinking': False},
+                        },
+                        'turns': [
+                            {'messages': [{'role': 'user', 'content': 'inspect state'}]},
+                            {
+                                'messages': [
+                                    {'role': 'tool', 'name': 'read_next_section', 'content': 'snippet'},
+                                    {'role': 'user', 'content': 'summarize'},
+                                ],
+                                'max_tokens': 48,
+                                'extra_body': {'tool_choice': 'auto', 'temperature': 0.2},
+                            },
+                        ],
+                    },
+                    {
+                        'workload_type': 'long_reasoning',
+                        'max_tokens': 64,
+                        'extra_body': {'chat_template_kwargs': {'enable_thinking': True}},
+                        'turns': [
+                            {'messages': [{'role': 'user', 'content': 'analyze race'}]},
+                        ],
+                    },
+                ],
+            },
+        )
+
+        def reply(path, body, index):
+            if body.get('tool_choice') != 'auto' and body.get('tools'):
+                return (
+                    [],
+                    12,
+                    'tool_calls',
+                    {
+                        'prompt_tokens': 100,
+                        'cached_tokens': 0,
+                        'tool_calls': [
+                            {'index': 0, 'id': 'call_99', 'type': 'function', 'function': {'name': 'read_next_section', 'arguments': '{"topic":"state"}'}},
+                        ],
+                        'speculative_stats': {
+                            'final_k': 5,
+                            'k_switches': 1,
+                            'adaptive_samples': 2,
+                            'acc_ema': 0.6,
+                            'draft_rounds': 2,
+                            'proposed_drafts': 10,
+                            'accepted_drafts': 6,
+                            'verify_rows': 12,
+                        },
+                    },
+                )
+            return (
+                ['answer ', 'done'],
+                10,
+                'stop',
+                {
+                    'prompt_tokens': 200,
+                    'cached_tokens': 120,
+                    'reasoning': ['step1 '],
+                    'speculative_stats': {
+                        'final_k': 7,
+                        'k_switches': 3,
+                        'adaptive_samples': 8,
+                        'acc_ema': 0.8,
+                        'draft_rounds': 4,
+                        'proposed_drafts': 20,
+                        'accepted_drafts': 14,
+                        'verify_rows': 24,
+                    },
+                },
+            )
+
+        with server(reply) as (srv, url):
+            data = run('track-d', '--endpoint', url + '/v1', '--dataset', ds, '--concurrency', '1')
+        level = data['levels'][0]
+        self.assertEqual(level['mode'], 'agentic')
+        self.assertEqual(level['conversations'], 2)
+        self.assertEqual(level['requests'], 3)
+        self.assertEqual(level['errors'], 0)
+        self.assertAlmostEqual(level['kv_cache_hit_rate'], 240 / 500)
+        self.assertEqual(set(level['by_workload']), {'tool_calling', 'long_reasoning'})
+        self.assertEqual([b['max_tokens'] for b in srv.bodies], [32, 48, 64])
+        self.assertEqual(srv.bodies[1]['temperature'], 0.2)
+        self.assertEqual(srv.bodies[1]['tool_choice'], 'auto')
+        self.assertEqual(srv.bodies[1]['messages'][1]['tool_calls'][0]['id'], 'call_99')
+        self.assertEqual(srv.bodies[1]['messages'][2]['tool_call_id'], 'call_99')
+        self.assertEqual(srv.bodies[2]['chat_template_kwargs'], {'enable_thinking': True})
+        tc_stats = level['by_workload']['tool_calling']
+        self.assertEqual(tc_stats['requests'], 2)
+        self.assertEqual(tc_stats['completion_tokens'], 22)
+        self.assertEqual(tc_stats['mean_final_k'], 6.0)
+        self.assertEqual(tc_stats['mean_k_switches'], 2.0)
+        self.assertAlmostEqual(tc_stats['mean_acc_ema'], 0.7)
+        self.assertAlmostEqual(tc_stats['acceptance_rate'], 20 / 30)
+        self.assertAlmostEqual(tc_stats['verify_rows_per_tok'], 36 / 22)
+        for bad_argv in (
+            ['track-d', '--mode', 'steady'],
+            ['track-d', '--mode', 'prefill-mix', '--max-tokens', '64'],
+            ['track-d', '--mode', 'prefill-mix', '--dataset', ds],
+        ):
+            bad = subprocess.run([sys.executable, str(SCRIPT), *bad_argv], capture_output=True)
+            self.assertNotEqual(bad.returncode, 0)
 
     def test_serving_disconnected_stream(self):
         with server(lambda *args: (['partial'], None, None)) as (_, url):
             level = run(
-                'track-d', '--endpoint', url + '/v1', '--concurrency', '1', '--requests', '2', '--mode', 'mix'
+                'track-d',
+                '--endpoint',
+                url + '/v1',
+                '--concurrency',
+                '1',
+                '--requests',
+                '2',
+                '--mode',
+                'prefill-mix',
             )['levels'][0]
         self.assertEqual(level['errors'], 2)
         self.assertEqual(level['completion_rate'], 0)
@@ -392,7 +601,34 @@ class SuiteTest(unittest.TestCase):
         b = run(
             'track-b', '--import-json', self.save('bb.json', betterbench(20, 3)), '--conditions', conditions
         )
-        with server(long_reply) as (_, url):
+
+        def render_reply(path, body, index):
+            if body.get('tools') and body.get('tool_choice') != 'auto':
+                return (
+                    [],
+                    16,
+                    'tool_calls',
+                    {
+                        'prompt_tokens': 200,
+                        'cached_tokens': 100,
+                        'tool_calls': [
+                            {'index': 0, 'id': f'call_{index}', 'type': 'function', 'function': {'name': 'read_next_section', 'arguments': '{"topic":"state"}'}},
+                        ],
+                        'speculative_stats': {
+                            'final_k': 5,
+                            'k_switches': 1,
+                            'adaptive_samples': 2,
+                            'acc_ema': 0.5,
+                            'draft_rounds': 2,
+                            'proposed_drafts': 10,
+                            'accepted_drafts': 6,
+                            'verify_rows': 16,
+                        },
+                    },
+                )
+            return long_reply(path, body, index)
+
+        with server(render_reply) as (_, url):
             a = run('track-a', '--spec-endpoint', url + '/v1', '--repeats', '1')
             c = run('track-c', '--endpoint', url + '/v1', '--task', 'multi_turn-en-short_2k')
             d = run(
@@ -402,9 +638,9 @@ class SuiteTest(unittest.TestCase):
                 '--concurrency',
                 '1',
                 '--requests',
-                '1',
+                '2',
                 '--mode',
-                'steady',
+                'both',
             )
         paths = [self.save(r['track'] + '.json', r) for r in (a, b, c, d)]
         review = {
@@ -420,7 +656,10 @@ class SuiteTest(unittest.TestCase):
             '③ 基礎性能',
             '④ サービング',
             'spec candidate',
-            'steady / 1',
+            'agentic / 1',
+            'prefill-mix / 1',
+            'Track D ワークロード別（agentic）',
+            '1 / tool',
             '未測定',
             '100.00 | 1.00 |',
         ):

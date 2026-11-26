@@ -73,7 +73,6 @@ GROUPS = OrderedDict([
     ]),
     ("bench", [
         "test_shelf_bench_suite.py",
-        "test_evalscope_agentic.py",
     ]),
     ("commonized-runtime", [
         "test_commonized_runtime_e2e.py",

@@ -26,6 +26,25 @@ CORPUS = pathlib.Path(__file__).resolve().parent / 'real_v1'
 VENDOR = ROOT / 'vendor/BetterBench'
 CATEGORIES = ('code', 'file_edit', 'json', 'math', 'prose', 'reasoning', 'summarization', 'chat')
 ROUND_FIELDS = ('ms_per_round', 'accepted_drafts_per_round', 'committed_tokens_per_round')
+WORKLOAD_WEIGHTS = (('tool', 45), ('reasoning', 25), ('coding', 20), ('doc', 10))
+NEXT_SECTION = {
+    'type': 'function',
+    'function': {
+        'name': 'read_next_section',
+        'description': '調査資料の次のコード断片を取得する。',
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'topic': {
+                    'type': 'string',
+                    'enum': ['state', 'capacity', 'ownership', 'cleanup'],
+                    'description': '次の断片で確認する観点。調査記録に添付する。',
+                }
+            },
+            'required': ['topic'],
+        },
+    },
+}
 CONDITIONS = (
     'gpu',
     'weights',
@@ -155,8 +174,10 @@ def stream(endpoint, body, on_first=None):
     request = urllib.request.Request(
         url, json.dumps(body, ensure_ascii=False).encode(), {'Content-Type': 'application/json'}
     )
-    chunks, answers, times = [], [], []
+    chunks, answers, reasonings, times = [], [], [], []
+    calls = {}
     stats = dict.fromkeys(ROUND_FIELDS)
+    spec_stats = None
     usage = finish = error = None
     done = False
     start = time.monotonic()
@@ -174,47 +195,83 @@ def stream(endpoint, body, on_first=None):
                 if event.get('error'):
                     raise ValueError(str(event['error']))
                 usage = event.get('usage') or usage
-                counters = event.get('speculative_stats') or {}
-                for key in ROUND_FIELDS:
-                    if key in counters:
-                        stats[key] = counters[key]
+                counters = event.get('speculative_stats')
+                if isinstance(counters, dict):
+                    spec_stats = dict(counters)
+                    for key in ROUND_FIELDS:
+                        if key in counters:
+                            stats[key] = counters[key]
                 for choice in event.get('choices', []):
                     finish = choice.get('finish_reason') or finish
                     delta = choice.get('delta') or {}
                     answer = delta.get('content') or ''
-                    chunk = (delta.get('reasoning_content') or delta.get('reasoning') or '') + answer
-                    if chunk:
+                    reasoning = delta.get('reasoning_content') or delta.get('reasoning') or ''
+                    tool_deltas = delta.get('tool_calls') or []
+                    for fragment in tool_deltas:
+                        call = calls.setdefault(
+                            fragment['index'],
+                            {'id': '', 'type': 'function', 'function': {'name': '', 'arguments': ''}},
+                        )
+                        call['id'] += fragment.get('id') or ''
+                        fn = fragment.get('function') or {}
+                        call['function']['name'] += fn.get('name') or ''
+                        call['function']['arguments'] += fn.get('arguments') or ''
+                    chunk = reasoning + answer
+                    if chunk or tool_deltas:
                         times.append(time.monotonic())
-                        chunks.append(chunk)
-                        answers.append(answer)
+                        if chunk:
+                            chunks.append(chunk)
+                        if answer:
+                            answers.append(answer)
+                        if reasoning:
+                            reasonings.append(reasoning)
                         if len(times) == 1 and on_first:
                             on_first()
-        if not done or not chunks or finish not in ('stop', 'length', 'tool_calls'):
+        if not done or not times or finish not in ('stop', 'length', 'tool_calls'):
             error = '生成が完了していません: ' + str(finish)
     except (OSError, ValueError, TypeError, EOFError, http.client.HTTPException) as exc:
         error = str(exc)
     end = time.monotonic()
     count = (usage or {}).get('completion_tokens')
+    prompt_tokens = (usage or {}).get('prompt_tokens')
+    cached_tokens = ((usage or {}).get('prompt_tokens_details') or {}).get('cached_tokens')
     approximate = count is None
     if approximate:
-        count = len(chunks)
+        count = len(times)
+    if spec_stats is not None:
+        proposed = spec_stats.get('proposed_drafts')
+        accepted = spec_stats.get('accepted_drafts')
+        verify_rows = spec_stats.get('verify_rows')
+        spec_stats['acceptance_rate'] = accepted / proposed if proposed and accepted is not None else None
+        spec_stats['verify_rows_per_tok'] = (
+            verify_rows / count if verify_rows is not None and not approximate and count else None
+        )
     content = ''.join(chunks)
     duration = times[-1] - times[0] if times else 0
+    assistant = {'role': 'assistant', 'content': ''.join(answers)}
+    if calls:
+        assistant['tool_calls'] = [calls[i] for i in sorted(calls)]
+    if reasonings:
+        assistant['reasoning_content'] = ''.join(reasonings)
     return {
         'ok': error is None,
         'error': error,
         'finish_reason': finish,
         'usage': usage,
+        'prompt_tokens': prompt_tokens,
+        'cached_tokens': cached_tokens,
         'completion_tokens': count,
         'completion_tokens_approximate': approximate,
         'ttft_ms': (times[0] - start) * 1000 if times else None,
         'e2e_ms': (end - start) * 1000,
         'decode_tok_s': (count - 1) / duration if duration and count > 1 and not approximate else None,
         'update_gaps_ms': [(b - a) * 1000 for a, b in zip(times, times[1:])],
-        'tokens_per_update': count / len(chunks) if chunks and not approximate else None,
+        'tokens_per_update': count / len(times) if times and not approximate else None,
         'output_sha256': digest(content.encode()),
         'output_text': content,
         'answer_text': ''.join(answers),
+        'assistant_message': assistant,
+        'speculative_stats': spec_stats,
         **stats,
     }
 
@@ -649,89 +706,443 @@ def track_b(args, preview):
         return normalize_b(read_json(out), args)
 
 
-def track_d(args, preview):
-    _, tasks = corpus()
-    base = {}
-    for name, tier in [('short', 'short_2k'), ('long', 'long_16k')]:
-        task = next(
-            t
-            for t in tasks
-            if t['domain'] == 'code_review' and t['language'] == 'ja' and t['length_tier'] == tier
+def agentic_conversations(count, run_tag, seed, temperature):
+    corpus()
+    lines = (CORPUS / 'mid_8k.txt').read_text(encoding='utf-8').splitlines(keepends=True)
+    counts = [0] * len(WORKLOAD_WEIGHTS)
+    conversations = []
+    for index in range(count):
+        category = max(
+            range(len(WORKLOAD_WEIGHTS)),
+            key=lambda j: WORKLOAD_WEIGHTS[j][1] * (index + 1) - 100 * counts[j],
         )
-        base[name] = request_body(args.model, task, args.seed)
-        base[name].update(max_tokens=args.max_tokens, temperature=args.temperature)
+        variant = counts[category]
+        counts[category] += 1
+        workload = WORKLOAD_WEIGHTS[category][0]
+        body = {
+            'temperature': temperature,
+            'ignore_eos': False,
+            'chat_template_kwargs': {'enable_thinking': workload == 'reasoning'},
+        }
+        ticket = f'調査票 {run_tag}/{index + 1}。'
+        if workload == 'tool':
+            body['tools'] = [NEXT_SECTION]
+            body['tool_choice'] = {'type': 'function', 'function': {'name': 'read_next_section'}}
+            turns = [
+                {
+                    'messages': [
+                        {
+                            'role': 'user',
+                            'content': ticket + '実行時の状態管理を調査します。まず read_next_section を1回呼んでください。',
+                        }
+                    ]
+                }
+            ]
+            cursor = (variant * 29 + seed) % len(lines)
+            for step in range(5):
+                excerpt = ''.join(lines[(cursor + offset) % len(lines)] for offset in range(24))
+                cursor = (cursor + 24) % len(lines)
+                followup = (
+                    '取得した資料に基づき、不変条件を二つ簡潔にまとめてください。'
+                    if step == 4
+                    else 'これまでの断片から次に調べる観点を選び、read_next_section を1回呼んでください。'
+                )
+                turn = {
+                    'messages': [
+                        {'role': 'tool', 'name': 'read_next_section', 'content': excerpt},
+                        {'role': 'user', 'content': followup},
+                    ]
+                }
+                if step == 4:
+                    turn['extra_body'] = {'tool_choice': 'auto'}
+                turns.append(turn)
+            limit = 192
+        else:
+            offset = (variant * 31 + seed) % len(lines)
+            source = ''.join(lines[(offset + k) % len(lines)] for k in range(42))
+            if workload == 'coding':
+                prompts = [
+                    '次のコードから境界条件を一つ選び、その条件を確認する C++ テストを実装してください。',
+                    '先ほどのテストに失敗経路のケースを加え、unified diff で示してください。',
+                ]
+                turn_limits = [768, 512]
+            elif workload == 'doc':
+                prompts = [
+                    '次のコードを使う開発者向けに、状態の変化と呼び出し条件を日本語の仕様書にしてください。',
+                    '初めて利用する人向けに、具体例と失敗時の対処を含む日本語の手順書に書き換えてください。',
+                ]
+                turn_limits = [768, 512]
+            else:
+                prompts = [
+                    '次の実装で途中失敗と再試行が重なったときの状態遷移を分析し、不変条件を導いてください。',
+                    '先ほどの分析を踏まえ、検証アルゴリズムと反例を説明してください。',
+                ]
+                turn_limits = [1024, 512]
+            prompts[0] = ticket + prompts[0] + '\n' + source
+            turns = [
+                {'messages': [{'role': 'user', 'content': prompt}], 'max_tokens': turn_limit}
+                for prompt, turn_limit in zip(prompts, turn_limits)
+            ]
+            limit = turn_limits[0]
+        conversations.append(
+            {'workload_type': workload, 'max_tokens': limit, 'extra_body': body, 'turns': turns}
+        )
+    return conversations
+
+
+def load_agentic_dataset(path):
+    raw = read_json(path)
+    if isinstance(raw, dict) and 'conversations' in raw:
+        items = raw['conversations']
+    elif isinstance(raw, list):
+        items = raw
+    else:
+        raise ValueError('agentic データセットの JSON 形式が不正です')
+    conversations = []
+    for conv in items:
+        if isinstance(conv, dict) and 'turns' in conv:
+            turns = conv['turns']
+            settings = conv
+        elif isinstance(conv, dict) and 'messages' in conv:
+            turns = [{'messages': [m]} for m in conv['messages'] if m.get('role') == 'user']
+            settings = conv
+        elif isinstance(conv, list):
+            turns = conv
+            settings = {}
+        else:
+            raise ValueError('会話データの形式が不正です')
+        if not turns:
+            continue
+        normalized_turns = []
+        for turn in turns:
+            msgs = turn['messages'] if isinstance(turn, dict) and 'messages' in turn else [turn]
+            entry = {'messages': msgs}
+            for key in ('extra_body', 'max_tokens'):
+                if isinstance(turn, dict) and key in turn:
+                    entry[key] = turn[key]
+            normalized_turns.append(entry)
+        item = {'workload_type': settings.get('workload_type', 'default'), 'turns': normalized_turns}
+        for key in ('extra_body', 'max_tokens'):
+            if key in settings:
+                item[key] = settings[key]
+        conversations.append(item)
+    if not conversations:
+        raise ValueError('agentic データセットに会話が含まれていません')
+    return conversations
+
+
+def merge_request_options(*levels):
+    merged = {}
+    for level in levels:
+        for key, value in level.items():
+            if key == 'chat_template_kwargs':
+                merged[key] = {**merged.get(key, {}), **value}
+            else:
+                merged[key] = value
+    return merged
+
+
+def summarize_speculative(records):
+    spec_records = [r for r in records if isinstance(r.get('speculative_stats'), dict)]
+    stats = [r['speculative_stats'] for r in spec_records]
+
+    def mean_key(key):
+        values = [s[key] for s in stats if s.get(key) is not None]
+        return statistics.mean(values) if values else None
+
+    def sum_key(key):
+        values = [s[key] for s in stats if s.get(key) is not None]
+        return sum(values) if values else None
+
+    proposed = sum_key('proposed_drafts')
+    accepted = sum_key('accepted_drafts')
+    verify_rows = sum_key('verify_rows')
+    spec_tokens = sum(
+        r['completion_tokens']
+        for r in spec_records
+        if not r.get('completion_tokens_approximate') and r.get('completion_tokens') is not None
+    )
+    return {
+        'speculative_requests': len(stats),
+        'mean_final_k': mean_key('final_k'),
+        'mean_k_switches': mean_key('k_switches'),
+        'mean_acc_ema': mean_key('acc_ema'),
+        'draft_rounds': sum_key('draft_rounds'),
+        'proposed_drafts': proposed,
+        'accepted_drafts': accepted,
+        'verify_rows': verify_rows,
+        'acceptance_rate': accepted / proposed if proposed and accepted is not None else None,
+        'verify_rows_per_tok': verify_rows / spec_tokens if verify_rows is not None and spec_tokens > 0 else None,
+    }
+
+
+def summarize_cache(records):
+    measured = [r for r in records if r.get('prompt_tokens') is not None]
+    total_prompt = sum(r['prompt_tokens'] for r in measured)
+    total_cached = sum(r.get('cached_tokens') or 0 for r in measured)
+    return {
+        'prompt_tokens': total_prompt if measured else None,
+        'cached_tokens': total_cached if measured else None,
+        'kv_cache_hit_rate': total_cached / total_prompt if total_prompt > 0 else None,
+    }
+
+
+def summarize_workload(records):
+    ok = [r for r in records if r['ok']]
+    known = [r for r in ok if not r['completion_tokens_approximate'] and r.get('completion_tokens') is not None]
+    return {
+        'requests': len(records),
+        'errors': len(records) - len(ok),
+        'completion_tokens': sum(r['completion_tokens'] for r in known) if known else None,
+        'decode_tok_s_median': median(r['decode_tok_s'] for r in ok),
+        'ttft_ms': latency(r['ttft_ms'] for r in ok),
+        **summarize_cache(ok),
+        **summarize_speculative(ok),
+    }
+
+
+def summarize_level(mode, concurrency, records, seconds, *, conversations=None, by_workload=None):
+    ok = [r for r in records if r['ok']]
+    total_requests = len(records)
+    known = all(not r['completion_tokens_approximate'] for r in records)
+    long_completed = sum(
+        not r['completion_tokens_approximate'] and r['completion_tokens'] >= 1024 for r in ok
+    )
+    total_completion = sum(r['completion_tokens'] for r in records) if known else None
+    aggregate = total_completion / seconds if known and seconds > 0 else None
+    result = {
+        'mode': mode,
+        'concurrency': concurrency,
+        'requests': total_requests,
+        'window_s': seconds,
+        'results': records,
+        'errors': total_requests - len(ok),
+        'completion_rate': len(ok) / total_requests if total_requests else 0.0,
+        'long_completed': long_completed,
+        'completion_tokens': total_completion,
+        'aggregate_tok_s': aggregate,
+        'long_window_tok_s': aggregate if total_requests and long_completed == total_requests else None,
+        'decode_tok_s_median': median(r['decode_tok_s'] for r in ok),
+        'ttft_ms': latency(r['ttft_ms'] for r in ok),
+        'e2e_ms': latency(r['e2e_ms'] for r in ok),
+        'itl_ms': latency(g for r in ok for g in r.get('itl_ms', [])),
+        'update_gap_ms': latency(g for r in ok for g in r.get('update_gap_ms', [])),
+        'tokens_per_update': median(r['tokens_per_update'] for r in ok),
+        **summarize_cache(ok),
+        **summarize_speculative(ok),
+    }
+    if conversations is not None:
+        result['conversations'] = conversations
+    if by_workload is not None:
+        result['by_workload'] = by_workload
+    return result
+
+
+def track_d(args, preview):
+    modes = ['agentic', 'prefill-mix'] if args.mode == 'both' else [args.mode]
+    if args.dataset and 'agentic' not in modes:
+        raise ValueError('--dataset は agentic モードでのみ使用できます')
+    if 'prefill-mix' in modes and args.max_tokens < 1024:
+        raise ValueError('prefill-mix の出力上限は 1024 token 以上を指定してください')
+    base = {}
+    if 'prefill-mix' in modes:
+        _, tasks = corpus()
+        for name, tier in [('short', 'short_2k'), ('long', 'long_16k')]:
+            task = next(
+                t
+                for t in tasks
+                if t['domain'] == 'code_review' and t['language'] == 'ja' and t['length_tier'] == tier
+            )
+            base[name] = request_body(args.model, task, args.seed)
+            base[name].update(max_tokens=args.max_tokens, temperature=args.temperature)
+    dataset_conversations = load_agentic_dataset(args.dataset) if args.dataset else None
     run_id = uuid.uuid4().hex if not preview else None
     levels = []
-    for mode in ['steady', 'mix'] if args.mode == 'both' else [args.mode]:
+    for mode in modes:
         for concurrency in args.concurrency:
-            n = args.requests or concurrency * 4
-            if n < concurrency or (mode == 'mix' and n < 2):
-                raise ValueError('要求数は同時数以上、mix では2件以上が必要です')
-            interval = max(2, concurrency)
-            kinds = [
-                'long' if mode == 'mix' and i % interval == max(1, concurrency - 1) else 'short'
-                for i in range(n)
-            ]
-            if preview:
-                levels.append({'mode': mode, 'concurrency': concurrency, 'kinds': kinds})
-                continue
-            first_update = threading.Event()
+            if mode == 'agentic':
+                if dataset_conversations is not None:
+                    n = args.requests or max(concurrency, len(dataset_conversations))
+                    if n < concurrency:
+                        raise ValueError('要求数は同時数以上を指定してください')
+                    selected = [dataset_conversations[i % len(dataset_conversations)] for i in range(n)]
+                else:
+                    n = args.requests or concurrency * 4
+                    if n < concurrency:
+                        raise ValueError('要求数は同時数以上を指定してください')
+                    run_tag = f'{run_id}/c{concurrency}' if run_id else f'preview/c{concurrency}'
+                    selected = agentic_conversations(n, run_tag, args.seed, args.temperature)
+                if preview:
+                    workload_counts = {}
+                    for conv in selected:
+                        wt = conv.get('workload_type', 'default')
+                        workload_counts[wt] = workload_counts.get(wt, 0) + 1
+                    levels.append(
+                        {
+                            'mode': mode,
+                            'concurrency': concurrency,
+                            'conversations': len(selected),
+                            'requests': sum(len(conv['turns']) for conv in selected),
+                            'workload_counts': workload_counts,
+                            'workload_types': [conv.get('workload_type', 'default') for conv in selected],
+                        }
+                    )
+                    continue
 
-            def run(i):
-                kind = kinds[i]
-                body = base[kind].copy()
-                msg = base[kind]['messages'][0].copy()
-                msg['content'] = f'{run_id}/{mode}/{concurrency}/{i}\n' + msg['content']
-                body['messages'] = [msg]
-                if mode == 'mix' and kind == 'long':
-                    first_update.wait()
-                offset = time.monotonic() - start
-                try:
-                    record = stream(args.endpoint, body, first_update.set)
-                finally:
-                    if kind == 'short':
-                        first_update.set()
-                gaps = record.pop('update_gaps_ms')
-                gap_key = 'itl_ms' if record['tokens_per_update'] == 1 else 'update_gap_ms'
-                record.pop('output_text')
-                record.pop('answer_text')
-                return {'request': i, 'kind': kind, 'start_offset_s': offset, **record, gap_key: gaps}
+                def run_conversation(item):
+                    conv_idx, conv = item
+                    messages = []
+                    conv_records = []
+                    workload = conv.get('workload_type', 'default')
+                    for turn_idx, turn in enumerate(conv['turns']):
+                        calls = messages[-1].get('tool_calls', []) if messages else []
+                        offset = time.monotonic() - start
+                        try:
+                            for message in turn['messages']:
+                                if message['role'] == 'tool' and 'tool_call_id' not in message:
+                                    matches = [
+                                        c
+                                        for c in calls
+                                        if not message.get('name')
+                                        or c.get('function', {}).get('name') == message['name']
+                                    ]
+                                    if len(matches) != 1:
+                                        raise ValueError('ツール結果に対応する関数呼び出しを一つ特定できません')
+                                    message = {**message, 'tool_call_id': matches[0]['id']}
+                                messages.append(message)
+                            body = {
+                                'model': args.model,
+                                'messages': list(messages),
+                                'temperature': args.temperature,
+                                'seed': args.seed + conv_idx * 100 + turn_idx,
+                                'stream': True,
+                                'stream_options': {'include_usage': True},
+                                'ignore_eos': False,
+                            }
+                            max_tokens = args.max_tokens
+                            for level in (conv, turn):
+                                extra = level.get('extra_body')
+                                if extra:
+                                    body = merge_request_options(body, extra)
+                                if 'max_tokens' in level:
+                                    max_tokens = level['max_tokens']
+                            body['max_tokens'] = max_tokens
+                            record = stream(args.endpoint, body)
+                        except (OSError, ValueError, TypeError, KeyError) as exc:
+                            conv_records.append(
+                                {
+                                    'conversation': conv_idx,
+                                    'turn': turn_idx,
+                                    'workload_type': workload,
+                                    'start_offset_s': offset,
+                                    'ok': False,
+                                    'error': str(exc),
+                                    'completion_tokens': 0,
+                                    'completion_tokens_approximate': True,
+                                    'prompt_tokens': None,
+                                    'cached_tokens': None,
+                                    'ttft_ms': None,
+                                    'e2e_ms': None,
+                                    'decode_tok_s': None,
+                                    'tokens_per_update': None,
+                                    'speculative_stats': None,
+                                }
+                            )
+                            break
+                        assistant = record.pop('assistant_message')
+                        record.pop('output_text')
+                        record.pop('answer_text')
+                        gaps = record.pop('update_gaps_ms')
+                        gap_key = 'itl_ms' if record['tokens_per_update'] == 1 else 'update_gap_ms'
+                        conv_records.append(
+                            {
+                                'conversation': conv_idx,
+                                'turn': turn_idx,
+                                'workload_type': workload,
+                                'start_offset_s': offset,
+                                **record,
+                                gap_key: gaps,
+                            }
+                        )
+                        if not record['ok']:
+                            break
+                        messages.append(assistant)
+                    return conv_records
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
-                start = time.monotonic()
-                records = list(pool.map(run, range(n)))
-                seconds = time.monotonic() - start
-            ok = [r for r in records if r['ok']]
-            known = all(not r['completion_tokens_approximate'] for r in records)
-            long_completed = sum(
-                not r['completion_tokens_approximate'] and r['completion_tokens'] >= 1024 for r in ok
-            )
-            aggregate = sum(r['completion_tokens'] for r in records) / seconds if known else None
-            levels.append(
-                {
-                    'mode': mode,
-                    'concurrency': concurrency,
-                    'requests': n,
-                    'window_s': seconds,
-                    'results': records,
-                    'errors': n - len(ok),
-                    'completion_rate': len(ok) / n,
-                    'long_completed': long_completed,
-                    'aggregate_tok_s': aggregate,
-                    'long_window_tok_s': aggregate if long_completed == n else None,
-                    'decode_tok_s_median': median(r['decode_tok_s'] for r in ok),
-                    'ttft_ms': latency(r['ttft_ms'] for r in ok),
-                    'e2e_ms': latency(r['e2e_ms'] for r in ok),
-                    'itl_ms': latency(g for r in ok for g in r.get('itl_ms', [])),
-                    'update_gap_ms': latency(g for r in ok for g in r.get('update_gap_ms', [])),
-                    'tokens_per_update': median(r['tokens_per_update'] for r in ok),
+                with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
+                    start = time.monotonic()
+                    sessions = list(pool.map(run_conversation, enumerate(selected)))
+                    seconds = time.monotonic() - start
+                records = [r for session in sessions for r in session]
+                by_workload = {
+                    wt: summarize_workload([r for r in records if r['workload_type'] == wt])
+                    for wt in sorted({r['workload_type'] for r in records})
                 }
-            )
+                levels.append(
+                    summarize_level(
+                        mode,
+                        concurrency,
+                        records,
+                        seconds,
+                        conversations=len(selected),
+                        by_workload=by_workload,
+                    )
+                )
+            else:
+                n = args.requests or concurrency * 4
+                if n < concurrency or n < 2:
+                    raise ValueError('要求数は同時数以上、prefill-mix では2件以上が必要です')
+                interval = max(2, concurrency)
+                kinds = [
+                    'long' if i % interval == max(1, concurrency - 1) else 'short'
+                    for i in range(n)
+                ]
+                if preview:
+                    levels.append({'mode': mode, 'concurrency': concurrency, 'requests': n, 'kinds': kinds})
+                    continue
+                first_update = threading.Event()
+
+                def run(i):
+                    kind = kinds[i]
+                    body = base[kind].copy()
+                    msg = base[kind]['messages'][0].copy()
+                    msg['content'] = f'{run_id}/{mode}/{concurrency}/{i}\n' + msg['content']
+                    body['messages'] = [msg]
+                    if kind == 'long':
+                        first_update.wait()
+                    offset = time.monotonic() - start
+                    try:
+                        record = stream(args.endpoint, body, first_update.set)
+                    finally:
+                        if kind == 'short':
+                            first_update.set()
+                    gaps = record.pop('update_gaps_ms')
+                    gap_key = 'itl_ms' if record['tokens_per_update'] == 1 else 'update_gap_ms'
+                    record.pop('output_text')
+                    record.pop('answer_text')
+                    record.pop('assistant_message')
+                    return {'request': i, 'kind': kind, 'start_offset_s': offset, **record, gap_key: gaps}
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
+                    start = time.monotonic()
+                    records = list(pool.map(run, range(n)))
+                    seconds = time.monotonic() - start
+                levels.append(summarize_level(mode, concurrency, records, seconds))
     if preview:
         return levels
+    sampling = (
+        {k: v for k, v in base['short'].items() if k != 'messages'}
+        if 'prefill-mix' in modes
+        else {
+            'temperature': args.temperature,
+            'max_tokens': args.max_tokens,
+            'seed': args.seed,
+            'dataset': str(args.dataset) if args.dataset else 'builtin',
+        }
+    )
     return {
         'run_id': run_id,
-        'sampling': {k: v for k, v in base['short'].items() if k != 'messages'},
+        'sampling': sampling,
         'levels': levels,
     }
 
@@ -909,6 +1320,8 @@ def render(args, preview):
         'token/更新',
         '集約 tok/s（全件 / 全件1024以上）',
         '要求別 decode 中央値',
+        'キャッシュ一致率',
+        '平均 K / 検証行/tok',
         '完了率 / エラー',
         '1024 token 以上の完了数',
     )
@@ -922,9 +1335,46 @@ def render(args, preview):
             level.get('tokens_per_update'),
             ' / '.join(fmt(level.get(k)) for k in ('aggregate_tok_s', 'long_window_tok_s')),
             level.get('decode_tok_s_median'),
+            level.get('kv_cache_hit_rate'),
+            ' / '.join(fmt(level.get(k)) for k in ('mean_final_k', 'verify_rows_per_tok')),
             ' / '.join(fmt(level.get(k)) for k in ('completion_rate', 'errors')),
             level.get('long_completed'),
         )
+    workload_rows = [
+        (level.get('concurrency'), wt, metrics)
+        for level in d.get('levels', [])
+        for wt, metrics in sorted((level.get('by_workload') or {}).items())
+    ]
+    if workload_rows:
+        lines.extend(['', '### Track D ワークロード別（agentic）', ''])
+        row(
+            '同時数 / 種別',
+            '件数',
+            '生成 tok',
+            'TTFT p50/p95 ms',
+            '要求別 decode 中央値',
+            'キャッシュ一致率',
+            '平均 K',
+            '切替回数',
+            'acc_ema',
+            '受理率',
+            '検証行/tok',
+        )
+        row(*['---'] * 11)
+        for conc, wt, metrics in workload_rows:
+            row(
+                f'{fmt(conc)} / {wt}',
+                metrics.get('requests'),
+                metrics.get('completion_tokens'),
+                ' / '.join(fmt(metrics.get('ttft_ms', {}).get(p)) for p in ('p50', 'p95')),
+                metrics.get('decode_tok_s_median'),
+                metrics.get('kv_cache_hit_rate'),
+                metrics.get('mean_final_k'),
+                metrics.get('mean_k_switches'),
+                metrics.get('mean_acc_ema'),
+                metrics.get('acceptance_rate'),
+                metrics.get('verify_rows_per_tok'),
+            )
     return '\n'.join(lines).strip() + '\n'
 
 
@@ -1005,9 +1455,10 @@ def parser():
     c.add_argument('--reasoning-effort', choices=('low', 'medium', 'xhigh'), help='思考を使う課題に渡す指示')
     c.add_argument('--no-answer-reserve', action='store_true', help='Shelf の回答用トークン予約を無効にする')
     d.add_argument('--concurrency', type=numbers, default=[1, 4, 8, 16])
-    d.add_argument('--requests', type=positive, help='同時数ごとの測定件数（既定は同時数の4倍）')
-    d.add_argument('--mode', choices=['steady', 'mix', 'both'], default='both')
-    d.add_argument('--max-tokens', type=long_budget, default=2048)
+    d.add_argument('--requests', type=positive, help='同時数ごとの測定件数（既定は agentic 既定では同時数の4倍、--dataset 指定時は会話数）')
+    d.add_argument('--mode', choices=['agentic', 'prefill-mix', 'both'], default='agentic')
+    d.add_argument('--dataset', help='agentic 用の凍結会話 JSON パス')
+    d.add_argument('--max-tokens', type=positive, default=2048)
     d.add_argument('--temperature', type=float, default=0)
     md = sub.add_parser('render', parents=[common])
     md.add_argument('inputs', nargs='*', help='トラック別 JSON')

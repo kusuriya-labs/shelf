@@ -353,30 +353,16 @@ greedy argmax sampling。
 容量が実モデルと異なれば選択結果も異なる。GPU の分離と比較手順は
 [計測方法](../perf/methodology.md) を参照。
 
-## 複数ターンのサーバー計測
-
-`tools/bench/evalscope_agentic.py` は、前の応答を会話履歴に加えながら Chat Completions を繰り返す。`hy4-c32` では同時要求数を1、4、8、16、32に切り替える。サーバーは32要求を受け付けられる設定で起動し、準備時にはサーバーと同じ tokenizer を指定する。
-
-```sh
-python3 tools/bench/evalscope_agentic.py prepare --profile hy4-c32 \
-  --tokenizer-path "$MODEL_DIR" --synthetic-count 64 --output-path /tmp/agentic.json
-python3 tools/bench/evalscope_agentic.py run --profile hy4-c32 --runner builtin \
-  --url http://127.0.0.1:8080/v1/chat/completions --model shelf \
-  --dataset-path /tmp/agentic.json --sweep-dir /tmp/agentic-results
-```
-
-`summary.csv` と `summary.json` に同時要求数ごとの出力速度、最初のトークンまでの時間、プロンプトのキャッシュ利用率を保存する。既定で `ignore_eos` を有効にする。「Tokens per stream update」は、受信したストリームの更新1回あたりのトークン数を示す。
-
 ## 統一ベンチマークスイート（`tools/bench/shelf_bench_suite.py`）
 
-E2E 基礎性能・BetterBench 互換・凍結実タスク（`tools/bench/real_v1/`）・サービング同時計測をまとめて実行し、Markdown レポートへ整形するラッパーである。4 トラックの定義・使い分け・JSON 契約は [../perf/methodology.md](../perf/methodology.md#9-統一-4-トラック体系と-shelf_bench_suitepy) を参照。
+E2E 基礎性能・BetterBench 互換・凍結実タスク（`tools/bench/real_v1/`）・複数ターン agentic / サービング同時計測をまとめて実行し、Markdown レポートへ整形するラッパーである。4 トラックの定義・使い分け・JSON 契約は [../perf/methodology.md](../perf/methodology.md#9-統一-4-トラック体系と-shelf_bench_suitepy) を参照。
 
 ```text
 サブコマンド:
   track-a   基礎性能（shelf-bench pp/tg/batch）と投機固定チェック（1,024+ token、AB/BA 対応）
   track-b   BetterBench 互換（既定 20 pass/category・3 warmup、--quick は smoke 専用）
   track-c   凍結実タスクコーパス real-v1（5 領域 × 日英 × 3 入力長、全 30 課題）
-  track-d   HTTP streaming closed-loop サービング計測（同時 1/4/8/16、steady / mix）
+  track-d   HTTP streaming closed-loop サービング計測（同時 1/4/8/16、agentic / prefill-mix）
   render    トラック別 JSON を C -> B -> A -> D の順で Markdown レポートへ整形
 ```
 
@@ -417,7 +403,7 @@ python3 tools/bench/shelf_bench_suite.py track-c \
   --model Qwen3.8-27B-FP8 \
   --output /tmp/track_c.json
 
-# Track D: サービング同時計測（steady / mix）
+# Track D: サービング同時計測（既定 agentic、外部凍結データセットは --dataset で指定）
 python3 tools/bench/shelf_bench_suite.py track-d \
   --lock-file /tmp/r9700.lock \
   --endpoint http://127.0.0.1:8080/v1 \
