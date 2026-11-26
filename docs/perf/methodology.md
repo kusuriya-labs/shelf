@@ -90,7 +90,7 @@ RDNA4 (gfx1201) 上で最適化を計測・採否判断するときに今後も�
 | 開発フェーズ・目的 | 主に使うトラック | 確認する内容 |
 | --- | --- | --- |
 | 日常のカーネル・Graph・融合最適化 | **Track A** | 非投機 `pp`/`tg` と、`temperature=0`・1,024+ token の投機固定チェック（`--ab-compare` による AB/BA 交互実行と出力 SHA-256 一致） |
-| バッチ・スケジューラ・サーバー改修 | **Track D** | HTTP streaming closed-loop 同時 1/4/8/16（既定 `agentic` / `prefill-mix`）の TTFT・E2E・集約 tok/s・KV cache hit 率・要求別投機統計・完了率 |
+| バッチ・スケジューラ・サーバー改修 | **Track D** | HTTP streaming closed-loop 同時 1/4/8/16（`agentic` / `prefill` / `decode` / `all`）の TTFT・E2E・prefill/decode 集約 tok/s・KV cache hit 率・要求別投機統計・完了率 |
 | 節目・公開数値更新 | **Track C ＋ Track B** | 凍結 `real-v1` 全 30 課題（Track C）と BetterBench 互換 `full` 20 pass/category（Track B）を揃え、`render` で統合出力 |
 
 ### 9.2 共通実行契約・JSON スキーマ・投機 1,024+ token 基準
@@ -107,19 +107,18 @@ RDNA4 (gfx1201) 上で最適化を計測・採否判断するときに今後も�
   - `completion_tokens` を取得できない場合は非空更新数を記録し、`completion_tokens_approximate=true`、`decode_tok_s=null`、`tokens_per_update=null` とする。
   - `output_sha256` は思考チャネルと回答チャネルを生成順に連結した UTF-8 テキストの SHA-256。`answer_text` は回答チャネルのみを保持する。
   - round 統計（`ms_per_round`, `accepted_drafts_per_round`, `committed_tokens_per_round`）は SSE 拡張 `speculative_stats` から取得する。DFlash2 診断ログからは `DFLASH2_ROUND_MS` / `DFLASH2_ACCEPTED_DRAFTS` / `DFLASH2_GENERATED_TOKENS` を `DFLASH2_ROUNDS` で割って算出し、合計カウンタがない場合は `DFLASH2_STAGE`（`round`）/ `DFLASH2_MEAN_ACCEPTED` / `DFLASH2_EMITTED_PER_ROUND` を読み取る（round 数が 0 の場合は `null`）。
-- **投機デコード 1,024+ token 出力基準**: 256 token 程度の短出力ではドラフト受理率の試行間ブレが大きく、定常の受理特性を代表しない。そのため投機を含む計測（Track A の投機固定チェック、Track C の期待出力、Track D `prefill-mix` の `--max-tokens` 下限および `long_window_tok_s`）は **1,024〜2,048+ token 出力を標準**とし、Track C では繰り返しループ検出フラグを併用して異常な高受理・無限反復を分離する。なお Track D の `agentic` モードでは、ツール呼び出しを含む短い実運用ターンを再現するためターン別の `max_tokens` を許容する。
+- **投機デコード 1,024+ token 出力基準**: 256 token 程度の短出力ではドラフト受理率の試行間ブレが大きく、定常の受理特性を代表しない。そのため投機を含む計測（Track A の投機固定チェック、Track C の期待出力、Track D `decode` の `--max-tokens` 下限および `long_window_tok_s`）は **1,024〜2,048+ token 出力を標準**とし、Track C では繰り返しループ検出フラグを併用して異常な高受理・無限反復を分離する。なお Track D の `agentic` モードでは、ツール呼び出しを含む短い実運用ターンを再現するためターン別の `max_tokens` を許容し、`prefill` モードでは `max_tokens=1` を固定とする。
 
 ### 9.3 Track A（基礎性能・形状固定）
 
-非投機の `shelf-bench`（`pp` / `tg` / `batch`）と、投機ありの日常固定チェックを 1 トラックにまとめる。
+非投機の `shelf-bench`（`pp` / `tg`）と、投機ありの日常固定チェックを 1 トラックにまとめる。
 
-- **非投機（native）**: `--shelf-bench`（既定 `build/shelf-bench`）、`--model-dir`、`--device`（既定 `0`）、`--tensor-parallel`（`1|2|4`、既定 `1`）、`--tokens-file`（`pp`/`tg` 用 PSKLDTOK）、`--pp-lengths 128,512,2048,8192`、`--contexts 0,2048,8192`、`--batch-sizes 1,4,8,16`、`--tg-tokens 256`、`--repeats 5`、`--warmup 1`。
-  - **`shelf-bench batch` の契約**: 共通 prefix を seed した後に各要求を逐次処理する（`batch_contract`: `max_scheduled_requests=1`, `timing=prefix_seed_and_serial_requests`, `parallel_tg_supported=false`）。並列 continuous batching の速度ではないため Track D と混同しない。正の prefix と suffix が必要なため context 0/1 は `unsupported=true`（`failures` にも計上）。
+- **非投機（native）**: `--shelf-bench`（既定 `build/shelf-bench`）、`--model-dir`、`--device`（既定 `0`）、`--tensor-parallel`（`1|2|4`、既定 `1`）、`--tokens-file`（`pp`/`tg` 用 PSKLDTOK）、`--pp-lengths 128,512,2048,8192`、`--contexts 0,2048,8192`、`--tg-tokens 256`、`--repeats 5`、`--warmup 1`。
 - **投機固定チェック**: `--spec-endpoint URL` または `--spec-cmd COMMAND` で追加する（投機のみ実行する場合は `--model-dir` を省略可能）。
   - `temperature=0`、**`--spec-max-tokens` の既定値・下限はともに `1024`**。実測 `completion_tokens` が 1,024 未満または未返却の場合は失敗として記録する。
   - `--spec-cmd` はシェル展開せず起動し、stdin に chat 要求 JSON を渡し、stdout から `output_text`, `completion_tokens`, `decode_tok_s`（および任意の round 統計、または stderr の DFlash2 診断ログ）を受け取る。
   - `ms_per_round` / `accepted_drafts_per_round` / `committed_tokens_per_round` と出力 SHA-256 を記録する。
-- **AB/BA 交互比較**: `--ab-compare` に `--baseline-bench PATH` や `--baseline-spec-endpoint URL` / `--baseline-spec-cmd COMMAND` を組み合わせ、各条件を AB、BA の順で交互実行する。比率は spec が `decode_tok_s`、native が `wall_tok_s` の `candidate / baseline`。両方成功して SHA-256 が不一致の場合は `raw_candidate_over_baseline` を残し、採用用の `candidate_over_baseline` を `null` とする（native の `pp`/`tg` は全出力 ID を公開しないためハッシュ照合は `null`、`batch` は全要求の ID 列、`spec` は生成テキストを照合）。
+- **AB/BA 交互比較**: `--ab-compare` に `--baseline-bench PATH` や `--baseline-spec-endpoint URL` / `--baseline-spec-cmd COMMAND` を組み合わせ、各条件を AB、BA の順で交互実行する。比率は spec が `decode_tok_s`、native が `wall_tok_s` の `candidate / baseline`。両方成功して SHA-256 が不一致の場合は `raw_candidate_over_baseline` を残し、採用用の `candidate_over_baseline` を `null` とする（native の `pp`/`tg` は全出力 ID を公開しないためハッシュ照合は `null`、`spec` は生成テキストを照合）。
 
 ### 9.4 Track B（外部比較: BetterBench 互換）
 
@@ -149,15 +148,16 @@ RDNA4 (gfx1201) 上で最適化を計測・採否判断するときに今後も�
 
 OpenAI 互換 HTTP streaming endpoint に対し、closed-loop で同時要求を投入してサービング性能を測る。
 
-- **条件**: `--concurrency 1,4,8,16`（`32` なども指定可能）、`--requests N`（各同時数で既定は同時数 × 4、`agentic` で `--dataset` 指定時は会話数以上）、`--mode agentic|prefill-mix|both`（既定 `agentic`）、`--dataset PATH`（`agentic` 用の凍結会話 JSON）、`--max-tokens 2048`（`prefill-mix` では下限 `1024`）、`--temperature 0`。
+- **条件**: `--concurrency 1,4,8,16`（`32` なども指定可能）、`--requests N`（各同時数で既定は同時数 × 4、`agentic` で `--dataset` 指定時は会話数以上）、`--mode agentic|prefill|decode|all`（既定 `agentic`）、`--prompt-tier short_2k|mid_8k|long_16k`（`prefill` 用、既定 `mid_8k`）、`--dataset PATH`（`agentic` 用の凍結会話 JSON。`prefill` / `decode` 単独指定時は拒否し、`all` 指定時は `agentic` フェーズのみへ適用）、`--max-tokens 1024`（`decode` では下限 `1024`、`prefill` は常に `1` 固定）、`--no-ignore-eos`（`decode` では既定 `ignore_eos=true`）、`--temperature 0`。
 - **モード**:
   - `agentic`（既定）: `coding` / `reasoning` / `tool` / `doc` の 4 ペルソナ（既定比率 20% / 25% / 45% / 10%）の複数ターン会話を同時実行する。組込生成では `tools/bench/real_v1/mid_8k.txt` の断片を使い、ターン間での prefix cache ヒット、ターン別の `max_tokens`・`extra_body`（思考切替、`tools`、`tool_choice`）、`assistant` 応答および `tool` 結果の履歴引き継ぎを再現する。`--dataset PATH` で凍結会話 JSON（`workload_type`・`max_tokens`・`extra_body`・tool-call ターンを含む形式）もそのまま再生できる。
-  - `prefill-mix`: 短資料（2k）と長資料（16k）を混在投入し、最初の長資料は短要求の最初の更新または終了を待って投入して Head-of-Line blocking を測る（同時数 1 では交互の逐次処理）。各要求に異なる接頭辞を付与して prefix cache の意図しないヒットを防ぐ。
-  - `both`: `agentic` と `prefill-mix` の両方を順に計測する。
+  - `prefill`: 凍結 `tools/bench/real_v1/` の `--prompt-tier` 対応資料（`code_review` / `ja`）を用い、`max_tokens=1`・要求ごとの一意 prefix nonce を付与して prefix cache ミスを強制し、decode ノイズやキャッシュ水増しのない純粋な同時 prefill スループット（`prefill_tok_s` = `total_prompt_tokens / window_s`）と `ttft_ms`・`e2e_ms` を測る。
+  - `decode`: 固定の短い技術プロンプト（約 200 token）を用い、各同時数ウィンドウの直前に計測対象外の 1 件ウォームアップ要求を投入して prefix cache を温めたうえで、`ignore_eos=true`（`--no-ignore-eos` で無効化可）・`max_tokens >= 1024` で全同時スロットを揃えて純粋な同時 decode スループット・ITL / 更新間隔・投機統計を測る。
+  - `all`: `agentic` → `prefill` → `decode` の順に実行し、全水準を `levels` へ格納する。
 - **指標**:
-  - 遅延 4 指標（いずれも `p50` / `p95`）: `ttft_ms`、`e2e_ms`、`itl_ms`（`tokens_per_update == 1` の観測のみ）、`update_gap_ms`（複数 token/update の観測）。
-  - スループットと完了率: 測定窓の集約スループット `aggregate_tok_s`（全要求の `completion_tokens` 合計 / 測定窓秒数。件数不明なら `null`）、全要求が成功かつ各実出力が 1,024 token 以上の窓限定の `long_window_tok_s`、要求別 decode 中央値 `decode_tok_s_median`、`completion_rate`、`long_completed`。
-  - キャッシュと投機統計: `kv_cache_hit_rate`（`usage.prompt_tokens_details.cached_tokens` / `prompt_tokens`）、要求別 `speculative_stats`（`final_k`, `k_switches`, `acc_ema`, `draft_rounds`, `proposed_drafts`, `accepted_drafts`, `verify_rows`, `acceptance_rate`, `verify_rows_per_tok`）および水準別集計。`agentic` ではさらに `by_workload`（`workload_type` ごとの `requests`, `completion_tokens`, `decode_tok_s_median`, `ttft_ms`, `kv_cache_hit_rate`, `mean_final_k`, `mean_k_switches`, `mean_acc_ema`, `verify_rows_per_tok`, `acceptance_rate`）を記録する。
+  - 遅延指標（いずれも `p50` / `p95`）: `ttft_ms`、`e2e_ms`（`agentic` と `decode` ではさらに `itl_ms`（`tokens_per_update == 1` の観測のみ）および `update_gap_ms`（複数 token/update の観測））。
+  - スループットと完了率: `prefill` では `total_prompt_tokens` と `prefill_tok_s`、`agentic` / `decode` では測定窓の集約スループット `aggregate_tok_s`（全要求の `completion_tokens` 合計 / 測定窓秒数。件数不明なら `null`）、全要求が成功かつ各実出力が 1,024 token 以上の窓限定の `long_window_tok_s`、要求別 decode 中央値 `decode_tok_s_median`、`long_completed`。全モード共通で `completion_rate` と `errors`。
+  - キャッシュと投機統計: `kv_cache_hit_rate`（`usage.prompt_tokens_details.cached_tokens` / `prompt_tokens`）。`agentic` / `decode` ではさらに要求別 `speculative_stats`（`final_k`, `k_switches`, `acc_ema`, `draft_rounds`, `proposed_drafts`, `accepted_drafts`, `verify_rows`, `acceptance_rate`, `verify_rows_per_tok`）および水準別集計。`agentic` ではさらに `by_workload`（`workload_type` ごとの `requests`, `completion_tokens`, `decode_tok_s_median`, `ttft_ms`, `kv_cache_hit_rate`, `mean_final_k`, `mean_k_switches`, `mean_acc_ema`, `verify_rows_per_tok`, `acceptance_rate`）を記録する。
 
 ### 9.7 公開時の報告フォーマット（`render`）
 
@@ -165,15 +165,15 @@ OpenAI 互換 HTTP streaming endpoint に対し、closed-loop で同時要求を
 
 1. **Track C（実タスク代表値）**: `real-v1` の `all` / `non_loop` / `long_output` / `long_non_loop` マクロ平均、セル別表、品質レビュー合格数。
 2. **Track B（外部標準 8 カテゴリ別レンジと同条件比較）**: 全 8 カテゴリの median / IQR / min〜max・受理長・round 時間、`--compare-b` による同条件比較。
-3. **Track A（基礎性能 & `ms/round`）**: 非投機 `pp`/`tg`/`batch`、投機固定チェックの `decode_tok_s`・`ms_per_round`・受理長、AB/BA 比較比率。
-4. **Track D（サービング）**: `agentic` / `prefill-mix` 別の同時数 1/4/8/16 の集約 tok/s・要求別 decode 中央値・TTFT/E2E/ITL（または update gap）・KV cache hit 率・平均 `final_k` / 検証行/tok・完了率、および `agentic` の `by_workload` 内訳表。
+3. **Track A（基礎性能 & `ms/round`）**: 非投機 `pp`/`tg`、投機固定チェックの `decode_tok_s`・`ms_per_round`・受理長、AB/BA 比較比率。
+4. **Track D（サービング）**: `agentic` / `decode` 別の同時数 1/4/8/16 の集約 tok/s・要求別 decode 中央値・TTFT/E2E/ITL（または update gap）・KV cache hit 率・平均 `final_k` / 検証行/tok・完了率、`prefill` の専用表（`prefill_tok_s`・`total_prompt_tokens`・TTFT/E2E・キャッシュ一致率・完了率）、および `agentic` の `by_workload` 内訳表。
 
 省略されたトラック、欠測セル、同条件を確認できない比較値はすべて「未測定」と出力され、推計値で埋めない。
 
 ### 9.8 実行コマンド例
 
 ```sh
-# Track A: 非投機 pp/tg/batch + 投機固定チェック（単一 R9700 の例）
+# Track A: 非投機 pp/tg + 投機固定チェック（単一 R9700 の例）
 ROCR_VISIBLE_DEVICES=GPU-a8e9ddefa2d60f55 \
 python3 tools/bench/shelf_bench_suite.py track-a \
   --lock-file /tmp/r9700.lock \
@@ -222,14 +222,15 @@ python3 tools/bench/shelf_bench_suite.py track-c \
   --seed 42 --repeats 1 --warmup 0 \
   --output /tmp/track_c.json
 
-# Track D: サービング（agentic 既定・同時 1/4/8/16）
+# Track D: サービング（agentic / prefill / decode をすべて計測、同時 1/4/8/16）
 python3 tools/bench/shelf_bench_suite.py track-d \
   --lock-file /tmp/r9700.lock \
   --endpoint http://127.0.0.1:8080/v1 \
   --model Qwen3.8-27B-FP8 \
   --concurrency 1,4,8,16 \
-  --mode both \
-  --max-tokens 2048 \
+  --mode all \
+  --prompt-tier mid_8k \
+  --max-tokens 1024 \
   --temperature 0 \
   --output /tmp/track_d.json
 

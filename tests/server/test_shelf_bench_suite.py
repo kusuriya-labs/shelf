@@ -204,10 +204,8 @@ class SuiteTest(unittest.TestCase):
     def test_track_a_native_and_ab(self):
         binary = self.tmp / 'shelf-bench'
         binary.write_text(
-            '#!/usr/bin/env python3\nimport sys\n'
-            'if sys.argv[1] == "batch":\n'
-            '    print("step_tokens=9 steps=3 wall_ms=80.0")\n    for i in range(4): print(f"GEN[{i}]=1,2 (n=2)")\n'
-            'else:\n    print("gpu_tokens_per_sec=120.00\\nwall_tokens_per_sec=100.00")\n'
+            '#!/usr/bin/env python3\n'
+            'print("gpu_tokens_per_sec=120.00\\nwall_tokens_per_sec=100.00")\n'
         )
         binary.chmod(0o755)
         paths = []
@@ -225,8 +223,6 @@ class SuiteTest(unittest.TestCase):
                 'fixture',
                 '--contexts',
                 '2048',
-                '--batch-sizes',
-                '1,4',
                 '--pp-lengths',
                 '128',
                 '--ab-compare',
@@ -240,16 +236,22 @@ class SuiteTest(unittest.TestCase):
         self.assertEqual(paths, ['baseline', 'candidate', 'candidate', 'baseline'])
         self.assertEqual(data['hash_mismatches'], 0)
         self.assertEqual(data['failures'], 0)
+        self.assertNotIn('batch_contract', data)
+        self.assertNotIn('unsupported', data)
         results = {r['case']: r for r in data['results']}
-        self.assertEqual(set(results), {'pp/128', 'tg/2048/1', 'batch/2048/4', 'spec'})
-        self.assertEqual(results['tg/2048/1']['gpu_tok_s'], 120)
-        self.assertEqual(results['batch/2048/4']['wall_tok_s'], 100)
+        self.assertEqual(set(results), {'pp/128', 'tg/2048', 'spec'})
+        self.assertEqual(results['tg/2048']['gpu_tok_s'], 120)
+        self.assertEqual(results['tg/2048']['wall_tok_s'], 100)
         self.assertEqual(results['spec']['ms_per_round'], 12)
         self.assertEqual(results['spec']['completion_tokens'], 1024)
         self.assertTrue(all(b['max_tokens'] == 1024 and b['temperature'] == 0 for b in srv.bodies))
         self.assertTrue(
             all(c['sha256_match'] and c['candidate_over_baseline'] > 0 for c in data['comparisons'])
         )
+        bad = subprocess.run(
+            [sys.executable, str(SCRIPT), 'track-a', '--batch-sizes', '1,4'], capture_output=True
+        )
+        self.assertNotEqual(bad.returncode, 0)
 
     def test_spec_mismatch_and_short_output(self):
         def reply(path, body, index):
@@ -364,77 +366,119 @@ class SuiteTest(unittest.TestCase):
         self.assertAlmostEqual(suite.summarize(manifest, tasks, data)['macro_decode_tok_s'], (435 + 10) / 30)
         self.assertIsNone(suite.summarize(manifest, tasks, data[2:])['macro_decode_tok_s'])
 
-    def test_serving_prefill_mix_and_agentic(self):
-        def reply(path, body, index):
-            msgs = body['messages']
-            long = len(msgs[0]['content']) > 20000
-            if body.get('tools') and body.get('tool_choice') != 'auto':
-                return (
-                    [],
-                    18,
-                    'tool_calls',
-                    {
-                        'prompt_tokens': 400 + len(msgs) * 100,
-                        'cached_tokens': 300 if len(msgs) > 1 else 0,
-                        'tool_calls': [
-                            {'index': 0, 'id': f'call_{index}', 'type': 'function', 'function': {'name': 'read_next_section', 'arguments': '{"topic":'}},
-                            {'index': 0, 'function': {'arguments': '"state"}'}},
-                        ],
-                        'speculative_stats': {
-                            'final_k': 5,
-                            'k_switches': 0,
-                            'adaptive_samples': 2,
-                            'acc_ema': 0.75,
-                            'draft_rounds': 3,
-                            'proposed_drafts': 15,
-                            'accepted_drafts': 12,
-                            'verify_rows': 18,
-                        },
-                    },
-                )
-            thinking = (body.get('chat_template_kwargs') or {}).get('enable_thinking')
-            extra = {
-                'prompt_tokens': 500 + len(msgs) * 120,
-                'cached_tokens': 400 if len(msgs) > 1 else 0,
-                'speculative_stats': {
-                    'final_k': 6 if not thinking else 4,
-                    'k_switches': 2,
-                    'adaptive_samples': 8,
-                    'acc_ema': 0.5,
-                    'draft_rounds': 4,
-                    'proposed_drafts': 20,
-                    'accepted_drafts': 10,
-                    'verify_rows': 24,
+    def _mock_track_d_reply(self, path, body, index):
+        msgs = body['messages']
+        if body.get('max_tokens') == 1:
+            is_warmup = not body.get('chat_template_kwargs', {}).get('enable_thinking', True)
+            if is_warmup:
+                time.sleep(0.08)
+                return ['w'], 1, 'length', {'prompt_tokens': 180, 'cached_tokens': 0}
+            return (
+                ['p'],
+                1,
+                'length',
+                {
+                    'prompt_tokens': 2100 if len(msgs[0]['content']) < 20000 else 16400,
+                    'cached_tokens': 0,
                 },
-            }
-            if thinking:
-                extra['reasoning'] = ['think1 ', 'think2 ']
-            return ['first', ' next', ' last'], 6 if long else 8, 'stop', extra
+            )
+        if body.get('tools') and body.get('tool_choice') != 'auto':
+            return (
+                [],
+                18,
+                'tool_calls',
+                {
+                    'prompt_tokens': 400 + len(msgs) * 100,
+                    'cached_tokens': 300 if len(msgs) > 1 else 0,
+                    'tool_calls': [
+                        {
+                            'index': 0,
+                            'id': f'call_{index}',
+                            'type': 'function',
+                            'function': {'name': 'read_next_section', 'arguments': '{"topic":'},
+                        },
+                        {'index': 0, 'function': {'arguments': '"state"}'}},
+                    ],
+                    'speculative_stats': {
+                        'final_k': 5,
+                        'k_switches': 0,
+                        'adaptive_samples': 2,
+                        'acc_ema': 0.75,
+                        'draft_rounds': 3,
+                        'proposed_drafts': 15,
+                        'accepted_drafts': 12,
+                        'verify_rows': 18,
+                    },
+                },
+            )
+        if body.get('ignore_eos') is True:
+            return (
+                [' alpha' * 512, ' beta' * 512],
+                1024,
+                'length',
+                {
+                    'prompt_tokens': 180,
+                    'cached_tokens': 180,
+                    'speculative_stats': {
+                        'final_k': 7,
+                        'k_switches': 1,
+                        'adaptive_samples': 12,
+                        'acc_ema': 0.85,
+                        'draft_rounds': 200,
+                        'proposed_drafts': 1200,
+                        'accepted_drafts': 900,
+                        'verify_rows': 1400,
+                    },
+                },
+            )
+        thinking = (body.get('chat_template_kwargs') or {}).get('enable_thinking')
+        extra = {
+            'prompt_tokens': 500 + len(msgs) * 120,
+            'cached_tokens': 400 if len(msgs) > 1 else 0,
+            'speculative_stats': {
+                'final_k': 6 if not thinking else 4,
+                'k_switches': 2,
+                'adaptive_samples': 8,
+                'acc_ema': 0.5,
+                'draft_rounds': 4,
+                'proposed_drafts': 20,
+                'accepted_drafts': 10,
+                'verify_rows': 24,
+            },
+        }
+        if thinking:
+            extra['reasoning'] = ['think1 ', 'think2 ']
+        return ['first', ' next', ' last'], 8, 'stop', extra
 
-        with server(reply) as (srv, url):
+    def test_track_d_all_modes_and_dry_run(self):
+        with server(self._mock_track_d_reply) as (srv, url):
             data = run(
                 'track-d',
                 '--endpoint',
                 url + '/v1',
                 '--mode',
-                'both',
+                'all',
+                '--prompt-tier',
+                'short_2k',
                 '--concurrency',
                 '2',
                 '--requests',
                 '4',
+                '--max-tokens',
+                '1024',
             )
         self.assertGreaterEqual(srv.peak, 2)
-        agentic, mix = data['levels']
+        agentic, prefill, decode = data['levels']
         self.assertEqual(agentic['mode'], 'agentic')
         self.assertEqual(agentic['conversations'], 4)
         self.assertEqual(agentic['errors'], 0)
         self.assertEqual(agentic['completion_rate'], 1)
         self.assertGreater(agentic['kv_cache_hit_rate'], 0)
-        self.assertAlmostEqual(agentic['acceptance_rate'], sum(
-            r['speculative_stats']['accepted_drafts'] for r in agentic['results']
-        ) / sum(
-            r['speculative_stats']['proposed_drafts'] for r in agentic['results']
-        ))
+        self.assertAlmostEqual(
+            agentic['acceptance_rate'],
+            sum(r['speculative_stats']['accepted_drafts'] for r in agentic['results'])
+            / sum(r['speculative_stats']['proposed_drafts'] for r in agentic['results']),
+        )
         self.assertGreater(agentic['verify_rows_per_tok'], 0)
         self.assertEqual(set(agentic['by_workload']), {'tool', 'reasoning', 'coding'})
         tool_stats = agentic['by_workload']['tool']
@@ -442,27 +486,134 @@ class SuiteTest(unittest.TestCase):
         self.assertAlmostEqual(tool_stats['mean_final_k'], 31 / 6)
         self.assertIsNotNone(tool_stats['ttft_ms']['p50'])
         self.assertIsNotNone(tool_stats['decode_tok_s_median'])
-        self.assertEqual(mix['mode'], 'prefill-mix')
-        self.assertEqual({r['kind'] for r in mix['results']}, {'long', 'short'})
-        self.assertEqual(mix['errors'], 0)
-        self.assertIsNone(mix['long_window_tok_s'])
-        count = sum(r['completion_tokens'] for r in mix['results'])
-        self.assertAlmostEqual(mix['aggregate_tok_s'], count / mix['window_s'])
-        self.assertGreater(mix['decode_tok_s_median'], 0)
-        for key in ('ttft_ms', 'e2e_ms'):
-            self.assertGreater(mix[key]['p50'], 0)
-            self.assertGreaterEqual(mix[key]['p95'], mix[key]['p50'])
-        for r in mix['results']:
-            single = r['tokens_per_update'] == 1
-            self.assertEqual('itl_ms' in r, single)
-            self.assertEqual('update_gap_ms' in r, not single)
-        self.assertGreater(mix['update_gap_ms']['p50'], 0)
 
-        plan_both = run('track-d', '--mode', 'both', '--concurrency', '2', '--requests', '20', '--dry-run')
-        self.assertEqual([p['mode'] for p in plan_both], ['agentic', 'prefill-mix'])
-        self.assertEqual(plan_both[0]['workload_counts'], {'tool': 9, 'reasoning': 5, 'coding': 4, 'doc': 2})
+        self.assertEqual(prefill['mode'], 'prefill')
+        self.assertEqual(prefill['prompt_tier'], 'short_2k')
+        self.assertEqual(prefill['requests'], 4)
+        self.assertEqual(prefill['errors'], 0)
+        self.assertEqual(prefill['completion_rate'], 1)
+        self.assertEqual(prefill['total_prompt_tokens'], 8400)
+        self.assertAlmostEqual(prefill['prefill_tok_s'], 8400 / prefill['window_s'])
+        self.assertEqual(prefill['kv_cache_hit_rate'], 0.0)
+        self.assertGreater(prefill['ttft_ms']['p50'], 0)
+        self.assertGreater(prefill['e2e_ms']['p50'], 0)
+        self.assertNotIn('decode_tok_s_median', prefill)
+        self.assertNotIn('itl_ms', prefill)
+        self.assertNotIn('long_window_tok_s', prefill)
+
+        self.assertEqual(decode['mode'], 'decode')
+        self.assertIs(decode['ignore_eos'], True)
+        self.assertEqual(decode['requests'], 4)
+        self.assertEqual(decode['errors'], 0)
+        self.assertEqual(decode['completion_rate'], 1)
+        self.assertEqual(decode['long_completed'], 4)
+        self.assertLess(decode['window_s'], 0.08)
+        self.assertGreater(decode['aggregate_tok_s'], 0)
+        self.assertEqual(decode['long_window_tok_s'], decode['aggregate_tok_s'])
+        self.assertGreater(decode['decode_tok_s_median'], 0)
+        self.assertEqual(decode['kv_cache_hit_rate'], 1.0)
+        self.assertEqual(decode['mean_final_k'], 7.0)
+        self.assertEqual(decode['mean_k_switches'], 1.0)
+        self.assertAlmostEqual(decode['mean_acc_ema'], 0.85)
+        self.assertAlmostEqual(decode['acceptance_rate'], 0.75)
+        self.assertAlmostEqual(decode['verify_rows_per_tok'], 1400 / 1024)
+        for key in ('ttft_ms', 'e2e_ms', 'update_gap_ms'):
+            self.assertGreater(decode[key]['p50'], 0)
+            self.assertGreaterEqual(decode[key]['p95'], decode[key]['p50'])
+
+        plan_all = run('track-d', '--mode', 'all', '--concurrency', '2', '--requests', '20', '--dry-run')
+        self.assertEqual([p['mode'] for p in plan_all], ['agentic', 'prefill', 'decode'])
+        self.assertEqual(plan_all[0]['workload_counts'], {'tool': 9, 'reasoning': 5, 'coding': 4, 'doc': 2})
+        self.assertEqual(plan_all[1]['prompt_tier'], 'mid_8k')
+        self.assertEqual(plan_all[1]['max_tokens'], 1)
+        self.assertEqual(plan_all[2]['max_tokens'], 1024)
+        self.assertIs(plan_all[2]['ignore_eos'], True)
+        self.assertEqual(plan_all[2]['warmup_requests'], 1)
+
         plan_default = run('track-d', '--concurrency', '2', '--requests', '4', '--list')
         self.assertEqual([p['mode'] for p in plan_default], ['agentic'])
+        plan_prefill = run('track-d', '--mode', 'prefill', '--prompt-tier', 'long_16k', '--dry-run')
+        self.assertEqual([p['prompt_tier'] for p in plan_prefill], ['long_16k'] * 4)
+        plan_decode = run('track-d', '--mode', 'decode', '--no-ignore-eos', '--dry-run')
+        self.assertTrue(all(p['ignore_eos'] is False for p in plan_decode))
+
+    def test_track_d_prefill_unique_nonce_and_tiers(self):
+        with server(self._mock_track_d_reply) as (srv, url):
+            data = run(
+                'track-d',
+                '--endpoint',
+                url + '/v1',
+                '--mode',
+                'prefill',
+                '--prompt-tier',
+                'long_16k',
+                '--concurrency',
+                '2',
+                '--requests',
+                '4',
+                '--max-tokens',
+                '64',
+            )
+        self.assertEqual(len(srv.bodies), 4)
+        self.assertTrue(all(b['max_tokens'] == 1 and b['temperature'] == 0 for b in srv.bodies))
+        prompts = [b['messages'][0]['content'] for b in srv.bodies]
+        self.assertEqual(len(set(prompts)), 4)
+        nonces = [p.splitlines()[0] for p in prompts]
+        self.assertEqual(len(set(nonces)), 4)
+        self.assertTrue(all('/prefill/2/' in n for n in nonces))
+        level = data['levels'][0]
+        self.assertEqual(level['prompt_tier'], 'long_16k')
+        self.assertEqual(level['total_prompt_tokens'], 16400 * 4)
+
+    def test_track_d_decode_warmup_and_no_ignore_eos(self):
+        with server(self._mock_track_d_reply) as (srv, url):
+            data = run(
+                'track-d',
+                '--endpoint',
+                url + '/v1',
+                '--mode',
+                'decode',
+                '--no-ignore-eos',
+                '--concurrency',
+                '2',
+                '--requests',
+                '3',
+                '--max-tokens',
+                '1024',
+            )
+        self.assertEqual(len(srv.bodies), 4)
+        self.assertEqual(srv.bodies[0]['max_tokens'], 1)
+        self.assertIs(srv.bodies[0]['ignore_eos'], False)
+        for timed_body in srv.bodies[1:]:
+            self.assertEqual(timed_body['max_tokens'], 1024)
+            self.assertIs(timed_body['ignore_eos'], False)
+            self.assertEqual(timed_body['messages'], srv.bodies[0]['messages'])
+        level = data['levels'][0]
+        self.assertIs(level['ignore_eos'], False)
+        self.assertEqual(level['requests'], 3)
+        self.assertEqual(len(level['results']), 3)
+        self.assertLess(level['window_s'], 0.08)
+
+        with server(lambda *args: (['partial'], None, None)) as (_, url):
+            bad_warmup = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    'track-d',
+                    '--endpoint',
+                    url + '/v1',
+                    '--mode',
+                    'decode',
+                    '--concurrency',
+                    '1',
+                    '--requests',
+                    '1',
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(bad_warmup.returncode, 0)
+            self.assertIn('ウォームアップ', bad_warmup.stderr)
 
     def test_track_d_agentic_dataset_and_validation(self):
         ds = self.save(
@@ -570,10 +721,35 @@ class SuiteTest(unittest.TestCase):
         self.assertAlmostEqual(tc_stats['mean_acc_ema'], 0.7)
         self.assertAlmostEqual(tc_stats['acceptance_rate'], 20 / 30)
         self.assertAlmostEqual(tc_stats['verify_rows_per_tok'], 36 / 22)
+
+        with server(reply) as (srv_all, url):
+            all_data = run(
+                'track-d',
+                '--endpoint',
+                url + '/v1',
+                '--mode',
+                'all',
+                '--dataset',
+                ds,
+                '--concurrency',
+                '1',
+                '--requests',
+                '2',
+                '--max-tokens',
+                '1024',
+            )
+        self.assertEqual([lvl['mode'] for lvl in all_data['levels']], ['agentic', 'prefill', 'decode'])
+        self.assertEqual(all_data['levels'][0]['conversations'], 2)
+
         for bad_argv in (
             ['track-d', '--mode', 'steady'],
-            ['track-d', '--mode', 'prefill-mix', '--max-tokens', '64'],
-            ['track-d', '--mode', 'prefill-mix', '--dataset', ds],
+            ['track-d', '--mode', 'mix'],
+            ['track-d', '--mode', 'prefill-mix'],
+            ['track-d', '--mode', 'both'],
+            ['track-d', '--mode', 'decode', '--max-tokens', '64'],
+            ['track-d', '--mode', 'all', '--max-tokens', '512'],
+            ['track-d', '--mode', 'prefill', '--dataset', ds],
+            ['track-d', '--mode', 'decode', '--dataset', ds],
         ):
             bad = subprocess.run([sys.executable, str(SCRIPT), *bad_argv], capture_output=True)
             self.assertNotEqual(bad.returncode, 0)
@@ -589,7 +765,30 @@ class SuiteTest(unittest.TestCase):
                 '--requests',
                 '2',
                 '--mode',
-                'prefill-mix',
+                'prefill',
+            )['levels'][0]
+        self.assertEqual(level['errors'], 2)
+        self.assertEqual(level['completion_rate'], 0)
+        self.assertIsNone(level['total_prompt_tokens'])
+        self.assertIsNone(level['prefill_tok_s'])
+        self.assertIsNone(level['ttft_ms']['p50'])
+
+        def decode_disconnect(path, body, index):
+            if body['max_tokens'] == 1:
+                return ['w'], 1, 'length', {'prompt_tokens': 180, 'cached_tokens': 0}
+            return ['partial'], None, None
+
+        with server(decode_disconnect) as (_, url):
+            level = run(
+                'track-d',
+                '--endpoint',
+                url + '/v1',
+                '--concurrency',
+                '1',
+                '--requests',
+                '2',
+                '--mode',
+                'decode',
             )['levels'][0]
         self.assertEqual(level['errors'], 2)
         self.assertEqual(level['completion_rate'], 0)
@@ -602,35 +801,13 @@ class SuiteTest(unittest.TestCase):
             'track-b', '--import-json', self.save('bb.json', betterbench(20, 3)), '--conditions', conditions
         )
 
-        def render_reply(path, body, index):
-            if body.get('tools') and body.get('tool_choice') != 'auto':
-                return (
-                    [],
-                    16,
-                    'tool_calls',
-                    {
-                        'prompt_tokens': 200,
-                        'cached_tokens': 100,
-                        'tool_calls': [
-                            {'index': 0, 'id': f'call_{index}', 'type': 'function', 'function': {'name': 'read_next_section', 'arguments': '{"topic":"state"}'}},
-                        ],
-                        'speculative_stats': {
-                            'final_k': 5,
-                            'k_switches': 1,
-                            'adaptive_samples': 2,
-                            'acc_ema': 0.5,
-                            'draft_rounds': 2,
-                            'proposed_drafts': 10,
-                            'accepted_drafts': 6,
-                            'verify_rows': 16,
-                        },
-                    },
-                )
-            return long_reply(path, body, index)
+        with server(self._mock_track_d_reply) as (_, url):
+            def track_a_c_reply(path, body, index):
+                return long_reply(path, body, index)
 
-        with server(render_reply) as (_, url):
-            a = run('track-a', '--spec-endpoint', url + '/v1', '--repeats', '1')
-            c = run('track-c', '--endpoint', url + '/v1', '--task', 'multi_turn-en-short_2k')
+            with server(track_a_c_reply) as (_, ac_url):
+                a = run('track-a', '--spec-endpoint', ac_url + '/v1', '--repeats', '1')
+                c = run('track-c', '--endpoint', ac_url + '/v1', '--task', 'multi_turn-en-short_2k')
             d = run(
                 'track-d',
                 '--endpoint',
@@ -640,7 +817,7 @@ class SuiteTest(unittest.TestCase):
                 '--requests',
                 '2',
                 '--mode',
-                'both',
+                'all',
             )
         paths = [self.save(r['track'] + '.json', r) for r in (a, b, c, d)]
         review = {
@@ -657,13 +834,28 @@ class SuiteTest(unittest.TestCase):
             '④ サービング',
             'spec candidate',
             'agentic / 1',
-            'prefill-mix / 1',
+            'decode / 1',
+            'Track D Prefill（prefill）',
+            'mid_8k / 1',
             'Track D ワークロード別（agentic）',
             '1 / tool',
             '未測定',
             '100.00 | 1.00 |',
         ):
             self.assertIn(text, md)
+        self.assertNotIn('prefill-mix', md)
+        self.assertNotIn('| batch ', md)
+
+        prefill_only_d = {
+            'schema_version': 1,
+            'track': 'D',
+            'levels': [lvl for lvl in d['levels'] if lvl['mode'] == 'prefill'],
+        }
+        prefill_md = run('render', self.save('d_prefill.json', prefill_only_d))
+        self.assertIn('Track D Prefill（prefill）', prefill_md)
+        self.assertIn('mid_8k / 1', prefill_md)
+        self.assertNotIn('| 負荷 / 同時数 |', prefill_md)
+
         b['conditions']['kv'] = 'different'
         md = run('render', *paths, '--compare-b', self.save('other.json', b))
         self.assertIn(

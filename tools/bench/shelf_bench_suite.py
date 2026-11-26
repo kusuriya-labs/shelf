@@ -16,7 +16,6 @@ import statistics
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import urllib.request
 import uuid
@@ -405,52 +404,30 @@ def native_cases(args):
             )
         )
     for ctx in args.contexts:
-        for size in args.batch_sizes:
-            if size == 1:
-                cases.append(
-                    (
-                        f'tg/{ctx}/1',
-                        [
-                            'tg',
-                            *prefix,
-                            '--context',
-                            str(ctx),
-                            '--tokens',
-                            str(args.tg_tokens),
-                            '--mode',
-                            'greedy',
-                            '--compute-logits',
-                            '1',
-                            '--warmup',
-                            str(args.warmup),
-                            *tokens_file,
-                        ],
-                    )
-                )
-            else:
-                cmd = None
-                if ctx >= 2:
-                    cmd = [
-                        'batch',
-                        *prefix,
-                        '--prefix-tokens',
-                        str(ctx - 1),
-                        '--suffix-tokens',
-                        '1',
-                        '--requests',
-                        str(size),
-                        '--max-new-tokens',
-                        str(args.tg_tokens),
-                        '--warmup',
-                        str(args.warmup),
-                    ]
-                cases.append((f'batch/{ctx}/{size}', cmd))
+        cases.append(
+            (
+                f'tg/{ctx}',
+                [
+                    'tg',
+                    *prefix,
+                    '--context',
+                    str(ctx),
+                    '--tokens',
+                    str(args.tg_tokens),
+                    '--mode',
+                    'greedy',
+                    '--compute-logits',
+                    '1',
+                    '--warmup',
+                    str(args.warmup),
+                    *tokens_file,
+                ],
+            )
+        )
     return cases
 
 
 def measure_native(binary, cmd):
-    if cmd is None:
-        return {'ok': False, 'unsupported': True, 'error': 'batch は正の prefix と suffix を必要とします'}
     proc = subprocess.run([binary, *cmd], text=True, capture_output=True)
     output = proc.stdout
     result = {
@@ -465,26 +442,14 @@ def measure_native(binary, cmd):
     }
     if not result['ok']:
         return result
-    if cmd[0] == 'batch':
-        wall = re.search(r'^step_tokens=\d+ steps=\d+ wall_ms=([\d.]+)', output, re.M)
-        generations = re.findall(r'^GEN\[\d+\]=([\d,-]*) \(n=(\d+)\)', output, re.M)
-        expected = int(cmd[cmd.index('--requests') + 1])
-        if wall and len(generations) == expected and float(wall[1]) > 0:
-            count = sum(int(n) for _, n in generations)
-            result.update(
-                wall_tok_s=count * 1000 / float(wall[1]),
-                generated_tokens=count,
-                output_sha256=digest('\n'.join(ids for ids, _ in generations).encode()),
-            )
-    else:
-        for key in ('prompt_tokens', 'context', 'final_position', 'tokens'):
-            match = re.search(r'^' + key + r'=(\d+)$', output, re.M)
-            if match:
-                result[key] = int(match[1])
-        for k in ('gpu', 'wall'):
-            match = re.search(r'^' + k + r'_tokens_per_sec=([\d.]+)$', output, re.M)
-            if match:
-                result[k + '_tok_s'] = float(match[1])
+    for key in ('prompt_tokens', 'context', 'final_position', 'tokens'):
+        match = re.search(r'^' + key + r'=(\d+)$', output, re.M)
+        if match:
+            result[key] = int(match[1])
+    for k in ('gpu', 'wall'):
+        match = re.search(r'^' + k + r'_tokens_per_sec=([\d.]+)$', output, re.M)
+        if match:
+            result[k + '_tok_s'] = float(match[1])
     if result['wall_tok_s'] is None:
         result.update(ok=False, error='shelf-bench の測定値がありません')
     return result
@@ -582,15 +547,9 @@ def track_a(args, preview):
             'spec': {k: v for k, v in body.items() if k != 'messages'},
             'spec_task_id': tasks[0]['id'],
         },
-        'batch_contract': {
-            'max_scheduled_requests': 1,
-            'timing': 'prefix_seed_and_serial_requests',
-            'parallel_tg_supported': False,
-        },
         'results': results,
         'comparisons': comparisons,
         'failures': sum(not r['ok'] for r in results),
-        'unsupported': sum(bool(r.get('unsupported')) for r in results),
         'hash_mismatches': sum(c['sha256_match'] is False for c in comparisons),
     }
 
@@ -901,7 +860,23 @@ def summarize_workload(records):
     }
 
 
-def summarize_level(mode, concurrency, records, seconds, *, conversations=None, by_workload=None):
+def decode_prompt():
+    corpus()
+    excerpt = ''.join((CORPUS / 'short_2k.txt').read_text(encoding='utf-8').splitlines(keepends=True)[:16])
+    return (
+        'Implement and explain a thread-safe bounded ring buffer in C++20 for a paged KV-cache block '
+        'allocator used in continuous batching LLM inference. Cover page alignment, reference counting, '
+        'free-list recycling, mutex-guarded admission under concurrent request slots, prefix-cache '
+        'eviction ordering, OOM backpressure handling, and explicit deterministic shutdown with failure '
+        'cleanup guarantees. Include concrete struct layouts, invariants, state transition rules, and '
+        'unit test scenarios.\n\nReference context:\n'
+        + excerpt
+    )
+
+
+def summarize_level(
+    mode, concurrency, records, seconds, *, conversations=None, by_workload=None, ignore_eos=None
+):
     ok = [r for r in records if r['ok']]
     total_requests = len(records)
     known = all(not r['completion_tokens_approximate'] for r in records)
@@ -935,27 +910,64 @@ def summarize_level(mode, concurrency, records, seconds, *, conversations=None, 
         result['conversations'] = conversations
     if by_workload is not None:
         result['by_workload'] = by_workload
+    if ignore_eos is not None:
+        result['ignore_eos'] = ignore_eos
     return result
 
 
+def summarize_prefill_level(prompt_tier, concurrency, records, seconds):
+    ok = [r for r in records if r['ok']]
+    total_requests = len(records)
+    all_prompt_known = bool(records) and all(r['ok'] and r.get('prompt_tokens') is not None for r in records)
+    total_prompt_tokens = sum(r['prompt_tokens'] for r in records) if all_prompt_known else None
+    prefill_tok_s = total_prompt_tokens / seconds if total_prompt_tokens is not None and seconds > 0 else None
+    return {
+        'mode': 'prefill',
+        'prompt_tier': prompt_tier,
+        'concurrency': concurrency,
+        'requests': total_requests,
+        'window_s': seconds,
+        'errors': total_requests - len(ok),
+        'completion_rate': len(ok) / total_requests if total_requests else 0.0,
+        'total_prompt_tokens': total_prompt_tokens,
+        'prefill_tok_s': prefill_tok_s,
+        'ttft_ms': latency(r['ttft_ms'] for r in ok),
+        'e2e_ms': latency(r['e2e_ms'] for r in ok),
+        **summarize_cache(ok),
+        'results': records,
+    }
+
+
 def track_d(args, preview):
-    modes = ['agentic', 'prefill-mix'] if args.mode == 'both' else [args.mode]
+    modes = ['agentic', 'prefill', 'decode'] if args.mode == 'all' else [args.mode]
     if args.dataset and 'agentic' not in modes:
         raise ValueError('--dataset は agentic モードでのみ使用できます')
-    if 'prefill-mix' in modes and args.max_tokens < 1024:
-        raise ValueError('prefill-mix の出力上限は 1024 token 以上を指定してください')
-    base = {}
-    if 'prefill-mix' in modes:
+    if 'decode' in modes and args.max_tokens < 1024:
+        raise ValueError('decode の出力上限は 1024 token 以上を指定してください')
+    prefill_base = None
+    if 'prefill' in modes:
         _, tasks = corpus()
-        for name, tier in [('short', 'short_2k'), ('long', 'long_16k')]:
-            task = next(
-                t
-                for t in tasks
-                if t['domain'] == 'code_review' and t['language'] == 'ja' and t['length_tier'] == tier
-            )
-            base[name] = request_body(args.model, task, args.seed)
-            base[name].update(max_tokens=args.max_tokens, temperature=args.temperature)
-    dataset_conversations = load_agentic_dataset(args.dataset) if args.dataset else None
+        task = next(
+            t
+            for t in tasks
+            if t['domain'] == 'code_review' and t['language'] == 'ja' and t['length_tier'] == args.prompt_tier
+        )
+        prefill_base = request_body(args.model, task, args.seed)
+        prefill_base.update(max_tokens=1, temperature=args.temperature)
+    decode_base = None
+    if 'decode' in modes:
+        decode_base = {
+            'model': args.model,
+            'messages': [{'role': 'user', 'content': decode_prompt()}],
+            'max_tokens': args.max_tokens,
+            'temperature': args.temperature,
+            'seed': args.seed,
+            'stream': True,
+            'stream_options': {'include_usage': True},
+            'ignore_eos': not args.no_ignore_eos,
+            'chat_template_kwargs': {'enable_thinking': False},
+        }
+    dataset_conversations = load_agentic_dataset(args.dataset) if args.dataset and 'agentic' in modes else None
     run_id = uuid.uuid4().hex if not preview else None
     levels = []
     for mode in modes:
@@ -1088,58 +1100,101 @@ def track_d(args, preview):
                         by_workload=by_workload,
                     )
                 )
+            elif mode == 'prefill':
+                n = args.requests or concurrency * 4
+                if n < concurrency:
+                    raise ValueError('要求数は同時数以上を指定してください')
+                if preview:
+                    levels.append(
+                        {
+                            'mode': mode,
+                            'prompt_tier': args.prompt_tier,
+                            'concurrency': concurrency,
+                            'requests': n,
+                            'max_tokens': 1,
+                        }
+                    )
+                    continue
+
+                def run_prefill(i):
+                    body = prefill_base.copy()
+                    msg = prefill_base['messages'][0].copy()
+                    msg['content'] = f'{run_id}/prefill/{concurrency}/{i}\n' + msg['content']
+                    body['messages'] = [msg]
+                    body['seed'] = args.seed + i
+                    offset = time.monotonic() - start
+                    record = stream(args.endpoint, body)
+                    record.pop('update_gaps_ms')
+                    record.pop('output_text')
+                    record.pop('answer_text')
+                    record.pop('assistant_message')
+                    return {'request': i, 'start_offset_s': offset, **record}
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
+                    start = time.monotonic()
+                    records = list(pool.map(run_prefill, range(n)))
+                    seconds = time.monotonic() - start
+                levels.append(summarize_prefill_level(args.prompt_tier, concurrency, records, seconds))
             else:
                 n = args.requests or concurrency * 4
-                if n < concurrency or n < 2:
-                    raise ValueError('要求数は同時数以上、prefill-mix では2件以上が必要です')
-                interval = max(2, concurrency)
-                kinds = [
-                    'long' if i % interval == max(1, concurrency - 1) else 'short'
-                    for i in range(n)
-                ]
+                if n < concurrency:
+                    raise ValueError('要求数は同時数以上を指定してください')
                 if preview:
-                    levels.append({'mode': mode, 'concurrency': concurrency, 'requests': n, 'kinds': kinds})
+                    levels.append(
+                        {
+                            'mode': mode,
+                            'concurrency': concurrency,
+                            'requests': n,
+                            'max_tokens': args.max_tokens,
+                            'ignore_eos': not args.no_ignore_eos,
+                            'warmup_requests': 1,
+                        }
+                    )
                     continue
-                first_update = threading.Event()
+                warmup_body = {**decode_base, 'max_tokens': 1, 'ignore_eos': False}
+                warmup_record = stream(args.endpoint, warmup_body)
+                if not warmup_record['ok']:
+                    raise ValueError(f"decode ウォームアップ要求が失敗しました: {warmup_record['error']}")
 
-                def run(i):
-                    kind = kinds[i]
-                    body = base[kind].copy()
-                    msg = base[kind]['messages'][0].copy()
-                    msg['content'] = f'{run_id}/{mode}/{concurrency}/{i}\n' + msg['content']
-                    body['messages'] = [msg]
-                    if kind == 'long':
-                        first_update.wait()
+                def run_decode(i):
+                    body = decode_base.copy()
+                    body['seed'] = args.seed + i
                     offset = time.monotonic() - start
-                    try:
-                        record = stream(args.endpoint, body, first_update.set)
-                    finally:
-                        if kind == 'short':
-                            first_update.set()
+                    record = stream(args.endpoint, body)
                     gaps = record.pop('update_gaps_ms')
                     gap_key = 'itl_ms' if record['tokens_per_update'] == 1 else 'update_gap_ms'
                     record.pop('output_text')
                     record.pop('answer_text')
                     record.pop('assistant_message')
-                    return {'request': i, 'kind': kind, 'start_offset_s': offset, **record, gap_key: gaps}
+                    return {'request': i, 'start_offset_s': offset, **record, gap_key: gaps}
 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
                     start = time.monotonic()
-                    records = list(pool.map(run, range(n)))
+                    records = list(pool.map(run_decode, range(n)))
                     seconds = time.monotonic() - start
-                levels.append(summarize_level(mode, concurrency, records, seconds))
+                levels.append(
+                    summarize_level(
+                        mode,
+                        concurrency,
+                        records,
+                        seconds,
+                        ignore_eos=not args.no_ignore_eos,
+                    )
+                )
     if preview:
         return levels
-    sampling = (
-        {k: v for k, v in base['short'].items() if k != 'messages'}
-        if 'prefill-mix' in modes
-        else {
-            'temperature': args.temperature,
-            'max_tokens': args.max_tokens,
-            'seed': args.seed,
-            'dataset': str(args.dataset) if args.dataset else 'builtin',
-        }
-    )
+    sampling = {
+        'modes': modes,
+        'temperature': args.temperature,
+        'max_tokens': args.max_tokens,
+        'seed': args.seed,
+    }
+    if 'agentic' in modes:
+        sampling['dataset'] = str(args.dataset) if args.dataset else 'builtin'
+    if 'prefill' in modes:
+        sampling['prompt_tier'] = args.prompt_tier
+    if 'decode' in modes:
+        sampling['ignore_eos'] = not args.no_ignore_eos
     return {
         'run_id': run_id,
         'sampling': sampling,
@@ -1291,7 +1346,7 @@ def render(args, preview):
         groups.setdefault(key, [])
         if record['ok']:
             groups[key].append(record)
-    for kind in ('pp', 'tg', 'batch', 'spec'):
+    for kind in ('pp', 'tg', 'spec'):
         if not any(case.split('/')[0] == kind for case, _ in groups):
             groups[(kind, '')] = []
     series = {}
@@ -1300,8 +1355,6 @@ def render(args, preview):
         series.setdefault((kind, variant), []).append((shape, records))
     for (kind, variant), measurements in series.items():
         label = ' '.join((kind, variant)).strip()
-        if kind == 'batch':
-            label += '（逐次要求）'
         shapes = [shape for shape, _ in measurements if shape]
         if shapes:
             label += ' ' + ' · '.join(shapes)
@@ -1310,39 +1363,69 @@ def render(args, preview):
             values = [median(r.get(key) for r in records) for _, records in measurements]
             columns.append(' · '.join(map(fmt, values)) if any(v is not None for v in values) else None)
         row(label, *columns)
-    section(
-        '④ サービング（Track D）',
-        '負荷 / 同時数',
-        'TTFT p50/p95 ms',
-        'E2E p50/p95 ms',
-        'ITL p50/p95 ms',
-        '更新間隔 p50/p95 ms',
-        'token/更新',
-        '集約 tok/s（全件 / 全件1024以上）',
-        '要求別 decode 中央値',
-        'キャッシュ一致率',
-        '平均 K / 検証行/tok',
-        '完了率 / エラー',
-        '1024 token 以上の完了数',
-    )
-    for level in d.get('levels', [{}]):
-        row(
-            fmt(level.get('mode')) + ' / ' + fmt(level.get('concurrency')),
-            *(
-                ' / '.join(fmt(level.get(k, {}).get(p)) for p in ('p50', 'p95'))
-                for k in ('ttft_ms', 'e2e_ms', 'itl_ms', 'update_gap_ms')
-            ),
-            level.get('tokens_per_update'),
-            ' / '.join(fmt(level.get(k)) for k in ('aggregate_tok_s', 'long_window_tok_s')),
-            level.get('decode_tok_s_median'),
-            level.get('kv_cache_hit_rate'),
-            ' / '.join(fmt(level.get(k)) for k in ('mean_final_k', 'verify_rows_per_tok')),
-            ' / '.join(fmt(level.get(k)) for k in ('completion_rate', 'errors')),
-            level.get('long_completed'),
+    track_d_levels = d.get('levels', [])
+    serving_levels = [lvl for lvl in track_d_levels if lvl.get('mode') != 'prefill']
+    prefill_levels = [lvl for lvl in track_d_levels if lvl.get('mode') == 'prefill']
+    if serving_levels or not track_d_levels:
+        section(
+            '④ サービング（Track D）',
+            '負荷 / 同時数',
+            'TTFT p50/p95 ms',
+            'E2E p50/p95 ms',
+            'ITL p50/p95 ms',
+            '更新間隔 p50/p95 ms',
+            'token/更新',
+            '集約 tok/s（全件 / 全件1024以上）',
+            '要求別 decode 中央値',
+            'キャッシュ一致率',
+            '平均 K / 検証行/tok',
+            '完了率 / エラー',
+            '1024 token 以上の完了数',
         )
+        for level in serving_levels or [{}]:
+            row(
+                fmt(level.get('mode')) + ' / ' + fmt(level.get('concurrency')),
+                *(
+                    ' / '.join(fmt(level.get(k, {}).get(p)) for p in ('p50', 'p95'))
+                    for k in ('ttft_ms', 'e2e_ms', 'itl_ms', 'update_gap_ms')
+                ),
+                level.get('tokens_per_update'),
+                ' / '.join(fmt(level.get(k)) for k in ('aggregate_tok_s', 'long_window_tok_s')),
+                level.get('decode_tok_s_median'),
+                level.get('kv_cache_hit_rate'),
+                ' / '.join(fmt(level.get(k)) for k in ('mean_final_k', 'verify_rows_per_tok')),
+                ' / '.join(fmt(level.get(k)) for k in ('completion_rate', 'errors')),
+                level.get('long_completed'),
+            )
+    else:
+        lines.extend(['', '## ④ サービング（Track D）'])
+    if prefill_levels:
+        lines.extend(['', '### Track D Prefill（prefill）', ''])
+        row(
+            'tier / 同時数',
+            '件数',
+            '総 prompt tok',
+            'prefill tok/s',
+            'TTFT p50/p95 ms',
+            'E2E p50/p95 ms',
+            'キャッシュ一致率',
+            '完了率 / エラー',
+        )
+        row(*['---'] * 8)
+        for level in prefill_levels:
+            row(
+                f"{fmt(level.get('prompt_tier'))} / {fmt(level.get('concurrency'))}",
+                level.get('requests'),
+                level.get('total_prompt_tokens'),
+                level.get('prefill_tok_s'),
+                ' / '.join(fmt(level.get('ttft_ms', {}).get(p)) for p in ('p50', 'p95')),
+                ' / '.join(fmt(level.get('e2e_ms', {}).get(p)) for p in ('p50', 'p95')),
+                level.get('kv_cache_hit_rate'),
+                ' / '.join(fmt(level.get(k)) for k in ('completion_rate', 'errors')),
+            )
     workload_rows = [
         (level.get('concurrency'), wt, metrics)
-        for level in d.get('levels', [])
+        for level in track_d_levels
         for wt, metrics in sorted((level.get('by_workload') or {}).items())
     ]
     if workload_rows:
@@ -1434,7 +1517,6 @@ def parser():
     a.add_argument('--tensor-parallel', type=int, choices=(1, 2, 4), default=1)
     a.add_argument('--pp-lengths', type=numbers, default=[128, 512, 2048, 8192])
     a.add_argument('--contexts', type=lambda v: numbers(v, 0), default=[0, 2048, 8192])
-    a.add_argument('--batch-sizes', type=numbers, default=[1, 4, 8, 16])
     a.add_argument('--tg-tokens', type=positive, default=256)
     a.add_argument('--spec-max-tokens', type=long_budget, default=1024)
     for prefix in ('', 'baseline-'):
@@ -1455,10 +1537,12 @@ def parser():
     c.add_argument('--reasoning-effort', choices=('low', 'medium', 'xhigh'), help='思考を使う課題に渡す指示')
     c.add_argument('--no-answer-reserve', action='store_true', help='Shelf の回答用トークン予約を無効にする')
     d.add_argument('--concurrency', type=numbers, default=[1, 4, 8, 16])
-    d.add_argument('--requests', type=positive, help='同時数ごとの測定件数（既定は agentic 既定では同時数の4倍、--dataset 指定時は会話数）')
-    d.add_argument('--mode', choices=['agentic', 'prefill-mix', 'both'], default='agentic')
+    d.add_argument('--requests', type=positive, help='同時数ごとの測定件数（既定は同時数の4倍、--dataset 指定時は会話数以上）')
+    d.add_argument('--mode', choices=['agentic', 'prefill', 'decode', 'all'], default='agentic')
+    d.add_argument('--prompt-tier', choices=['short_2k', 'mid_8k', 'long_16k'], default='mid_8k')
     d.add_argument('--dataset', help='agentic 用の凍結会話 JSON パス')
-    d.add_argument('--max-tokens', type=positive, default=2048)
+    d.add_argument('--max-tokens', type=positive, default=1024)
+    d.add_argument('--no-ignore-eos', action='store_true', help='decode モードで ignore_eos を無効にする')
     d.add_argument('--temperature', type=float, default=0)
     md = sub.add_parser('render', parents=[common])
     md.add_argument('inputs', nargs='*', help='トラック別 JSON')

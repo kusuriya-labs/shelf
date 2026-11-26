@@ -359,10 +359,10 @@ E2E 基礎性能・BetterBench 互換・凍結実タスク（`tools/bench/real_v
 
 ```text
 サブコマンド:
-  track-a   基礎性能（shelf-bench pp/tg/batch）と投機固定チェック（1,024+ token、AB/BA 対応）
+  track-a   基礎性能（shelf-bench pp/tg）と投機固定チェック（1,024+ token、AB/BA 対応）
   track-b   BetterBench 互換（既定 20 pass/category・3 warmup、--quick は smoke 専用）
   track-c   凍結実タスクコーパス real-v1（5 領域 × 日英 × 3 入力長、全 30 課題）
-  track-d   HTTP streaming closed-loop サービング計測（同時 1/4/8/16、agentic / prefill-mix）
+  track-d   HTTP streaming closed-loop サービング計測（同時 1/4/8/16、agentic / prefill / decode / all）
   render    トラック別 JSON を C -> B -> A -> D の順で Markdown レポートへ整形
 ```
 
@@ -376,7 +376,7 @@ E2E 基礎性能・BetterBench 互換・凍結実タスク（`tools/bench/real_v
 # 実行計画と課題一覧の確認
 python3 tools/bench/shelf_bench_suite.py track-c --list
 
-# Track A: 非投機 pp/tg/batch + 投機固定チェック
+# Track A: 非投機 pp/tg + 投機固定チェック
 ROCR_VISIBLE_DEVICES=GPU-a8e9ddefa2d60f55 \
 python3 tools/bench/shelf_bench_suite.py track-a \
   --lock-file /tmp/r9700.lock \
@@ -403,14 +403,15 @@ python3 tools/bench/shelf_bench_suite.py track-c \
   --model Qwen3.8-27B-FP8 \
   --output /tmp/track_c.json
 
-# Track D: サービング同時計測（既定 agentic、外部凍結データセットは --dataset で指定）
+# Track D: サービング同時計測（agentic / prefill / decode / all、外部凍結データセットは --dataset で指定）
 python3 tools/bench/shelf_bench_suite.py track-d \
   --lock-file /tmp/r9700.lock \
   --endpoint http://127.0.0.1:8080/v1 \
   --model Qwen3.8-27B-FP8 \
   --concurrency 1,4,8,16 \
-  --mode both \
-  --max-tokens 2048 \
+  --mode all \
+  --prompt-tier mid_8k \
+  --max-tokens 1024 \
   --output /tmp/track_d.json
 
 # Markdown レポート生成（省略したトラックや欠測値は「未測定」と表示）
